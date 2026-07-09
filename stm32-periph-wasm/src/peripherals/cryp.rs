@@ -396,8 +396,14 @@ impl Cryp {
         if !self.out_buf.is_empty() { self.sr |= 4; } // OFNE
         if self.out_buf.len() >= 64 { self.sr |= 8; } // OFFU
 
-        // Signal interrupt if output FIFO non-empty and OUTIM enabled
+        // Signal interrupts
+        let was_full = self.in_buf.len() >= 64;
+        let now_not_full = self.in_buf.len() < 64;
         if !self.out_buf.is_empty() && (self.imscr & 1) != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(79);
+        }
+        // IFNF: Input FIFO Not Full interrupt (IMSCR bit 1)
+        if was_full && now_not_full && (self.imscr & 2) != 0 {
             sys.p.nvic.borrow_mut().set_intr_pending(79);
         }
     }

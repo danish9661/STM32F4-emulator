@@ -11,6 +11,7 @@ pub struct Hash {
     hash_hr: [u32; 8],
     msg_buf: Vec<u8>,
     dcma_pending: bool,
+    dinne: bool,
 }
 
 impl Default for Hash {
@@ -19,6 +20,7 @@ impl Default for Hash {
             cr: 0, nbw: 0, din: 0, str_: 0, hr: [0; 8],
             imr: 0, sr: 0x01, csr: [0; 54], hash_hr: [0; 8],
             msg_buf: Vec::new(), dcma_pending: false,
+            dinne: false,
         }
     }
 }
@@ -107,7 +109,7 @@ impl Peripheral for Hash {
             0x00 => {
                 let mut v = self.cr;
                 v = (v & !0x1F00) | ((self.nbw & 0x0F) << 8);
-                if !self.msg_buf.is_empty() { v |= 0x1000; } // DINNE
+                if self.dinne { v |= 0x1000; }
                 v
             }
             0x04 => self.din,
@@ -131,12 +133,20 @@ impl Peripheral for Hash {
                     self.nbw = 0;
                     self.hr = [0; 8];
                     self.hash_hr = [0; 8];
+                    self.dinne = false;
                 }
             }
             0x04 => {
                 self.din = value;
                 self.msg_buf.extend_from_slice(&value.to_be_bytes());
                 self.nbw = (self.nbw + 1) & 0x0F;
+                self.dinne = true;
+                // Consumed immediately → DIN ready for next word
+                // DINIE (bit 3): fire interrupt when DIN goes ready
+                self.dinne = false;
+                if (self.cr & 8) != 0 {
+                    sys.p.nvic.borrow_mut().set_intr_pending(HASH_IRQ);
+                }
             }
             0x08 => {
                 self.str_ = value & 0x1_001F;
