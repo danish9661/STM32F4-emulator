@@ -20,11 +20,13 @@ pub mod dac;
 pub mod can;
 pub mod sdio;
 pub mod dcmi;
+pub mod fsmc;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use crate::system::System;
 use crate::ext_devices::ExtDevices;
+use fsmc::Fsmc;
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
@@ -137,10 +139,13 @@ impl Peripherals {
                 .and_then(|d| svd_map.get(d.as_str()).copied())
                 .unwrap_or(p);
 
-            let size = extract_svd_max_offset(resolved).max(0x10).min(0x400);
-            let (start, end) = (p.base_address as u32, p.base_address as u32 + size);
-
             let name = &p.name;
+            let size = extract_svd_max_offset(resolved).max(0x10).min(0x400);
+            let (start, end) = if name.as_str() == "FSMC" {
+                (0x6000_0000, 0xA000_1000)
+            } else {
+                (p.base_address as u32, p.base_address as u32 + size)
+            };
             let peri: Option<Box<dyn Peripheral>> = None
                 .or_else(|| nvic::NvicWrapper::new(name))
                 .or_else(|| SysTick::new(name))
@@ -164,6 +169,7 @@ impl Peripherals {
                 .or_else(|| Can::new(name))
                 .or_else(|| Sdio::new(name))
                 .or_else(|| Dcmi::new(name))
+                .or_else(|| Fsmc::new(name, ext_devices))
             ;
 
             if let Some(peri) = peri {
@@ -237,11 +243,19 @@ impl Peripherals {
                 .or_else(|| Spi::new(name, ext_devices))
                 .or_else(|| Timer::new(name))
                 .or_else(|| Adc::new(name))
+                .or_else(|| Can::new(name))
+                .or_else(|| Sdio::new(name))
+                .or_else(|| Dcmi::new(name))
             ;
 
             if let Some(p) = p {
                 peripherals.peripherals.push(PeripheralSlot { start, end, peripheral: RefCell::new(p) });
             }
+        }
+
+        // FSMC has a huge range (0x6000_0000-0xA000_1000), register separately
+        if let Some(p) = Fsmc::new("FSMC", ext_devices) {
+            peripherals.peripherals.push(PeripheralSlot { start: 0x6000_0000, end: 0xA000_1000, peripheral: RefCell::new(p) });
         }
 
         peripherals.finish_registration();

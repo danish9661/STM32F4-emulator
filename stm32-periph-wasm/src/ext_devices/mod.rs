@@ -1,8 +1,16 @@
 pub mod spi_flash;
 pub mod i2c_eeprom;
+pub mod usart_probe;
+pub mod lcd;
+pub mod touchscreen;
+pub mod display;
 
 pub use spi_flash::SpiFlash;
 pub use i2c_eeprom::I2cEeprom;
+pub use usart_probe::UsartProbe;
+pub use lcd::Lcd;
+pub use touchscreen::Touchscreen;
+pub use display::Display;
 
 use std::{rc::Rc, cell::RefCell};
 
@@ -23,18 +31,52 @@ pub struct I2cDeviceEntry {
 pub struct ExtDevices {
     pub spi_flashes: Vec<Rc<RefCell<SpiFlash>>>,
     pub i2c_eeproms: Vec<Rc<RefCell<I2cEeprom>>>,
+    pub usart_probes: Vec<Rc<RefCell<UsartProbe>>>,
+    pub lcds: Vec<Rc<RefCell<Lcd>>>,
+    pub touchscreens: Vec<Rc<RefCell<Touchscreen>>>,
+    pub displays: Vec<Rc<RefCell<Display>>>,
 }
 
 impl ExtDevices {
     pub fn find_serial_devices(&self, peri_name: &str) -> Vec<SpiDeviceEntry> {
-        self.spi_flashes.iter()
-            .filter(|d| d.borrow().config.peripheral == peri_name)
-            .map(|d| SpiDeviceEntry {
-                cs: d.borrow().config.cs.as_ref().map(|s| parse_pin(s)),
-                device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
-                name: format!("{} spi-flash", peri_name),
-            })
-            .collect()
+        let mut result: Vec<SpiDeviceEntry> = Vec::new();
+        for d in &self.spi_flashes {
+            if d.borrow().config.peripheral == peri_name {
+                result.push(SpiDeviceEntry {
+                    cs: d.borrow().config.cs.as_ref().map(|s| parse_pin(s)),
+                    device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
+                    name: format!("{} spi-flash", peri_name),
+                });
+            }
+        }
+        for d in &self.usart_probes {
+            if d.borrow().config.peripheral == peri_name {
+                result.push(SpiDeviceEntry {
+                    cs: None,
+                    device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
+                    name: format!("{} usart-probe", peri_name),
+                });
+            }
+        }
+        for d in &self.lcds {
+            if d.borrow().config.peripheral == peri_name {
+                result.push(SpiDeviceEntry {
+                    cs: d.borrow().config.cs.as_ref().map(|s| parse_pin(s)),
+                    device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
+                    name: format!("{} lcd", peri_name),
+                });
+            }
+        }
+        for d in &self.touchscreens {
+            if d.borrow().config.peripheral == peri_name {
+                result.push(SpiDeviceEntry {
+                    cs: d.borrow().config.cs.as_ref().map(|s| parse_pin(s)),
+                    device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
+                    name: format!("{} touchscreen", peri_name),
+                });
+            }
+        }
+        result
     }
 
     pub fn find_serial_device(&self, peri_name: &str) -> Option<Rc<RefCell<dyn ExtDevice<(), u8>>>> {
@@ -42,6 +84,21 @@ impl ExtDevices {
             .filter(|d| d.borrow().config.peripheral == peri_name)
             .next()
             .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>)
+        .or_else(||
+        self.usart_probes.iter()
+            .filter(|d| d.borrow().config.peripheral == peri_name)
+            .next()
+            .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>))
+        .or_else(||
+        self.lcds.iter()
+            .filter(|d| d.borrow().config.peripheral == peri_name)
+            .next()
+            .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>))
+        .or_else(||
+        self.touchscreens.iter()
+            .filter(|d| d.borrow().config.peripheral == peri_name)
+            .next()
+            .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>))
     }
 
     pub fn find_i2c_devices(&self, peri_name: &str) -> Vec<I2cDeviceEntry> {
@@ -53,6 +110,13 @@ impl ExtDevices {
                 name: format!("{} i2c-eeprom", peri_name),
             })
             .collect()
+    }
+
+    pub fn find_mem_device(&self, peri_name: &str) -> Option<Rc<RefCell<dyn ExtDevice<u32, u32>>>> {
+        self.displays.iter()
+            .filter(|d| d.borrow().config.peripheral == peri_name)
+            .next()
+            .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<u32, u32>>>)
     }
 }
 
