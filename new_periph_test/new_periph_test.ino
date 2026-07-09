@@ -50,6 +50,8 @@
 
 #define DCMI_CR      (*(volatile uint32_t *)0x50050000)
 #define DCMI_SR      (*(volatile uint32_t *)0x50050004)
+#define DCMI_RIS     (*(volatile uint32_t *)0x50050008)
+#define DCMI_DR      (*(volatile uint32_t *)0x50050028)
 
 static int pass, fail;
 
@@ -75,6 +77,10 @@ static void tx_hex(uint32_t v) {
     else { tx_s("FAIL "); tx_s(msg); tx_s("\n"); fail++; } \
 } while(0)
 
+static void burn(volatile uint32_t n) {
+    while (n--);
+}
+
 void init_periphs() {
     USART_BRR = 364;
     USART_CR1 = (1 << 13) | (1 << 3) | (1 << 2);
@@ -90,14 +96,24 @@ void setup() {
     CHECK(PWR_CSR == 0, "PWR CSR default 0");
     PWR_CR = 0x00;
     CHECK(PWR_CR == 0x00, "PWR CR cleared");
+    PWR_CR = 0x100;
+    CHECK(PWR_CR == 0x100, "PWR DBP set");
 
     // WWDG
     CHECK(WWDG_CR == 0x7F, "WWDG CR default");
-    WWDG_CR = 0xAA;
-    CHECK(WWDG_CR == 0xAA, "WWDG CR write");
+    WWDG_CR = 0x2A;
+    CHECK(WWDG_CR == 0x2A, "WWDG CR write");
     WWDG_CFR = 0x7FFF;
     CHECK(WWDG_CFR == 0x7FFF, "WWDG CFR write");
+    WWDG_CR = 0x7F;
     CHECK(WWDG_SR == 0, "WWDG SR default 0");
+
+    // WWDG EWIF — use slow prescaler so counter 0x41→0x3F takes ~4000 instr
+    WWDG_CR = 0x41;
+    WWDG_CFR = 0x0180;
+    burn(2000);
+    CHECK(WWDG_SR & 1, "WWDG EWIF set");
+    WWDG_CR = 0x7F;
 
     // IWDG
     CHECK(IWDG_SR == 0, "IWDG SR default");
@@ -108,6 +124,15 @@ void setup() {
     CHECK(IWDG_RLR == 0xABC, "IWDG RLR write");
     IWDG_KR = 0xAAAA;
     IWDG_KR = 0xCCCC;
+
+    // IWDG refresh — start with long timeout, refresh
+    IWDG_KR = 0x5555;
+    IWDG_PR = 7;
+    IWDG_RLR = 0xFFF;
+    IWDG_KR = 0xCCCC;
+    burn(100);
+    IWDG_KR = 0xAAAA;
+    CHECK(1, "IWDG refresh OK");
 
     // RTC
     CHECK(RTC_ISR & 1, "RTC ISR init mode");
@@ -163,9 +188,16 @@ void setup() {
     CHECK(!(SDIO_STA & (1 << 6)), "SDIO ICR clears CMDSENT");
 
     // DCMI
+    CHECK(DCMI_SR == 0, "DCMI SR default 0");
     DCMI_CR = 0x7FFF3FFF;
     CHECK(DCMI_CR == 0x7FFF3FFF, "DCMI CR write");
-    CHECK(DCMI_SR == 0, "DCMI SR default 0");
+    DCMI_CR = 1;
+    burn(500);
+    uint32_t dr1 = DCMI_DR;
+    burn(500);
+    uint32_t dr2 = DCMI_DR;
+    CHECK(dr1 != dr2, "DCMI data increments");
+    CHECK(DCMI_SR & 4, "DCMI FNE set");
 
     tx_s("---- SUMMARY ----\n");
     tx_s("PASS: "); tx_hex(pass); tx_s("\n");

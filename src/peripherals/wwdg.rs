@@ -7,12 +7,13 @@ pub struct Wwdg {
     cfr: u32,
     sr: u32,
     last_tick: u64,
+    initialized: bool,
 }
 
 impl Wwdg {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
         if name == "WWDG" {
-            Some(Box::new(Wwdg { cr: 0x7F, cfr: 0x7F, sr: 0, last_tick: 0 }))
+            Some(Box::new(Wwdg { cr: 0x7F, cfr: 0x7F, sr: 0, last_tick: 0, initialized: false }))
         } else {
             None
         }
@@ -38,6 +39,11 @@ impl Wwdg {
 
     fn elapsed_ticks(&mut self) -> u32 {
         let now = crate::emulator::NUM_INSTRUCTIONS.load(Ordering::Relaxed);
+        if !self.initialized {
+            self.last_tick = now;
+            self.initialized = true;
+            return 0;
+        }
         let elapsed = now.saturating_sub(self.last_tick);
         let ticks = elapsed / self.tick_instructions();
         if ticks > 0 {
@@ -47,9 +53,6 @@ impl Wwdg {
     }
 
     fn decrement_counter(&mut self, sys: &System) {
-        if !self.wdga_enabled() {
-            return;
-        }
         let ticks = self.elapsed_ticks();
         if ticks == 0 {
             return;
@@ -62,7 +65,9 @@ impl Wwdg {
             if self.cfr & 0x200 != 0 {
                 sys.p.nvic.borrow_mut().set_intr_pending(0);
             }
-            crate::system::request_watchdog_reset();
+            if self.wdga_enabled() {
+                crate::system::request_watchdog_reset();
+            }
             return;
         }
         let new_counter = counter - ticks;
@@ -78,6 +83,7 @@ impl Wwdg {
 
     fn refresh(&mut self, value: u32) {
         self.last_tick = crate::emulator::NUM_INSTRUCTIONS.load(Ordering::Relaxed);
+        self.initialized = true;
         self.cr = value & 0xFF;
     }
 }
