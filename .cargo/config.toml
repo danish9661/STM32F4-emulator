@@ -1,0 +1,6 @@
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+CFLAGS = "-Wno-implicit-function-declaration -Wno-incompatible-pointer-types"
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-args=-Wl,--allow-multiple-definition"]

@@ -1,0 +1,13 @@
+cpu:
+  svd: ../saturn/stm32f407.svd
+  vector_table: 0x08000000
+regions:
+  - name: ROM
+    start: 0x08000000
+    load: periph_test.ino.bin
+    size: 0x100000
+  - name: RAM
+    start: 0x20000000
+    size: 0x20000
+components: []
+wires: []

@@ -1,0 +1,80 @@
+cpu:
+  svd: stm32f407.svd
+  vector_table: 0x08020000
+  #id: 0x1234_5678_BABE_1234_5678_BABE
+regions:
+  #- name: NULL_forgiveness
+  #start: 0x00000000
+  #size: 4096
+  - name: ROM
+    start: 0x08020000
+    load: saturn-v4.4.3-pj-v5.bin
+    size: 0x80000
+  - name: RAM-CCM
+    start: 0x10000000
+    size: 0x18000
+  - name: RAM
+    start: 0x20000000
+    size: 0x20000
+framebuffers:
+  - name: Touchscreen
+    width: 480
+    height: 320
+    mode: rgb565
+    sdl: true
+    #image:
+    #  file: framebuffer.png
+  #- name: LCD
+  #  width: 3840
+  #  height: 2400
+  #  mode: gray8
+  #  sdl: true
+peripherals:
+  software_spi:
+    - name: SW_SPI_LCD
+      cs: PA15
+      clk: PC7
+      miso: PC6
+      mosi: PG3
+devices:
+  spi_flash:
+    - peripheral: SPI3
+      jedec_id: 0xef4016
+      file: ext-flash.bin
+      size: 0x400000
+  touchscreen:
+    - peripheral: SPI2
+      framebuffer: Touchscreen
+      swap_x_y: true
+      flip_x: true
+      scale_down: 2
+  usart_probe:
+    - peripheral: USART1
+  display:
+    - peripheral: FSMC.BANK1
+      framebuffer: Touchscreen
+      cmd_addr_bit: 0x2000
+      replies:
+        - cmd: 0xd3 # id4
+          data: [0x00, 0x00, 0x94, 0x88]
+        - cmd: 0xa1
+          data: [0x00, 0x93, 0x30, 0x93]
+        - cmd: 0x04 # device id
+          data: [0x30, 0x54, 0x80, 0x66]
+  #lcd:
+  #  - peripheral: SW_SPI_LCD
+  #    framebuffer: LCD
+patches:
+  # Generate these with ./asm.py
+  # NOP a delay_us()
+  - start: 0x08051e98
+    data: [0x70, 0x47]
+  # NOP systick delay
+  - start: 0x08051ee8
+    data: [0x70, 0x47]
+  # Nop the fpga not being there
+  #- start: 0x08041F92
+  #  data: [0x00, 0xbf]
+  # Skip bad eeprom data. Go to main menu
+  #- start: 0x08034058
+  #  data: [0x48, 0xb1]
