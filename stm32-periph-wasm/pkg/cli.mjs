@@ -28,8 +28,15 @@ async function main() {
     const periphWasmBuf = readFileSync(new URL('./stm32_periph_wasm_bg.wasm', import.meta.url));
     await periph.default({ module_or_path: periphWasmBuf.buffer });
 
-    if (periph.add_spi_flash || periph.add_i2c_eeprom) {
-        // Add ext devices if needed
+    // Discover ext devices from firmware directory
+    const fwDir = firmwarePath.replace(/\\/g, '/').replace(/\/[^/]+$/, '');
+    for (const entry of [{ name: 'eeprom.bin', fn: (d) => periph.add_i2c_eeprom("I2C1", 0x50, d) }]) {
+        const path = `${fwDir}/${entry.name}`;
+        try {
+            const data = readFileSync(path);
+            entry.fn(data);
+            console.log(`Loaded ext device: ${path} (${data.length} bytes)`);
+        } catch (_) {}
     }
     const svdPath = new URL('../../monox/stm32f407.svd', import.meta.url);
     const svdXml = readFileSync(svdPath, 'utf8');
@@ -102,9 +109,12 @@ async function main() {
             uc.emu_stop();
             return;
         }
+        if (periph.dma_get_pending_count() > 0) {
+            uc.emu_stop();
+            return;
+        }
         if (instCount % BigInt(tickInterval) === 0n) {
-            const irq = periph.get_next_pending_interrupt();
-            if (irq >= 0) {
+            if (periph.has_pending_interrupt()) {
                 uc.emu_stop();
             }
         }
@@ -202,14 +212,27 @@ async function main() {
             sv.setUint32(28, r0, true);
             uc.mem_write(BigInt(sp - 32), frame);
             uc.reg_write_i32(Module.ARM_REG_SP, sp - 32);
-            const handler_pc = read32(vector_table + 4 + irq * 4);
+            const handler_pc = read32(vector_table + 4 * (16 + irq));
             uc.reg_write_i32(Module.ARM_REG_LR, 0xFFFFFFF9);
             uc.reg_write_i32(Module.ARM_REG_PC, handler_pc);
             try {
                 uc.emu_start(BigInt(handler_pc), 0n, 0n, 100000);
             } catch (e) {
-                if (!stopRequested) break;
+                // Handler likely crashed on bx lr (EXC_RETURN not supported)
+                // Pop the saved context to restore firmware state
             }
+            // After handler (or crash), restore context from stack
+            const savedSp = uc.reg_read_i32(Module.ARM_REG_SP);
+            const savedFrame = uc.mem_read(BigInt(savedSp), 32);
+            const savedSv = new DataView(savedFrame.buffer, savedFrame.byteOffset, savedFrame.byteLength);
+            uc.reg_write_i32(Module.ARM_REG_R0, savedSv.getUint32(28, true));
+            uc.reg_write_i32(Module.ARM_REG_R1, savedSv.getUint32(24, true));
+            uc.reg_write_i32(Module.ARM_REG_R2, savedSv.getUint32(20, true));
+            uc.reg_write_i32(Module.ARM_REG_R3, savedSv.getUint32(16, true));
+            uc.reg_write_i32(Module.ARM_REG_R12, savedSv.getUint32(12, true));
+            uc.reg_write_i32(Module.ARM_REG_LR, savedSv.getUint32(8, true));
+            uc.reg_write_i32(Module.ARM_REG_PC, savedSv.getUint32(4, true) | 1);
+            uc.reg_write_i32(Module.ARM_REG_SP, savedSp + 32);
             processDma();
         }
     };

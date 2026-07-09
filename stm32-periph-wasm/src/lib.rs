@@ -46,6 +46,12 @@ pub fn tick() {
     sys().tick();
 }
 
+/// Check if any interrupt is pending (non-consuming).
+#[wasm_bindgen]
+pub fn has_pending_interrupt() -> bool {
+    sys().p.nvic.borrow().has_pending()
+}
+
 #[wasm_bindgen]
 pub fn get_next_pending_interrupt() -> i32 {
     sys().p.nvic.borrow_mut().get_and_clear_next_intr_pending()

@@ -29,7 +29,7 @@ pub struct Rcc {
 impl Default for Rcc {
     fn default() -> Self {
         Self {
-            cr: 0x0000_0083,
+            cr: 0x0000_0003,
             cfgr: 0x0000_0000,
             ahb1enr: 0x0010_0000,
             bdcr: 0x0000_0000,
@@ -174,15 +174,13 @@ impl Peripheral for Rcc {
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
         match offset {
             0x00 => {
-                let old = self.cr;
-                self.cr = (value & 0xFFF6_FF83) | 0x0000_0083;
-                if value & (1 << 16) != 0 && old & (1 << 16) == 0 {
-                    self.hse_on_inst = self.now();
-                }
+                let hseon = value & (1 << 16);
+                let pllon = value & (1 << 24);
+                let mut cr = value;
+                if hseon != 0 { cr |= 1 << 17; }
+                if pllon != 0 { cr |= 1 << 25; }
+                self.cr = cr;
                 if value & (1 << 16) == 0 { self.hse_on_inst = u64::MAX; }
-                if value & (1 << 24) != 0 && old & (1 << 24) == 0 {
-                    self.pll_on_inst = self.now();
-                }
                 if value & (1 << 24) == 0 { self.pll_on_inst = u64::MAX; }
             }
             0x04 => self.pllcfgr = value & 0x7F7F_FFFF,

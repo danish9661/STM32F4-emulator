@@ -98,12 +98,11 @@ impl Stream {
     fn dma_size(bits: u32) -> usize {
         match bits { 0b00 => 1, 0b01 => 2, _ => 4 }
     }
-    fn word_size(&self) -> usize {
-        let msize = Self::dma_size((self.cr >> 10) & 0b11);
-        let psize = Self::dma_size((self.cr >> 8) & 0b11);
-        std::cmp::min(msize, psize)
+    fn data_size(&self) -> usize {
+        let msize = Self::dma_size((self.cr >> 13) & 0b11);
+        let psize = Self::dma_size((self.cr >> 11) & 0b11);
+        std::cmp::max(msize, psize) * self.ndtr as usize
     }
-    fn data_size(&self) -> usize { self.word_size() * self.ndtr as usize }
     fn data_addr(&self) -> u32 {
         if (self.cr >> 19) & 1 != 0 { self.m1ar } else { self.m0ar }
     }
@@ -128,6 +127,7 @@ impl Stream {
             Dir::Invalid => (0, 0),
         };
 
+        let peripheral = dir != Dir::MemCopy;
         sys.queue_dma_transfer(DmaTransfer {
             direction: dma_dir,
             stream_idx,
@@ -135,7 +135,7 @@ impl Stream {
             src, dst,
             size,
             peri_addr,
-            peripheral: true,
+            peripheral,
         });
 
         log::debug!("{} queued DMA xfer stream={} dir={:?} src=0x{:08x} dst=0x{:08x} size={}",
@@ -171,9 +171,9 @@ impl Stream {
                     self.do_xfer(name, sys, stream_idx);
                     self.status |= 1 << 4;
                     self.status |= 1 << 3;
-                    let tcie = (value >> 5) & 1;
-                    let htie = (value >> 4) & 1;
-                    let teie = (value >> 3) & 1;
+                    let tcie = (value >> 4) & 1;
+                    let htie = (value >> 3) & 1;
+                    let teie = (value >> 2) & 1;
                     if tcie != 0 || htie != 0 || teie != 0 {
                         sys.p.nvic.borrow_mut().set_intr_pending(irq);
                     }

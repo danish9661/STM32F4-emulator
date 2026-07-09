@@ -1,31 +1,33 @@
-use crate::{system::System, ext_devices::{ExtDevices, ExtDevice, I2cDeviceEntry}};
+use crate::{system::System, ext_devices::{ExtDevices, I2cDeviceEntry}};
 use super::Peripheral;
-use std::{rc::Rc, cell::RefCell, collections::VecDeque};
-
-#[derive(Default, Clone)]
-pub struct I2c {
-    name: String,
-    cr1: u32,
-    cr2: u32,
-    oar1: u32,
-    oar2: u32,
-    dr: u32,
-    sr1: u32,
-    sr2: u32,
-    ccr: u32,
-    trise: u32,
-    fltr: u32,
-    devices: Vec<I2cDeviceEntry>,
-    tx_buf: VecDeque<u8>,
-    rx_buf: VecDeque<u8>,
-    addr: u8,
-    state: I2cState,
-}
 
 #[derive(Clone, PartialEq)]
-enum I2cState { Idle, Addr, Data }
+enum I2cState { Idle, StartSent, AddrSent { is_read: bool }, Active { is_read: bool } }
 
 impl Default for I2cState { fn default() -> Self { I2cState::Idle } }
+
+#[derive(Clone)]
+pub struct I2c {
+    name: String,
+    devices: Vec<I2cDeviceEntry>,
+    active_device: Option<usize>,
+    cr1: u32,
+    sr1: u32,
+    sr2: u32,
+    dr: u32,
+    state: I2cState,
+    sr1_read_with_addr: bool,
+}
+
+impl Default for I2c {
+    fn default() -> Self {
+        Self {
+            name: String::new(), devices: Vec::new(), active_device: None,
+            cr1: 0, sr1: 0, sr2: 0, dr: 0,
+            state: I2cState::Idle, sr1_read_with_addr: false,
+        }
+    }
+}
 
 impl I2c {
     pub fn new(name: &str, ext_devices: &ExtDevices) -> Option<Box<dyn Peripheral>> {
@@ -34,14 +36,10 @@ impl I2c {
             Some(Box::new(Self { name: name.to_string(), devices, ..Default::default() }))
         } else { None }
     }
-
-    fn find_device(&self) -> Option<Rc<RefCell<dyn ExtDevice<(), u8>>>> {
-        for d in &self.devices {
-            if d.address == self.addr {
-                return Some(d.device.clone());
-            }
-        }
-        None
+    fn reset(&mut self) {
+        self.sr1 = 0; self.sr2 = 0; self.dr = 0;
+        self.active_device = None; self.state = I2cState::Idle;
+        self.sr1_read_with_addr = false;
     }
 }
 
@@ -49,58 +47,114 @@ impl Peripheral for I2c {
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => self.cr1,
-            0x04 => self.cr2,
-            0x08 => self.oar1,
-            0x0C => self.oar2,
-            0x14 => {
-                if let Some(dev) = self.find_device() {
-                    let mut d = dev.borrow_mut();
-                    d.read(sys, ());
-                    let v = self.rx_buf.pop_front().unwrap_or(0);
-                    self.sr1 &= !0x40;
-                    v as u32
-                } else { 0 }
+            0x10 => {
+                let v = self.dr;
+                self.sr1 &= !(1 << 5);
+                if let Some(idx) = self.active_device {
+                    if matches!(self.state, I2cState::Active { is_read: true }) {
+                        let mut d = self.devices[idx].device.borrow_mut();
+                        self.dr = d.read(sys, ()) as u32;
+                        self.sr1 |= 1 << 5;
+                    }
+                }
+                v
             }
-            0x18 => self.sr1,
-            0x1C => self.sr2,
-            0x20 => self.ccr,
-            0x24 => self.trise,
-            0x28 => self.fltr,
+            0x14 => {
+                self.sr1_read_with_addr = (self.sr1 & (1 << 1)) != 0;
+                self.sr1
+            }
+            0x18 => {
+                if self.sr1_read_with_addr {
+                    self.sr1 &= !(1 << 1);
+                    self.sr1_read_with_addr = false;
+                    let is_read = match std::mem::replace(&mut self.state, I2cState::Idle) {
+                        I2cState::AddrSent { is_read } => {
+                            self.state = I2cState::Active { is_read };
+                            is_read
+                        }
+                        s => { self.state = s; false }
+                    };
+                    if is_read {
+                        self.sr1 |= 1 << 5;
+                    } else {
+                        self.sr1 |= 1 << 6;
+                    }
+                }
+                self.sr2
+            }
             _ => 0,
         }
     }
 
     fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
-            0x00 => self.cr1 = value,
-            0x04 => self.cr2 = value,
-            0x08 => self.oar1 = value,
-            0x0C => self.oar2 = value,
-            0x14 => {
-                self.dr = value & 0xFF;
-                if self.state == I2cState::Idle || self.state == I2cState::Addr {
-                    self.addr = ((value & 0xFF) >> 1) as u8;
-                    if let Some(dev) = self.find_device() {
-                        dev.borrow_mut().reset();
+            0x00 => {
+                let prev_start = self.cr1 & (1 << 8);
+                let prev_pe = self.cr1 & 1;
+                self.cr1 = value;
+
+                if value & (1 << 15) != 0 {
+                    self.reset();
+                    self.cr1 = value & 1;
+                    return;
+                }
+                if prev_pe != 0 && value & 1 == 0 {
+                    self.reset();
+                    return;
+                }
+
+                let start = value & (1 << 8);
+                let stop = value & (1 << 9);
+
+                if start != 0 && prev_start == 0 {
+                    self.state = I2cState::StartSent;
+                    self.sr1 = 1;
+                    self.sr2 = (1 << 0) | (1 << 1);
+                    self.active_device = None;
+                    self.cr1 &= !(1 << 8);
+                }
+
+                if stop != 0 {
+                    if matches!(self.state, I2cState::Active { .. } | I2cState::AddrSent { .. }) {
+                        self.reset();
                     }
-                    self.state = I2cState::Data;
-                    self.sr1 |= 0x02;
-                    self.sr1 |= 0x80;
-                } else {
-                    if let Some(dev) = self.find_device() {
-                        let mut d = dev.borrow_mut();
-                        d.write(sys, (), value as u8);
-                        let rx = d.read(sys, ());
-                        self.rx_buf.push_back(rx);
-                    }
-                    self.sr1 |= 0x40;
-                    self.sr1 |= 0x80;
+                    self.cr1 &= !(1 << 9);
                 }
             }
-            0x18 => self.sr1 &= !(value & 0xFFFF),
-            0x20 => self.ccr = value,
-            0x24 => self.trise = value,
-            0x28 => self.fltr = value,
+            0x10 => {
+                match self.state {
+                    I2cState::StartSent => {
+                        let addr = ((value >> 1) & 0x7F) as u8;
+                        let is_read = (value & 1) != 0;
+
+                        let found = self.devices.iter().position(|d| d.address == addr);
+
+                        if let Some(idx) = found {
+                            self.active_device = Some(idx);
+                            self.devices[idx].device.borrow_mut().reset();
+                            self.sr1 = 1 << 1;
+                            self.sr2 = (1 << 0) | (1 << 1);
+                            if is_read {
+                                let mut d = self.devices[idx].device.borrow_mut();
+                                self.dr = d.read(sys, ()) as u32;
+                            }
+                            self.state = I2cState::AddrSent { is_read };
+                        } else {
+                            self.sr1 = 1 << 9;
+                            self.sr2 = (1 << 0) | (1 << 1);
+                            self.state = I2cState::Idle;
+                        }
+                    }
+                    I2cState::Active { is_read: false } => {
+                        if let Some(idx) = self.active_device {
+                            let mut d = self.devices[idx].device.borrow_mut();
+                            d.write(sys, (), value as u8);
+                        }
+                        self.sr1 |= 1 << 6;
+                    }
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }

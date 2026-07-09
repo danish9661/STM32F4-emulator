@@ -39,27 +39,32 @@ impl Default for Nvic {
 }
 
 impl Nvic {
-    fn irq_bit(irq: i32) -> Option<(usize, u32)> {
-        let bit = IRQ_OFFSET + irq;
-        if bit < 0 { return None; }
-        let idx = (bit as usize) / 32;
-        let mask = 1u32 << (bit as usize % 32);
+    /// Map irq to pending_reg index (IRQ-based, no offset)
+    fn irq_reg_idx(irq: i32) -> Option<(usize, u32)> {
+        if irq < 0 { return None; }
+        let idx = (irq as usize) / 32;
+        let mask = 1u32 << (irq as usize % 32);
         if idx >= REG_WORDS { None } else { Some((idx, mask)) }
     }
 
     pub fn set_intr_pending(&mut self, irq: i32) {
-        if let Some((idx, mask)) = Self::irq_bit(irq) {
+        if irq < 0 {
+            // System exception
+            self.pending |= 1u128 << (IRQ_OFFSET + irq);
+        } else if let Some((idx, mask)) = Self::irq_reg_idx(irq) {
             self.pending |= 1u128 << (IRQ_OFFSET + irq);
             self.pending_reg[idx] |= mask;
         }
     }
 
     pub fn clear_pending(&mut self, irq: i32) {
-        if let Some((idx, mask)) = Self::irq_bit(irq) {
-            self.pending &= !(1u128 << (IRQ_OFFSET + irq));
+        self.pending &= !(1u128 << (IRQ_OFFSET + irq));
+        if let Some((idx, mask)) = Self::irq_reg_idx(irq) {
             self.pending_reg[idx] &= !mask;
         }
     }
+
+    pub fn has_pending(&self) -> bool { self.pending != 0 }
 
     pub fn get_pending_vector(&self) -> u32 {
         if self.pending != 0 {
@@ -76,8 +81,9 @@ impl Nvic {
             let irq = (bit as i32) - IRQ_OFFSET;
             // External IRQs (bit >= 16) need ISER enable; system exceptions always fire
             if bit >= 16 {
-                let idx = (bit as usize) / 32;
-                let mask = 1u32 << (bit as usize % 32);
+                let irq_num = irq as usize;
+                let idx = irq_num / 32;
+                let mask = 1u32 << (irq_num % 32);
                 if self.enable[idx] & mask == 0 {
                     // Not enabled - skip and clear
                     self.pending &= !(1 << bit);
@@ -86,9 +92,9 @@ impl Nvic {
                 }
             }
             self.pending &= !(1 << bit);
-            if bit >= 16 {
-                let idx = (bit as usize) / 32;
-                let mask = 1u32 << (bit as usize % 32);
+            if irq >= 0 {
+                let idx = (irq as usize) / 32;
+                let mask = 1u32 << (irq as usize % 32);
                 self.pending_reg[idx] &= !mask;
                 self.active[idx] |= mask;
             }
@@ -122,38 +128,31 @@ impl Peripheral for Nvic {
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         match offset {
             0x004 => {
-                // Interrupt Controller Type Register: INTLines = IRQ_COUNT / 32
                 let intlines = ((IRQ_COUNT + 31) / 32 - 1) as u32;
                 intlines << 4
             }
-            // ISER[0..2] at 0x100, 0x104, 0x108
-            0x100..=0x11C if offset < 0x100 + 4 * REG_WORDS as u32 => {
-                let i = ((offset - 0x100) / 4) as usize;
+            0x00..=0x1C if offset < 4 * REG_WORDS as u32 => {
+                let i = (offset / 4) as usize;
                 self.enable[i]
             }
-            // ICER
-            0x180..=0x19C if offset < 0x180 + 4 * REG_WORDS as u32 => {
-                let i = ((offset - 0x180) / 4) as usize;
-                self.enable[i] // reads current enable state
+            0x80..=0x9C if offset < 0x80 + 4 * REG_WORDS as u32 => {
+                let i = ((offset - 0x80) / 4) as usize;
+                self.enable[i]
             }
-            // ICPR
+            0x100..=0x11C if offset < 0x100 + 4 * REG_WORDS as u32 => {
+                let i = ((offset - 0x100) / 4) as usize;
+                self.pending_reg[i]
+            }
             0x200..=0x21C if offset < 0x200 + 4 * REG_WORDS as u32 => {
                 let i = ((offset - 0x200) / 4) as usize;
                 self.pending_reg[i]
             }
-            // ISPR
-            0x300..=0x31C if offset < 0x300 + 4 * REG_WORDS as u32 => {
-                let i = ((offset - 0x300) / 4) as usize;
-                self.pending_reg[i]
-            }
-            // IABR
-            0x380..=0x39C if offset < 0x380 + 4 * REG_WORDS as u32 => {
-                let i = ((offset - 0x380) / 4) as usize;
+            0x280..=0x29C if offset < 0x280 + 4 * REG_WORDS as u32 => {
+                let i = ((offset - 0x280) / 4) as usize;
                 self.active[i]
             }
-            // IPR - byte accessible, 4 per IRQ word
-            0x400..=0x5EF => {
-                let byte_idx = (offset - 0x400) as usize;
+            0x300..=0x4EF => {
+                let byte_idx = (offset - 0x300) as usize;
                 if byte_idx < IRQ_COUNT {
                     self.priority[byte_idx] as u32
                 } else { 0 }
@@ -164,25 +163,24 @@ impl Peripheral for Nvic {
 
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
         match offset {
-            0x100..=0x11C if offset < 0x100 + 4 * REG_WORDS as u32 => {
-                let i = ((offset - 0x100) / 4) as usize;
+            0x00..=0x1C if offset < 4 * REG_WORDS as u32 => {
+                let i = (offset / 4) as usize;
                 let was = self.enable[i];
                 self.enable[i] |= value;
-                // Set any newly enabled pending bits
                 let newly_enabled = self.enable[i] & !was;
                 let newly_pending = self.pending_reg[i] & newly_enabled;
                 for b in 0..32 {
                     if newly_pending & (1 << b) != 0 {
-                        self.pending |= 1u128 << (i * 32 + b);
+                        self.pending |= 1u128 << (IRQ_OFFSET as u32 + i as u32 * 32 + b) as u128;
                     }
                 }
             }
-            0x180..=0x19C if offset < 0x180 + 4 * REG_WORDS as u32 => {
-                let i = ((offset - 0x180) / 4) as usize;
+            0x80..=0x9C if offset < 0x80 + 4 * REG_WORDS as u32 => {
+                let i = ((offset - 0x80) / 4) as usize;
                 self.enable[i] &= !value;
             }
-            0x200..=0x21C if offset < 0x200 + 4 * REG_WORDS as u32 => {
-                let i = ((offset - 0x200) / 4) as usize;
+            0x100..=0x11C if offset < 0x100 + 4 * REG_WORDS as u32 => {
+                let i = ((offset - 0x100) / 4) as usize;
                 let cleared = self.pending_reg[i] & value;
                 self.pending_reg[i] &= !value;
                 for b in 0..32 {
@@ -191,22 +189,19 @@ impl Peripheral for Nvic {
                     }
                 }
             }
-            0x300..=0x31C if offset < 0x300 + 4 * REG_WORDS as u32 => {
-                let i = ((offset - 0x300) / 4) as usize;
+            0x200..=0x21C if offset < 0x200 + 4 * REG_WORDS as u32 => {
+                let i = ((offset - 0x200) / 4) as usize;
                 let new_pending = value & !self.pending_reg[i];
                 self.pending_reg[i] |= value;
-                // Set global pending for any newly set bits that are enabled
                 for b in 0..32 {
                     if new_pending & (1 << b) != 0 && self.enable[i] & (1 << b) != 0 {
                         self.pending |= 1u128 << (i * 32 + b);
                     }
                 }
             }
-            0x400..=0x5EF => {
-                let byte_idx = (offset - 0x400) as usize;
+            0x300..=0x4EF => {
+                let byte_idx = (offset - 0x300) as usize;
                 if byte_idx < IRQ_COUNT {
-                    // Write byte enables: IPR is accessed as 8/16/32 bit
-                    // Each byte maps to one IRQ's priority
                     self.priority[byte_idx] = (value & 0xFF) as u8;
                 }
             }
@@ -218,21 +213,7 @@ impl Peripheral for Nvic {
 pub struct NvicWrapper;
 
 impl NvicWrapper {
-    pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
-        if name == "NVIC" {
-            Some(Box::new(Self))
-        } else {
-            None
-        }
-    }
-}
-
-impl Peripheral for NvicWrapper {
-    fn read(&mut self, sys: &System, offset: u32) -> u32 {
-        sys.p.nvic.borrow_mut().read(sys, offset)
-    }
-
-    fn write(&mut self, sys: &System, offset: u32, value: u32) {
-        sys.p.nvic.borrow_mut().write(sys, offset, value)
+    pub fn new(_name: &str) -> Option<Box<dyn Peripheral>> {
+        None // NVIC is handled by shortcut in Peripherals::read/write, not as a peripheral slot
     }
 }

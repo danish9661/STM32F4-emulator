@@ -97,7 +97,7 @@ fn extract_svd_max_offset(p: &PeripheralInfo) -> u32 {
 }
 
 impl Peripherals {
-    pub const NVIC_REGS_BASE: u32 = 0xE000_E000;
+    pub const NVIC_REGS_BASE: u32 = 0xE000_E100;
     pub const NVIC_REGS_END: u32 = 0xE000_EF00;
 
     pub const MEMORY_MAPS: [(u32, u32); 2] = [
@@ -282,11 +282,10 @@ impl Peripherals {
         let (addr, byte_offset) = if is_reg {
             Self::align_addr_4(addr)
         } else { (addr, 0) };
-        let value = if Self::NVIC_REGS_BASE <= addr && addr < Self::NVIC_REGS_END {
-            // NVIC range: pass aligned addr (no shift needed, NVIC handles width internally)
-            self.nvic.borrow_mut().read(sys, addr - Self::NVIC_REGS_BASE)
-        } else if let Some(p) = Self::get_peripheral(&self.peripherals, addr) {
+        let value = if let Some(p) = Self::get_peripheral(&self.peripherals, addr) {
             p.peripheral.borrow_mut().read(sys, addr - p.start)
+        } else if Self::NVIC_REGS_BASE <= addr && addr < Self::NVIC_REGS_END {
+            self.nvic.borrow_mut().read(sys, addr - Self::NVIC_REGS_BASE)
         } else { 0 };
         if is_reg { value << (8 * byte_offset) } else { value }
     }
@@ -305,10 +304,10 @@ impl Peripherals {
             let v = self.read(sys, addr, 4);
             value = (value << 8 * byte_offset) | (v & (0xFFFF_FFFF >> (32 - 8 * byte_offset)));
         }
-        if Self::NVIC_REGS_BASE <= addr && addr < Self::NVIC_REGS_END {
-            self.nvic.borrow_mut().write(sys, addr - Self::NVIC_REGS_BASE, value);
-        } else if let Some(p) = Self::get_peripheral(&self.peripherals, addr) {
+        if let Some(p) = Self::get_peripheral(&self.peripherals, addr) {
             p.peripheral.borrow_mut().write(sys, addr - p.start, value);
+        } else if Self::NVIC_REGS_BASE <= addr && addr < Self::NVIC_REGS_END {
+            self.nvic.borrow_mut().write(sys, addr - Self::NVIC_REGS_BASE, value);
         }
     }
 
