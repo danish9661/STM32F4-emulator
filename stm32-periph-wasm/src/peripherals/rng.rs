@@ -11,7 +11,7 @@ pub struct Rng {
 impl Default for Rng {
     fn default() -> Self {
         Self {
-            sr: 0x40, // DRDY set
+            sr: 0x00,
             dr: 0x0000_0000,
             last_regen: 0,
             cr: 0x0000_0000,
@@ -61,23 +61,17 @@ impl Peripheral for Rng {
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
         match offset {
             0x00 => {
-                self.cr = value & 0x70007;
-                if value & 0x40000 != 0 {
-                    // CONDRST: reset the RNG
-                    self.dr = 0;
-                    self.sr = 0x40;
-                }
-                if value & 1 != 0 {
-                    // RNGEN: enable - start generating
-                    self.last_regen = instruction_count();
-                    self.sr = 0x40;
+                self.cr = value & 0x17;
+                if self.cr & 4 != 0 {
+                    self.sr |= 1;
+                } else {
+                    self.sr &= !1;
                 }
             }
             0x04 => {
-                // Writing to SR clears specified bits
                 self.sr &= !(value & 0x46);
             }
-            0x08 => {} // DR is read-only
+            0x08 => {}
             _ => {}
         }
     }

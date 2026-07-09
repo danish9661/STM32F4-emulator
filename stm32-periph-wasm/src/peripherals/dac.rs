@@ -76,7 +76,7 @@ impl Peripheral for Dac {
 
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
         match offset {
-            0x00 => self.cr = value & 0x3F0F_003F,
+            0x00 => self.cr = value & 0x3F3F_FFFF,
             0x04 => {
                 self.swtrigr = value;
                 // SWTRIG updates DOR from DHR

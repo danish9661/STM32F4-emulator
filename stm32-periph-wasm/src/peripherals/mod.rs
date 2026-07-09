@@ -17,6 +17,9 @@ pub mod rtc;
 pub mod crc;
 pub mod rng;
 pub mod dac;
+pub mod can;
+pub mod sdio;
+pub mod dcmi;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -134,7 +137,7 @@ impl Peripherals {
                 .and_then(|d| svd_map.get(d.as_str()).copied())
                 .unwrap_or(p);
 
-            let size = extract_svd_max_offset(resolved).max(0x10);
+            let size = extract_svd_max_offset(resolved).max(0x10).min(0x400);
             let (start, end) = (p.base_address as u32, p.base_address as u32 + size);
 
             let name = &p.name;
@@ -158,6 +161,9 @@ impl Peripherals {
                 .or_else(|| Spi::new(name, ext_devices))
                 .or_else(|| Timer::new(name))
                 .or_else(|| Adc::new(name))
+                .or_else(|| Can::new(name))
+                .or_else(|| Sdio::new(name))
+                .or_else(|| Dcmi::new(name))
             ;
 
             if let Some(peri) = peri {
@@ -334,3 +340,6 @@ use crc::Crc;
 use rng::Rng;
 use dac::Dac;
 use rcc::Rcc;
+use can::Can;
+use sdio::Sdio;
+use dcmi::Dcmi;
