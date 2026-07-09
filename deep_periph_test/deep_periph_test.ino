@@ -208,6 +208,52 @@ void setup() {
     *(volatile uint32_t *)0x5005001C = cwstrt;
     CHECK(*(volatile uint32_t *)0x5005001C == (cwstrt & 0x3FFF), "DCMI CWSTRT write");
 
+    // I2S: registers on SPI1
+    *(volatile uint32_t *)0x4001301C = 0xFFF;
+    CHECK(*(volatile uint32_t *)0x4001301C == 0xFFF, "I2S I2SCFGR write");
+    *(volatile uint32_t *)0x40013020 = 0x3FF;
+    CHECK(*(volatile uint32_t *)0x40013020 == 0x3FF, "I2S I2SPR write");
+    *(volatile uint32_t *)0x4001301C = 0;
+    CHECK(*(volatile uint32_t *)0x4001301C == 0, "I2S I2SCFGR cleared");
+
+    // I2S2ext: full register access
+    *(volatile uint32_t *)0x40003400 = 0x1234;
+    CHECK(*(volatile uint32_t *)0x40003400 == 0x1234, "I2S2ext CR1 write");
+    *(volatile uint32_t *)0x4000341C = 0xABC;
+    CHECK(*(volatile uint32_t *)0x4000341C == 0xABC, "I2S2ext I2SCFGR write");
+    *(volatile uint32_t *)0x40003420 = 0x1AB;
+    CHECK(*(volatile uint32_t *)0x40003420 == 0x1AB, "I2S2ext I2SPR write");
+
+    // I2S3ext: register access
+    *(volatile uint32_t *)0x40004000 = 0x5678;
+    CHECK(*(volatile uint32_t *)0x40004000 == 0x5678, "I2S3ext CR1 write");
+    *(volatile uint32_t *)0x4000401C = 0xDEF;
+    CHECK(*(volatile uint32_t *)0x4000401C == 0xDEF, "I2S3ext I2SCFGR write");
+
+    // SAI1: block A registers
+    // Registers: CR1(+0), CR2(+4), FRCR(+8), SLOTR(+C), IM(+10), SR(+14), CLRFR(+18), DR(+1C)
+    // Cluster starts at SAI offset +4, so absolute: CR1=0x40015804, ... DR=0x40015820
+    CHECK(*(volatile uint32_t *)0x40015804 == 0x40, "SAI A_CR1 default");
+    *(volatile uint32_t *)0x40015804 = 0x3F3FFFFF;
+    CHECK(*(volatile uint32_t *)0x40015804 == 0x3F3FFFFF, "SAI A_CR1 write");
+    *(volatile uint32_t *)0x40015808 = 0x7FFF;
+    CHECK(*(volatile uint32_t *)0x40015808 == 0x7FFF, "SAI A_CR2 write");
+    CHECK(*(volatile uint32_t *)0x4001580C == 0x07, "SAI A_FRCR default");
+    *(volatile uint32_t *)0x4001580C = 0x7FFFF;
+    CHECK(*(volatile uint32_t *)0x4001580C == 0x7FFFF, "SAI A_FRCR write");
+    *(volatile uint32_t *)0x40015810 = 0x1FFFFF;
+    CHECK(*(volatile uint32_t *)0x40015810 == 0x1FFFFF, "SAI A_SLOTR write");
+    CHECK(*(volatile uint32_t *)0x40015818 == 0x08, "SAI A_SR default");
+    *(volatile uint32_t *)0x4001581C = 0x77;
+    CHECK(*(volatile uint32_t *)0x4001581C == 0x77, "SAI A_CLRFR write");
+    *(volatile uint32_t *)0x40015820 = 0x12345678;
+    CHECK(*(volatile uint32_t *)0x40015820 == 0x12345678, "SAI A_DR write/read");
+
+    // SAI1: block B registers (cluster +0x24)
+    CHECK(*(volatile uint32_t *)0x40015824 == 0x40, "SAI B_CR1 default");
+    *(volatile uint32_t *)0x40015824 = 0x3F3F0000;
+    CHECK(*(volatile uint32_t *)0x40015824 == 0x3F3F0000, "SAI B_CR1 write");
+
     tx_s("---- SUMMARY ----\n");
     tx_s("PASS: "); tx_hex(pass); tx_s("\n");
     tx_s("FAIL: "); tx_hex(fail); tx_s("\n");

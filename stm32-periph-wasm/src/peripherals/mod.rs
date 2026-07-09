@@ -21,12 +21,16 @@ pub mod can;
 pub mod sdio;
 pub mod dcmi;
 pub mod fsmc;
+pub mod i2s;
+pub mod sai;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use crate::system::System;
 use crate::ext_devices::ExtDevices;
 use fsmc::Fsmc;
+use i2s::I2s;
+use sai::Sai;
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
@@ -170,6 +174,8 @@ impl Peripherals {
                 .or_else(|| Sdio::new(name))
                 .or_else(|| Dcmi::new(name))
                 .or_else(|| Fsmc::new(name, ext_devices))
+                .or_else(|| I2s::new(name))
+                .or_else(|| Sai::new(name))
             ;
 
             if let Some(peri) = peri {
@@ -197,7 +203,8 @@ impl Peripherals {
             (0x4000_0C00, "TIM5"),  (0x4000_1000, "TIM6"),  (0x4000_1400, "TIM7"),
             (0x4000_1800, "TIM12"), (0x4000_1C00, "TIM13"), (0x4000_2000, "TIM14"),
             (0x4000_2800, "RTC"),  (0x4000_2C00, "WWDG"),  (0x4000_3000, "IWDG"),
-            (0x4000_3800, "SPI2"),  (0x4000_3C00, "SPI3"),
+            (0x4000_3400, "I2S2ext"), (0x4000_3800, "SPI2"),  (0x4000_3C00, "SPI3"),
+            (0x4000_4000, "I2S3ext"),
             (0x4000_4400, "USART2"), (0x4000_4800, "USART3"),
             (0x4000_4C00, "UART4"),  (0x4000_5000, "UART5"),
             (0x4000_5400, "I2C1"), (0x4000_5800, "I2C2"), (0x4000_5C00, "I2C3"),
@@ -209,6 +216,7 @@ impl Peripherals {
             (0x4001_2C00, "TIM8"),  (0x4001_3000, "SPI1"),
             (0x4001_3400, "SPI4"),  (0x4001_4000, "TIM9"),  (0x4001_4400, "TIM10"),
             (0x4001_4800, "TIM11"), (0x4001_5000, "SPI5"), (0x4001_5400, "SPI6"),
+            (0x4001_5800, "SAI1"),
             (0x4002_0000, "GPIOA"), (0x4002_0400, "GPIOB"), (0x4002_0800, "GPIOC"),
             (0x4002_0C00, "GPIOD"), (0x4002_1000, "GPIOE"), (0x4002_1400, "GPIOF"),
             (0x4002_1800, "GPIOG"), (0x4002_1C00, "GPIOH"), (0x4002_2000, "GPIOI"),

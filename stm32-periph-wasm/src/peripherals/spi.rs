@@ -11,6 +11,8 @@ pub struct Spi {
     pub dr: u32,
     pub rx_buffer: u32,
     pub ready_toggle: bool,
+    pub i2scfgr: u32,
+    pub i2spr: u32,
     devices: Vec<SpiDeviceEntry>,
 }
 
@@ -61,7 +63,9 @@ impl Peripheral for Spi {
                 self.rx_buffer = 0;
                 v
             }
-            0x0010 => self.dr,
+             0x0010 => self.dr,
+             0x001C => self.i2scfgr,
+             0x0020 => self.i2spr,
             _ => 0
         }
     }
@@ -88,7 +92,9 @@ impl Peripheral for Spi {
                     self.rx_buffer = 0xFF;
                 }
             }
-            0x0010 => self.dr = value,
+             0x0010 => self.dr = value,
+             0x001C => self.i2scfgr = value & 0xFFF,
+             0x0020 => self.i2spr = value & 0x3FF,
             _ => {}
         }
     }
