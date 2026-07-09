@@ -26,6 +26,8 @@ pub struct Cryp {
     ghash_data_done: bool,
     gcm_j0: [u8; 16],       // J0 for GCM
     gcm_ctr: [u8; 16],      // current GCM counter
+    gcm_aad_len: u64,       // AAD bit-length for GCM tag
+    gcm_data_len: u64,      // ciphertext/plaintext bit-length for GCM tag
     ccm_b0: [u8; 16],       // B0 for CCM
     ccm_mac: [u8; 16],      // running CBC-MAC
     ccm_aad_len: usize,
@@ -44,6 +46,7 @@ impl Default for Cryp {
             ghash_h: [0; 16], ghash_y: [0; 16],
             ghash_aad_done: false, ghash_data_done: false,
             gcm_j0: [0; 16], gcm_ctr: [0; 16],
+            gcm_aad_len: 0, gcm_data_len: 0,
             ccm_b0: [0; 16], ccm_mac: [0; 16],
             ccm_aad_len: 0, ccm_data_len: 0,
             gcm_phase_done: false,
@@ -180,6 +183,8 @@ impl Cryp {
         self.ghash_y = [0u8; 16];
         self.ghash_aad_done = false;
         self.ghash_data_done = false;
+        self.gcm_aad_len = 0;
+        self.gcm_data_len = 0;
         self.gcm_phase_done = false;
     }
 
@@ -255,13 +260,16 @@ impl Cryp {
     }
 
     fn process_des_block(&self, block: &[u8; 16], mode: u8, encrypt: bool) -> [u8; 16] {
+        let dt = self.datatype();
         let mut result = *block;
+        Self::apply_datatype(&mut result, dt);
         let b0: [u8; 8] = result[..8].try_into().unwrap();
         let b1: [u8; 8] = result[8..].try_into().unwrap();
         let r0 = self.process_des_block8(&b0, mode, encrypt);
         let r1 = self.process_des_block8(&b1, mode, encrypt);
         result[..8].copy_from_slice(&r0);
         result[8..].copy_from_slice(&r1);
+        Self::apply_datatype_rev(&mut result, dt);
         result
     }
 
@@ -353,7 +361,7 @@ impl Cryp {
         }
     }
 
-    fn process_fifo(&mut self) {
+    fn process_fifo(&mut self, sys: &System) {
         if self.in_buf.len() < 16 {
             return;
         }
@@ -387,6 +395,11 @@ impl Cryp {
         if self.in_buf.len() < 64 { self.sr |= 2; } // IFNF
         if !self.out_buf.is_empty() { self.sr |= 4; } // OFNE
         if self.out_buf.len() >= 64 { self.sr |= 8; } // OFFU
+
+        // Signal interrupt if output FIFO non-empty and OUTIM enabled
+        if !self.out_buf.is_empty() && (self.imscr & 1) != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(79);
+        }
     }
 
     fn process_gcm_block(&mut self, block: &[u8; 16]) -> [u8; 16] {
@@ -405,6 +418,7 @@ impl Cryp {
                 // Header (AAD) phase - feed to GHASH, no encryption
                 xor_into(&mut self.ghash_y, &result);
                 self.ghash_y = Self::gf128_mul(&self.ghash_y, &self.ghash_h);
+                self.gcm_aad_len += 128; // each block = 128 bits
                 self.ghash_aad_done = true;
             }
             2 => {
@@ -420,14 +434,15 @@ impl Cryp {
                     for i in 0..16 { result[i] ^= enc_ctr[i]; }
                 }
                 self.ghash_y = Self::gf128_mul(&self.ghash_y, &self.ghash_h);
+                self.gcm_data_len += 128;
                 self.ghash_data_done = true;
             }
             3 => {
                 // Final phase - compute tag
                 // T = GHASH(H, A, C) XOR AES(K, J0)
                 let mut len_block = [0u8; 16];
-                // For simplicity, use zeros for AAD and data lengths
-                // Real GCM would use actual bit lengths
+                len_block[..8].copy_from_slice(&self.gcm_aad_len.to_be_bytes());
+                len_block[8..].copy_from_slice(&self.gcm_data_len.to_be_bytes());
                 xor_into(&mut self.ghash_y, &len_block);
                 self.ghash_y = Self::gf128_mul(&self.ghash_y, &self.ghash_h);
                 let mut enc_j0 = self.gcm_j0;
@@ -488,13 +503,6 @@ impl Cryp {
         result
     }
 
-    fn check_interrupt(&mut self, _sys: &System) {
-        // CRYP interrupts: OUTIF (bit 0) when output FIFO is non-empty
-        if !self.out_buf.is_empty() && (self.imscr & 1) != 0 {
-            // Signal interrupt pending
-            // Real hardware would assert NVIC IRQ
-        }
-    }
 }
 
 fn xor_into(a: &mut [u8; 16], b: &[u8; 16]) {
@@ -516,7 +524,7 @@ impl Peripheral for Cryp {
             0x00 => self.cr & 0xF_8FFF,
             0x04 => {
                 if self.cr & 0x8000 != 0 {
-                    self.process_fifo();
+                    self.process_fifo(sys);
                 }
                 let mut sr = 0u32;
                 if self.in_buf.is_empty() { sr |= 1; }
@@ -529,7 +537,7 @@ impl Peripheral for Cryp {
             0x08 => self.din,
             0x0C => {
                 if self.cr & 0x8000 != 0 {
-                    self.process_fifo();
+                    self.process_fifo(sys);
                 }
                 let bsize = if self.is_des_mode() { 8 } else { 16 };
                 if self.out_buf.len() >= 4 {
@@ -565,7 +573,7 @@ impl Peripheral for Cryp {
         }
     }
 
-    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
+    fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
             0x00 => {
                 let was_en = (self.cr & 0x8000) != 0;
@@ -590,6 +598,8 @@ impl Peripheral for Cryp {
                     self.ghash_y = [0u8; 16];
                     self.ghash_aad_done = false;
                     self.ghash_data_done = false;
+                    self.gcm_aad_len = 0;
+                    self.gcm_data_len = 0;
                     self.gcm_phase_done = false;
                     self.sr = 0x03;
                 }
@@ -599,7 +609,7 @@ impl Peripheral for Cryp {
                 if self.cr & 0x8000 != 0 {
                     let b = value.to_be_bytes();
                     self.in_buf.extend_from_slice(&b);
-                    self.process_fifo();
+                    self.process_fifo(sys);
                 }
             }
             0x10 => self.dmacr = value & 0x07,

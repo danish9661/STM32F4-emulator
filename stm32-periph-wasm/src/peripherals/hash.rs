@@ -2,6 +2,8 @@ use crate::system::System;
 use super::Peripheral;
 use sha1::Digest;
 
+const HASH_IRQ: i32 = 80;
+
 pub struct Hash {
     cr: u32, nbw: u32, din: u32, str_: u32,
     hr: [u32; 8],
@@ -90,6 +92,13 @@ impl Hash {
         self.sr |= 0x0A; // BUSY + DCIS
         self.dcma_pending = false;
     }
+
+    fn check_interrupt(&mut self, sys: &System) {
+        // DCIE (bit 5): Digest Calculation Complete Interrupt Enable
+        if (self.sr & 0x08) != 0 && (self.cr & 0x20) != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(HASH_IRQ);
+        }
+    }
 }
 
 impl Peripheral for Hash {
@@ -112,7 +121,7 @@ impl Peripheral for Hash {
         }
     }
 
-    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
+    fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
             0x00 => {
                 self.cr = value;
@@ -133,6 +142,7 @@ impl Peripheral for Hash {
                 self.str_ = value & 0x1_001F;
                 if value & 0x100 != 0 {
                     self.compute_digest();
+                    self.check_interrupt(sys);
                 }
             }
             0x20 => self.imr = value & 0x03,
