@@ -174,14 +174,15 @@ impl Peripheral for Rcc {
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
         match offset {
             0x00 => {
-                let hseon = value & (1 << 16);
-                let pllon = value & (1 << 24);
-                let mut cr = value;
-                if hseon != 0 { cr |= 1 << 17; }
-                if pllon != 0 { cr |= 1 << 25; }
-                self.cr = cr;
-                if value & (1 << 16) == 0 { self.hse_on_inst = u64::MAX; }
-                if value & (1 << 24) == 0 { self.pll_on_inst = u64::MAX; }
+                let old_hseon = self.cr & (1 << 16);
+                let new_hseon = value & (1 << 16);
+                if old_hseon == 0 && new_hseon != 0 { self.hse_on_inst = instruction_count(); }
+                if old_hseon != 0 && new_hseon == 0 { self.hse_on_inst = u64::MAX; }
+                let old_pllon = self.cr & (1 << 24);
+                let new_pllon = value & (1 << 24);
+                if old_pllon == 0 && new_pllon != 0 { self.pll_on_inst = instruction_count(); }
+                if old_pllon != 0 && new_pllon == 0 { self.pll_on_inst = u64::MAX; }
+                self.cr = value;
             }
             0x04 => self.pllcfgr = value & 0x7F7F_FFFF,
             0x08 => self.cfgr = (value & 0xFD7F_FFFC) | (value & 0x3),

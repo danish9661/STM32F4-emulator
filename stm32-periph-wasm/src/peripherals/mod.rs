@@ -51,6 +51,7 @@ use svd_parser::svd::{MaybeArray, PeripheralInfo};
 pub trait Peripheral {
     fn read(&mut self, sys: &System, offset: u32) -> u32;
     fn write(&mut self, sys: &System, offset: u32, value: u32);
+    fn tick(&mut self, _sys: &System) {}
 }
 
 pub struct PeripheralSlot<T> {
@@ -60,7 +61,7 @@ pub struct PeripheralSlot<T> {
 }
 
 pub struct Peripherals {
-    peripherals: Vec<PeripheralSlot<RefCell<Box<dyn Peripheral>>>>,
+pub(crate) peripherals: Vec<PeripheralSlot<RefCell<Box<dyn Peripheral>>>>,
     pub nvic: RefCell<nvic::Nvic>,
     pub gpio: RefCell<GpioPorts>,
 }

@@ -131,8 +131,10 @@ impl WasmSystem {
     }
 
     pub fn tick(&self) {
-        // Use an intermediate to avoid holding the borrow across the method call
         let p = self.p.clone();
+        for slot in &p.peripherals {
+            slot.peripheral.borrow_mut().tick(self);
+        }
         p.nvic.borrow_mut().maybe_set_systick_intr_pending();
     }
 

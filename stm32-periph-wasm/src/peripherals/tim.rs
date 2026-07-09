@@ -158,6 +158,10 @@ impl Timer {
 }
 
 impl Peripheral for Timer {
+    fn tick(&mut self, sys: &System) {
+        self.advance(sys);
+    }
+
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         if offset == 0x24 { return self.cnt; }
         self.advance(sys);
