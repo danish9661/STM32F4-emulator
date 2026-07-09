@@ -5,12 +5,7 @@ const LAYER_BASE: u32 = 0x84;
 const LAYER_STRIDE: u32 = 0x80;
 const NUM_LAYERS: u32 = 2;
 
-#[derive(Clone, Copy, Default)]
-struct Lx {
-    cr: u32, whpcr: u32, wvpcr: u32, ckcr: u32,
-    pfcr: u32, cacr: u32, dccr: u32, bfcr: u32,
-    cfbar: u32, cfblr: u32, cfblnr: u32, clutwr: u32,
-}
+const LTDC_IRQ: i32 = 88;
 
 fn lx_bis(offset: u32) -> Option<(u32, u32)> {
     if offset >= LAYER_BASE {
@@ -20,6 +15,13 @@ fn lx_bis(offset: u32) -> Option<(u32, u32)> {
             Some((layer_idx, layer_rel % LAYER_STRIDE))
         } else { None }
     } else { None }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Lx {
+    cr: u32, whpcr: u32, wvpcr: u32, ckcr: u32,
+    pfcr: u32, cacr: u32, dccr: u32, bfcr: u32,
+    cfbar: u32, cfblr: u32, cfblnr: u32, clutwr: u32,
 }
 
 pub struct Ltdc {
@@ -49,6 +51,12 @@ impl Ltdc {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
         if name == "LTDC" { Some(Box::new(Self::default())) } else { None }
     }
+
+    fn fire_interrupts(&mut self, sys: &System) {
+        if self.isr & self.ier & 0x0F != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(LTDC_IRQ);
+        }
+    }
 }
 
 impl Peripheral for Ltdc {
@@ -66,7 +74,7 @@ impl Peripheral for Ltdc {
                 0x28 => self.layers[_li as usize].cfbar,
                 0x2C => self.layers[_li as usize].cfblr,
                 0x30 => self.layers[_li as usize].cfblnr,
-                0x40 => 0, // CLUTWR is write-only
+                0x40 => 0,
                 _ => 0,
             };
         }
@@ -81,13 +89,13 @@ impl Peripheral for Ltdc {
             0x34 => self.ier,
             0x38 => self.isr,
             0x40 => self.lipcr,
-            0x44 => 0, // CPSR: current (X,Y) = 0
-            0x48 => 0x0F, // CDSR: all display statuses active
+            0x44 => 0,
+            0x48 => 0x0F,
             _ => 0,
         }
     }
 
-    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
+    fn write(&mut self, sys: &System, offset: u32, value: u32) {
         if let Some((_li, lr)) = lx_bis(offset) {
             match lr {
                 0x00 => self.layers[_li as usize].cr = value & 0x13,
@@ -112,10 +120,25 @@ impl Peripheral for Ltdc {
             0x10 => self.awcr = value & 0x0FFF_0FFF,
             0x14 => self.twcr = value & 0x0FFF_0FFF,
             0x18 => self.gcr = value & 0xF331_1111,
-            0x24 => self.srcr = value & 0x03,
+            0x24 => {
+                self.srcr = value & 0x03;
+                if value & 0x01 != 0 {
+                    self.isr |= 1 << 3;
+                    self.fire_interrupts(sys);
+                }
+                if value & 0x02 != 0 {
+                    self.isr |= 1 << 2;
+                    self.fire_interrupts(sys);
+                }
+            }
             0x2C => self.bccr = value & 0x00FF_FFFF,
-            0x34 => self.ier = value & 0x0F,
-            0x3C => self.isr &= !(value & 0x0F), // ICR clears ISR bits
+            0x34 => {
+                self.ier = value & 0x0F;
+                self.fire_interrupts(sys);
+            }
+            0x3C => {
+                self.isr &= !(value & 0x0F);
+            }
             0x40 => self.lipcr = value & 0x07FF,
             _ => {}
         }

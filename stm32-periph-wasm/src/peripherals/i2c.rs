@@ -6,40 +6,74 @@ enum I2cState { Idle, StartSent, AddrSent { is_read: bool }, Active { is_read: b
 
 impl Default for I2cState { fn default() -> Self { I2cState::Idle } }
 
+fn i2c_irqs(name: &str) -> Option<(i32, i32)> {
+    match name {
+        "I2C1" => Some((31, 32)),
+        "I2C2" => Some((33, 34)),
+        "I2C3" => Some((72, 73)),
+        _ => None,
+    }
+}
+
 #[derive(Clone)]
 pub struct I2c {
     name: String,
     devices: Vec<I2cDeviceEntry>,
     active_device: Option<usize>,
     cr1: u32,
+    cr2: u32,
     sr1: u32,
     sr2: u32,
     dr: u32,
     state: I2cState,
     sr1_read_with_addr: bool,
+    irq_ev: i32,
+    irq_er: i32,
 }
 
 impl Default for I2c {
     fn default() -> Self {
         Self {
             name: String::new(), devices: Vec::new(), active_device: None,
-            cr1: 0, sr1: 0, sr2: 0, dr: 0,
+            cr1: 0, cr2: 0, sr1: 0, sr2: 0, dr: 0,
             state: I2cState::Idle, sr1_read_with_addr: false,
+            irq_ev: 0, irq_er: 0,
         }
     }
 }
 
 impl I2c {
     pub fn new(name: &str, ext_devices: &ExtDevices) -> Option<Box<dyn Peripheral>> {
-        if name.starts_with("I2C") {
-            let devices = ext_devices.find_i2c_devices(name);
-            Some(Box::new(Self { name: name.to_string(), devices, ..Default::default() }))
-        } else { None }
+        if !name.starts_with("I2C") { return None; }
+        let (irq_ev, irq_er) = i2c_irqs(name)?;
+        let devices = ext_devices.find_i2c_devices(name);
+        Some(Box::new(Self { name: name.to_string(), devices, irq_ev, irq_er, ..Default::default() }))
     }
+
     fn reset(&mut self) {
         self.sr1 = 0; self.sr2 = 0; self.dr = 0;
         self.active_device = None; self.state = I2cState::Idle;
         self.sr1_read_with_addr = false;
+    }
+
+    fn fire_interrupts(&mut self, sys: &System) {
+        let itevten = (self.cr2 >> 10) & 1;
+        let iterren = (self.cr2 >> 9) & 1;
+        let itbufen = (self.cr2 >> 8) & 1;
+
+        let ev_flags = self.sr1 & 0x17;
+        let buf_flags = self.sr1 & 0x60;
+        let err_flags = self.sr1 & 0x0E00;
+
+        if ev_flags != 0 && itevten != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(self.irq_ev);
+        }
+        if buf_flags != 0 && itbufen != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(self.irq_ev);
+        }
+        if err_flags != 0 && iterren != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(self.irq_er);
+        }
     }
 }
 
@@ -47,6 +81,7 @@ impl Peripheral for I2c {
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => self.cr1,
+            0x04 => self.cr2,
             0x10 => {
                 let v = self.dr;
                 self.sr1 &= !(1 << 5);
@@ -57,6 +92,7 @@ impl Peripheral for I2c {
                         self.sr1 |= 1 << 5;
                     }
                 }
+                self.fire_interrupts(sys);
                 v
             }
             0x14 => {
@@ -80,6 +116,7 @@ impl Peripheral for I2c {
                         self.sr1 |= 1 << 6;
                     }
                 }
+                self.fire_interrupts(sys);
                 self.sr2
             }
             _ => 0,
@@ -112,6 +149,7 @@ impl Peripheral for I2c {
                     self.sr2 = (1 << 0) | (1 << 1);
                     self.active_device = None;
                     self.cr1 &= !(1 << 8);
+                    self.fire_interrupts(sys);
                 }
 
                 if stop != 0 {
@@ -120,6 +158,9 @@ impl Peripheral for I2c {
                     }
                     self.cr1 &= !(1 << 9);
                 }
+            }
+            0x04 => {
+                self.cr2 = value & 0x07FF;
             }
             0x10 => {
                 match self.state {
@@ -144,6 +185,7 @@ impl Peripheral for I2c {
                             self.sr2 = (1 << 0) | (1 << 1);
                             self.state = I2cState::Idle;
                         }
+                        self.fire_interrupts(sys);
                     }
                     I2cState::Active { is_read: false } => {
                         if let Some(idx) = self.active_device {
@@ -151,6 +193,7 @@ impl Peripheral for I2c {
                             d.write(sys, (), value as u8);
                         }
                         self.sr1 |= 1 << 6;
+                        self.fire_interrupts(sys);
                     }
                     _ => {}
                 }

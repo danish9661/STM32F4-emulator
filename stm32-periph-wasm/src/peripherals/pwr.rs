@@ -10,7 +10,7 @@ impl Default for Pwr {
     fn default() -> Self {
         Self {
             cr: 0x0000_0000,
-            csr: 0x0000_0000,
+            csr: 0x0000_0800,
         }
     }
 }
@@ -32,8 +32,18 @@ impl Peripheral for Pwr {
 
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
         match offset {
-            0x00 => self.cr = (self.cr & 0xE000) | (value & 0x1FFF),
-            0x04 => {}
+            0x00 => {
+                let pvd_en = value & 0x10;
+                self.cr = (self.cr & 0xE000) | (value & 0x1FFF);
+                if pvd_en != 0 && value & 0x0F != 0 {
+                    self.csr |= 1 << 1;
+                } else {
+                    self.csr &= !(1 << 1);
+                }
+            }
+            0x04 => {
+                self.csr |= value & 0x100;
+            }
             _ => {}
         }
     }

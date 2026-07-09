@@ -1,6 +1,8 @@
 use crate::system::System;
 use super::Peripheral;
 
+const SDIO_IRQ: i32 = 49;
+
 #[derive(Clone, Copy, PartialEq)]
 enum SdState { Idle, Ready, Ident, Stby, Tran }
 
@@ -16,6 +18,12 @@ impl Sdio {
         if name == "SDIO" {
             Some(Box::new(Sdio { sta: 0x7E48_0000, ..Default::default() }))
         } else { None }
+    }
+
+    fn fire_interrupts(&mut self, sys: &System) {
+        if self.sta & self.mask != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(SDIO_IRQ);
+        }
     }
 }
 
@@ -55,7 +63,7 @@ impl Peripheral for Sdio {
         }
     }
 
-    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
+    fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
             0x00 => self.power = value & 3,
             0x04 => self.clkcr = value & 0x3FFF,
@@ -68,7 +76,6 @@ impl Peripheral for Sdio {
                     self.respcmd = cmd_index as u32;
                     self.resp = [0; 4];
 
-                    // SD state machine + response generation
                     match (self.sd_state, cmd_index) {
                         (SdState::Idle, 0)  => { self.resp[0] = 0x00FF_FF80; }
                         (SdState::Idle, 2)  => { self.resp[0] = 0x00FF_FF80; self.sd_state = SdState::Ident; }
@@ -99,13 +106,14 @@ impl Peripheral for Sdio {
                     self.sta |= 1 << 6;
                     if wait_type != 0 { self.sta |= 1 << 10; }
 
-                    // Auto-start data transfer for read/write commands
                     if cmd_index == 17 || cmd_index == 18 {
                         self.data_xfer_active = true;
                         self.dcount = self.dlen;
                         self.sta |= (1 << 1) | (1 << 3) | (1 << 11);
                         self.fifocnt = self.dlen.min(512);
                     }
+
+                    self.fire_interrupts(sys);
                 }
             }
             0x24 => self.dtimer = value,
@@ -118,10 +126,16 @@ impl Peripheral for Sdio {
                     self.fifocnt = 0;
                     self.sta |= 1 << 3;
                     self.sta |= 1 << 5;
+                    self.fire_interrupts(sys);
                 }
             }
-            0x38 => self.sta &= !value,
-            0x3C => self.mask = value & 0x7FFF_FFFF,
+            0x38 => {
+                self.sta &= !value;
+            }
+            0x3C => {
+                self.mask = value & 0x7FFF_FFFF;
+                self.fire_interrupts(sys);
+            }
             0x80 => self.fifo = value,
             _ => {}
         }

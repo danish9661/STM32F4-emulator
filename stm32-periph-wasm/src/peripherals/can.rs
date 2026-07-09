@@ -13,16 +13,41 @@ pub struct Can {
     rx: [Mailbox; 2],
     fmr: u32, fm1r: u32, fs1r: u32, ffa1r: u32, fa1r: u32,
     filter: [u32; 56],
+    irq_base: i32,
 }
 
 impl Can {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
-        if name == "CAN1" || name == "CAN2" {
-            Some(Box::new(Can {
-                mcr: 0x0001_0002, msr: 0x0000_0C02, tsr: 0x1C00_0000,
-                ..Self::default()
-            }))
-        } else { None }
+        let irq_base = match name {
+            "CAN1" => Some(19),
+            "CAN2" => Some(63),
+            _ => None,
+        }?;
+        Some(Box::new(Can {
+            mcr: 0x0001_0002, msr: 0x0000_0C02, tsr: 0x1C00_0000,
+            irq_base,
+            ..Self::default()
+        }))
+    }
+
+    fn fire_interrupts(&mut self, sys: &System) {
+        let base = self.irq_base;
+        // TX (TMEIE bit 0)
+        if self.ier & 0x01 != 0 && self.tsr & 0x0700_0000 != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(base);
+        }
+        // RX0 (FMPIE0 bit 1, FFIE0 bit 2, FOVIE0 bit 3)
+        if self.ier & 0x0E != 0 && self.rf0r & 0x03 != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(base + 1);
+        }
+        // RX1 (FMPIE1 bit 4, FFIE1 bit 5, FOVIE1 bit 6)
+        if self.ier & 0x70 != 0 && self.rf1r & 0x03 != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(base + 2);
+        }
+        // SCE (EWGIE bit 7, EPVIE bit 8, BOFIE bit 9, LECIE bit 10, ERRIE bit 11)
+        if self.ier & 0xF80 != 0 && self.esr != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(base + 3);
+        }
     }
 }
 
@@ -34,6 +59,7 @@ impl Default for Can {
             rx: [Mailbox { tir: 0, tdtr: 0, tdlr: 0, tdhr: 0 }; 2],
             fmr: 0x2A1C_0E01, fm1r: 0, fs1r: 0xFFFF_FFFF, ffa1r: 0, fa1r: 0,
             filter: [0; 56],
+            irq_base: 0,
         }
     }
 }
@@ -84,7 +110,7 @@ impl Peripheral for Can {
         }
     }
 
-    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
+    fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
             0x000 => {
                 let mask = 0x7F3F;
@@ -101,9 +127,18 @@ impl Peripheral for Can {
             }
             0x004 => self.msr = (self.msr & !0x0C0B) | (value & 0x0C0B),
             0x008 => self.tsr &= !(value & 0x0007_0707),
-            0x00C => self.rf0r = (self.rf0r & 0xFFFF_0000) | (value & 0x3F),
-            0x010 => self.rf1r = (self.rf1r & 0xFFFF_0000) | (value & 0x3F),
-            0x014 => self.ier = value & 0x7FF,
+            0x00C => {
+                self.rf0r = (self.rf0r & 0xFFFF_0000) | (value & 0x3F);
+                self.fire_interrupts(sys);
+            }
+            0x010 => {
+                self.rf1r = (self.rf1r & 0xFFFF_0000) | (value & 0x3F);
+                self.fire_interrupts(sys);
+            }
+            0x014 => {
+                self.ier = value & 0x7FF;
+                self.fire_interrupts(sys);
+            }
             0x01C => self.btr = value & 0x3FFF_FFFF,
             0x180..=0x1AC => {
                 let i = ((offset - 0x180) / 0x10) as usize;
@@ -115,16 +150,13 @@ impl Peripheral for Can {
                     0x0C => self.tx[i].tdhr = value,
                     _ => {}
                 }
-                // Tx request: complete immediately with success
                 if (offset - 0x180) % 0x10 == 0 && value & 1 != 0 {
                     self.tsr |= 1 << i;
                     self.tsr |= 0x2 << (8 + i * 4);
                     let rqcp = (self.tsr >> 26) & 7;
                     self.tsr = (self.tsr & !(7 << 26)) | ((rqcp & !(1 << i)) << 26);
                     self.tsr |= 1 << (16 + i);
-                    if (self.ier >> (i + 15)) & 1 != 0 {
-                        self.tsr |= 1 << (16 + i);
-                    }
+                    self.fire_interrupts(sys);
                 }
             }
             0x1B0..=0x1CC => {
@@ -137,7 +169,6 @@ impl Peripheral for Can {
                     0x0C => self.rx[i].tdhr = value,
                     _ => {}
                 }
-                // Reading rx mailbox releases it: decrement FIFO count
                 if (offset - 0x1B0) % 0x10 == 0 && i == 0 && self.rf0r & 0x3 != 0 {
                     self.rf0r = (self.rf0r & !0x3) | ((self.rf0r & 0x3) - 1);
                     self.rf0r |= 1 << 3;
