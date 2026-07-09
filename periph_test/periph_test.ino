@@ -145,8 +145,8 @@ void setup() {
     tx_str("=== PERIPHERAL TEST ===\n");
 
     // 1. RCC
-    CHECK(RCC_CR == 0xFFFFFFFF, "RCC_CR=0xFFFFFFFF");
-    CHECK(RCC_CFGR == 8, "RCC_CFGR SWS=HSI");
+    CHECK(RCC_CR == 0x03, "RCC_CR HSI ready");
+    CHECK(RCC_CFGR == 0, "RCC_CFGR SWS=HSI");
 
     // 2. SysTick
     STK_LOAD = 1000;

@@ -5572,8 +5572,8 @@ LOAD C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/x
  .rodata        0x08001ff4       0x10 C:\Users\Danish\AppData\Local\arduino\sketches\3BB409F85BB5789A4E74F8381CE124BA\sketch\periph_test.ino.cpp.o
  *(.rodata*)
  .rodata.setup.str1.1
-                0x08002004      0x28f C:\Users\Danish\AppData\Local\arduino\sketches\3BB409F85BB5789A4E74F8381CE124BA\sketch\periph_test.ino.cpp.o
- *fill*         0x08002293        0x1 
+                0x08002004      0x28e C:\Users\Danish\AppData\Local\arduino\sketches\3BB409F85BB5789A4E74F8381CE124BA\sketch\periph_test.ino.cpp.o
+ *fill*         0x08002292        0x2 
  .rodata.PinMap_UART_RX
                 0x08002294       0x90 C:\Users\Danish\AppData\Local\arduino\sketches\3BB409F85BB5789A4E74F8381CE124BA\core\PeripheralPins.c.o
                 0x08002294                PinMap_UART_RX

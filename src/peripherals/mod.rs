@@ -13,6 +13,7 @@ pub mod scb;
 pub mod sw_spi;
 pub mod tim;
 pub mod adc;
+pub mod flash;
 
 use rcc::*;
 use serde::Deserialize;
@@ -28,6 +29,7 @@ use scb::*;
 use sw_spi::*;
 use tim::*;
 use adc::*;
+use flash::*;
 
 use std::{collections::{BTreeMap, VecDeque, HashMap}, cell::RefCell};
 use svd_parser::svd::{RegisterInfo, Device as SvdDevice};
@@ -84,6 +86,7 @@ impl Peripherals {
             .or_else(||       Usart::new(&name, ext_devices))
             .or_else(||        Fsmc::new(&name, ext_devices))
             .or_else(||         Rcc::new(&name))
+            .or_else(||       Flash::new(&name))
             .or_else(||         I2c::new(&name, ext_devices))
             .or_else(||         Dma::new(&name))
             .or_else(||         Spi::new(&name, ext_devices))
