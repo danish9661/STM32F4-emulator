@@ -79,18 +79,6 @@ impl Nvic {
         if self.pending != 0 {
             let bit = self.pending.trailing_zeros();
             let irq = (bit as i32) - IRQ_OFFSET;
-            // External IRQs (bit >= 16) need ISER enable; system exceptions always fire
-            if bit >= 16 {
-                let irq_num = irq as usize;
-                let idx = irq_num / 32;
-                let mask = 1u32 << (irq_num % 32);
-                if self.enable[idx] & mask == 0 {
-                    // Not enabled - skip and clear
-                    self.pending &= !(1 << bit);
-                    self.pending_reg[idx] &= !mask;
-                    return None;
-                }
-            }
             self.pending &= !(1 << bit);
             if irq >= 0 {
                 let idx = (irq as usize) / 32;

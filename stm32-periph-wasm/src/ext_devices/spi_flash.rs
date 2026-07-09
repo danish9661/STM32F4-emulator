@@ -29,6 +29,7 @@ enum Command {
     WriteEnable = 0x06,
     WriteDisable = 0x04,
     ReadId = 0x9F,
+    ReadDeviceId = 0x90,
     ReadStatus1 = 0x05,
     ReadStatus2 = 0x35,
     WriteStatus1 = 0x01,
@@ -53,6 +54,7 @@ impl TryFrom<u8> for Command {
             0x06 => Ok(WriteEnable),
             0x04 => Ok(WriteDisable),
             0x9F => Ok(ReadId),
+            0x90 => Ok(ReadDeviceId),
             0x05 => Ok(ReadStatus1),
             0x35 => Ok(ReadStatus2),
             0x01 => Ok(WriteStatus1),
@@ -91,6 +93,16 @@ impl SpiFlash {
                 reply.push_back((jedec >> 16) as u8);
                 reply.push_back((jedec >> 8) as u8);
                 reply.push_back(jedec as u8);
+                Some(Reply::Data(reply))
+            }
+            ReadDeviceId => {
+                let mut reply = VecDeque::new();
+                // 0x90: 3 dummy/address bytes then manufacturer ID then device ID
+                reply.push_back(0xFF);
+                reply.push_back(0xFF);
+                reply.push_back(0xFF);
+                reply.push_back(0xAA);
+                reply.push_back(0xBB);
                 Some(Reply::Data(reply))
             }
             ReadStatus1 => {

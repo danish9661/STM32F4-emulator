@@ -30,14 +30,19 @@ async function main() {
 
     // Discover ext devices from firmware directory
     const fwDir = firmwarePath.replace(/\\/g, '/').replace(/\/[^/]+$/, '');
-    for (const entry of [{ name: 'eeprom.bin', fn: (d) => periph.add_i2c_eeprom("I2C1", 0x50, d) }]) {
-        const path = `${fwDir}/${entry.name}`;
-        try {
-            const data = readFileSync(path);
-            entry.fn(data);
-            console.log(`Loaded ext device: ${path} (${data.length} bytes)`);
-        } catch (_) {}
-    }
+    const eepromPath = `${fwDir}/eeprom.bin`;
+    try {
+        const data = readFileSync(eepromPath);
+        periph.add_i2c_eeprom("I2C1", 0x50, data);
+        periph.add_spi_flash("SPI3", 0xef4016, data, null);
+        console.log(`Loaded ext device: ${eepromPath} (${data.length} bytes)`);
+    } catch (_) {}
+    const spiFlashPath = `${fwDir}/spi_flash.bin`;
+    try {
+        const data = readFileSync(spiFlashPath);
+        periph.add_spi_flash("SPI3", 0xef4016, data, null);
+        console.log(`Loaded ext device: ${spiFlashPath} (${data.length} bytes)`);
+    } catch (_) {}
     const svdPath = new URL('../../monox/stm32f407.svd', import.meta.url);
     const svdXml = readFileSync(svdPath, 'utf8');
     periph.init_svd(svdXml);

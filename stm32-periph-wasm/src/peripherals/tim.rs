@@ -177,11 +177,11 @@ impl Peripheral for Timer {
             0x24 => self.cnt,
             0x28 => self.psc,
             0x2C => self.arr,
-            0x30..=0x3C => {
-                let i = ((offset - 0x30) / 4) as usize;
+            0x30 => self.rcr,
+            0x34..=0x40 => {
+                let i = ((offset - 0x34) / 4) as usize;
                 self.ccr.get(i).copied().unwrap_or(0)
             }
-            0x40 => self.rcr,
             0x48 => self.dcr,
             0x4C => self.dmar,
             0x50 => self.or_,
@@ -209,7 +209,7 @@ impl Peripheral for Timer {
                 self.dier = value & 0xFFFF;
                 self.update_interrupt(sys);
             }
-            0x10 => self.sr &= !value,
+            0x10 => self.sr = value,
             0x14 => {
                 self.egr = value & 0xFF;
                 if value & 1 != 0 { self.generate_update(sys); } // UG
@@ -220,13 +220,13 @@ impl Peripheral for Timer {
             0x24 => self.cnt = value & 0xFFFF,
             0x28 => self.psc = value & 0xFFFF,
             0x2C => self.arr = value & 0xFFFFFFFF,
-            0x30..=0x3C => {
-                let i = ((offset - 0x30) / 4) as usize;
+            0x30 => self.rcr = value & 0xFF,
+            0x34..=0x40 => {
+                let i = ((offset - 0x34) / 4) as usize;
                 if let Some(ccr) = self.ccr.get_mut(i) {
                     *ccr = value & 0xFFFF;
                 }
             }
-            0x40 => self.rcr = value & 0xFF,
             0x48 => self.dcr = value & 0x1F1F,
             0x4C => self.dmar = value,
             0x50 => self.or_ = value & 0xFF,
