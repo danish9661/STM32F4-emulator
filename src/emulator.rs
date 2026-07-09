@@ -109,6 +109,12 @@ pub fn run_emulator(config: Config, svd_device: SvdDevice, args: Args) -> Result
 
             let n = NUM_INSTRUCTIONS.fetch_add(1, Ordering::Acquire);
 
+            if crate::system::is_watchdog_reset_requested() {
+                info!("Watchdog reset");
+                uc.emu_stop().unwrap();
+                return;
+            }
+
             if trace_instructions {
                 info!("{}", disassemble_instruction(&diassembler, uc, pc));
             }

@@ -1,10 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{rc::Rc, cell::RefCell};
 use unicorn_engine::{Unicorn, unicorn_const::Permission};
 use crate::{peripherals::{Peripherals, gpio::GpioPorts}, ext_devices::ExtDevices, util::{UniErr, round_up, self}, config::Config, framebuffers::Framebuffers, components::netlist::Netlist};
 use anyhow::{Context as _, Result};
 use svd_parser::svd::Device as SvdDevice;
+
+static WATCHDOG_RESET: AtomicBool = AtomicBool::new(false);
+
+pub fn is_watchdog_reset_requested() -> bool {
+    WATCHDOG_RESET.swap(false, Ordering::Acquire)
+}
+
+pub fn request_watchdog_reset() {
+    WATCHDOG_RESET.store(true, Ordering::Release);
+}
 
 // System is passed around during read/write hooks. It's more convenient than passing each thing individually.
 // Maybe it should just be a global variable, and we call it a day.

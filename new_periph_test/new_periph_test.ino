@@ -100,6 +100,7 @@ void setup() {
     CHECK(WWDG_SR == 0, "WWDG SR default 0");
 
     // IWDG
+    CHECK(IWDG_SR == 0, "IWDG SR default");
     IWDG_KR = 0x5555;
     IWDG_PR = 0x05;
     CHECK(IWDG_PR == 0x05, "IWDG PR write with KR=5555");
@@ -107,7 +108,6 @@ void setup() {
     CHECK(IWDG_RLR == 0xABC, "IWDG RLR write");
     IWDG_KR = 0xAAAA;
     IWDG_KR = 0xCCCC;
-    CHECK(IWDG_SR == 0, "IWDG SR default");
 
     // RTC
     CHECK(RTC_ISR & 1, "RTC ISR init mode");

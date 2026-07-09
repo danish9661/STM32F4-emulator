@@ -27,7 +27,7 @@ impl Peripheral for Pwr {
 
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
         match offset {
-            0x00 => self.cr = value & 0x1FFF,
+            0x00 => self.cr = (self.cr & 0xE000) | (value & 0x1FFF),
             0x04 => {}
             _ => {}
         }
