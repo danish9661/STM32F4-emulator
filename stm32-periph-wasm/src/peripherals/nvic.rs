@@ -85,12 +85,12 @@ impl Nvic {
                 let idx = irq_num / 32;
                 let mask = 1u32 << (irq_num % 32);
                 if self.enable[idx] & mask == 0 {
-                    self.pending &= !(1 << bit);
+                    self.pending &= !(1u128 << bit);
                     self.pending_reg[idx] &= !mask;
                     return None;
                 }
             }
-            self.pending &= !(1 << bit);
+            self.pending &= !(1u128 << bit);
             if irq >= 0 {
                 let idx = (irq as usize) / 32;
                 let mask = 1u32 << (irq as usize % 32);

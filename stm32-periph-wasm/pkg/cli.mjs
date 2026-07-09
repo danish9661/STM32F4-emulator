@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import { periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output } from './stm32_periph_wasm.js';
+import { initSync, periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output } from './stm32_periph_wasm.js';
 
 async function getMUnicorn() {
     const { createRequire } = await import('module');
@@ -43,6 +43,9 @@ async function main() {
         add_spi_flash("SPI3", 0xef4016, data, null);
         console.log(`Loaded ext device: ${spiFlashPath} (${data.length} bytes)`);
     } catch (_) {}
+    const wasmPath = new URL('stm32_periph_wasm_bg.wasm', import.meta.url);
+    const wasmBytes = readFileSync(wasmPath);
+    initSync(wasmBytes);
     const svdPath = new URL('../../monox/stm32f407.svd', import.meta.url);
     const svdXml = readFileSync(svdPath, 'utf8');
     init_svd(svdXml);

@@ -13,7 +13,7 @@ impl SaiBlock {
     fn read(&mut self, offset: u32) -> u32 {
         if offset == 0x1C {
             let v = self.dr;
-            self.sr = 0x0A;
+            self.sr = 0x08;
             v
         } else {
             match offset {
@@ -39,7 +39,7 @@ impl SaiBlock {
             0x18 => self.clrfr = value & 0x77,
             0x1C => {
                 self.dr = value;
-                self.sr = 0x09;
+                self.sr = 0x03;
             }
             _ => {}
         }
