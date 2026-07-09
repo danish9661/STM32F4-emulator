@@ -1,10 +1,11 @@
-import { createRequire } from 'module';
 import { readFileSync } from 'fs';
+import { periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output } from './stm32_periph_wasm.js';
 
-const require = createRequire(import.meta.url);
-
-const MUnicorn = require('./unicorn_arm.cjs');
-const periph = require('./stm32_periph_wasm.js');
+async function getMUnicorn() {
+    const { createRequire } = await import('module');
+    const require = createRequire(import.meta.url);
+    return require('./unicorn_arm.cjs');
+}
 
 async function main() {
     const args = process.argv.slice(2);
@@ -24,27 +25,27 @@ async function main() {
     console.log(`Max instructions: ${maxInst}`);
     console.log('Initializing Unicorn...');
 
+    const MUnicorn = await getMUnicorn();
     const Module = await MUnicorn({});
-
 
     // Discover ext devices from firmware directory
     const fwDir = firmwarePath.replace(/\\/g, '/').replace(/\/[^/]+$/, '');
     const eepromPath = `${fwDir}/eeprom.bin`;
     try {
         const data = readFileSync(eepromPath);
-        periph.add_i2c_eeprom("I2C1", 0x50, data);
-        periph.add_spi_flash("SPI3", 0xef4016, data, null);
+        add_i2c_eeprom("I2C1", 0x50, data);
+        add_spi_flash("SPI3", 0xef4016, data, null);
         console.log(`Loaded ext device: ${eepromPath} (${data.length} bytes)`);
     } catch (_) {}
     const spiFlashPath = `${fwDir}/spi_flash.bin`;
     try {
         const data = readFileSync(spiFlashPath);
-        periph.add_spi_flash("SPI3", 0xef4016, data, null);
+        add_spi_flash("SPI3", 0xef4016, data, null);
         console.log(`Loaded ext device: ${spiFlashPath} (${data.length} bytes)`);
     } catch (_) {}
     const svdPath = new URL('../../monox/stm32f407.svd', import.meta.url);
     const svdXml = readFileSync(svdPath, 'utf8');
-    periph.init_svd(svdXml);
+    init_svd(svdXml);
 
     const uc = new Module.Unicorn(
         Module.ARCH_ARM,
@@ -84,7 +85,7 @@ async function main() {
 
     const memReadHook = (handle, type, address, size, value, user_data) => {
         const addr32 = Number(address);
-        const val = periph.periph_read(addr32, size) >>> 0;
+        const val = periph_read(addr32, size) >>> 0;
         const bytes = new Uint8Array(size);
         for (let i = 0; i < size; i++) {
             bytes[i] = (val >> (i * 8)) & 0xFF;
@@ -93,7 +94,7 @@ async function main() {
     };
 
     const memWriteHook = (handle, type, address, size, value, user_data) => {
-        periph.periph_write(Number(address), size, Number(value));
+        periph_write(Number(address), size, Number(value));
     };
 
     for (const [start, end] of periphRanges) {
@@ -107,18 +108,18 @@ async function main() {
 
     const codeHook = (handle, address, size, user_data) => {
         instCount++;
-        periph.tick();
-        if (periph.is_watchdog_reset_requested()) {
+        tick();
+        if (is_watchdog_reset_requested()) {
             stopRequested = true;
             uc.emu_stop();
             return;
         }
-        if (periph.dma_get_pending_count() > 0) {
+        if (dma_get_pending_count() > 0) {
             uc.emu_stop();
             return;
         }
         if (instCount % BigInt(tickInterval) === 0n) {
-            if (periph.has_pending_interrupt()) {
+            if (has_pending_interrupt()) {
                 uc.emu_stop();
             }
         }
@@ -143,9 +144,9 @@ async function main() {
     uc.hook_add(Module.HOOK_INTR, intrHook, null);
 
     const processDma = () => {
-        const count = periph.dma_get_pending_count();
+        const count = dma_get_pending_count();
         for (let i = 0; i < count; i++) {
-            const pending = periph.dma_get_pending(0);
+            const pending = dma_get_pending(0);
             if (pending.length < 5) continue;
             const dir = pending[0];
             const stream = pending[1];
@@ -165,7 +166,7 @@ async function main() {
                             const chunk = Math.min(4, size - j);
                             let val = 0;
                             for (let k = 0; k < chunk; k++) val |= data[j + k] << (k * 8);
-                            periph.periph_write(peri_addr, chunk, val);
+                            periph_write(peri_addr, chunk, val);
                         }
                     } else {
                         uc.mem_write(BigInt(dst), data);
@@ -174,7 +175,7 @@ async function main() {
                     if (peripheral) {
                         for (let j = 0; j < size; j += 4) {
                             const chunk = Math.min(4, size - j);
-                            const val = periph.periph_read(peri_addr, chunk);
+                            const val = periph_read(peri_addr, chunk);
                             const bytes = new Uint8Array(chunk);
                             for (let k = 0; k < chunk; k++) bytes[k] = (val >> (k * 8)) & 0xFF;
                             uc.mem_write(BigInt(dst + j), bytes);
@@ -187,13 +188,13 @@ async function main() {
             } catch (e) {
                 console.warn('DMA error:', e.message);
             }
-            periph.dma_set_completed(stream, true);
+            dma_set_completed(stream, true);
         }
     };
 
     const processInterrupts = () => {
         while (!stopRequested) {
-            const irq = periph.get_next_pending_interrupt();
+            const irq = get_next_pending_interrupt();
             if (irq < 0) break;
             const sp = uc.reg_read_i32(Module.ARM_REG_SP);
             const pc = uc.reg_read_i32(Module.ARM_REG_PC);
@@ -264,7 +265,7 @@ async function main() {
         processInterrupts();
         totalSteps++;
 
-        if (stopRequested || periph.is_watchdog_reset_requested()) break;
+        if (stopRequested || is_watchdog_reset_requested()) break;
         if (totalSteps * maxBatch >= maxInst) break;
     }
 
@@ -272,7 +273,7 @@ async function main() {
     const finalPc = uc.reg_read_i32(Module.ARM_REG_PC);
     const finalSp = uc.reg_read_i32(Module.ARM_REG_SP);
 
-    const uartOut = periph.get_uart_output();
+    const uartOut = get_uart_output();
     if (uartOut) {
         console.log(`\n=== UART Output ===\n${uartOut}`);
     }
