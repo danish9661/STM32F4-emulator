@@ -88,18 +88,7 @@ impl Peripheral for Spi {
             0x0000 => self.cr1 = value,
             0x000C => {
                 let device = self.active_device(sys);
-                self.rx_buffer = device.as_ref().and_then(|d| {
-                    let mut d = d.borrow_mut();
-                    Some(if self.is_16bits() {
-                        let h = d.read(sys, ()) as u32;
-                        let l = d.read(sys, ()) as u32;
-                        (h << 8) | l
-                    } else {
-                        d.read(sys, ()) as u32
-                    })
-                }).unwrap_or(0);
-
-                if let Some(d) = device {
+                if let Some(ref d) = device {
                     let mut d = d.borrow_mut();
                     if self.is_16bits() {
                         d.write(sys, (), (value >> 8) as u8);
@@ -111,6 +100,16 @@ impl Peripheral for Spi {
                         trace!("{} write={:02x?}", self.name, v);
                     }
                 }
+                self.rx_buffer = device.as_ref().and_then(|d| {
+                    let mut d = d.borrow_mut();
+                    Some(if self.is_16bits() {
+                        let h = d.read(sys, ()) as u32;
+                        let l = d.read(sys, ()) as u32;
+                        (h << 8) | l
+                    } else {
+                        d.read(sys, ()) as u32
+                    })
+                }).unwrap_or(0);
             }
             _ => {}
         }

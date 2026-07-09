@@ -97,13 +97,11 @@ async function main() {
     const codeHook = (handle, address, size, user_data) => {
         instCount++;
         periph.tick();
-
         if (periph.is_watchdog_reset_requested()) {
             stopRequested = true;
             uc.emu_stop();
             return;
         }
-
         if (instCount % BigInt(tickInterval) === 0n) {
             const irq = periph.get_next_pending_interrupt();
             if (irq >= 0) {
@@ -142,12 +140,11 @@ async function main() {
             const size = pending[4];
             const peri_addr = pending[5] || 0;
             const peripheral = pending[6] || 0;
-
             try {
-                if (dir === 2) { // MemCopy
+                if (dir === 2) {
                     const data = uc.mem_read(BigInt(src), size);
                     uc.mem_write(BigInt(dst), data);
-                } else if (dir === 0) { // MEM->PERIPH
+                } else if (dir === 0) {
                     const data = uc.mem_read(BigInt(src), size);
                     if (peripheral) {
                         for (let j = 0; j < size; j += 4) {
@@ -159,7 +156,7 @@ async function main() {
                     } else {
                         uc.mem_write(BigInt(dst), data);
                     }
-                } else if (dir === 1) { // PERIPH->MEM
+                } else if (dir === 1) {
                     if (peripheral) {
                         for (let j = 0; j < size; j += 4) {
                             const chunk = Math.min(4, size - j);
@@ -193,7 +190,6 @@ async function main() {
             const r2 = uc.reg_read_i32(Module.ARM_REG_R2);
             const r3 = uc.reg_read_i32(Module.ARM_REG_R3);
             const r12 = uc.reg_read_i32(Module.ARM_REG_R12);
-
             const frame = new Uint8Array(32);
             const sv = new DataView(frame.buffer);
             sv.setUint32(0, xpsr, true);
@@ -204,13 +200,11 @@ async function main() {
             sv.setUint32(20, r2, true);
             sv.setUint32(24, r1, true);
             sv.setUint32(28, r0, true);
-
             uc.mem_write(BigInt(sp - 32), frame);
             uc.reg_write_i32(Module.ARM_REG_SP, sp - 32);
             const handler_pc = read32(vector_table + 4 + irq * 4);
             uc.reg_write_i32(Module.ARM_REG_LR, 0xFFFFFFF9);
             uc.reg_write_i32(Module.ARM_REG_PC, handler_pc);
-
             try {
                 uc.emu_start(BigInt(handler_pc), 0n, 0n, 100000);
             } catch (e) {
@@ -250,6 +244,11 @@ async function main() {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
     const finalPc = uc.reg_read_i32(Module.ARM_REG_PC);
     const finalSp = uc.reg_read_i32(Module.ARM_REG_SP);
+
+    const uartOut = periph.get_uart_output();
+    if (uartOut) {
+        console.log(`\n=== UART Output ===\n${uartOut}`);
+    }
 
     console.log(`\nDone: ${totalSteps} steps, ${instCount} instructions in ${elapsed}s`);
     console.log(`PC=0x${finalPc.toString(16)} SP=0x${finalSp.toString(16)}`);

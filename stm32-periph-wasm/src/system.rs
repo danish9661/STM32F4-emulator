@@ -1,11 +1,18 @@
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Mutex;
 use crate::peripherals::{Peripherals, gpio::GpioPorts};
 use crate::ext_devices::ExtDevices;
 
+// UART output buffer: USART write_dr pushes chars here, JS reads via get_uart_output()
+use std::sync::OnceLock;
+static UART_OUTPUT: OnceLock<Mutex<String>> = OnceLock::new();
+pub fn get_uart_output() -> &'static Mutex<String> {
+    UART_OUTPUT.get_or_init(|| Mutex::new(String::new()))
+}
+
 // Global ExtDevices: populated by JS add_* calls before init
-use std::sync::{OnceLock, Mutex};
 static EXT_DEVICES: OnceLock<Mutex<ExtDevices>> = OnceLock::new();
 pub fn get_ext_devices() -> &'static Mutex<ExtDevices> {
     EXT_DEVICES.get_or_init(|| Mutex::new(ExtDevices::default()))

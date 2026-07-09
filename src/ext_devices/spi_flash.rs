@@ -92,12 +92,17 @@ impl SpiFlash {
         match (cmd, args) {
             (Command::ReadJEDECID, []) => {
                 let id = self.config.jedec_id;
-                let data = id.to_be_bytes();
+                let mut data: Vec<u8> = id.to_be_bytes().into();
+                while data.len() > 3 && data[0] == 0 { data.remove(0); }
                 Some(Reply::Data(data.into()))
             }
             (Command::ReadDeviceID, []) => {
+                None  // needs 3 address bytes first
+            }
+            (Command::ReadDeviceID, [_, _, _]) => {
                 let id: u32 = 0xAABBCC;
-                let data = id.to_be_bytes();
+                let mut data: Vec<u8> = id.to_be_bytes().into();
+                while data.len() > 3 && data[0] == 0 { data.remove(0); }
                 Some(Reply::Data(data.into()))
             }
             (Command::ReadData, [a,b,c]) => {

@@ -89,6 +89,13 @@ pub fn is_watchdog_reset_requested() -> bool {
     system::is_watchdog_reset_requested()
 }
 
+/// Collect UART output since last call.
+#[wasm_bindgen]
+pub fn get_uart_output() -> String {
+    use std::mem::take;
+    take(&mut *system::get_uart_output().lock().unwrap())
+}
+
 /// Add an SPI flash device. Must be called before init().
 #[wasm_bindgen]
 pub fn add_spi_flash(peripheral: &str, jedec_id: u32, data: &[u8], cs: Option<String>) {

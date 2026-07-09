@@ -1,0 +1,24 @@
+cpu:
+  svd: ../saturn/stm32f407.svd
+  vector_table: 0x08000000
+regions:
+  - name: ROM
+    start: 0x08000000
+    load: edge_test.ino.bin
+    size: 0x100000
+  - name: RAM
+    start: 0x20000000
+    size: 0x20000
+devices:
+  usart_probe:
+    - peripheral: USART1
+  i2c_eeprom:
+    - peripheral: I2C1
+      address: 0x50
+      file: eeprom.bin
+      size: 256
+  spi_flash:
+    - peripheral: SPI3
+      jedec_id: 0xef4016
+      file: eeprom.bin
+      size: 0x400000

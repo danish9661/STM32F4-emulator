@@ -451,7 +451,7 @@ mod tests {
             p: std::rc::Rc::new(crate::peripherals::Peripherals::default()),
             d: std::rc::Rc::new(crate::ext_devices::ExtDevices {
                 spi_flashes: vec![], usart_probes: vec![], displays: vec![],
-                lcds: vec![], touchscreens: vec![],
+                lcds: vec![], touchscreens: vec![], i2c_eeproms: vec![],
             }),
             n: Some(std::rc::Rc::new(std::cell::RefCell::new(Netlist::new()))),
         });
@@ -465,7 +465,7 @@ mod tests {
             p: std::rc::Rc::new(crate::peripherals::Peripherals::default()),
             d: std::rc::Rc::new(crate::ext_devices::ExtDevices {
                 spi_flashes: vec![], usart_probes: vec![], displays: vec![],
-                lcds: vec![], touchscreens: vec![],
+                lcds: vec![], touchscreens: vec![], i2c_eeproms: vec![],
             }),
             n: Some(std::rc::Rc::new(std::cell::RefCell::new(Netlist::new()))),
         });

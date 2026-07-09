@@ -138,7 +138,7 @@ impl Peripheral for Timer {
             0x08 => self.smcr = value,
             0x0C => self.dier = value,
             0x10 => self.sr = value,
-            0x14 => { self.egr = value; if value & 1 != 0 { self.cnt = 0; } }
+            0x14 => { self.egr = value; if value & 1 != 0 { self.cnt = 0; self.last_tick = crate::emulator::NUM_INSTRUCTIONS.load(std::sync::atomic::Ordering::Relaxed); } }
             0x18 => self.ccmr1 = value,
             0x1C => self.ccmr2 = value,
             0x20 => self.ccer = value,
@@ -183,7 +183,7 @@ mod tests {
             p: std::rc::Rc::new(crate::peripherals::Peripherals::default()),
             d: std::rc::Rc::new(crate::ext_devices::ExtDevices {
                 spi_flashes: vec![], usart_probes: vec![], displays: vec![],
-                lcds: vec![], touchscreens: vec![],
+                lcds: vec![], touchscreens: vec![], i2c_eeproms: vec![],
             }),
             n: None,
         }
