@@ -23,6 +23,7 @@ impl Can {
             Some(Box::new(Can {
                 mcr: 0x0001_0002,
                 msr: 0x0000_0C02,
+                tsr: 0x1C00_0000,
                 ..Default::default()
             }))
         } else {
@@ -34,7 +35,7 @@ impl Can {
 impl Default for Can {
     fn default() -> Self {
         Self {
-            mcr: 0, msr: 0, tsr: 0x1C00_0000, rf0r: 0, rf1r: 0, ier: 0, esr: 0,
+            mcr: 0, msr: 0, tsr: 0, rf0r: 0, rf1r: 0, ier: 0, esr: 0,
             btr: 0, fmr: 0x2A1C_0E01, fm1r: 0, fs1r: 0xFFFF_FFFF, ffa1r: 0, fa1r: 0,
         }
     }
@@ -62,7 +63,25 @@ impl Peripheral for Can {
 
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
         match offset {
-            0x000 => self.mcr = (self.mcr & 0xFFFF_0000) | (value & 0x7F3F),
+            0x000 => {
+                let mcr = (self.mcr & 0xFFFF_0000) | (value & 0x7F3F);
+                // Handle mode transitions
+                let inrq = mcr & 1;
+                let sleep = (mcr >> 1) & 1;
+                if inrq == 1 {
+                    self.msr |= 1;  // INAK
+                    self.msr &= !2; // SLAK clear
+                } else {
+                    self.msr &= !1; // INAK clear
+                    self.msr |= 2;  // SLAK
+                }
+                if sleep == 1 {
+                    self.msr |= 2; // SLAK
+                } else if inrq == 0 {
+                    self.msr &= !2; // SLAK clear (operational)
+                }
+                self.mcr = mcr;
+            }
             0x004 => self.msr = (self.msr & 0xFFFF_0000) | (value & 0x0C0B),
             0x008 => self.tsr = self.tsr & !(value & 0x0007_0707),
             0x00C => self.rf0r = self.rf0r & 0xFFFF_0000 | (value & 0x3F),

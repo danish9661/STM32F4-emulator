@@ -119,9 +119,11 @@ void setup() {
     CHECK(RTC_BKP0 == 0xA5A5A5A5, "RTC BKP0 write/read");
     CHECK(RTC_PRER == 0x007F00FF, "RTC PRER default");
 
-    // CRC
+    // CRC — real CRC32 calculation
+    CRC_CR = 1;
     CRC_DR = 0x12345678;
-    CHECK(CRC_DR == 0x12345678, "CRC DR write");
+    uint32_t crc_val = CRC_DR;
+    CHECK(crc_val != 0x12345678 && crc_val != 0xFFFFFFFF, "CRC computes");
     CRC_IDR = 0xAB;
     CHECK(CRC_IDR == 0xAB, "CRC IDR write");
     CRC_CR = 1;

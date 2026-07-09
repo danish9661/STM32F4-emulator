@@ -75,9 +75,31 @@ impl Peripheral for Sdio {
             0x0C => {
                 self.cmd = value & 0xFFFF;
                 if value & 0x40 != 0 {
-                    self.respcmd = value & 0x3F;
+                    let cmd_index = value & 0x3F;
+                    let wait_type = (value >> 6) & 3;
+                    self.respcmd = cmd_index;
+                    self.resp = [0, 0, 0, 0];
+                    match cmd_index {
+                        0 => { self.resp[0] = 0x00FF_FF80; }
+                        2 => { self.resp[0] = 0x00FF_FF80; }
+                        3 => { self.resp[0] = 0x1D0_0000; }
+                        5 => { self.resp[0] = 0x20_FF80; }
+                        7 => { self.resp[0] = 0x1D0_0000; }
+                        8 => { self.resp[0] = 0x1AA; }
+                        9 => { self.resp[0] = 0x10_FFFF; self.resp[1] = 0x7F_FF80_9A; }
+                        10 => { self.resp[0] = 0x10_FFFF; self.resp[1] = 0x7F_FF80_9A; }
+                        13 => { self.resp[0] = 0x100; }
+                        16 => { self.resp[0] = 0x200; }
+                        17 => { self.resp[0] = 0x1D0_0000; }
+                        18 => { self.resp[0] = 0x1D0_0000; }
+                        41 => { self.resp[0] = 0x50_FF80; }
+                        55 => { self.resp[0] = 0x1D0_0000; }
+                        _ => {}
+                    }
                     self.sta |= 1 << 6;
-                    self.sta |= 1 << 10;
+                    if wait_type != 0 {
+                        self.sta |= 1 << 10;
+                    }
                 }
             }
             0x24 => self.dtimer = value,
@@ -85,8 +107,9 @@ impl Peripheral for Sdio {
             0x2C => {
                 self.dctrl = value & 0x1F3F;
                 if value & 1 != 0 {
-                    self.fifo = 0;
+                    self.sta &= !0x3F;
                     self.fifocnt = self.dlen;
+                    self.dcount = self.dlen;
                     self.sta |= 1 << 1;
                     self.sta |= 1 << 3;
                     self.sta |= 1 << 11;
