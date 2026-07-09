@@ -254,6 +254,103 @@ void setup() {
     *(volatile uint32_t *)0x40015824 = 0x3F3F0000;
     CHECK(*(volatile uint32_t *)0x40015824 == 0x3F3F0000, "SAI B_CR1 write");
 
+    // LTDC: global registers
+    *(volatile uint32_t *)0x40016808 = 0x0FFF0FFF;
+    CHECK(*(volatile uint32_t *)0x40016808 == 0x0FFF0FFF, "LTDC SSCR write/read");
+    CHECK(*(volatile uint32_t *)0x40016818 == 0x2220, "LTDC GCR default");
+    *(volatile uint32_t *)0x4001682C = 0x123456;
+    CHECK(*(volatile uint32_t *)0x4001682C == 0x123456, "LTDC BCCR write/read");
+    *(volatile uint32_t *)0x40016834 = 0xF;
+    CHECK(*(volatile uint32_t *)0x40016834 == 0xF, "LTDC IER write");
+    *(volatile uint32_t *)0x4001683C = 0xF;
+    CHECK(*(volatile uint32_t *)0x40016838 == 0, "LTDC ICR cleared ISR");
+
+    // LTDC: layer 1 registers
+    *(volatile uint32_t *)0x40016884 = 0x13;
+    CHECK(*(volatile uint32_t *)0x40016884 == 0x13, "LTDC L1CR write/read");
+    *(volatile uint32_t *)0x400168AC = 0xDEADBEEF;
+    CHECK(*(volatile uint32_t *)0x400168AC == 0xDEADBEEF, "LTDC L1CFBAR write/read");
+    *(volatile uint32_t *)0x400168B0 = 0x1FFF1FFF;
+    CHECK(*(volatile uint32_t *)0x400168B0 == 0x1FFF1FFF, "LTDC L1CFBLR write/read");
+
+    // EXTI: interrupt mask and pending
+    *(volatile uint32_t *)0x40013C00 = 0x7F;
+    CHECK(*(volatile uint32_t *)0x40013C00 == 0x7F, "EXTI IMR write/read");
+    *(volatile uint32_t *)0x40013C08 = 0x55;
+    CHECK(*(volatile uint32_t *)0x40013C08 == 0x55, "EXTI RTSR write/read");
+    *(volatile uint32_t *)0x40013C0C = 0xAA;
+    CHECK(*(volatile uint32_t *)0x40013C0C == 0xAA, "EXTI FTSR write/read");
+    // SWIER sets PR
+    *(volatile uint32_t *)0x40013C10 = 0x03;
+    CHECK(*(volatile uint32_t *)0x40013C14 & 0x03, "EXTI SWIER set PR");
+    // PR is write-1-to-clear
+    *(volatile uint32_t *)0x40013C14 = 0x03;
+    CHECK(*(volatile uint32_t *)0x40013C14 == 0, "EXTI PR cleared");
+
+    // SYSCFG: memory remap and EXTICR
+    *(volatile uint32_t *)0x40013800 = 0x01;
+    CHECK(*(volatile uint32_t *)0x40013800 == 0x01, "SYSCFG MEMRM write/read");
+    *(volatile uint32_t *)0x40013808 = 0x76543210;
+    CHECK(*(volatile uint32_t *)0x40013808 == 0x76543210, "SYSCFG EXTICR1 write/read");
+    *(volatile uint32_t *)0x40013814 = 0xFEDCBA98;
+    CHECK(*(volatile uint32_t *)0x40013814 == 0xFEDCBA98, "SYSCFG EXTICR4 write/read");
+
+    // DBGMCU: ID code and control
+    CHECK(*(volatile uint32_t *)0xE0042000 == 0x10006411, "DBGMCU IDCODE default");
+    *(volatile uint32_t *)0xE0042004 = 0x1F0077;
+    CHECK(*(volatile uint32_t *)0xE0042004 == 0x1F0077, "DBGMCU CR write/read");
+    *(volatile uint32_t *)0xE0042008 = 0xAAAAAAAA;
+    CHECK(*(volatile uint32_t *)0xE0042008 == 0xAAAAAAAA, "DBGMCU APB1_FZ write/read");
+
+    // CRYP: real AES-128 ECB encrypt/decrypt with NIST test vector
+    *(volatile uint32_t *)0x50060000 = 0x4000; // flush + disable
+    // AES-128 key: K0LR=0x2B7E1516, K0RR=0x28AED2A6, K1LR=0xABF71588, K1RR=0x09CF4F3C
+    *(volatile uint32_t *)0x50060020 = 0x2B7E1516;
+    *(volatile uint32_t *)0x50060024 = 0x28AED2A6;
+    *(volatile uint32_t *)0x50060028 = 0xABF71588;
+    *(volatile uint32_t *)0x5006002C = 0x09CF4F3C;
+    // enable ECB encrypt (CRYPEN=1, ALGOMODE=000, ALGODIR=0, KEYSIZE=00)
+    *(volatile uint32_t *)0x50060000 = 0x8000;
+    CHECK(*(volatile uint32_t *)0x50060000 == 0x8000, "CRYP CR write (enable)");
+    CHECK(*(volatile uint32_t *)0x50060004 & 0x13, "CRYP SR IFNF+OFNE");
+    // write 4 plaintext words => one 16-byte AES block
+    *(volatile uint32_t *)0x50060008 = 0x6BC1BEE2;
+    *(volatile uint32_t *)0x50060008 = 0x2E409F96;
+    *(volatile uint32_t *)0x50060008 = 0xE93D7E11;
+    *(volatile uint32_t *)0x50060008 = 0x7393172A;
+    // read 4 ciphertext words: expected 3AD77BB4 0D7A3660 A89ECAF3 2466EF97
+    CHECK(*(volatile uint32_t *)0x5006000C == 0x3AD77BB4, "CRYP AES-128 ECB CT word0");
+    CHECK(*(volatile uint32_t *)0x5006000C == 0x0D7A3660, "CRYP AES-128 ECB CT word1");
+    CHECK(*(volatile uint32_t *)0x5006000C == 0xA89ECAF3, "CRYP AES-128 ECB CT word2");
+    CHECK(*(volatile uint32_t *)0x5006000C == 0x2466EF97, "CRYP AES-128 ECB CT word3");
+    // decrypt back: flush, set ALGODIR=1, write back ciphertext
+    *(volatile uint32_t *)0x50060000 = 0x4000;
+    *(volatile uint32_t *)0x50060000 = 0x8004; // enable + decrypt
+    *(volatile uint32_t *)0x50060008 = 0x3AD77BB4;
+    *(volatile uint32_t *)0x50060008 = 0x0D7A3660;
+    *(volatile uint32_t *)0x50060008 = 0xA89ECAF3;
+    *(volatile uint32_t *)0x50060008 = 0x2466EF97;
+    CHECK(*(volatile uint32_t *)0x5006000C == 0x6BC1BEE2, "CRYP AES-128 ECB decrypt word0");
+    CHECK(*(volatile uint32_t *)0x5006000C == 0x2E409F96, "CRYP AES-128 ECB decrypt word1");
+    CHECK(*(volatile uint32_t *)0x5006000C == 0xE93D7E11, "CRYP AES-128 ECB decrypt word2");
+    CHECK(*(volatile uint32_t *)0x5006000C == 0x7393172A, "CRYP AES-128 ECB decrypt word3");
+    // IMSCR write/read
+    *(volatile uint32_t *)0x50060014 = 0x03;
+    CHECK(*(volatile uint32_t *)0x50060014 == 0x03, "CRYP IMSCR write/read");
+
+    // HASH: real SHA-1 digest of "abcd" (single 32-bit word)
+    *(volatile uint32_t *)0x50060400 = 0x4000; // flush (DMAE=1)
+    // feed message "abcd" as big-endian word 0x61626364
+    *(volatile uint32_t *)0x50060404 = 0x61626364;
+    *(volatile uint32_t *)0x50060408 = 0x100; // DCAL triggers hash with auto-padding
+    CHECK(*(volatile uint32_t *)0x50060424 & 0x08, "HASH SR DCIS set");
+    // SHA-1("abcd") = 81FE8BFE 87576C3E CB5000AB 0A4AB14B 855724B3
+    CHECK(*(volatile uint32_t *)0x5006040C == 0x81FE8BFE, "HASH SHA-1 HR0");
+    CHECK(*(volatile uint32_t *)0x50060410 == 0x87576C3E, "HASH SHA-1 HR1");
+    CHECK(*(volatile uint32_t *)0x50060414 == 0xCB22426F, "HASH SHA-1 HR2");
+    CHECK(*(volatile uint32_t *)0x50060418 == 0x8E578473, "HASH SHA-1 HR3");
+    CHECK(*(volatile uint32_t *)0x5006041C == 0x82917ACF, "HASH SHA-1 HR4");
+
     tx_s("---- SUMMARY ----\n");
     tx_s("PASS: "); tx_hex(pass); tx_s("\n");
     tx_s("FAIL: "); tx_hex(fail); tx_s("\n");

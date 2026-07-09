@@ -23,6 +23,13 @@ pub mod dcmi;
 pub mod fsmc;
 pub mod i2s;
 pub mod sai;
+pub mod sw_spi;
+pub mod ltdc;
+pub mod exti;
+pub mod syscfg;
+pub mod dbgmcu;
+pub mod cryp;
+pub mod hash;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -31,6 +38,13 @@ use crate::ext_devices::ExtDevices;
 use fsmc::Fsmc;
 use i2s::I2s;
 use sai::Sai;
+use sw_spi::{SoftwareSpi, SoftwareSpiConfig};
+use ltdc::Ltdc;
+use exti::Exti;
+use syscfg::Syscfg;
+use dbgmcu::Dbgmcu;
+use cryp::Cryp;
+use hash::Hash;
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
@@ -176,6 +190,12 @@ impl Peripherals {
                 .or_else(|| Fsmc::new(name, ext_devices))
                 .or_else(|| I2s::new(name))
                 .or_else(|| Sai::new(name))
+                .or_else(|| Ltdc::new(name))
+                .or_else(|| Exti::new(name))
+                .or_else(|| Syscfg::new(name))
+                .or_else(|| Cryp::new(name))
+                .or_else(|| Hash::new(name))
+                .or_else(|| Dbgmcu::new(name))
             ;
 
             if let Some(peri) = peri {
@@ -216,13 +236,14 @@ impl Peripherals {
             (0x4001_2C00, "TIM8"),  (0x4001_3000, "SPI1"),
             (0x4001_3400, "SPI4"),  (0x4001_4000, "TIM9"),  (0x4001_4400, "TIM10"),
             (0x4001_4800, "TIM11"), (0x4001_5000, "SPI5"), (0x4001_5400, "SPI6"),
-            (0x4001_5800, "SAI1"),
+            (0x4001_5800, "SAI1"),  (0x4001_6800, "LTDC"),
             (0x4002_0000, "GPIOA"), (0x4002_0400, "GPIOB"), (0x4002_0800, "GPIOC"),
             (0x4002_0C00, "GPIOD"), (0x4002_1000, "GPIOE"), (0x4002_1400, "GPIOF"),
             (0x4002_1800, "GPIOG"), (0x4002_1C00, "GPIOH"), (0x4002_2000, "GPIOI"),
             (0x4002_3000, "CRC"),  (0x4002_3800, "RCC"),  (0x4002_3C00, "FLASH"),
             (0x4002_5800, "RNG"),  (0x4002_6400, "DMA2"),
             (0xE000_E000, "NVIC"), (0xE000_E010, "SysTick"), (0xE000_ED00, "SCB"),
+            (0xE004_2000, "DBGMCU"),
         ];
 
         for (i, &(base, name)) in regs.iter().enumerate() {
@@ -254,6 +275,12 @@ impl Peripherals {
                 .or_else(|| Can::new(name))
                 .or_else(|| Sdio::new(name))
                 .or_else(|| Dcmi::new(name))
+                .or_else(|| Ltdc::new(name))
+                .or_else(|| Exti::new(name))
+                .or_else(|| Syscfg::new(name))
+                .or_else(|| Cryp::new(name))
+                .or_else(|| Hash::new(name))
+                .or_else(|| Dbgmcu::new(name))
             ;
 
             if let Some(p) = p {
@@ -268,6 +295,17 @@ impl Peripherals {
 
         peripherals.finish_registration();
         peripherals
+    }
+
+    pub fn register_software_spi(&self, name: &str, cs: Option<String>, clk: &str, miso: &str, mosi: &str, ext_devices: &ExtDevices) {
+        let config = SoftwareSpiConfig {
+            name: name.to_string(),
+            cs,
+            clk: clk.to_string(),
+            miso: miso.to_string(),
+            mosi: mosi.to_string(),
+        };
+        SoftwareSpi::register(config, &mut self.gpio.borrow_mut(), ext_devices);
     }
 
     fn finish_registration(&mut self) {

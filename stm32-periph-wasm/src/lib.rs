@@ -132,3 +132,10 @@ pub fn add_i2c_eeprom(peripheral: &str, address: u8, data: &[u8]) {
     system::get_ext_devices().lock().unwrap().i2c_eeproms
         .push(std::rc::Rc::new(std::cell::RefCell::new(eeprom)));
 }
+
+/// Register a software SPI device. Must be called before init().
+#[wasm_bindgen]
+pub fn add_software_spi(name: &str, cs: Option<String>, clk: &str, miso: &str, mosi: &str) {
+    system::get_software_spi_configs().lock().unwrap()
+        .push((name.to_string(), cs, clk.to_string(), miso.to_string(), mosi.to_string()));
+}

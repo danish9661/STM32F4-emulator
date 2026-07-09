@@ -22,6 +22,12 @@ pub static INSTRUCTION_COUNT: AtomicU64 = AtomicU64::new(0);
 pub fn instruction_count() -> u64 { INSTRUCTION_COUNT.load(Ordering::Relaxed) }
 
 static WATCHDOG_RESET: AtomicBool = AtomicBool::new(false);
+
+// Software SPI configs queued before init, registered after GPIO exists
+static SOFTWARE_SPI_CONFIGS: OnceLock<Mutex<Vec<(String, Option<String>, String, String, String)>>> = OnceLock::new();
+pub fn get_software_spi_configs() -> &'static Mutex<Vec<(String, Option<String>, String, String, String)>> {
+    SOFTWARE_SPI_CONFIGS.get_or_init(|| Mutex::new(Vec::new()))
+}
 pub fn is_watchdog_reset_requested() -> bool { WATCHDOG_RESET.swap(false, Ordering::Acquire) }
 pub fn request_watchdog_reset() { WATCHDOG_RESET.store(true, Ordering::Release); }
 
@@ -70,6 +76,7 @@ impl WasmSystem {
         let ext = get_ext_devices().lock().unwrap();
         let p = Rc::new(Peripherals::new_wasm(gpio, &*ext));
         drop(ext);
+        Self::register_software_spis(&p);
         WasmSystem { p, pending_dma: RefCell::new(Vec::new()) }
     }
 
@@ -78,7 +85,24 @@ impl WasmSystem {
         let ext = get_ext_devices().lock().unwrap();
         let p = Rc::new(Peripherals::from_svd(svd_xml, gpio, &*ext));
         drop(ext);
+        Self::register_software_spis(&p);
         WasmSystem { p, pending_dma: RefCell::new(Vec::new()) }
+    }
+
+    fn register_software_spis(p: &Peripherals) {
+        use crate::peripherals::sw_spi::{SoftwareSpi, SoftwareSpiConfig};
+        let configs = get_software_spi_configs().lock().unwrap();
+        let ext_devices = get_ext_devices().lock().unwrap();
+        for (name, cs, clk, miso, mosi) in configs.iter() {
+            let config = SoftwareSpiConfig {
+                name: name.clone(),
+                cs: cs.clone(),
+                clk: clk.clone(),
+                miso: miso.clone(),
+                mosi: mosi.clone(),
+            };
+            SoftwareSpi::register(config, &mut p.gpio.borrow_mut(), &ext_devices);
+        }
     }
 
     pub fn queue_dma_transfer(&self, t: DmaTransfer) {
