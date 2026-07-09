@@ -1,0 +1,116 @@
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::cell::RefCell;
+use std::rc::Rc;
+use crate::peripherals::{Peripherals, gpio::GpioPorts};
+use crate::ext_devices::ExtDevices;
+
+// Global ExtDevices: populated by JS add_* calls before init
+use std::sync::{OnceLock, Mutex};
+static EXT_DEVICES: OnceLock<Mutex<ExtDevices>> = OnceLock::new();
+pub fn get_ext_devices() -> &'static Mutex<ExtDevices> {
+    EXT_DEVICES.get_or_init(|| Mutex::new(ExtDevices::default()))
+}
+
+pub static INSTRUCTION_COUNT: AtomicU64 = AtomicU64::new(0);
+pub fn instruction_count() -> u64 { INSTRUCTION_COUNT.load(Ordering::Relaxed) }
+
+static WATCHDOG_RESET: AtomicBool = AtomicBool::new(false);
+pub fn is_watchdog_reset_requested() -> bool { WATCHDOG_RESET.swap(false, Ordering::Acquire) }
+pub fn request_watchdog_reset() { WATCHDOG_RESET.store(true, Ordering::Release); }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmaDir { Read, Write, MemCopy }
+
+#[derive(Debug, Clone)]
+pub struct DmaTransfer {
+    pub direction: DmaDir,
+    pub stream_idx: usize,
+    pub dma_name: String,
+    pub src: u32,
+    pub dst: u32,
+    pub size: usize,
+    pub peri_addr: u32,
+    pub peripheral: bool,
+}
+
+impl DmaTransfer {
+    pub fn to_u32_vec(&self) -> Vec<u32> {
+        vec![
+            self.direction as u32,
+            self.stream_idx as u32,
+            self.src,
+            self.dst,
+            self.size as u32,
+            self.peri_addr,
+            self.peripheral as u32,
+        ]
+    }
+}
+
+static DMA_COMPLETED: [AtomicBool; 8] = [
+    AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false),
+];
+
+pub struct WasmSystem {
+    pub p: Rc<Peripherals>,
+    pending_dma: RefCell<Vec<DmaTransfer>>,
+}
+
+impl WasmSystem {
+    pub fn new() -> Self {
+        let gpio = GpioPorts::default();
+        let ext = get_ext_devices().lock().unwrap();
+        let p = Rc::new(Peripherals::new_wasm(gpio, &*ext));
+        drop(ext);
+        WasmSystem { p, pending_dma: RefCell::new(Vec::new()) }
+    }
+
+    pub fn new_svd(svd_xml: &str) -> Self {
+        let gpio = GpioPorts::default();
+        let ext = get_ext_devices().lock().unwrap();
+        let p = Rc::new(Peripherals::from_svd(svd_xml, gpio, &*ext));
+        drop(ext);
+        WasmSystem { p, pending_dma: RefCell::new(Vec::new()) }
+    }
+
+    pub fn queue_dma_transfer(&self, t: DmaTransfer) {
+        self.pending_dma.borrow_mut().push(t);
+    }
+
+    pub fn pending_dma_count(&self) -> usize {
+        self.pending_dma.borrow().len()
+    }
+
+    pub fn take_pending_dma_transfer(&self, index: usize) -> Option<DmaTransfer> {
+        let mut pending = self.pending_dma.borrow_mut();
+        if index < pending.len() {
+            Some(pending.remove(index))
+        } else {
+            None
+        }
+    }
+
+    pub fn mark_dma_completed(&self, stream_idx: usize, _success: bool) {
+        DMA_COMPLETED[stream_idx].store(true, Ordering::Release);
+    }
+
+    pub fn dma_check_completion(&self, stream_idx: usize) -> bool {
+        DMA_COMPLETED[stream_idx].swap(false, Ordering::Acquire)
+    }
+
+    pub fn tick(&self) {
+        // Use an intermediate to avoid holding the borrow across the method call
+        let p = self.p.clone();
+        p.nvic.borrow_mut().maybe_set_systick_intr_pending();
+    }
+
+    pub fn addr_desc(&self, addr: u32) -> String {
+        self.p.addr_desc(addr)
+    }
+}
+
+pub type System = WasmSystem;
+
+unsafe impl Sync for WasmSystem {}
+unsafe impl Send for WasmSystem {}

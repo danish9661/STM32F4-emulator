@@ -1,0 +1,5 @@
+target/
+pkg/stm32_periph_wasm_bg.wasm
+pkg/stm32_periph_wasm.js
+pkg/package.json
+pkg/.gitignore
