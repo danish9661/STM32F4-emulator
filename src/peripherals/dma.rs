@@ -20,20 +20,66 @@ impl Dma {
             None
         }
     }
+
+    fn stream_irq(&self, stream: usize) -> i32 {
+        match self.name.as_str() {
+            "DMA1" => 11 + stream as i32,
+            "DMA2" => 56 + stream as i32,
+            _ => panic!("Unknown DMA controller: {}", self.name),
+        }
+    }
 }
 
 impl Peripheral for Dma {
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
-        match Access::from_offset(offset) {
-            Access::StreamReg(i, offset) => self.streams[i].read(&self.name, sys, offset),
-            _ => 0
+        match offset {
+            0x00 => {
+                let mut v = 0u32;
+                for i in 0..=3 {
+                    v |= (self.streams[i].status as u32) << (i * 6);
+                }
+                v
+            }
+            0x04 => {
+                let mut v = 0u32;
+                for i in 0..=3 {
+                    v |= (self.streams[i+4].status as u32) << (i * 6);
+                }
+                v
+            }
+            _ => {
+                match Access::from_offset(offset) {
+                    Access::StreamReg(i, offset) => self.streams[i].read(&self.name, sys, offset),
+                    _ => 0
+                }
+            }
         }
     }
 
     fn write(&mut self, sys: &System, offset: u32, value: u32) {
-        match Access::from_offset(offset) {
-            Access::StreamReg(i, offset) => self.streams[i].write(&self.name, sys, offset, value),
-            _ => {}
+        match offset {
+            0x08 => {
+                for i in 0..=3 {
+                    let mask = (value >> (i * 6)) & 0x1F;
+                    if mask != 0 {
+                        self.streams[i].status &= !(mask as u8);
+                    }
+                }
+            }
+            0x0C => {
+                for i in 0..=3 {
+                    let mask = (value >> (i * 6)) & 0x1F;
+                    if mask != 0 {
+                        self.streams[i+4].status &= !(mask as u8);
+                    }
+                }
+            }
+            _ => {
+                match Access::from_offset(offset) {
+                    Access::StreamReg(i, offset) => self.streams[i].write(&self.name, sys, i, offset, value, self.stream_irq(i)),
+                    _ => {}
+                }
+            }
         }
     }
 }
@@ -47,6 +93,8 @@ struct Stream {
     pub m0ar: u32,
     pub m1ar: u32,
     pub fcr: u32,
+    /// bit 4=TCIF, 3=HTIF, 2=TEIF, 1=DMEIF, 0=FEIF
+    pub status: u8,
 }
 
 impl Stream {
@@ -176,15 +224,24 @@ impl Stream {
         }
     }
 
-    pub fn write(&mut self, name: &str, sys: &System, offset: u32, mut value: u32) {
+    pub fn write(&mut self, name: &str, sys: &System, _stream_idx: usize, offset: u32, mut value: u32, irq: i32) {
         match offset {
             0x0000 => {
                 self.cr = value;
 
-                // CRx register
                 if value & 1 != 0 {
-                    // Enable is on. do the transfer.
                     self.do_xfer(name, sys);
+
+                    self.status |= 1 << 4;
+                    self.status |= 1 << 3;
+
+                    let teie = (value >> 3) & 1;
+                    let htie = (value >> 4) & 1;
+                    let tcie = (value >> 5) & 1;
+
+                    if tcie != 0 || htie != 0 || teie != 0 {
+                        sys.p.nvic.borrow_mut().set_intr_pending(irq);
+                    }
 
                     value &= !1;
                     self.ndtr = 0;

@@ -5,12 +5,14 @@ mod usart_probe;
 mod display;
 mod lcd;
 mod touchscreen;
+mod i2c_eeprom;
 
 use spi_flash::{SpiFlashConfig, SpiFlash};
 use usart_probe::{UsartProbeConfig, UsartProbe};
 use display::{DisplayConfig, Display};
 use lcd::{LcdConfig, Lcd};
 use touchscreen::{TouchscreenConfig, Touchscreen};
+use i2c_eeprom::{I2cEepromConfig, I2cEeprom};
 
 use std::{rc::Rc, cell::RefCell};
 use serde::Deserialize;
@@ -27,6 +29,13 @@ pub struct SpiDeviceEntry {
     pub name: String,
 }
 
+/// An I2C device bound to a specific 7-bit address.
+pub struct I2cDeviceEntry {
+    pub address: u8,
+    pub device: Rc<RefCell<dyn ExtDevice<(), u8>>>,
+    pub name: String,
+}
+
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ExtDevicesConfig {
@@ -35,6 +44,7 @@ pub struct ExtDevicesConfig {
     pub display: Option<Vec<DisplayConfig>>,
     pub lcd: Option<Vec<LcdConfig>>,
     pub touchscreen: Option<Vec<TouchscreenConfig>>,
+    pub i2c_eeprom: Option<Vec<I2cEepromConfig>>,
 }
 
 pub struct ExtDevices {
@@ -43,6 +53,7 @@ pub struct ExtDevices {
     pub displays: Vec<Rc<RefCell<Display>>>,
     pub lcds: Vec<Rc<RefCell<Lcd>>>,
     pub touchscreens: Vec<Rc<RefCell<Touchscreen>>>,
+    pub i2c_eeproms: Vec<Rc<RefCell<I2cEeprom>>>,
 }
 
 impl ExtDevices {
@@ -126,6 +137,22 @@ impl ExtDevices {
        )
     }
 
+    pub fn find_i2c_devices(&self, peri_name: &str) -> Vec<I2cDeviceEntry> {
+        let mut result: Vec<I2cDeviceEntry> = Vec::new();
+
+        for d in &self.i2c_eeproms {
+            if d.borrow().config.peripheral == peri_name {
+                result.push(I2cDeviceEntry {
+                    address: d.borrow().config.address,
+                    device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
+                    name: format!("{} i2c-eeprom", peri_name),
+                });
+            }
+        }
+
+        result
+    }
+
     pub fn find_mem_device(&self, peri_name: &str) -> Option<Rc<RefCell<dyn ExtDevice<u32, u32>>>> {
         self.displays.iter()
             .filter(|d| d.borrow().config.peripheral == peri_name)
@@ -156,7 +183,11 @@ impl ExtDevicesConfig {
             .map(|config| Touchscreen::new(config, gpio, framebuffers).map(RefCell::new).map(Rc::new))
             .collect::<Result<_>>()?;
 
-        Ok(ExtDevices { spi_flashes, usart_probes, displays, lcds, touchscreens })
+        let i2c_eeproms = self.i2c_eeprom.unwrap_or_default().into_iter()
+            .map(|config| I2cEeprom::new(config).map(RefCell::new).map(Rc::new))
+            .collect::<Result<_>>()?;
+
+        Ok(ExtDevices { spi_flashes, usart_probes, displays, lcds, touchscreens, i2c_eeproms })
     }
 }
 

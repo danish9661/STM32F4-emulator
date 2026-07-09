@@ -84,7 +84,7 @@ impl Peripherals {
             .or_else(||       Usart::new(&name, ext_devices))
             .or_else(||        Fsmc::new(&name, ext_devices))
             .or_else(||         Rcc::new(&name))
-            .or_else(||         I2c::new(&name))
+            .or_else(||         I2c::new(&name, ext_devices))
             .or_else(||         Dma::new(&name))
             .or_else(||         Spi::new(&name, ext_devices))
             .or_else(||       Timer::new(&name))
