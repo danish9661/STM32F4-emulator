@@ -9,6 +9,9 @@ regions:
   - name: RAM
     start: 0x20000000
     size: 0x20000
+devices:
+  usart_probe:
+    - peripheral: USART1
 components:
   - name: pot1
     type: potentiometer
