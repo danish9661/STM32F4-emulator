@@ -25,8 +25,7 @@ async function main() {
     console.log('Initializing Unicorn...');
 
     const Module = await MUnicorn({});
-    const periphWasmBuf = readFileSync(new URL('./stm32_periph_wasm_bg.wasm', import.meta.url));
-    await periph.default({ module_or_path: periphWasmBuf.buffer });
+
 
     // Discover ext devices from firmware directory
     const fwDir = firmwarePath.replace(/\\/g, '/').replace(/\/[^/]+$/, '');

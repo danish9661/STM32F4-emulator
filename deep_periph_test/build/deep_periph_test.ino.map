@@ -5003,7 +5003,7 @@ LOAD C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/x
                 0x08000000                g_pfnVectors
                 0x08000188                        . = ALIGN (0x4)
 
-.text           0x08000188     0x2cfc
+.text           0x08000188     0x38fc
                 0x08000188                        . = ALIGN (0x4)
  *(.text)
  .text          0x08000188       0x30 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard\libgcc.a(_aeabi_uldivmod.o)
@@ -5027,575 +5027,575 @@ LOAD C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/x
  .text._Z12init_periphsv
                 0x0800026c       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\sketch\deep_periph_test.ino.cpp.o
                 0x0800026c                init_periphs()
- .text.setup    0x08000280      0xe78 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\sketch\deep_periph_test.ino.cpp.o
+ .text.setup    0x08000280     0x1a78 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\sketch\deep_periph_test.ino.cpp.o
                 0x08000280                setup
- .text.loop     0x080010f8        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\sketch\deep_periph_test.ino.cpp.o
-                0x080010f8                loop
+ .text.loop     0x08001cf8        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\sketch\deep_periph_test.ino.cpp.o
+                0x08001cf8                loop
  .text.HAL_MspInit
-                0x080010fa        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal.c.o
-                0x080010fa                HAL_MspInit
+                0x08001cfa        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal.c.o
+                0x08001cfa                HAL_MspInit
  .text.HAL_InitTick
-                0x080010fc       0x48 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal.c.o
-                0x080010fc                HAL_InitTick
+                0x08001cfc       0x48 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal.c.o
+                0x08001cfc                HAL_InitTick
  .text.HAL_Init
-                0x08001144       0x34 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal.c.o
-                0x08001144                HAL_Init
+                0x08001d44       0x34 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal.c.o
+                0x08001d44                HAL_Init
  .text.HAL_IncTick
-                0x08001178       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal.c.o
-                0x08001178                HAL_IncTick
+                0x08001d78       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal.c.o
+                0x08001d78                HAL_IncTick
  .text.HAL_GetTick
-                0x08001190        0xc C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal.c.o
-                0x08001190                HAL_GetTick
+                0x08001d90        0xc C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal.c.o
+                0x08001d90                HAL_GetTick
  .text.HAL_NVIC_SetPriorityGrouping
-                0x0800119c       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
-                0x0800119c                HAL_NVIC_SetPriorityGrouping
+                0x08001d9c       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
+                0x08001d9c                HAL_NVIC_SetPriorityGrouping
  .text.HAL_NVIC_SetPriority
-                0x080011c0       0x64 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
-                0x080011c0                HAL_NVIC_SetPriority
+                0x08001dc0       0x64 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
+                0x08001dc0                HAL_NVIC_SetPriority
  .text.HAL_NVIC_EnableIRQ
-                0x08001224       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
-                0x08001224                HAL_NVIC_EnableIRQ
+                0x08001e24       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
+                0x08001e24                HAL_NVIC_EnableIRQ
  .text.HAL_NVIC_DisableIRQ
-                0x08001240       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
-                0x08001240                HAL_NVIC_DisableIRQ
+                0x08001e40       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
+                0x08001e40                HAL_NVIC_DisableIRQ
  .text.HAL_SYSTICK_Config
-                0x08001264       0x28 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
-                0x08001264                HAL_SYSTICK_Config
+                0x08001e64       0x28 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
+                0x08001e64                HAL_SYSTICK_Config
  .text.HAL_NVIC_ClearPendingIRQ
-                0x0800128c       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
-                0x0800128c                HAL_NVIC_ClearPendingIRQ
+                0x08001e8c       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
+                0x08001e8c                HAL_NVIC_ClearPendingIRQ
  .text.HAL_SYSTICK_Callback
-                0x080012a8        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
-                0x080012a8                HAL_SYSTICK_Callback
+                0x08001ea8        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
+                0x08001ea8                HAL_SYSTICK_Callback
  .text.HAL_SYSTICK_IRQHandler
-                0x080012aa        0x8 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
-                0x080012aa                HAL_SYSTICK_IRQHandler
+                0x08001eaa        0x8 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_cortex.c.o
+                0x08001eaa                HAL_SYSTICK_IRQHandler
  .text.HAL_CRC_MspInit
-                0x080012b2        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_crc.c.o
-                0x080012b2                HAL_CRC_MspInit
+                0x08001eb2        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_crc.c.o
+                0x08001eb2                HAL_CRC_MspInit
  .text.HAL_CRC_Init
-                0x080012b4       0x20 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_crc.c.o
-                0x080012b4                HAL_CRC_Init
+                0x08001eb4       0x20 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_crc.c.o
+                0x08001eb4                HAL_CRC_Init
  .text.HAL_DMA_Abort
-                0x080012d4       0x7c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_dma.c.o
-                0x080012d4                HAL_DMA_Abort
+                0x08001ed4       0x7c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_dma.c.o
+                0x08001ed4                HAL_DMA_Abort
  .text.HAL_DMA_Abort_IT
-                0x08001350       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_dma.c.o
-                0x08001350                HAL_DMA_Abort_IT
+                0x08001f50       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_dma.c.o
+                0x08001f50                HAL_DMA_Abort_IT
  .text.HAL_GPIO_EXTI_IRQHandler
-                0x08001374       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_gpio.c.o
-                0x08001374                HAL_GPIO_EXTI_IRQHandler
+                0x08001f74       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_gpio.c.o
+                0x08001f74                HAL_GPIO_EXTI_IRQHandler
  .text.HAL_RCC_OscConfig
-                0x0800138c      0x35c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_rcc.c.o
-                0x0800138c                HAL_RCC_OscConfig
+                0x08001f8c      0x35c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_rcc.c.o
+                0x08001f8c                HAL_RCC_OscConfig
  .text.HAL_RCC_GetSysClockFreq
-                0x080016e8       0x5c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_rcc.c.o
-                0x080016e8                HAL_RCC_GetSysClockFreq
+                0x080022e8       0x5c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_rcc.c.o
+                0x080022e8                HAL_RCC_GetSysClockFreq
  .text.HAL_RCC_ClockConfig
-                0x08001744      0x134 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_rcc.c.o
-                0x08001744                HAL_RCC_ClockConfig
+                0x08002344      0x134 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_rcc.c.o
+                0x08002344                HAL_RCC_ClockConfig
  .text.HAL_TIM_PWM_PulseFinishedCallback
-                0x08001878        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_tim.c.o
-                0x08001878                HAL_TIM_PWM_PulseFinishedCallback
+                0x08002478        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_tim.c.o
+                0x08002478                HAL_TIM_PWM_PulseFinishedCallback
  .text.HAL_TIM_TriggerCallback
-                0x0800187a        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_tim.c.o
-                0x0800187a                HAL_TIM_TriggerCallback
+                0x0800247a        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_tim.c.o
+                0x0800247a                HAL_TIM_TriggerCallback
  .text.HAL_TIM_IRQHandler
-                0x0800187c      0x128 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_tim.c.o
-                0x0800187c                HAL_TIM_IRQHandler
+                0x0800247c      0x128 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_tim.c.o
+                0x0800247c                HAL_TIM_IRQHandler
  .text.HAL_TIMEx_CommutCallback
-                0x080019a4        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_tim_ex.c.o
-                0x080019a4                HAL_TIMEx_CommutCallback
+                0x080025a4        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_tim_ex.c.o
+                0x080025a4                HAL_TIMEx_CommutCallback
  .text.HAL_TIMEx_BreakCallback
-                0x080019a6        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_tim_ex.c.o
-                0x080019a6                HAL_TIMEx_BreakCallback
+                0x080025a6        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_tim_ex.c.o
+                0x080025a6                HAL_TIMEx_BreakCallback
  .text.UART_EndRxTransfer
-                0x080019a8       0x5c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
+                0x080025a8       0x5c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
  .text.HAL_UART_Transmit_IT
-                0x08001a04       0x32 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
-                0x08001a04                HAL_UART_Transmit_IT
+                0x08002604       0x32 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
+                0x08002604                HAL_UART_Transmit_IT
  .text.UART_DMAAbortOnError
-                0x08001a36        0xe C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
+                0x08002636        0xe C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
  .text.HAL_UARTEx_RxEventCallback
-                0x08001a44        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
-                0x08001a44                HAL_UARTEx_RxEventCallback
+                0x08002644        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
+                0x08002644                HAL_UARTEx_RxEventCallback
  .text.UART_Receive_IT.isra.0
-                0x08001a46       0xb6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
+                0x08002646       0xb6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
  .text.HAL_UART_IRQHandler
-                0x08001afc      0x2a0 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
-                0x08001afc                HAL_UART_IRQHandler
+                0x080026fc      0x2a0 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
+                0x080026fc                HAL_UART_IRQHandler
  .text.HAL_HalfDuplex_EnableTransmitter
-                0x08001d9c       0x30 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
-                0x08001d9c                HAL_HalfDuplex_EnableTransmitter
+                0x0800299c       0x30 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
+                0x0800299c                HAL_HalfDuplex_EnableTransmitter
  .text.HAL_HalfDuplex_EnableReceiver
-                0x08001dcc       0x30 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
-                0x08001dcc                HAL_HalfDuplex_EnableReceiver
+                0x080029cc       0x30 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
+                0x080029cc                HAL_HalfDuplex_EnableReceiver
  .text.HAL_UART_GetState
-                0x08001dfc        0xc C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
-                0x08001dfc                HAL_UART_GetState
+                0x080029fc        0xc C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
+                0x080029fc                HAL_UART_GetState
  .text.UART_Start_Receive_IT
-                0x08001e08       0x32 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
-                0x08001e08                UART_Start_Receive_IT
+                0x08002a08       0x32 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
+                0x08002a08                UART_Start_Receive_IT
  .text.HAL_UART_Receive_IT
-                0x08001e3a       0x22 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
-                0x08001e3a                HAL_UART_Receive_IT
+                0x08002a3a       0x22 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HAL\stm32yyxx_hal_uart.c.o
+                0x08002a3a                HAL_UART_Receive_IT
  .text._ZNSt14_Function_baseD2Ev
-                0x08001e5c       0x12 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001e5c                std::_Function_base::~_Function_base()
-                0x08001e5c                std::_Function_base::~_Function_base()
- *fill*         0x08001e6e        0x2 
+                0x08002a5c       0x12 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002a5c                std::_Function_base::~_Function_base()
+                0x08002a5c                std::_Function_base::~_Function_base()
+ *fill*         0x08002a6e        0x2 
  .text.TIM1_UP_TIM10_IRQHandler
-                0x08001e70       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001e70                TIM1_UP_TIM10_IRQHandler
+                0x08002a70       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002a70                TIM1_UP_TIM10_IRQHandler
  .text.TIM1_CC_IRQHandler
-                0x08001e94       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001e94                TIM1_CC_IRQHandler
+                0x08002a94       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002a94                TIM1_CC_IRQHandler
  .text.TIM2_IRQHandler
-                0x08001ea8       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001ea8                TIM2_IRQHandler
+                0x08002aa8       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002aa8                TIM2_IRQHandler
  .text.TIM3_IRQHandler
-                0x08001ebc       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001ebc                TIM3_IRQHandler
+                0x08002abc       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002abc                TIM3_IRQHandler
  .text.TIM4_IRQHandler
-                0x08001ed0       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001ed0                TIM4_IRQHandler
+                0x08002ad0       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002ad0                TIM4_IRQHandler
  .text.TIM5_IRQHandler
-                0x08001ee4       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001ee4                TIM5_IRQHandler
+                0x08002ae4       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002ae4                TIM5_IRQHandler
  .text.TIM6_DAC_IRQHandler
-                0x08001ef8       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001ef8                TIM6_DAC_IRQHandler
+                0x08002af8       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002af8                TIM6_DAC_IRQHandler
  .text.TIM7_IRQHandler
-                0x08001f0c       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001f0c                TIM7_IRQHandler
+                0x08002b0c       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002b0c                TIM7_IRQHandler
  .text.TIM8_UP_TIM13_IRQHandler
-                0x08001f20       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001f20                TIM8_UP_TIM13_IRQHandler
+                0x08002b20       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002b20                TIM8_UP_TIM13_IRQHandler
  .text.TIM8_CC_IRQHandler
-                0x08001f44       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001f44                TIM8_CC_IRQHandler
+                0x08002b44       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002b44                TIM8_CC_IRQHandler
  .text.TIM1_BRK_TIM9_IRQHandler
-                0x08001f58       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001f58                TIM1_BRK_TIM9_IRQHandler
+                0x08002b58       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002b58                TIM1_BRK_TIM9_IRQHandler
  .text.TIM1_TRG_COM_TIM11_IRQHandler
-                0x08001f6c       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001f6c                TIM1_TRG_COM_TIM11_IRQHandler
+                0x08002b6c       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002b6c                TIM1_TRG_COM_TIM11_IRQHandler
  .text.TIM8_BRK_TIM12_IRQHandler
-                0x08001f80       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001f80                TIM8_BRK_TIM12_IRQHandler
+                0x08002b80       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002b80                TIM8_BRK_TIM12_IRQHandler
  .text.TIM8_TRG_COM_TIM14_IRQHandler
-                0x08001f94       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001f94                TIM8_TRG_COM_TIM14_IRQHandler
+                0x08002b94       0x14 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002b94                TIM8_TRG_COM_TIM14_IRQHandler
  .text._ZNKSt8functionIFvvEEclEv
-                0x08001fa8       0x12 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001fa8                std::function<void ()>::operator()() const
+                0x08002ba8       0x12 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002ba8                std::function<void ()>::operator()() const
  .text._ZN13HardwareTimer14updateCallbackEP17TIM_HandleTypeDef
-                0x08001fba       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001fba                HardwareTimer::updateCallback(TIM_HandleTypeDef*)
+                0x08002bba       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002bba                HardwareTimer::updateCallback(TIM_HandleTypeDef*)
  .text.HAL_TIM_PeriodElapsedCallback
-                0x08001fd2        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001fd2                HAL_TIM_PeriodElapsedCallback
+                0x08002bd2        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002bd2                HAL_TIM_PeriodElapsedCallback
  .text._ZN13HardwareTimer22captureCompareCallbackEP17TIM_HandleTypeDef
-                0x08001fd6       0x3e C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08001fd6                HardwareTimer::captureCompareCallback(TIM_HandleTypeDef*)
+                0x08002bd6       0x3e C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002bd6                HardwareTimer::captureCompareCallback(TIM_HandleTypeDef*)
  .text.HAL_TIM_OC_DelayElapsedCallback
-                0x08002014        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08002014                HAL_TIM_OC_DelayElapsedCallback
+                0x08002c14        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002c14                HAL_TIM_OC_DelayElapsedCallback
  .text.HAL_TIM_IC_CaptureCallback
-                0x08002018        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
-                0x08002018                HAL_TIM_IC_CaptureCallback
+                0x08002c18        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\HardwareTimer.cpp.o
+                0x08002c18                HAL_TIM_IC_CaptureCallback
  .text.getCurrentMillis
-                0x0800201c        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\clock.c.o
-                0x0800201c                getCurrentMillis
+                0x08002c1c        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\clock.c.o
+                0x08002c1c                getCurrentMillis
  .text.noOsSystickHandler
-                0x08002020        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\clock.c.o
-                0x08002020                osSystickHandler
-                0x08002020                noOsSystickHandler
+                0x08002c20        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\clock.c.o
+                0x08002c20                osSystickHandler
+                0x08002c20                noOsSystickHandler
  .text.SysTick_Handler
-                0x08002022       0x10 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\clock.c.o
-                0x08002022                SysTick_Handler
+                0x08002c22       0x10 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\clock.c.o
+                0x08002c22                SysTick_Handler
  .text.configHSECapacitorTuning
-                0x08002032        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\clock.c.o
-                0x08002032                configHSECapacitorTuning
+                0x08002c32        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\clock.c.o
+                0x08002c32                configHSECapacitorTuning
  .text.configIPClock
-                0x08002034       0x4c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\clock.c.o
-                0x08002034                configIPClock
+                0x08002c34       0x4c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\clock.c.o
+                0x08002c34                configIPClock
  .text.dwt_init
-                0x08002080       0x3c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\dwt.c.o
-                0x08002080                dwt_init
+                0x08002c80       0x3c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\dwt.c.o
+                0x08002c80                dwt_init
  .text.hw_config_init
-                0x080020bc       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\hw_config.c.o
-                0x080020bc                hw_config_init
+                0x08002cbc       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\hw_config.c.o
+                0x08002cbc                hw_config_init
  .text.startup._ZNSt8functionIFvvEEC2EDn.constprop.0.isra.0
-                0x080020e0        0xc C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+                0x08002ce0        0xc C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
  .text.HAL_GPIO_EXTI_Callback
-                0x080020ec       0x2c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
-                0x080020ec                HAL_GPIO_EXTI_Callback
+                0x08002cec       0x2c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+                0x08002cec                HAL_GPIO_EXTI_Callback
  .text.EXTI0_IRQHandler
-                0x08002118        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
-                0x08002118                EXTI0_IRQHandler
+                0x08002d18        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+                0x08002d18                EXTI0_IRQHandler
  .text.EXTI1_IRQHandler
-                0x0800211e        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
-                0x0800211e                EXTI1_IRQHandler
+                0x08002d1e        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+                0x08002d1e                EXTI1_IRQHandler
  .text.EXTI2_IRQHandler
-                0x08002124        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
-                0x08002124                EXTI2_IRQHandler
+                0x08002d24        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+                0x08002d24                EXTI2_IRQHandler
  .text.EXTI3_IRQHandler
-                0x0800212a        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
-                0x0800212a                EXTI3_IRQHandler
+                0x08002d2a        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+                0x08002d2a                EXTI3_IRQHandler
  .text.EXTI4_IRQHandler
-                0x08002130        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
-                0x08002130                EXTI4_IRQHandler
+                0x08002d30        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+                0x08002d30                EXTI4_IRQHandler
  .text.EXTI9_5_IRQHandler
-                0x08002136       0x28 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
-                0x08002136                EXTI9_5_IRQHandler
+                0x08002d36       0x28 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+                0x08002d36                EXTI9_5_IRQHandler
  .text.EXTI15_10_IRQHandler
-                0x0800215e       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
-                0x0800215e                EXTI15_10_IRQHandler
- *fill*         0x08002176        0x2 
+                0x08002d5e       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+                0x08002d5e                EXTI15_10_IRQHandler
+ *fill*         0x08002d76        0x2 
  .text.startup._GLOBAL__sub_I__Z22stm32_interrupt_enable7PinNameSt8functionIFvvEEm
-                0x08002178       0xd8 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+                0x08002d78       0xd8 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
  .text.exit._GLOBAL__sub_D__Z22stm32_interrupt_enable7PinNameSt8functionIFvvEEm
-                0x08002250       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+                0x08002e50       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
  .text.pinmap_find_peripheral
-                0x0800226c       0x16 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\pinmap.c.o
-                0x0800226c                pinmap_find_peripheral
+                0x08002e6c       0x16 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\pinmap.c.o
+                0x08002e6c                pinmap_find_peripheral
  .text.pinmap_peripheral
-                0x08002282        0xc C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\pinmap.c.o
-                0x08002282                pinmap_peripheral
+                0x08002e82        0xc C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\pinmap.c.o
+                0x08002e82                pinmap_peripheral
  .text.pinmap_find_pin
-                0x0800228e       0x16 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\pinmap.c.o
-                0x0800228e                pinmap_find_pin
+                0x08002e8e       0x16 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\pinmap.c.o
+                0x08002e8e                pinmap_find_pin
  .text.pinmap_pin
-                0x080022a4        0xc C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\pinmap.c.o
-                0x080022a4                pinmap_pin
+                0x08002ea4        0xc C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\pinmap.c.o
+                0x08002ea4                pinmap_pin
  .text.SystemInit
-                0x080022b0       0x50 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\system_stm32yyxx.c.o
-                0x080022b0                SystemInit
+                0x08002eb0       0x50 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\system_stm32yyxx.c.o
+                0x08002eb0                SystemInit
  .text.get_timer_obj
-                0x08002300        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\timer.c.o
-                0x08002300                get_timer_obj
+                0x08002f00        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\timer.c.o
+                0x08002f00                get_timer_obj
  .text.serial_rx_active
-                0x08002304       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x08002304                serial_rx_active
+                0x08002f04       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x08002f04                serial_rx_active
  .text.serial_tx_active
-                0x08002328       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x08002328                serial_tx_active
+                0x08002f28       0x24 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x08002f28                serial_tx_active
  .text.uart_attach_tx_callback
-                0x0800234c       0x40 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x0800234c                uart_attach_tx_callback
+                0x08002f4c       0x40 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x08002f4c                uart_attach_tx_callback
  .text.uart_enable_tx
-                0x0800238c       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x0800238c                uart_enable_tx
+                0x08002f8c       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x08002f8c                uart_enable_tx
  .text.uart_enable_rx
-                0x080023a8       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x080023a8                uart_enable_rx
+                0x08002fa8       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x08002fa8                uart_enable_rx
  .text.HAL_UART_RxCpltCallback
-                0x080023c4        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x080023c4                HAL_UART_RxCpltCallback
+                0x08002fc4        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x08002fc4                HAL_UART_RxCpltCallback
  .text.HAL_UART_TxCpltCallback
-                0x080023ca        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x080023ca                HAL_UART_TxCpltCallback
+                0x08002fca        0x6 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x08002fca                HAL_UART_TxCpltCallback
  .text.HAL_UART_ErrorCallback
-                0x080023d0       0x7c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x080023d0                HAL_UART_ErrorCallback
+                0x08002fd0       0x7c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x08002fd0                HAL_UART_ErrorCallback
  .text.USART1_IRQHandler
-                0x0800244c       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x0800244c                USART1_IRQHandler
+                0x0800304c       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x0800304c                USART1_IRQHandler
  .text.USART2_IRQHandler
-                0x08002464       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x08002464                USART2_IRQHandler
+                0x08003064       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x08003064                USART2_IRQHandler
  .text.USART3_IRQHandler
-                0x08002480       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x08002480                USART3_IRQHandler
+                0x08003080       0x1c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x08003080                USART3_IRQHandler
  .text.UART4_IRQHandler
-                0x0800249c       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x0800249c                UART4_IRQHandler
+                0x0800309c       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x0800309c                UART4_IRQHandler
  .text.UART5_IRQHandler
-                0x080024b4       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x080024b4                UART5_IRQHandler
+                0x080030b4       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x080030b4                UART5_IRQHandler
  .text.USART6_IRQHandler
-                0x080024cc       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
-                0x080024cc                USART6_IRQHandler
- .text._exit    0x080024e4        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\syscalls.c.o
-                0x080024e4                _exit
- *fill*         0x080024e6        0x2 
- .text._kill    0x080024e8       0x10 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\syscalls.c.o
-                0x080024e8                _kill
- .text._getpid  0x080024f8        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\syscalls.c.o
-                0x080024f8                _getpid
+                0x080030cc       0x18 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\uart.c.o
+                0x080030cc                USART6_IRQHandler
+ .text._exit    0x080030e4        0x2 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\syscalls.c.o
+                0x080030e4                _exit
+ *fill*         0x080030e6        0x2 
+ .text._kill    0x080030e8       0x10 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\syscalls.c.o
+                0x080030e8                _kill
+ .text._getpid  0x080030f8        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\syscalls.c.o
+                0x080030f8                _getpid
  .text.SystemClock_Config
-                0x080024fc       0x9c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\core\generic_clock.c.o
-                0x080024fc                SystemClock_Config
+                0x080030fc       0x9c C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\core\generic_clock.c.o
+                0x080030fc                SystemClock_Config
  .text.startup._Z7premainv
-                0x08002598       0x10 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(main.cpp.o)
-                0x08002598                premain()
+                0x08003198       0x10 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(main.cpp.o)
+                0x08003198                premain()
  .text.startup.main
-                0x080025a8       0x14 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(main.cpp.o)
-                0x080025a8                main
+                0x080031a8       0x14 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(main.cpp.o)
+                0x080031a8                main
  .text.Reset_Handler
-                0x080025bc       0x50 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(startup_stm32yyxx.S.o)
-                0x080025bc                Reset_Handler
+                0x080031bc       0x50 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(startup_stm32yyxx.S.o)
+                0x080031bc                Reset_Handler
  .text.Default_Handler
-                0x0800260c        0x2 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(startup_stm32yyxx.S.o)
-                0x0800260c                RTC_Alarm_IRQHandler
-                0x0800260c                HASH_RNG_IRQHandler
-                0x0800260c                DebugMon_Handler
-                0x0800260c                DMA2_Stream5_IRQHandler
-                0x0800260c                HardFault_Handler
-                0x0800260c                DMA1_Stream5_IRQHandler
-                0x0800260c                PVD_IRQHandler
-                0x0800260c                SDIO_IRQHandler
-                0x0800260c                TAMP_STAMP_IRQHandler
-                0x0800260c                PendSV_Handler
-                0x0800260c                NMI_Handler
-                0x0800260c                CAN2_RX1_IRQHandler
-                0x0800260c                I2C3_ER_IRQHandler
-                0x0800260c                I2C2_EV_IRQHandler
-                0x0800260c                DMA1_Stream2_IRQHandler
-                0x0800260c                CAN1_RX0_IRQHandler
-                0x0800260c                FPU_IRQHandler
-                0x0800260c                OTG_HS_WKUP_IRQHandler
-                0x0800260c                UsageFault_Handler
-                0x0800260c                CAN2_SCE_IRQHandler
-                0x0800260c                DMA2_Stream2_IRQHandler
-                0x0800260c                SPI1_IRQHandler
-                0x0800260c                DCMI_IRQHandler
-                0x0800260c                CAN2_RX0_IRQHandler
-                0x0800260c                DMA2_Stream3_IRQHandler
-                0x0800260c                CAN1_RX1_IRQHandler
-                0x0800260c                DMA2_Stream0_IRQHandler
-                0x0800260c                I2C1_EV_IRQHandler
-                0x0800260c                DMA1_Stream6_IRQHandler
-                0x0800260c                DMA1_Stream1_IRQHandler
-                0x0800260c                RCC_IRQHandler
-                0x0800260c                Default_Handler
-                0x0800260c                ADC_IRQHandler
-                0x0800260c                DMA1_Stream7_IRQHandler
-                0x0800260c                CAN2_TX_IRQHandler
-                0x0800260c                DMA2_Stream7_IRQHandler
-                0x0800260c                I2C3_EV_IRQHandler
-                0x0800260c                RTC_WKUP_IRQHandler
-                0x0800260c                ETH_WKUP_IRQHandler
-                0x0800260c                SPI2_IRQHandler
-                0x0800260c                OTG_HS_EP1_IN_IRQHandler
-                0x0800260c                MemManage_Handler
-                0x0800260c                DMA1_Stream0_IRQHandler
-                0x0800260c                CAN1_TX_IRQHandler
-                0x0800260c                SVC_Handler
-                0x0800260c                FSMC_IRQHandler
-                0x0800260c                ETH_IRQHandler
-                0x0800260c                OTG_HS_EP1_OUT_IRQHandler
-                0x0800260c                WWDG_IRQHandler
-                0x0800260c                OTG_FS_WKUP_IRQHandler
-                0x0800260c                OTG_HS_IRQHandler
-                0x0800260c                I2C2_ER_IRQHandler
-                0x0800260c                DMA2_Stream1_IRQHandler
-                0x0800260c                CAN1_SCE_IRQHandler
-                0x0800260c                FLASH_IRQHandler
-                0x0800260c                DMA2_Stream4_IRQHandler
-                0x0800260c                BusFault_Handler
-                0x0800260c                OTG_FS_IRQHandler
-                0x0800260c                SPI3_IRQHandler
-                0x0800260c                DMA1_Stream4_IRQHandler
-                0x0800260c                I2C1_ER_IRQHandler
-                0x0800260c                DMA2_Stream6_IRQHandler
-                0x0800260c                DMA1_Stream3_IRQHandler
- *fill*         0x0800260e        0x2 
+                0x0800320c        0x2 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(startup_stm32yyxx.S.o)
+                0x0800320c                RTC_Alarm_IRQHandler
+                0x0800320c                HASH_RNG_IRQHandler
+                0x0800320c                DebugMon_Handler
+                0x0800320c                DMA2_Stream5_IRQHandler
+                0x0800320c                HardFault_Handler
+                0x0800320c                DMA1_Stream5_IRQHandler
+                0x0800320c                PVD_IRQHandler
+                0x0800320c                SDIO_IRQHandler
+                0x0800320c                TAMP_STAMP_IRQHandler
+                0x0800320c                PendSV_Handler
+                0x0800320c                NMI_Handler
+                0x0800320c                CAN2_RX1_IRQHandler
+                0x0800320c                I2C3_ER_IRQHandler
+                0x0800320c                I2C2_EV_IRQHandler
+                0x0800320c                DMA1_Stream2_IRQHandler
+                0x0800320c                CAN1_RX0_IRQHandler
+                0x0800320c                FPU_IRQHandler
+                0x0800320c                OTG_HS_WKUP_IRQHandler
+                0x0800320c                UsageFault_Handler
+                0x0800320c                CAN2_SCE_IRQHandler
+                0x0800320c                DMA2_Stream2_IRQHandler
+                0x0800320c                SPI1_IRQHandler
+                0x0800320c                DCMI_IRQHandler
+                0x0800320c                CAN2_RX0_IRQHandler
+                0x0800320c                DMA2_Stream3_IRQHandler
+                0x0800320c                CAN1_RX1_IRQHandler
+                0x0800320c                DMA2_Stream0_IRQHandler
+                0x0800320c                I2C1_EV_IRQHandler
+                0x0800320c                DMA1_Stream6_IRQHandler
+                0x0800320c                DMA1_Stream1_IRQHandler
+                0x0800320c                RCC_IRQHandler
+                0x0800320c                Default_Handler
+                0x0800320c                ADC_IRQHandler
+                0x0800320c                DMA1_Stream7_IRQHandler
+                0x0800320c                CAN2_TX_IRQHandler
+                0x0800320c                DMA2_Stream7_IRQHandler
+                0x0800320c                I2C3_EV_IRQHandler
+                0x0800320c                RTC_WKUP_IRQHandler
+                0x0800320c                ETH_WKUP_IRQHandler
+                0x0800320c                SPI2_IRQHandler
+                0x0800320c                OTG_HS_EP1_IN_IRQHandler
+                0x0800320c                MemManage_Handler
+                0x0800320c                DMA1_Stream0_IRQHandler
+                0x0800320c                CAN1_TX_IRQHandler
+                0x0800320c                SVC_Handler
+                0x0800320c                FSMC_IRQHandler
+                0x0800320c                ETH_IRQHandler
+                0x0800320c                OTG_HS_EP1_OUT_IRQHandler
+                0x0800320c                WWDG_IRQHandler
+                0x0800320c                OTG_FS_WKUP_IRQHandler
+                0x0800320c                OTG_HS_IRQHandler
+                0x0800320c                I2C2_ER_IRQHandler
+                0x0800320c                DMA2_Stream1_IRQHandler
+                0x0800320c                CAN1_SCE_IRQHandler
+                0x0800320c                FLASH_IRQHandler
+                0x0800320c                DMA2_Stream4_IRQHandler
+                0x0800320c                BusFault_Handler
+                0x0800320c                OTG_FS_IRQHandler
+                0x0800320c                SPI3_IRQHandler
+                0x0800320c                DMA1_Stream4_IRQHandler
+                0x0800320c                I2C1_ER_IRQHandler
+                0x0800320c                DMA2_Stream6_IRQHandler
+                0x0800320c                DMA1_Stream3_IRQHandler
+ *fill*         0x0800320e        0x2 
  .text._Z14serialEventRunv
-                0x08002610       0x1c C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(WSerial.cpp.o)
-                0x08002610                serialEventRun()
- .text.init     0x0800262c        0x4 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(board.c.o)
-                0x0800262c                init
+                0x08003210       0x1c C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(WSerial.cpp.o)
+                0x08003210                serialEventRun()
+ .text.init     0x0800322c        0x4 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(board.c.o)
+                0x0800322c                init
  .text._ZN14HardwareSerial9availableEv
-                0x08002630       0x10 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x08002630                HardwareSerial::available()
+                0x08003230       0x10 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x08003230                HardwareSerial::available()
  .text._ZN14HardwareSerial4peekEv
-                0x08002640       0x1a C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x08002640                HardwareSerial::peek()
+                0x08003240       0x1a C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x08003240                HardwareSerial::peek()
  .text._ZN14HardwareSerial17availableForWriteEv
-                0x0800265a       0x1c C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x0800265a                HardwareSerial::availableForWrite()
+                0x0800325a       0x1c C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x0800325a                HardwareSerial::availableForWrite()
  .text._ZN14HardwareSerial5writeEh
-                0x08002676       0x18 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x08002676                HardwareSerial::write(unsigned char)
- *fill*         0x0800268e        0x2 
+                0x08003276       0x18 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x08003276                HardwareSerial::write(unsigned char)
+ *fill*         0x0800328e        0x2 
  .text._ZN14HardwareSerial16_tx_complete_irqEP8serial_s
-                0x08002690       0x60 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x08002690                HardwareSerial::_tx_complete_irq(serial_s*)
+                0x08003290       0x60 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x08003290                HardwareSerial::_tx_complete_irq(serial_s*)
  .text._ZN14HardwareSerial5writeEPKhj
-                0x080026f0       0xe4 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x080026f0                HardwareSerial::write(unsigned char const*, unsigned int)
+                0x080032f0       0xe4 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x080032f0                HardwareSerial::write(unsigned char const*, unsigned int)
  .text._ZN14HardwareSerial4initE7PinNameS0_S0_S0_
-                0x080027d4       0x32 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x080027d4                HardwareSerial::init(PinName, PinName, PinName, PinName)
+                0x080033d4       0x32 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x080033d4                HardwareSerial::init(PinName, PinName, PinName, PinName)
  .text._ZN14HardwareSerial5flushEm
-                0x08002806       0x36 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x08002806                HardwareSerial::flush(unsigned long)
+                0x08003406       0x36 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x08003406                HardwareSerial::flush(unsigned long)
  .text._ZN14HardwareSerial5flushEv
-                0x0800283c        0x6 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x0800283c                HardwareSerial::flush()
- *fill*         0x08002842        0x2 
+                0x0800343c        0x6 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x0800343c                HardwareSerial::flush()
+ *fill*         0x08003442        0x2 
  .text._ZN14HardwareSerial5setRxEm
-                0x08002844       0x48 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x08002844                HardwareSerial::setRx(unsigned long)
+                0x08003444       0x48 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x08003444                HardwareSerial::setRx(unsigned long)
  .text._ZN14HardwareSerial5setTxEm
-                0x0800288c       0x48 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x0800288c                HardwareSerial::setTx(unsigned long)
+                0x0800348c       0x48 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x0800348c                HardwareSerial::setTx(unsigned long)
  .text._ZN14HardwareSerialC2EPv16HalfDuplexMode_t
-                0x080028d4       0x9c C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x080028d4                HardwareSerial::HardwareSerial(void*, HalfDuplexMode_t)
-                0x080028d4                HardwareSerial::HardwareSerial(void*, HalfDuplexMode_t)
+                0x080034d4       0x9c C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x080034d4                HardwareSerial::HardwareSerial(void*, HalfDuplexMode_t)
+                0x080034d4                HardwareSerial::HardwareSerial(void*, HalfDuplexMode_t)
  .text._ZN14HardwareSerial18enableHalfDuplexRxEv
-                0x08002970       0x2c C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x08002970                HardwareSerial::enableHalfDuplexRx()
+                0x08003570       0x2c C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x08003570                HardwareSerial::enableHalfDuplexRx()
  .text._ZN14HardwareSerial4readEv
-                0x0800299c       0x2e C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x0800299c                HardwareSerial::read()
- *fill*         0x080029ca        0x2 
+                0x0800359c       0x2e C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x0800359c                HardwareSerial::read()
+ *fill*         0x080035ca        0x2 
  .text.startup._GLOBAL__sub_I_Serial4
-                0x080029cc       0x14 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x080035cc       0x14 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
  .text._ZN6Stream9timedReadEv
-                0x080029e0       0x2a C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(Stream.cpp.o)
-                0x080029e0                Stream::timedRead()
+                0x080035e0       0x2a C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(Stream.cpp.o)
+                0x080035e0                Stream::timedRead()
  .text._ZN6Stream9readBytesEPcj
-                0x08002a0a       0x22 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(Stream.cpp.o)
-                0x08002a0a                Stream::readBytes(char*, unsigned int)
+                0x0800360a       0x22 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(Stream.cpp.o)
+                0x0800360a                Stream::readBytes(char*, unsigned int)
  .text._ZN6Stream14readBytesUntilEcPcj
-                0x08002a2c       0x30 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(Stream.cpp.o)
-                0x08002a2c                Stream::readBytesUntil(char, char*, unsigned int)
- .text.millis   0x08002a5c        0x4 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(wiring_time.c.o)
-                0x08002a5c                millis
- .text.memset   0x08002a60       0x10 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-memset.o)
-                0x08002a60                memset
+                0x0800362c       0x30 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(Stream.cpp.o)
+                0x0800362c                Stream::readBytesUntil(char, char*, unsigned int)
+ .text.millis   0x0800365c        0x4 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(wiring_time.c.o)
+                0x0800365c                millis
+ .text.memset   0x08003660       0x10 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-memset.o)
+                0x08003660                memset
  .text.__libc_init_array
-                0x08002a70       0x48 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-init.o)
-                0x08002a70                __libc_init_array
- .text.memcpy   0x08002ab8       0x1c C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-memcpy-stub.o)
-                0x08002ab8                memcpy
- .text.abort    0x08002ad4        0xe C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-abort.o)
-                0x08002ad4                abort
+                0x08003670       0x48 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-init.o)
+                0x08003670                __libc_init_array
+ .text.memcpy   0x080036b8       0x1c C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-memcpy-stub.o)
+                0x080036b8                memcpy
+ .text.abort    0x080036d4        0xe C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-abort.o)
+                0x080036d4                abort
  .text._raise_r
-                0x08002ae2       0x50 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-signal.o)
-                0x08002ae2                _raise_r
- *fill*         0x08002b32        0x2 
- .text.raise    0x08002b34       0x10 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-signal.o)
-                0x08002b34                raise
- .text._kill_r  0x08002b44       0x24 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-signalr.o)
-                0x08002b44                _kill_r
+                0x080036e2       0x50 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-signal.o)
+                0x080036e2                _raise_r
+ *fill*         0x08003732        0x2 
+ .text.raise    0x08003734       0x10 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-signal.o)
+                0x08003734                raise
+ .text._kill_r  0x08003744       0x24 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-signalr.o)
+                0x08003744                _kill_r
  .text._getpid_r
-                0x08002b68        0x4 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-signalr.o)
-                0x08002b68                _getpid_r
+                0x08003768        0x4 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libc_nano.a(libc_a-signalr.o)
+                0x08003768                _getpid_r
  .text.__udivmoddi4
-                0x08002b6c      0x2f8 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard\libgcc.a(_udivmoddi4.o)
-                0x08002b6c                __udivmoddi4
+                0x0800376c      0x2f8 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard\libgcc.a(_udivmoddi4.o)
+                0x0800376c                __udivmoddi4
  .text.unlikely._ZSt25__throw_bad_function_callv
-                0x08002e64        0x6 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libstdc++_nano.a(functional.o)
-                0x08002e64                std::__throw_bad_function_call()
+                0x08003a64        0x6 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libstdc++_nano.a(functional.o)
+                0x08003a64                std::__throw_bad_function_call()
  *(.glue_7)
- .glue_7        0x08002e6a        0x0 linker stubs
+ .glue_7        0x08003a6a        0x0 linker stubs
  *(.glue_7t)
- .glue_7t       0x08002e6a        0x0 linker stubs
+ .glue_7t       0x08003a6a        0x0 linker stubs
  *(.eh_frame)
- *fill*         0x08002e6a        0x2 
- .eh_frame      0x08002e6c        0x0 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtbegin.o
+ *fill*         0x08003a6a        0x2 
+ .eh_frame      0x08003a6c        0x0 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtbegin.o
  *(.init)
- .init          0x08002e6c        0x4 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crti.o
-                0x08002e6c                _init
- .init          0x08002e70        0x8 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtn.o
+ .init          0x08003a6c        0x4 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crti.o
+                0x08003a6c                _init
+ .init          0x08003a70        0x8 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtn.o
  *(.fini)
- .fini          0x08002e78        0x4 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crti.o
-                0x08002e78                _fini
- .fini          0x08002e7c        0x8 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtn.o
-                0x08002e84                        . = ALIGN (0x4)
-                0x08002e84                        _etext = .
+ .fini          0x08003a78        0x4 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crti.o
+                0x08003a78                _fini
+ .fini          0x08003a7c        0x8 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtn.o
+                0x08003a84                        . = ALIGN (0x4)
+                0x08003a84                        _etext = .
 
-.vfp11_veneer   0x08002e84        0x0
- .vfp11_veneer  0x08002e84        0x0 linker stubs
+.vfp11_veneer   0x08003a84        0x0
+ .vfp11_veneer  0x08003a84        0x0 linker stubs
 
-.v4_bx          0x08002e84        0x0
- .v4_bx         0x08002e84        0x0 linker stubs
+.v4_bx          0x08003a84        0x0
+ .v4_bx         0x08003a84        0x0 linker stubs
 
-.iplt           0x08002e84        0x0
- .iplt          0x08002e84        0x0 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtbegin.o
+.iplt           0x08003a84        0x0
+ .iplt          0x08003a84        0x0 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtbegin.o
 
-.rodata         0x08002e84      0x6c0
-                0x08002e84                        . = ALIGN (0x4)
+.rodata         0x08003a84      0x9d4
+                0x08003a84                        . = ALIGN (0x4)
  *(.rodata)
  *(.rodata*)
  .rodata.setup.str1.1
-                0x08002e84      0x3db C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\sketch\deep_periph_test.ino.cpp.o
-                                0x3dd (size before relaxing)
+                0x08003a84      0x6ef C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\sketch\deep_periph_test.ino.cpp.o
+                                0x6f1 (size before relaxing)
  .rodata.AHBPrescTable
-                0x0800325f       0x10 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\system_stm32yyxx.c.o
-                0x0800325f                AHBPrescTable
- *fill*         0x0800326f        0x1 
+                0x08004173       0x10 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\system_stm32yyxx.c.o
+                0x08004173                AHBPrescTable
+ *fill*         0x08004183        0x1 
  .rodata.PinMap_UART_RX
-                0x08003270       0x90 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\core\PeripheralPins.c.o
-                0x08003270                PinMap_UART_RX
+                0x08004184       0x90 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\core\PeripheralPins.c.o
+                0x08004184                PinMap_UART_RX
  .rodata.PinMap_UART_TX
-                0x08003300       0x90 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\core\PeripheralPins.c.o
-                0x08003300                PinMap_UART_TX
+                0x08004214       0x90 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\core\PeripheralPins.c.o
+                0x08004214                PinMap_UART_TX
  .rodata.analogInputPin
-                0x08003390       0x40 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\core\variant_generic.cpp.o
-                0x08003390                analogInputPin
+                0x080042a4       0x40 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\core\variant_generic.cpp.o
+                0x080042a4                analogInputPin
  .rodata.digitalPin
-                0x080033d0      0x148 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\core\variant_generic.cpp.o
-                0x080033d0                digitalPin
+                0x080042e4      0x148 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\core\variant_generic.cpp.o
+                0x080042e4                digitalPin
  .rodata._ZTV14HardwareSerial
-                0x08003518       0x2c C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x08003518                vtable for HardwareSerial
-                0x08003544                        . = ALIGN (0x4)
+                0x0800442c       0x2c C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x0800442c                vtable for HardwareSerial
+                0x08004458                        . = ALIGN (0x4)
 
-.ARM.extab      0x08003544        0x0
-                0x08003544                        . = ALIGN (0x4)
+.ARM.extab      0x08004458        0x0
+                0x08004458                        . = ALIGN (0x4)
  *(.ARM.extab* .gnu.linkonce.armextab.*)
-                0x08003544                        . = ALIGN (0x4)
+                0x08004458                        . = ALIGN (0x4)
 
-.ARM            0x08003544        0x8
-                0x08003544                        . = ALIGN (0x4)
-                0x08003544                        __exidx_start = .
+.ARM            0x08004458        0x8
+                0x08004458                        . = ALIGN (0x4)
+                0x08004458                        __exidx_start = .
  *(.ARM.exidx*)
  .ARM.exidx.text.__udivmoddi4
-                0x08003544        0x8 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard\libgcc.a(_udivmoddi4.o)
-                0x0800354c                        __exidx_end = .
-                0x0800354c                        . = ALIGN (0x4)
+                0x08004458        0x8 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard\libgcc.a(_udivmoddi4.o)
+                0x08004460                        __exidx_end = .
+                0x08004460                        . = ALIGN (0x4)
 
-.preinit_array  0x0800354c        0x0
-                0x0800354c                        . = ALIGN (0x4)
-                0x0800354c                        PROVIDE (__preinit_array_start = .)
+.preinit_array  0x08004460        0x0
+                0x08004460                        . = ALIGN (0x4)
+                0x08004460                        PROVIDE (__preinit_array_start = .)
  *(.preinit_array*)
-                0x0800354c                        PROVIDE (__preinit_array_end = .)
-                0x0800354c                        . = ALIGN (0x4)
+                0x08004460                        PROVIDE (__preinit_array_end = .)
+                0x08004460                        . = ALIGN (0x4)
 
-.init_array     0x0800354c       0x10
-                0x0800354c                        . = ALIGN (0x4)
-                0x0800354c                        PROVIDE (__init_array_start = .)
+.init_array     0x08004460       0x10
+                0x08004460                        . = ALIGN (0x4)
+                0x08004460                        PROVIDE (__init_array_start = .)
  *(SORT_BY_NAME(.init_array.*))
  .init_array.00101
-                0x0800354c        0x4 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(main.cpp.o)
+                0x08004460        0x4 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(main.cpp.o)
  *(.init_array*)
- .init_array    0x08003550        0x4 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtbegin.o
- .init_array    0x08003554        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
- .init_array    0x08003558        0x4 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
-                0x0800355c                        PROVIDE (__init_array_end = .)
-                0x0800355c                        . = ALIGN (0x4)
+ .init_array    0x08004464        0x4 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtbegin.o
+ .init_array    0x08004468        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+ .init_array    0x0800446c        0x4 C:\Users\Danish\AppData\Local\arduino\cores\STMicroelectronics_stm32_GenF4_pnum_GENERIC_F407VGTX_f31267b17cf20b1f13fdcee9ccd5d123\core.a(HardwareSerial.cpp.o)
+                0x08004470                        PROVIDE (__init_array_end = .)
+                0x08004470                        . = ALIGN (0x4)
 
-.fini_array     0x0800355c        0x8
-                0x0800355c                        . = ALIGN (0x4)
-                0x0800355c                        PROVIDE (__fini_array_start = .)
+.fini_array     0x08004470        0x8
+                0x08004470                        . = ALIGN (0x4)
+                0x08004470                        PROVIDE (__fini_array_start = .)
  *(SORT_BY_NAME(.fini_array.*))
  *(.fini_array*)
- .fini_array    0x0800355c        0x4 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtbegin.o
- .fini_array    0x08003560        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
-                0x08003564                        PROVIDE (__fini_array_end = .)
-                0x08003564                        . = ALIGN (0x4)
-                0x08003564                        _sidata = LOADADDR (.data)
+ .fini_array    0x08004470        0x4 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtbegin.o
+ .fini_array    0x08004474        0x4 C:\Users\Danish\AppData\Local\arduino\sketches\AAB113AF73FD3B826B97F5ABB2C87B31\libraries\SrcWrapper\stm32\interrupt.cpp.o
+                0x08004478                        PROVIDE (__fini_array_end = .)
+                0x08004478                        . = ALIGN (0x4)
+                0x08004478                        _sidata = LOADADDR (.data)
 
-.rel.dyn        0x08003564        0x0
- .rel.iplt      0x08003564        0x0 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtbegin.o
+.rel.dyn        0x08004478        0x0
+ .rel.iplt      0x08004478        0x0 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtbegin.o
 
-.data           0x20000000       0x64 load address 0x08003564
+.data           0x20000000       0x64 load address 0x08004478
                 0x20000000                        . = ALIGN (0x4)
                 0x20000000                        _sdata = .
  *(.data)
@@ -5623,11 +5623,11 @@ LOAD C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/x
                 0x20000064                        . = ALIGN (0x4)
                 0x20000064                        _edata = .
 
-.igot.plt       0x20000064        0x0 load address 0x080035c8
+.igot.plt       0x20000064        0x0 load address 0x080044dc
  .igot.plt      0x20000064        0x0 C:/Users/Danish/AppData/Local/Arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/../lib/gcc/arm-none-eabi/14.2.1/thumb/v7e-m+fp/hard/crtbegin.o
                 0x20000064                        . = ALIGN (0x4)
 
-.bss            0x20000064      0x40c load address 0x080035c8
+.bss            0x20000064      0x40c load address 0x080044dc
                 0x20000064                        _sbss = .
                 0x20000064                        __bss_start__ = _sbss
  *(.bss)
