@@ -7,39 +7,15 @@ pub struct Sdio {
     sta: u32, icr: u32, mask: u32, fifocnt: u32, fifo: u32,
 }
 
-impl Default for Sdio {
-    fn default() -> Self {
-        Self {
-            power: 0, clkcr: 0, arg: 0, cmd: 0, respcmd: 0,
-            resp: [0; 4], dtimer: 0, dlen: 0, dctrl: 0, dcount: 0,
-            sta: 0x7E48_0000, icr: 0, mask: 0, fifocnt: 0, fifo: 0,
-        }
+impl Sdio {
+    pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
+        if name == "SDIO" { Some(Box::new(Sdio { sta: 0x7E48_0000, ..Default::default() })) } else { None }
     }
 }
 
-impl Sdio {
-    pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
-        if name == "SDIO" { Some(Box::new(Self::default())) } else { None }
-    }
-
-    fn exec_cmd(&mut self) {
-        let cmd_index = self.cmd & 0x3F;
-        let wait_type = (self.cmd >> 6) & 3;
-        self.respcmd = cmd_index;
-        self.resp = [0; 4];
-        self.resp[0] = match cmd_index {
-            0 | 2 => 0x00FF_FF80,
-            3 | 7 | 17 | 18 | 55 => 0x1D0_0000,
-            5 => 0x20_FF80,
-            8 => 0x1AA,
-            9 | 10 => { self.resp[1] = 0x7F_FF80_9A; 0x10_FFFF }
-            13 => 0x100,
-            16 => 0x200,
-            41 => 0x50_FF80,
-            _ => 0,
-        };
-        self.sta |= 1 << 6;
-        if wait_type != 0 { self.sta |= 1 << 10; }
+impl Default for Sdio {
+    fn default() -> Self {
+        Self { power: 0, clkcr: 0, arg: 0, cmd: 0, respcmd: 0, resp: [0; 4], dtimer: 0, dlen: 0, dctrl: 0, dcount: 0, sta: 0, icr: 0, mask: 0, fifocnt: 0, fifo: 0 }
     }
 }
 
@@ -75,20 +51,45 @@ impl Peripheral for Sdio {
             0x08 => self.arg = value,
             0x0C => {
                 self.cmd = value & 0xFFFF;
-                if value & (1 << 6) != 0 { self.exec_cmd(); }
+                if value & 0x40 != 0 {
+                    let cmd_index = value & 0x3F;
+                    let wait_type = (value >> 6) & 3;
+                    self.respcmd = cmd_index;
+                    self.resp = [0, 0, 0, 0];
+                    match cmd_index {
+                        0  => { self.resp[0] = 0x00FF_FF80; }
+                        2  => { self.resp[0] = 0x00FF_FF80; }
+                        3  => { self.resp[0] = 0x1D0_0000; }
+                        5  => { self.resp[0] = 0x20_FF80; }
+                        7  => { self.resp[0] = 0x1D0_0000; }
+                        8  => { self.resp[0] = 0x1AA; }
+                        9  => { self.resp[0] = 0x10_FFFF; self.resp[1] = 0x7F_FF80_9A; }
+                        10 => { self.resp[0] = 0x10_FFFF; self.resp[1] = 0x7F_FF80_9A; }
+                        13 => { self.resp[0] = 0x100; }
+                        16 => { self.resp[0] = 0x200; }
+                        17 => { self.resp[0] = 0x1D0_0000; }
+                        18 => { self.resp[0] = 0x1D0_0000; }
+                        41 => { self.resp[0] = 0x50_FF80; }
+                        55 => { self.resp[0] = 0x1D0_0000; }
+                        _ => {}
+                    }
+                    self.sta |= 1 << 6;
+                    if wait_type != 0 { self.sta |= 1 << 10; }
+                }
             }
             0x24 => self.dtimer = value,
-            0x28 => { self.dlen = value & 0x01FF_FFFF; self.dcount = self.dlen; }
+            0x28 => { self.dlen = value & 0x1FF_FFFF; self.dcount = value & 0x1FF_FFFF; }
             0x2C => {
                 self.dctrl = value & 0x1F3F;
                 if value & 1 != 0 {
                     self.sta &= !0x3F;
                     self.fifocnt = self.dlen;
                     self.dcount = self.dlen;
-                    self.sta |= (1 << 1) | (1 << 3) | (1 << 11);
+                    self.sta |= 1 << 1;
+                    self.sta |= 1 << 3;
+                    self.sta |= 1 << 11;
                 }
             }
-            0x34 => {} // STA is read-only (cleared via ICR)
             0x38 => self.sta &= !value,
             0x3C => self.mask = value & 0x7FFF_FFFF,
             0x80 => self.fifo = value,

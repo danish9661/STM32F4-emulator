@@ -209,7 +209,7 @@ impl Peripheral for Timer {
                 self.dier = value & 0xFFFF;
                 self.update_interrupt(sys);
             }
-            0x10 => self.sr = value,
+            0x10 => self.sr &= !value,
             0x14 => {
                 self.egr = value & 0xFF;
                 if value & 1 != 0 { self.generate_update(sys); } // UG

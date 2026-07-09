@@ -182,7 +182,7 @@ void setup() {
     // DMA interrupt — poll with timeout since NVIC fires async
     dma2_irq_fired = 0;
     dma_dst[0] = 0; dma_dst[1] = 0; dma_dst[2] = 0; dma_dst[3] = 0;
-    NVIC_ISER2 |= (1 << 24);
+    NVIC_ISER1 |= (1 << 24);
     DMA2_S0_NDTR = 4;
     DMA2_S0_CR   = (1<<14) | (1<<11) | (1<<10) | (1<<9) | (1<<7) | (1<<5) | (1<<4) | 1;
     int timeout = 100000;
@@ -218,7 +218,7 @@ void setup() {
     int uif_timeout = 100000;
     while (!(TIM_SR & 1) && uif_timeout-- > 0);
     CHECK(uif_timeout > 0, "TIM UIF set on overflow");
-    TIM_SR = 0;
+    TIM_SR = 1;
     CHECK((TIM_SR & 1) == 0, "TIM UIF cleared by write");
 
     // ===== I2C =====
