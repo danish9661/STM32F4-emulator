@@ -14,6 +14,16 @@ pub mod sw_spi;
 pub mod tim;
 pub mod adc;
 pub mod flash;
+pub mod pwr;
+pub mod wwdg;
+pub mod iwdg;
+pub mod rtc;
+pub mod can;
+pub mod sdio;
+pub mod dcmi;
+pub mod crc;
+pub mod rng;
+pub mod dac;
 
 use rcc::*;
 use serde::Deserialize;
@@ -30,6 +40,16 @@ use sw_spi::*;
 use tim::*;
 use adc::*;
 use flash::*;
+use pwr::*;
+use wwdg::*;
+use iwdg::*;
+use rtc::*;
+use can::*;
+use sdio::*;
+use dcmi::*;
+use crc::*;
+use rng::*;
+use dac::*;
 
 use std::{collections::{BTreeMap, VecDeque, HashMap}, cell::RefCell};
 use svd_parser::svd::{RegisterInfo, Device as SvdDevice};
@@ -87,6 +107,16 @@ impl Peripherals {
             .or_else(||        Fsmc::new(&name, ext_devices))
             .or_else(||         Rcc::new(&name))
             .or_else(||       Flash::new(&name))
+            .or_else(||         Pwr::new(&name))
+            .or_else(||       Wwdg::new(&name))
+            .or_else(||       Iwdg::new(&name))
+            .or_else(||        Rtc::new(&name))
+            .or_else(||        Can::new(&name))
+            .or_else(||       Sdio::new(&name))
+            .or_else(||       Dcmi::new(&name))
+            .or_else(||        Crc::new(&name))
+            .or_else(||        Rng::new(&name))
+            .or_else(||        Dac::new(&name))
             .or_else(||         I2c::new(&name, ext_devices))
             .or_else(||         Dma::new(&name))
             .or_else(||         Spi::new(&name, ext_devices))
