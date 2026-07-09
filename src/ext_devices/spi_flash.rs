@@ -16,6 +16,8 @@ pub struct SpiFlashConfig {
     pub jedec_id: u32,
     pub file: String,
     pub size: usize,
+    #[serde(default)]
+    pub cs: Option<String>,
 }
 
 #[derive(Default)]

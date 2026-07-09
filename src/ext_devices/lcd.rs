@@ -12,6 +12,8 @@ use super::ExtDevice;
 pub struct LcdConfig {
     pub peripheral: String,
     pub framebuffer: String,
+    #[serde(default)]
+    pub cs: Option<String>,
 }
 
 pub struct Lcd {

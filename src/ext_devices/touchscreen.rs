@@ -24,6 +24,8 @@ pub struct TouchscreenConfig {
     pub swap_x_y: Option<bool>,
     pub touch_detected_pin: Option<String>,
     pub scale_down: Option<u32>,
+    #[serde(default)]
+    pub cs: Option<String>,
 }
 
 pub struct Touchscreen {
