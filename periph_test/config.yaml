@@ -12,5 +12,10 @@ regions:
 devices:
   usart_probe:
     - peripheral: USART1
+  i2c_eeprom:
+    - peripheral: I2C1
+      address: 0x50
+      file: eeprom.bin
+      size: 256
 components: []
 wires: []

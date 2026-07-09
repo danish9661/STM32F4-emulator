@@ -198,4 +198,6 @@ pub trait ExtDevice<A, T> {
     fn connect_peripheral<'a>(&mut self, peri_name: &str) -> String;
     fn read(&mut self, sys: &System, addr: A) -> T;
     fn write(&mut self, sys: &System, addr: A, v: T);
+    /// Called when a new bus transaction starts (I2C START, SPI CS assert, etc.)
+    fn reset(&mut self) {}
 }

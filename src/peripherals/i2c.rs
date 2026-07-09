@@ -75,6 +75,7 @@ impl Default for I2c {
 impl Peripheral for I2c {
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
+            0x00 => self.cr1,
             0x10 => {
                 let v = self.dr;
                 self.sr1 &= !(1 << 5);
@@ -123,6 +124,7 @@ impl Peripheral for I2c {
 
                 if value & (1 << 15) != 0 {
                     self.reset();
+                    self.cr1 = value & 1;
                     return;
                 }
                 if prev_pe != 0 && value & 1 == 0 {
@@ -138,12 +140,14 @@ impl Peripheral for I2c {
                     self.sr1 = 1;
                     self.sr2 = (1 << 0) | (1 << 1);
                     self.active_device = None;
+                    self.cr1 &= !(1 << 8);
                 }
 
                 if stop != 0 {
                     if matches!(self.state, I2cState::Active { .. } | I2cState::AddrSent { .. }) {
                         self.reset();
                     }
+                    self.cr1 &= !(1 << 9);
                 }
             }
             0x10 => {
@@ -156,6 +160,7 @@ impl Peripheral for I2c {
 
                         if let Some(idx) = found {
                             self.active_device = Some(idx);
+                            self.devices[idx].device.borrow_mut().reset();
                             self.sr1 = 1 << 1;
                             self.sr2 = (1 << 0) | (1 << 1);
                             if is_read {

@@ -22,24 +22,37 @@ extern "C" void init(void) {}
 #define SPI1_SR   (*(volatile uint32_t*)0x40013008)
 #define SPI1_DR   (*(volatile uint32_t*)0x4001300C)
 
-#define I2C1_CR1  (*(volatile uint32_t*)0x40005400)
-#define I2C1_SR1  (*(volatile uint32_t*)0x40005414)
-#define I2C1_SR2  (*(volatile uint32_t*)0x40005418)
-#define I2C1_DR   (*(volatile uint32_t*)0x40005410)
+#define I2C1_BASE (0x40005400)
+#define I2C1_CR1  (*(volatile uint32_t*)(I2C1_BASE + 0x00))
+#define I2C1_SR1  (*(volatile uint32_t*)(I2C1_BASE + 0x14))
+#define I2C1_SR2  (*(volatile uint32_t*)(I2C1_BASE + 0x18))
+#define I2C1_DR   (*(volatile uint32_t*)(I2C1_BASE + 0x10))
 
-#define DMA2_S0_CR   (*(volatile uint32_t*)0x40026410)
-#define DMA2_S0_NDTR (*(volatile uint32_t*)0x40026414)
-#define DMA2_S0_PAR  (*(volatile uint32_t*)0x40026418)
-#define DMA2_S0_M0AR (*(volatile uint32_t*)0x4002641C)
+#define DMA2_BASE    (0x40026400)
+#define DMA2_S0_CR   (*(volatile uint32_t*)(DMA2_BASE + 0x10))
+#define DMA2_S0_NDTR (*(volatile uint32_t*)(DMA2_BASE + 0x14))
+#define DMA2_S0_PAR  (*(volatile uint32_t*)(DMA2_BASE + 0x18))
+#define DMA2_S0_M0AR (*(volatile uint32_t*)(DMA2_BASE + 0x1C))
+#define DMA2_LISR    (*(volatile uint32_t*)(DMA2_BASE + 0x00))
+#define DMA2_HISR    (*(volatile uint32_t*)(DMA2_BASE + 0x04))
+#define DMA2_LIFCR   (*(volatile uint32_t*)(DMA2_BASE + 0x08))
 
 #define STK_CTRL  (*(volatile uint32_t*)0xE000E010)
 #define STK_LOAD  (*(volatile uint32_t*)0xE000E014)
 #define STK_VAL   (*(volatile uint32_t*)0xE000E018)
 
+#define NVIC_ISER1 (*(volatile uint32_t*)0xE000E104)
+
 #define FSMC_BCR1 (*(volatile uint32_t*)0xA0000000)
 #define FSMC_DATA (*(volatile uint32_t*)0x60000000)
 
 static uint32_t pass, fail;
+static volatile uint32_t dma_irq_fired;
+
+extern "C" void DMA2_Stream0_IRQHandler(void) {
+    dma_irq_fired = 1;
+    DMA2_LIFCR = (1 << 4);
+}
 
 static void uart_init(void) {
     RCC_AHB1ENR |= (1 << 0);
@@ -76,6 +89,52 @@ static void tx_dec(uint32_t v) {
     else { tx_str("  FAIL "); tx_str(msg); putc('\n'); fail++; } \
 } while(0)
 
+static void i2c_start(void) { I2C1_CR1 |= (1 << 8); }
+static void i2c_stop(void)  { I2C1_CR1 |= (1 << 9); }
+static void i2c_wait_sb(void) { while (!(I2C1_SR1 & 1)); }
+static void i2c_wait_addr(void) { while (!(I2C1_SR1 & (1 << 1))); }
+static void i2c_wait_txe(void) { while (!(I2C1_SR1 & (1 << 6))); }
+static void i2c_wait_rxne(void) { while (!(I2C1_SR1 & (1 << 5))); }
+static void i2c_clear_addr(void) { volatile uint32_t sr = I2C1_SR2; (void)sr; }
+static void i2c_send_byte(uint8_t b) { I2C1_DR = b; }
+static uint8_t i2c_read_byte(void) { return I2C1_DR; }
+
+static int i2c_eeprom_write_byte(uint8_t mem_addr, uint8_t data) {
+    i2c_start();
+    i2c_wait_sb();
+    i2c_send_byte(0xA0);
+    i2c_wait_addr();
+    i2c_clear_addr();
+    i2c_wait_txe();
+    i2c_send_byte(mem_addr);
+    i2c_wait_txe();
+    i2c_send_byte(data);
+    i2c_wait_txe();
+    i2c_stop();
+    return (I2C1_SR1 & (1 << 9)) ? -1 : 0;
+}
+
+static int i2c_eeprom_read_byte(uint8_t mem_addr, uint8_t *out) {
+    i2c_start();
+    i2c_wait_sb();
+    i2c_send_byte(0xA0);
+    i2c_wait_addr();
+    i2c_clear_addr();
+    i2c_wait_txe();
+    i2c_send_byte(mem_addr);
+    i2c_wait_txe();
+    i2c_start();
+    i2c_wait_sb();
+    i2c_send_byte(0xA1);
+    i2c_wait_addr();
+    I2C1_CR1 &= ~(1 << 10);
+    i2c_clear_addr();
+    i2c_wait_rxne();
+    *out = i2c_read_byte();
+    i2c_stop();
+    return (I2C1_SR1 & (1 << 9)) ? -1 : 0;
+}
+
 void setup() {
     uart_init();
     RCC_AHB1ENR |= (1 << 0) | (1 << 1);
@@ -106,10 +165,10 @@ void setup() {
     SPI1_DR = 0xA5;
     CHECK(SPI1_SR & 1, "SPI1 TXE set");
     SPI1_DR = 0x5A;
-    SPI1_SR; // discard toggle
+    SPI1_SR;
     CHECK(SPI1_SR & 1, "SPI1 TXE set (2nd)");
 
-    // 4. I2C1
+    // 4. I2C1 register reset test
     GPIOB_MODER &= ~((3 << 12) | (3 << 14));
     GPIOB_MODER |=  ((2 << 12) | (2 << 14));
     GPIOB_AFRL  |=  ((4 << 24) | (4 << 28));
@@ -118,7 +177,32 @@ void setup() {
     CHECK(I2C1_SR1 == 0, "I2C1_SR1 = 0 after reset");
     CHECK(I2C1_SR2 == 0, "I2C1_SR2 = 0 after reset");
 
-    // 5. DMA2: memory-to-memory copy
+    // 5. I2C EEPROM test
+    I2C1_CR1 = 0x8001;
+    {
+        int ret = i2c_eeprom_write_byte(0x10, 0xAB);
+        CHECK(ret == 0, "I2C EEPROM write ACK");
+        uint8_t val;
+        ret = i2c_eeprom_read_byte(0x10, &val);
+        CHECK(ret == 0, "I2C EEPROM read ACK");
+        CHECK(val == 0xAB, "I2C EEPROM readback=0xAB");
+    }
+    {
+        int ret = i2c_eeprom_write_byte(0x10, 0xCD);
+        CHECK(ret == 0, "I2C EEPROM overwrite ACK");
+        uint8_t val;
+        ret = i2c_eeprom_read_byte(0x10, &val);
+        CHECK(ret == 0, "I2C EEPROM readback ACK");
+        CHECK(val == 0xCD, "I2C EEPROM overwrite readback=0xCD");
+    }
+    {
+        uint8_t val;
+        int ret = i2c_eeprom_read_byte(0x00, &val);
+        CHECK(ret == 0, "I2C EEPROM addr 00 ACK");
+        CHECK(val == 0xFF, "I2C EEPROM addr 00 = 0xFF (unwritten)");
+    }
+
+    // 6. DMA2: memory-to-memory copy
     volatile uint32_t src[4] __attribute__((aligned(16))) = {0xDEADBEEF, 0xCAFEBABE, 0x12345678, 0x87654321};
     volatile uint32_t dst[4] __attribute__((aligned(16))) = {0, 0, 0, 0};
     DMA2_S0_PAR = (uint32_t)&src[0];
@@ -132,7 +216,24 @@ void setup() {
     CHECK(dst[2] == 0x12345678, "dst2=12345678");
     CHECK(dst[3] == 0x87654321, "dst3=87654321");
 
-    // 6. FSMC
+    // 7. DMA LISR status bits
+    CHECK(DMA2_LISR != 0, "DMA LISR non-zero after xfer");
+    CHECK(DMA2_LISR & (1 << 4), "DMA LISR TCIF set");
+    CHECK(DMA2_LISR & (1 << 3), "DMA LISR HTIF set");
+    DMA2_LIFCR = (1 << 4);
+    CHECK((DMA2_LISR & (1 << 4)) == 0, "DMA LISR TCIF cleared via LIFCR");
+
+    // 8. DMA interrupt test
+    dma_irq_fired = 0;
+    NVIC_ISER1 |= (1 << 24);
+    DMA2_S0_PAR = (uint32_t)&src[0];
+    DMA2_S0_M0AR = (uint32_t)&dst[0];
+    DMA2_S0_NDTR = 4;
+    DMA2_S0_CR = (1 << 14) | (1 << 11) | (1 << 10) | (1 << 9) | (1 << 7) | (1 << 5) | (1 << 4) | 1;
+    for (d = 0; d < 1000; d++);
+    CHECK(dma_irq_fired != 0, "DMA TC IRQ fired");
+
+    // 9. FSMC
     CHECK(FSMC_BCR1 == 0, "FSMC_BCR1=0");
     FSMC_DATA = 0x12345678;
     CHECK(FSMC_DATA == 0 || FSMC_DATA == 0x12345678, "FSMC bank1=OK");

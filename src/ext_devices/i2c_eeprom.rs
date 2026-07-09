@@ -48,6 +48,11 @@ impl ExtDevice<(), u8> for I2cEeprom {
         self.name.clone()
     }
 
+    fn reset(&mut self) {
+        self.phase = EepromPhase::Addr;
+        self.addr_bytes.clear();
+    }
+
     fn read(&mut self, _sys: &System, _addr: ()) -> u8 {
         self.phase = EepromPhase::Data;
         let v = self.mem.get(self.addr).copied().unwrap_or(0);
