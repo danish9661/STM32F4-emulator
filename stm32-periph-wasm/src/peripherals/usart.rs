@@ -6,9 +6,9 @@ const USART_IRQ_OFFSET: i32 = 37;
 
 fn usart_irq(name: &str) -> Option<i32> {
     match name {
-        "USART1" => Some(38),
-        "USART2" => Some(39),
-        "USART3" => Some(40),
+        "USART1" => Some(37),
+        "USART2" => Some(38),
+        "USART3" => Some(39),
         "UART4" => Some(52),
         "UART5" => Some(53),
         "USART6" => Some(71),

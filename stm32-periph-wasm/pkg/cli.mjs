@@ -1,8 +1,12 @@
 import { readFileSync } from 'fs';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const periph = require('./stm32_periph_wasm.js');
+const yaml = require('js-yaml');
+const path = require('path');
+import * as periph from './stm32_periph_wasm.js';
 const { periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte } = periph;
+
+const parseHex = (v) => typeof v === 'number' ? v : parseInt(v, 16);
 
 async function getMUnicorn() {
     const { createRequire } = await import('module');
@@ -12,66 +16,137 @@ async function getMUnicorn() {
 
 async function main() {
     const args = process.argv.slice(2);
-    const firmwarePath = args[0] || process.env.FIRMWARE;
-    const maxInst = parseInt(args[1] || process.env.MAX_INST || '1000000', 10);
+    const configPaths = args.filter(a => a.startsWith('--config=')).map(a => a.split('=')[1]);
+    const posArgs = args.filter(a => !a.startsWith('--'));
+    const maxInst = parseInt(posArgs[1] || process.env.MAX_INST || '1000000', 10);
     const showRegs = args.includes('--regs') || process.env.SHOW_REGS === '1';
-    const uartAddr = parseInt(args.find(a => a.startsWith('--uart='))?.split('=')[1] || process.env.UART_ADDR || '0x40011000', 16);
+    let uartAddr = parseInt(args.find(a => a.startsWith('--uart='))?.split('=')[1] || process.env.UART_ADDR || '0x40011000', 16);
 
-    if (!firmwarePath) {
-        console.error('Usage: node cli.mjs <firmware.bin> [max_instructions] [--regs] [--uart=0x40011000]');
-        console.error('  or set FIRMWARE env var');
-        process.exit(1);
+    // Load and merge configs
+    let config = {};
+    if (configPaths.length > 0) {
+        for (const cp of configPaths) {
+            const raw = yaml.load(readFileSync(cp, 'utf8'));
+            const cfgDir = path.dirname(path.resolve(cp));
+            if (raw.regions) raw.regions = raw.regions.map(r => ({ ...r, _dir: cfgDir }));
+            if (raw.patches) raw.patches = raw.patches.map(p => ({ ...p, _dir: cfgDir }));
+            raw._devices_dir = cfgDir;
+            // Merge: later configs override earlier ones
+            config = { ...config, ...raw, regions: [...(config.regions || []), ...(raw.regions || [])], patches: [...(config.patches || []), ...(raw.patches || [])] };
+        }
+        console.log(`Using config(s): ${configPaths.join(', ')}`);
     }
 
-    const firmware = readFileSync(firmwarePath);
-
-    console.log(`Loading firmware: ${firmwarePath} (${firmware.length} bytes)`);
-    console.log(`Max instructions: ${maxInst}`);
-    console.log('Initializing Unicorn...');
-
-    
     const MUnicorn = await getMUnicorn();
     const Module = await MUnicorn({});
 
-    // Discover ext devices from firmware directory
-    const fwDir = firmwarePath.replace(/\\/g, '/').replace(/\/[^/]+$/, '');
-    const eepromPath = `${fwDir}/eeprom.bin`;
-    try {
-        const data = readFileSync(eepromPath);
-        add_i2c_eeprom("I2C1", 0x50, data);
-        add_spi_flash("SPI3", 0xef4016, data, null);
-        console.log(`Loaded ext device: ${eepromPath} (${data.length} bytes)`);
-    } catch (_) {}
-    const spiFlashPath = `${fwDir}/spi_flash.bin`;
-    try {
-        const data = readFileSync(spiFlashPath);
-        add_spi_flash("SPI3", 0xef4016, data, null);
-        console.log(`Loaded ext device: ${spiFlashPath} (${data.length} bytes)`);
-    } catch (_) {}
-    const svdPath = new URL('../../monox/stm32f407.svd', import.meta.url);
-    const svdXml = readFileSync(svdPath, 'utf8');
-    init_svd(svdXml);
+    let firmware;
+    let vector_table;
+    let memRegions;
+
+    if (config.regions) {
+        // Config mode
+        memRegions = config.regions.map(r => ({ ...r, start: parseHex(r.start), size: parseHex(r.size) }));
+        const romRegion = memRegions.find(r => r.load);
+        if (!romRegion) { console.error('No region with load file found'); process.exit(1); }
+        vector_table = parseHex(config.cpu?.vector_table || romRegion.start);
+        const romFile = path.resolve(romRegion._dir || config._devices_dir, romRegion.load);
+        firmware = readFileSync(romFile);
+        console.log(`Loading firmware: ${romFile} (${firmware.length} bytes)`);
+
+        const svdPath = path.resolve(config._devices_dir, config.cpu?.svd || 'stm32f407.svd');
+        const svdXml = readFileSync(svdPath, 'utf8');
+        init_svd(svdXml);
+
+        // Patches
+        if (config.patches) {
+            for (const p of config.patches) {
+                const start = BigInt(parseHex(p.start));
+                const data = new Uint8Array(p.data);
+                const romRegionStart = BigInt(romRegion.start);
+                const relOff = Number(start - romRegionStart);
+                if (relOff >= 0 && relOff + data.length <= firmware.length) {
+                    data.forEach((b, i) => firmware[relOff + i] = b);
+                    console.log(`Applied patch at 0x${start.toString(16)}: [${data.join(', ')}]`);
+                }
+            }
+        }
+    } else {
+        // Default fallback (no config)
+        const firmwarePath = posArgs[0] || process.env.FIRMWARE;
+        if (!firmwarePath) {
+            console.error('Usage: node cli.mjs <firmware.bin> [max_instructions] [--config=path]');
+            console.error('  or set FIRMWARE env var');
+            process.exit(1);
+        }
+        firmware = readFileSync(firmwarePath);
+        console.log(`Loading firmware: ${firmwarePath} (${firmware.length} bytes)`);
+
+        const fwDir = firmwarePath.replace(/\\/g, '/').replace(/\/[^/]+$/, '');
+        for (const fn of ['eeprom.bin', 'spi_flash.bin']) {
+            try {
+                const data = readFileSync(`${fwDir}/${fn}`);
+                if (fn.startsWith('eeprom')) add_i2c_eeprom("I2C1", 0x50, data);
+                else add_spi_flash("SPI3", 0xef4016, data, null);
+                console.log(`Loaded ext device: ${fwDir}/${fn} (${data.length} bytes)`);
+            } catch (_) {}
+        }
+
+        const svdPath = new URL('../../monox/stm32f407.svd', import.meta.url);
+        const svdXml = readFileSync(svdPath, 'utf8');
+        init_svd(svdXml);
+
+        vector_table = 0x08000000;
+        memRegions = [
+            { start: 0x08000000, size: 0x100000 },
+            { start: 0x20000000, size: 0x20000 },
+        ];
+    }
+
+    console.log(`Max instructions: ${maxInst}`);
+    console.log('Initializing Unicorn...');
 
     const uc = new Module.Unicorn(
         Module.ARCH_ARM,
         Module.MODE_THUMB | Module.MODE_LITTLE_ENDIAN
     );
 
-    const vector_table = 0x08000000;
-    const flash_size = 0x100000;
-    const ram_size = 0x20000;
+    // Map memory regions
+    for (const r of memRegions) {
+        uc.mem_map(r.start, r.size, Module.PROT_ALL);
+    }
+    // Write firmware into first writable-mapped ROM region
+    const romRegion = memRegions.find(r => firmware && (r._firmware || r.load || (r.start <= vector_table && r.start + r.size > vector_table)));
+    const romStart = romRegion ? romRegion.start : (memRegions[0]?.start || 0x08000000);
+    if (firmware) uc.mem_write(BigInt(romStart), firmware);
 
-    uc.mem_map(vector_table, flash_size, Module.PROT_ALL);
-    uc.mem_write(vector_table, firmware);
+    // Also write firmware to the exact vector_table region if different
+    if (romStart !== vector_table) uc.mem_write(BigInt(vector_table), firmware);
 
-    uc.mem_map(0x20000000, ram_size, Module.PROT_ALL);
-
+    // Peripheral ranges
     const periphRanges = [
         [0x40000000, 0xB0000000],
         [0xE0000000, 0xE1000000],
     ];
     for (const [start, end] of periphRanges) {
         uc.mem_map(start, end - start, Module.PROT_READ | Module.PROT_WRITE);
+    }
+
+    // Config devices
+    if (config.devices) {
+        for (const [type, devs] of Object.entries(config.devices)) {
+            for (const d of devs || []) {
+                if (type === 'i2c_eeprom') {
+                    const data = d.file ? readFileSync(path.resolve(config._devices_dir, d.file)) : new Uint8Array(d.size || 0);
+                    add_i2c_eeprom(d.peripheral, parseHex(d.addr), data);
+                } else if (type === 'spi_flash') {
+                    const data = d.file ? readFileSync(path.resolve(config._devices_dir, d.file)) : new Uint8Array(d.size || 0);
+                    add_spi_flash(d.peripheral, parseHex(d.jedec_id), data, null);
+                } else if (type === 'usart_probe') {
+                    uartAddr = parseHex(d.peripheral.match(/[0-9a-fA-F]+/)?.[0]) ? parseInt(d.peripheral, 16) : (PERIPH_ADDR[d.peripheral] || uartAddr);
+                }
+            }
+        }
     }
 
     const read32 = (addr) => {
@@ -209,7 +284,7 @@ async function main() {
             const irq = get_next_pending_interrupt();
             if (irq <= -100) break;
 
-            const sp = uc.reg_read_i32(Module.ARM_REG_SP);
+            const savedAt = uc.reg_read_i32(Module.ARM_REG_SP);
             const pc = uc.reg_read_i32(Module.ARM_REG_PC);
             const lr = uc.reg_read_i32(Module.ARM_REG_LR);
             const xpsr = uc.reg_read_i32(Module.ARM_REG_XPSR);
@@ -228,19 +303,18 @@ async function main() {
             sv.setUint32(20, r2, true);
             sv.setUint32(24, r1, true);
             sv.setUint32(28, r0, true);
-            uc.mem_write(BigInt(sp - 32), frame);
-            uc.reg_write_i32(Module.ARM_REG_SP, sp - 32);
+            uc.mem_write(BigInt(savedAt - 32), frame);
+            uc.reg_write_i32(Module.ARM_REG_SP, savedAt - 32);
             const handler_pc = read32(vector_table + 4 * (16 + irq));
             uc.reg_write_i32(Module.ARM_REG_LR, 0xFFFFFFF9);
             uc.reg_write_i32(Module.ARM_REG_PC, handler_pc);
             try {
                 uc.emu_start(BigInt(handler_pc), 0n, 0n, 100000);
             } catch (e) {
-                // Handler likely crashed on bx lr (EXC_RETURN not supported)
-                // Pop the saved context to restore firmware state
+                // Handler crashed on BX LR (EXC_RETURN not supported)
             }
-            // After handler (or crash), restore context from where we saved it
-            const savedFrame = uc.mem_read(BigInt(sp - 32), 32);
+            // Restore context from where we saved it (handlers may modify SP)
+            const savedFrame = uc.mem_read(BigInt(savedAt - 32), 32);
             const savedSv = new DataView(savedFrame.buffer, savedFrame.byteOffset, savedFrame.byteLength);
             uc.reg_write_i32(Module.ARM_REG_R0, savedSv.getUint32(28, true));
             uc.reg_write_i32(Module.ARM_REG_R1, savedSv.getUint32(24, true));
@@ -249,7 +323,7 @@ async function main() {
             uc.reg_write_i32(Module.ARM_REG_R12, savedSv.getUint32(12, true));
             uc.reg_write_i32(Module.ARM_REG_LR, savedSv.getUint32(8, true));
             uc.reg_write_i32(Module.ARM_REG_PC, savedSv.getUint32(4, true) | 1);
-            uc.reg_write_i32(Module.ARM_REG_SP, sp);
+            uc.reg_write_i32(Module.ARM_REG_SP, savedAt);
             processDma();
         }
     };

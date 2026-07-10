@@ -13,8 +13,8 @@
 
 #define NVIC_ISER1 (*(volatile unsigned int *)0xE000E104)
 
-#define CRC_DR  (*(volatile unsigned int *)0x40023008)
-#define CRC_CR  (*(volatile unsigned int *)0x40023000)
+#define CRC_DR  (*(volatile unsigned int *)0x40023000)
+#define CRC_CR  (*(volatile unsigned int *)0x40023008)
 
 #define HASH_CR  (*(volatile unsigned int *)0x50060400)
 #define HASH_DIN (*(volatile unsigned int *)0x50060408)
@@ -30,8 +30,8 @@ static volatile unsigned int rx_buf[64];
 static volatile unsigned int rx_done = 0;
 
 // USART1 IRQ 37 handler - vector table entry at 0x080000D4 (0x100 + 37*4)
-void USART1_IRQHandler(void) __attribute__((interrupt));
-void USART1_IRQHandler(void) {
+extern "C" void USART1_IRQHandler(void) __attribute__((interrupt));
+extern "C" void USART1_IRQHandler(void) {
     unsigned int sr = USART1_SR;
     if (sr & (1 << 5)) {
         unsigned char c = USART1_DR;
