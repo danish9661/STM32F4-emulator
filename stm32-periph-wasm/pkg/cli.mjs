@@ -29,8 +29,7 @@ async function main() {
     console.log(`Max instructions: ${maxInst}`);
     console.log('Initializing Unicorn...');
 
-    const wasmBuf = readFileSync(new URL('./stm32_periph_wasm_bg.wasm', import.meta.url));
-    await periph.default({ module_or_path: wasmBuf.buffer });
+    
     const MUnicorn = await getMUnicorn();
     const Module = await MUnicorn({});
 
