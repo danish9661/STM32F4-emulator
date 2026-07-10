@@ -1,4 +1,4 @@
-use crate::system::{System, DmaTransfer, DmaDir};
+use crate::system::{System, DmaTransfer, DmaDir, set_dma_intr_info};
 use super::Peripheral;
 
 #[derive(Default)]
@@ -169,11 +169,13 @@ impl Stream {
                 self.cr = value;
                 if value & 1 != 0 {
                     self.do_xfer(name, sys, stream_idx);
-                    self.status |= 1 << 4;
-                    self.status |= 1 << 3;
-                    let tcie = (value >> 4) & 1;
-                    let htie = (value >> 3) & 1;
-                    let teie = (value >> 2) & 1;
+                    self.status |= 1 << 4; // TCIF
+                    self.status |= 1 << 3; // HTIF
+                    let tcie = ((value >> 4) & 1) as u8;
+                    let htie = ((value >> 3) & 1) as u8;
+                    let teie = ((value >> 2) & 1) as u8;
+                    let flags = tcie | (htie << 1) | (teie << 2);
+                    set_dma_intr_info(stream_idx, irq, flags);
                     if tcie != 0 || htie != 0 || teie != 0 {
                         sys.p.nvic.borrow_mut().set_intr_pending(irq);
                     }

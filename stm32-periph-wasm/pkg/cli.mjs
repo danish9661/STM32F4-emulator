@@ -1,6 +1,8 @@
 import { readFileSync } from 'fs';
-import { initSync, periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte } from './stm32_periph_wasm.js';
-initSync(readFileSync(new URL('stm32_periph_wasm_bg.wasm', import.meta.url)));
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const periph = require('./stm32_periph_wasm.js');
+const { periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte } = periph;
 
 async function getMUnicorn() {
     const { createRequire } = await import('module');
@@ -27,6 +29,8 @@ async function main() {
     console.log(`Max instructions: ${maxInst}`);
     console.log('Initializing Unicorn...');
 
+    const wasmBuf = readFileSync(new URL('./stm32_periph_wasm_bg.wasm', import.meta.url));
+    await periph.default({ module_or_path: wasmBuf.buffer });
     const MUnicorn = await getMUnicorn();
     const Module = await MUnicorn({});
 

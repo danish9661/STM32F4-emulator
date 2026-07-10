@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -65,6 +65,23 @@ static DMA_COMPLETED: [AtomicBool; 8] = [
     AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false),
 ];
 
+// Per-stream DMA interrupt info: IRQ number (-1 = none) and flags (bit 0=TCIE, 1=HTIE, 2=TEIE)
+static DMA_STREAM_IRQ: [AtomicI32; 8] = [
+    AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1),
+    AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1),
+];
+static DMA_STREAM_FLAGS: [AtomicU8; 8] = [
+    AtomicU8::new(0), AtomicU8::new(0), AtomicU8::new(0), AtomicU8::new(0),
+    AtomicU8::new(0), AtomicU8::new(0), AtomicU8::new(0), AtomicU8::new(0),
+];
+
+pub fn set_dma_intr_info(stream_idx: usize, irq: i32, flags: u8) {
+    if stream_idx < 8 {
+        DMA_STREAM_IRQ[stream_idx].store(irq, Ordering::Release);
+        DMA_STREAM_FLAGS[stream_idx].store(flags, Ordering::Release);
+    }
+}
+
 pub struct WasmSystem {
     pub p: Rc<Peripherals>,
     pending_dma: RefCell<Vec<DmaTransfer>>,
@@ -124,6 +141,16 @@ impl WasmSystem {
 
     pub fn mark_dma_completed(&self, stream_idx: usize, _success: bool) {
         DMA_COMPLETED[stream_idx].store(true, Ordering::Release);
+        // Fire NVIC interrupt after transfer completes
+        if stream_idx < 8 {
+            let irq = DMA_STREAM_IRQ[stream_idx].swap(-1, Ordering::Acquire);
+            if irq >= 0 {
+                let flags = DMA_STREAM_FLAGS[stream_idx].swap(0, Ordering::Acquire);
+                if flags & 0x7 != 0 {
+                    self.p.nvic.borrow_mut().set_intr_pending(irq);
+                }
+            }
+        }
     }
 
     pub fn dma_check_completion(&self, stream_idx: usize) -> bool {

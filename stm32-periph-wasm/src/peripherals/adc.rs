@@ -3,12 +3,19 @@ use super::Peripheral;
 use std::sync::atomic::Ordering;
 
 fn adc_rand() -> u32 {
-    // Deterministic pseudo-random using instruction count
     let n = instruction_count();
     ((n.wrapping_mul(1103515245).wrapping_add(12345)) >> 12) as u32
 }
 
+fn adc_irq(name: &str) -> i32 {
+    match name {
+        "ADC3" => 47,
+        _ => 18, // ADC1 and ADC2 share IRQ 18
+    }
+}
+
 pub struct Adc {
+    name: String,
     sr: u32,
     cr1: u32,
     cr2: u32,
@@ -29,29 +36,53 @@ pub struct Adc {
 impl Default for Adc {
     fn default() -> Self {
         Self {
+            name: String::new(),
+            sr: 0,
+            cr1: 0,
             cr2: 0x0000_0001,
+            smpr1: 0,
+            smpr2: 0,
+            jofr: [0; 4],
+            htr: 0,
+            ltr: 0,
+            sqr1: 0,
+            sqr2: 0,
+            sqr3: 0,
+            jsqr: 0,
+            jdr: [0; 4],
+            dr: 0,
             last_conv_start: 0,
-            ..unsafe { std::mem::zeroed() }
         }
     }
 }
 
 impl Adc {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
-        if name.starts_with("ADC") { Some(Box::new(Self::default())) } else { None }
+        if name.starts_with("ADC") { Some(Box::new(Self { name: name.to_string(), ..Self::default() })) } else { None }
     }
 
-    fn set_eoc(&mut self) {
+    fn eoc_enabled(&self) -> bool { self.cr1 & (1 << 5) != 0 }
+    fn ovr_enabled(&self) -> bool { self.cr1 & (1 << 4) != 0 }
+
+    fn fire_interrupts(&mut self, sys: &System) {
+        let irq = adc_irq(&self.name);
+        if (self.sr & (1 << 1) != 0 && self.eoc_enabled()) ||
+           (self.sr & (1 << 5) != 0 && self.ovr_enabled()) {
+            sys.p.nvic.borrow_mut().set_intr_pending(irq);
+        }
+    }
+
+    fn set_eoc(&mut self, sys: &System) {
         self.sr |= 1 << 1; // EOC
+        self.fire_interrupts(sys);
     }
 
-    fn start_conversion(&mut self) {
-        let n = crate::system::INSTRUCTION_COUNT.load(Ordering::Relaxed);
+    fn start_conversion(&mut self, sys: &System) {
+        let n = instruction_count();
         let elapsed = n.saturating_sub(self.last_conv_start);
         if elapsed > 12 {
-            // Conversion complete
             let smp = if self.sqr3 & 0x1F < 7 {
-                (self.smpr2 & 0x7) // SMPR0
+                (self.smpr2 & 0x7)
             } else {
                 (self.smpr1 & 0x7) >> ((self.sqr3 & 0x1F) % 6 * 3)
             };
@@ -62,32 +93,31 @@ impl Adc {
             };
             let conv_cycles = sampling_cycles + 12;
             if elapsed >= conv_cycles as u64 {
-                // Generate simulated conversion result
                 let channel = self.sqr3 & 0x1F;
                 let val = match channel {
-                    16 | 17 => 1200 + (adc_rand() % 50), // temperature sensor ~1.2V
-                    18 => 1500, // Vrefint = 1.5V (approx)
-                    _ => adc_rand() % 4096, // random
+                    16 | 17 => 1200 + (adc_rand() % 50),
+                    18 => 1500,
+                    _ => adc_rand() % 4096,
                 };
                 self.dr = val;
-                self.set_eoc();
+                self.set_eoc(sys);
             }
         }
     }
 }
 
 impl Peripheral for Adc {
-    fn read(&mut self, _sys: &System, offset: u32) -> u32 {
+    fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => {
                 let sr = self.sr;
-                self.sr = 0; // clear on read
+                self.sr = 0;
                 sr
             }
             0x04 => self.cr1,
             0x08 => {
-                if self.cr2 & 1 != 0 { // ADON
-                    self.start_conversion();
+                if self.cr2 & 1 != 0 {
+                    self.start_conversion(sys);
                 }
                 self.cr2
             }
@@ -108,7 +138,6 @@ impl Peripheral for Adc {
                 self.jdr.get(i).copied().unwrap_or(0)
             }
             0x4C => {
-                // Reading DR clears EOC
                 let dr = self.dr;
                 self.sr &= !(1 << 1);
                 dr
@@ -117,16 +146,21 @@ impl Peripheral for Adc {
         }
     }
 
-    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
+    fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
-            0x00 => { self.sr = value & 0x3F; }
-            0x04 => { self.cr1 = value & 0x7FFF_FFFF; }
+            0x00 => {
+                self.sr = value & 0x3F;
+                self.fire_interrupts(sys);
+            }
+            0x04 => {
+                self.cr1 = value & 0x7FFF_FFFF;
+                self.fire_interrupts(sys);
+            }
             0x08 => {
                 let was_swstart = self.cr2 & (1 << 30);
                 self.cr2 = value & 0x7FF0_0EFF;
-                // SWSTART rising edge triggers conversion
                 if value & (1 << 30) != 0 && was_swstart == 0 {
-                    self.last_conv_start = crate::system::INSTRUCTION_COUNT.load(Ordering::Relaxed);
+                    self.last_conv_start = instruction_count();
                 }
             }
             0x0C => self.smpr1 = value,
@@ -141,10 +175,8 @@ impl Peripheral for Adc {
             0x30 => self.sqr2 = value,
             0x34 => self.sqr3 = value,
             0x38 => self.jsqr = value,
-            0x3C..=0x48 => {
-                // JDR writes? Spec says they're read-only typically, but ignore
-            }
-            0x4C => {} // DR is read-only
+            0x3C..=0x48 => {}
+            0x4C => {}
             _ => {}
         }
     }

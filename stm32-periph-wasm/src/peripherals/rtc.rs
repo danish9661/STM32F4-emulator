@@ -23,6 +23,15 @@ fn bcd_inc_tr(tr: u32) -> u32 {
     ((tr & 0xFF00_0000) | (new_hr << 16) | (new_min << 8) | new_sec)
 }
 
+fn bcd_match(tr_bcd: u32, alarm_bcd: u32, mask_bits: u32) -> bool {
+    // alarm_bcd has MSB bits per field indicating "don't care"
+    // mask_bits: bit 7 of each byte = don't care
+    let sec_match = if alarm_bcd & (1 << 7) != 0 { true } else { (tr_bcd & 0x7F) == (alarm_bcd & 0x7F) };
+    let min_match = if alarm_bcd & (1 << 15) != 0 { true } else { ((tr_bcd >> 8) & 0x7F) == ((alarm_bcd >> 8) & 0x7F) };
+    let hr_match = if alarm_bcd & (1 << 23) != 0 { true } else { ((tr_bcd >> 16) & 0x3F) == ((alarm_bcd >> 16) & 0x3F) };
+    sec_match && min_match && hr_match
+}
+
 pub struct Rtc {
     tr: u32, dr: u32, cr: u32, isr: u32, prer: u32, wutr: u32,
     calibr: u32, alrmar: u32, alrmbr: u32, wpr: u32, ssr: u32,
@@ -48,24 +57,89 @@ impl Rtc {
             }))
         } else { None }
     }
-}
 
-impl Peripheral for Rtc {
-    fn read(&mut self, _sys: &System, offset: u32) -> u32 {
+    fn check_alarm(&mut self, sys: &System) {
+        let alra_enabled = self.cr & (1 << 8) != 0; // ALRAE
+        let alrb_enabled = self.cr & (1 << 9) != 0; // ALRBE
+        if !alra_enabled && !alrb_enabled { return; }
+
+        let irq = 43; // RTC_Alarm (ALRAF, ALRBF)
+
+        if alra_enabled && self.isr & (1 << 8) != 0 { // ALRAF already set
+            if self.cr & (1 << 12) != 0 { // ALRAIE
+                sys.p.nvic.borrow_mut().set_intr_pending(irq);
+            }
+            return;
+        }
+
+        if alrb_enabled && self.isr & (1 << 9) != 0 { // ALRBF already set
+            if self.cr & (1 << 13) != 0 { // ALRBIE
+                sys.p.nvic.borrow_mut().set_intr_pending(irq);
+            }
+            return;
+        }
+
+        // Compare alarm with current time
+        if alra_enabled && !alrb_enabled {
+            if bcd_match(self.tr, self.alrmar, self.alrmar) {
+                self.isr |= 1 << 8; // ALRAF
+                if self.cr & (1 << 12) != 0 { // ALRAIE
+                    sys.p.nvic.borrow_mut().set_intr_pending(irq);
+                }
+            }
+        }
+
+        if alrb_enabled && !alra_enabled {
+            if bcd_match(self.tr, self.alrmbr, self.alrmbr) {
+                self.isr |= 1 << 9; // ALRBF
+                if self.cr & (1 << 13) != 0 { // ALRBIE
+                    sys.p.nvic.borrow_mut().set_intr_pending(irq);
+                }
+            }
+        }
+
+        if alra_enabled && alrb_enabled {
+            let alra_match = bcd_match(self.tr, self.alrmar, self.alrmar);
+            let alrb_match = bcd_match(self.tr, self.alrmbr, self.alrmbr);
+            if alra_match {
+                self.isr |= 1 << 8;
+                if self.cr & (1 << 12) != 0 {
+                    sys.p.nvic.borrow_mut().set_intr_pending(irq);
+                }
+            }
+            if alrb_match {
+                self.isr |= 1 << 9;
+                if self.cr & (1 << 13) != 0 {
+                    sys.p.nvic.borrow_mut().set_intr_pending(irq);
+                }
+            }
+        }
+    }
+
+    fn advance_time(&mut self, sys: &System) {
         if (self.isr & 1) == 0 {
             let now = INSTRUCTION_COUNT.load(Ordering::Relaxed);
             let elapsed = now.wrapping_sub(self.last_inst);
             if elapsed > 100 {
                 let async_prer = (self.prer >> 16) & 0x7F;
                 let sync_prer = self.prer & 0x7FFF;
-                let ticks = (async_prer + 1) * (sync_prer + 1);
-                let secs = elapsed / ticks.max(1) as u64;
+                let ticks_per_sec = (async_prer + 1) * (sync_prer + 1);
+                let secs = elapsed / ticks_per_sec.max(1) as u64;
                 if secs > 0 {
-                    for _ in 0..secs.min(100) { self.tr = bcd_inc_tr(self.tr); }
+                    for _ in 0..secs.min(100) {
+                        self.tr = bcd_inc_tr(self.tr);
+                        self.check_alarm(sys);
+                    }
                     self.last_inst = now;
                 }
             }
         }
+    }
+}
+
+impl Peripheral for Rtc {
+    fn read(&mut self, sys: &System, offset: u32) -> u32 {
+        self.advance_time(sys);
         match offset {
             0x00 => self.tr, 0x04 => self.dr, 0x08 => self.cr, 0x0C => self.isr,
             0x10 => self.prer, 0x14 => self.wutr, 0x18 => self.calibr,
@@ -81,17 +155,38 @@ impl Peripheral for Rtc {
         }
     }
 
-    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
+    fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
-            0x00 => self.tr = value, 0x04 => self.dr = value,
-            0x08 => self.cr = value, 0x0C => self.isr = value,
-            0x10 => self.prer = value, 0x14 => self.wutr = value,
-            0x18 => self.calibr = value, 0x1C => self.alrmar = value,
-            0x20 => self.alrmbr = value, 0x24 => self.wpr = value,
-            0x28 => self.ssr = value, 0x2C => self.shiftr = value,
-            0x30 => self.tstr = value, 0x34 => self.tsdr = value,
-            0x38 => self.tsssr = value, 0x3C => self.calr = value,
-            0x40 => self.tafcr = value, 0x44 => self.alrmassr = value,
+            0x00 => self.tr = value,
+            0x04 => self.dr = value,
+            0x08 => {
+                self.cr = value;
+                self.check_alarm(sys);
+            }
+            0x0C => {
+                self.isr = value;
+                self.check_alarm(sys);
+            }
+            0x10 => self.prer = value,
+            0x14 => self.wutr = value,
+            0x18 => self.calibr = value,
+            0x1C => {
+                self.alrmar = value;
+                self.check_alarm(sys);
+            }
+            0x20 => {
+                self.alrmbr = value;
+                self.check_alarm(sys);
+            }
+            0x24 => self.wpr = value,
+            0x28 => self.ssr = value,
+            0x2C => self.shiftr = value,
+            0x30 => self.tstr = value,
+            0x34 => self.tsdr = value,
+            0x38 => self.tsssr = value,
+            0x3C => self.calr = value,
+            0x40 => self.tafcr = value,
+            0x44 => self.alrmassr = value,
             0x48 => self.alrmbssr = value,
             0x50..=0x9C => {
                 let idx = ((offset - 0x50) / 4) as usize;

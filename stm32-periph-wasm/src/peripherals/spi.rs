@@ -13,6 +13,7 @@ pub struct Spi {
     pub ready_toggle: bool,
     pub i2scfgr: u32,
     pub i2spr: u32,
+    wave_counter: u16,
     devices: Vec<SpiDeviceEntry>,
 }
 
@@ -35,6 +36,7 @@ impl Spi {
     }
 
     pub fn is_16bits(&self) -> bool { self.cr1 & (1 << 11) != 0 }
+    fn is_i2s(&self) -> bool { self.i2scfgr & 1 != 0 } // I2SMOD
 
     fn active_device(&self, sys: &System) -> Option<Rc<RefCell<dyn ExtDevice<(), u8>>>> {
         let mut gpio = sys.p.gpio.borrow_mut();
@@ -47,19 +49,59 @@ impl Spi {
         }
         self.devices.first().map(|d| d.device.clone())
     }
+
+    fn generate_i2s_audio(&mut self) -> u32 {
+        let idx = self.wave_counter;
+        self.wave_counter = self.wave_counter.wrapping_add(1);
+        let phase = idx & 0xFF;
+        let sample = if phase < 128 { phase } else { 255 - phase };
+        let sample_16 = ((sample as u32) << 7) | (sample as u32);
+        if idx & 1 != 0 { sample_16 } else { sample_16 ^ 0x8000 }
+    }
+
+    fn fire_interrupts(&mut self, sys: &System) {
+        if self.name.starts_with("SPI") && !self.is_i2s() {
+            // SPI mode: fire when TXEIE or RXNEIE enabled and ready
+            let irq = match self.name.as_str() {
+                "SPI1" | "SPI4" => Some(35),
+                "SPI2" | "SPI5" => Some(36),
+                "SPI3" | "SPI6" => Some(51),
+                _ => None,
+            };
+            if let Some(irq) = irq {
+                let txeie = (self.cr2 >> 1) & 1;
+                let rxneie = self.cr2 & 1;
+                if (txeie != 0 || rxneie != 0) && self.ready_toggle {
+                    sys.p.nvic.borrow_mut().set_intr_pending(irq);
+                }
+            }
+        }
+    }
 }
 
 impl Peripheral for Spi {
-    fn read(&mut self, _sys: &System, offset: u32) -> u32 {
+    fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
             0x0000 => self.cr1,
             0x0004 => self.cr2,
             0x0008 => {
                 self.ready_toggle = !self.ready_toggle;
-                if self.ready_toggle { 0b11 } else { 0 }
+                if self.is_i2s() {
+                    // I2S SR: RXNE, TXE, etc
+                    (if self.ready_toggle { 0b11 } else { 0 })
+                } else {
+                    let sr = if self.ready_toggle { 0b11 } else { 0 };
+                    self.fire_interrupts(sys);
+                    sr
+                }
             }
             0x000C => {
-                let v = self.rx_buffer;
+                let v = if self.is_i2s() {
+                    // I2S mode: generate received audio data
+                    self.generate_i2s_audio()
+                } else {
+                    self.rx_buffer
+                };
                 self.rx_buffer = 0;
                 v
             }
@@ -73,23 +115,31 @@ impl Peripheral for Spi {
     fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
             0x0000 => self.cr1 = value,
-            0x0004 => self.cr2 = value,
+            0x0004 => {
+                self.cr2 = value;
+                self.fire_interrupts(sys);
+            }
             0x000C => {
-                let device = self.active_device(sys);
-                if let Some(ref d) = device {
-                    let mut d = d.borrow_mut();
-                    if self.is_16bits() {
-                        d.write(sys, (), (value >> 8) as u8);
-                        self.rx_buffer = (d.read(sys, ()) as u32) << 8;
-                        d.write(sys, (), value as u8);
-                        self.rx_buffer |= d.read(sys, ()) as u32;
-                    } else {
-                        let v = value as u8;
-                        d.write(sys, (), v);
-                        self.rx_buffer = d.read(sys, ()) as u32;
-                    }
+                if self.is_i2s() {
+                    // I2S mode: write data generates receive data
+                    self.rx_buffer = self.generate_i2s_audio();
                 } else {
-                    self.rx_buffer = 0xFF;
+                    let device = self.active_device(sys);
+                    if let Some(ref d) = device {
+                        let mut d = d.borrow_mut();
+                        if self.is_16bits() {
+                            d.write(sys, (), (value >> 8) as u8);
+                            self.rx_buffer = (d.read(sys, ()) as u32) << 8;
+                            d.write(sys, (), value as u8);
+                            self.rx_buffer |= d.read(sys, ()) as u32;
+                        } else {
+                            let v = value as u8;
+                            d.write(sys, (), v);
+                            self.rx_buffer = d.read(sys, ()) as u32;
+                        }
+                    } else {
+                        self.rx_buffer = 0xFF;
+                    }
                 }
             }
              0x0010 => self.dr = value,

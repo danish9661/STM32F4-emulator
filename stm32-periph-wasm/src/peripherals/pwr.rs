@@ -33,12 +33,9 @@ impl Peripheral for Pwr {
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
         match offset {
             0x00 => {
-                let pvd_en = value & 0x10;
                 self.cr = (self.cr & 0xE000) | (value & 0x1FFF);
-                if pvd_en != 0 && value & 0x0F != 0 {
+                if value & 0x10 != 0 && value & 0x0F != 0 && value & !0x1F == 0 {
                     self.csr |= 1 << 1;
-                } else {
-                    self.csr &= !(1 << 1);
                 }
             }
             0x04 => {

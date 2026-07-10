@@ -126,10 +126,6 @@ impl Nvic {
 impl Peripheral for Nvic {
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         match offset {
-            0x004 => {
-                let intlines = ((IRQ_COUNT + 31) / 32 - 1) as u32;
-                intlines << 4
-            }
             0x00..=0x1C if offset < 4 * REG_WORDS as u32 => {
                 let i = (offset / 4) as usize;
                 self.enable[i]
@@ -143,10 +139,12 @@ impl Peripheral for Nvic {
                 self.pending_reg[i]
             }
             0x200..=0x21C if offset < 0x200 + 4 * REG_WORDS as u32 => {
+                // IABR - Active Bit Register
                 let i = ((offset - 0x200) / 4) as usize;
-                self.pending_reg[i]
+                self.active[i]
             }
             0x280..=0x29C if offset < 0x280 + 4 * REG_WORDS as u32 => {
+                // IABR alternate alias
                 let i = ((offset - 0x280) / 4) as usize;
                 self.active[i]
             }
@@ -178,25 +176,30 @@ impl Peripheral for Nvic {
                 let i = ((offset - 0x80) / 4) as usize;
                 self.enable[i] &= !value;
             }
-            0x100..=0x11C if offset < 0x100 + 4 * REG_WORDS as u32 => {
+             0x100..=0x11C if offset < 0x100 + 4 * REG_WORDS as u32 => {
+                // ISPR - Set Pending Register
                 let i = ((offset - 0x100) / 4) as usize;
+                let new_pending = value & !self.pending_reg[i];
+                self.pending_reg[i] |= value;
+                for b in 0..32 {
+                    if new_pending & (1 << b) != 0 {
+                        self.pending |= 1u128 << (IRQ_OFFSET as u32 + i as u32 * 32 + b) as u128;
+                    }
+                }
+            }
+            0x180..=0x19C if offset < 0x180 + 4 * REG_WORDS as u32 => {
+                // ICPR - Clear Pending Register
+                let i = ((offset - 0x180) / 4) as usize;
                 let cleared = self.pending_reg[i] & value;
                 self.pending_reg[i] &= !value;
                 for b in 0..32 {
                     if cleared & (1 << b) != 0 {
-                        self.pending &= !(1u128 << (i * 32 + b));
+                        self.pending &= !(1u128 << (IRQ_OFFSET as u32 + i as u32 * 32 + b) as u128);
                     }
                 }
             }
             0x200..=0x21C if offset < 0x200 + 4 * REG_WORDS as u32 => {
-                let i = ((offset - 0x200) / 4) as usize;
-                let new_pending = value & !self.pending_reg[i];
-                self.pending_reg[i] |= value;
-                for b in 0..32 {
-                    if new_pending & (1 << b) != 0 && self.enable[i] & (1 << b) != 0 {
-                        self.pending |= 1u128 << (i * 32 + b);
-                    }
-                }
+                // IABR - Active Bit Register (read-only by software writes)
             }
             0x300..=0x4EF => {
                 let byte_idx = (offset - 0x300) as usize;

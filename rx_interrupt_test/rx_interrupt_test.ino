@@ -1,4 +1,5 @@
 #define RCC_AHB1ENR (*(volatile unsigned int *)0x40023830)
+#define RCC_AHB2ENR (*(volatile unsigned int *)0x40023834)
 #define RCC_APB1ENR (*(volatile unsigned int *)0x40023840)
 #define RCC_APB2ENR (*(volatile unsigned int *)0x40023844)
 
