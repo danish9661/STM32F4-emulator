@@ -52,6 +52,7 @@ pub trait Peripheral {
     fn read(&mut self, sys: &System, offset: u32) -> u32;
     fn write(&mut self, sys: &System, offset: u32, value: u32);
     fn tick(&mut self, _sys: &System) {}
+    fn rx_byte(&mut self, _sys: &System, _byte: u8) {}
 }
 
 pub struct PeripheralSlot<T> {
@@ -376,6 +377,13 @@ impl Peripherals {
         } else if Self::NVIC_REGS_BASE <= addr && addr < Self::NVIC_REGS_END {
             self.nvic.borrow_mut().write(sys, addr - Self::NVIC_REGS_BASE, value);
         }
+    }
+
+    pub fn rx_byte(&self, sys: &System, addr: u32, byte: u8) -> bool {
+        if let Some(p) = Self::get_peripheral(&self.peripherals, addr) {
+            p.peripheral.borrow_mut().rx_byte(sys, byte);
+            true
+        } else { false }
     }
 
     pub fn addr_desc(&self, addr: u32) -> String {

@@ -10,7 +10,7 @@ impl Default for Pwr {
     fn default() -> Self {
         Self {
             cr: 0x0000_0000,
-            csr: 0x0000_0800,
+            csr: 0x0000_0000,
         }
     }
 }

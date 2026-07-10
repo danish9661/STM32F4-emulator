@@ -95,6 +95,13 @@ pub fn is_watchdog_reset_requested() -> bool {
     system::is_watchdog_reset_requested()
 }
 
+/// Inject a received byte into the UART at the given peripheral base address.
+/// Returns true if a peripheral was found at that address.
+#[wasm_bindgen]
+pub fn uart_rx_byte(addr: u32, byte: u8) -> bool {
+    sys().p.rx_byte(&*sys(), addr, byte)
+}
+
 /// Collect UART output since last call.
 #[wasm_bindgen]
 pub fn get_uart_output() -> String {

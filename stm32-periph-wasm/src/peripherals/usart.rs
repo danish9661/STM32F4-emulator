@@ -27,6 +27,7 @@ pub struct Usart {
     cr3: u32,
     gtp: u32,
     tx_data: Vec<u8>,
+    rx_buf: Vec<u8>,
     irq_num: i32,
 }
 
@@ -37,6 +38,7 @@ impl Usart {
                 sr: 0x00C0,
                 dr: 0, brr: 0, cr1: 0, cr2: 0, cr3: 0, gtp: 0,
                 tx_data: Vec::new(),
+                rx_buf: Vec::new(),
                 irq_num: irq,
             }) as Box<dyn Peripheral>
         })
@@ -44,7 +46,7 @@ impl Usart {
 
     fn update_interrupt(&mut self, sys: &System) {
         let mut pending = false;
-        if self.cr1 & (1 << 5) != 0 && self.sr & (1 << 6) != 0 { pending = true; } // TCIE + TC
+        if self.cr1 & (1 << 6) != 0 && self.sr & (1 << 6) != 0 { pending = true; } // TCIE + TC
         if self.cr1 & (1 << 7) != 0 && self.sr & (1 << 7) != 0 { pending = true; } // TXEIE + TXE
         if self.cr1 & (1 << 5) != 0 && self.sr & (1 << 5) != 0 { pending = true; } // RXNEIE + RXNE
         if pending {
@@ -59,19 +61,24 @@ impl Usart {
     }
 
     fn read_dr(&mut self) -> u32 {
-        let dr = self.dr;
-        self.sr &= !(1 << 5); // Clear RXNE
+        let dr = if !self.rx_buf.is_empty() {
+            self.rx_buf.remove(0) as u32
+        } else {
+            self.dr
+        };
+        if self.rx_buf.is_empty() {
+            self.sr &= !(1 << 5); // Clear RXNE only when buffer empty
+        }
         self.sr |= 0x00C0; // TXE, TC
         dr
     }
 
     fn write_dr(&mut self, value: u32, sys: &System) {
-        self.dr = value & 0xFF;
-        let ch = self.dr as u8;
+        let ch = (value & 0xFF) as u8;
         self.tx_data.push(ch);
         get_uart_output().lock().unwrap().push(ch as char);
         self.sr |= 0x00C0; // TXE=1, TC=1
-        self.sr &= !(1 << 5); // RXNE=0
+        self.update_interrupt(sys);
     }
 }
 
@@ -103,5 +110,16 @@ impl Peripheral for Usart {
             0x18 => self.gtp = value,
             _ => {}
         }
+    }
+
+    fn rx_byte(&mut self, sys: &System, byte: u8) {
+        if self.rx_buf.len() < 16 {
+            self.rx_buf.push(byte);
+            self.sr |= 1 << 5; // RXNE
+        } else {
+            self.sr |= 1 << 3; // ORE
+        }
+        self.sr |= 0x00C0; // TXE, TC
+        self.update_interrupt(sys);
     }
 }

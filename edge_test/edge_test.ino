@@ -218,8 +218,8 @@ void setup() {
     int uif_timeout = 100000;
     while (!(TIM_SR & 1) && uif_timeout-- > 0);
     CHECK(uif_timeout > 0, "TIM UIF set on overflow");
-    TIM_SR = 1;
-    CHECK((TIM_SR & 1) == 0, "TIM UIF cleared by write");
+    TIM_SR = 0;
+    CHECK((TIM_SR & 1) == 0, "TIM UIF cleared by write 0");
 
     // ===== I2C =====
     tx_s("--- I2C ---\n");

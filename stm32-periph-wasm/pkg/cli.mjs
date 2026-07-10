@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import { initSync, periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output } from './stm32_periph_wasm.js';
+import { periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte } from './stm32_periph_wasm.js';
 
 async function getMUnicorn() {
     const { createRequire } = await import('module');
@@ -12,9 +12,10 @@ async function main() {
     const firmwarePath = args[0] || process.env.FIRMWARE;
     const maxInst = parseInt(args[1] || process.env.MAX_INST || '1000000', 10);
     const showRegs = args.includes('--regs') || process.env.SHOW_REGS === '1';
+    const uartAddr = parseInt(args.find(a => a.startsWith('--uart='))?.split('=')[1] || process.env.UART_ADDR || '0x40011000', 16);
 
     if (!firmwarePath) {
-        console.error('Usage: node cli.mjs <firmware.bin> [max_instructions] [--regs]');
+        console.error('Usage: node cli.mjs <firmware.bin> [max_instructions] [--regs] [--uart=0x40011000]');
         console.error('  or set FIRMWARE env var');
         process.exit(1);
     }
@@ -43,9 +44,6 @@ async function main() {
         add_spi_flash("SPI3", 0xef4016, data, null);
         console.log(`Loaded ext device: ${spiFlashPath} (${data.length} bytes)`);
     } catch (_) {}
-    const wasmPath = new URL('stm32_periph_wasm_bg.wasm', import.meta.url);
-    const wasmBytes = readFileSync(wasmPath);
-    initSync(wasmBytes);
     const svdPath = new URL('../../monox/stm32f407.svd', import.meta.url);
     const svdXml = readFileSync(svdPath, 'utf8');
     init_svd(svdXml);
@@ -107,7 +105,7 @@ async function main() {
 
     let instCount = 0n;
     let stopRequested = false;
-    const tickInterval = 1000;
+    const tickInterval = 100000;
 
     const codeHook = (handle, address, size, user_data) => {
         instCount++;
@@ -128,6 +126,13 @@ async function main() {
         }
     };
     uc.hook_add(Module.HOOK_CODE, codeHook, null);
+
+    // Stdin -> UART RX
+    const stdinQueue = [];
+    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+    process.stdin.on('data', (chunk) => { for (const b of chunk) stdinQueue.push(b); });
+    process.stdin.resume();
+    if (process.stdin.isTTY) process.on('SIGINT', () => { process.stdin.setRawMode(false); process.exit(0); });
 
     const intrHook = (handle, intno, user_data) => {
         if (intno === 8) {
@@ -198,7 +203,7 @@ async function main() {
     const processInterrupts = () => {
         while (!stopRequested) {
             const irq = get_next_pending_interrupt();
-            if (irq < 0) break;
+            if (irq <= -100) break;
             const sp = uc.reg_read_i32(Module.ARM_REG_SP);
             const pc = uc.reg_read_i32(Module.ARM_REG_PC);
             const lr = uc.reg_read_i32(Module.ARM_REG_LR);
@@ -250,6 +255,8 @@ async function main() {
     const startTime = Date.now();
 
     while (!stopRequested) {
+        while (stdinQueue.length > 0) uart_rx_byte(uartAddr, stdinQueue.shift());
+
         processDma();
         const curPc = uc.reg_read_i32(Module.ARM_REG_PC);
         try {
@@ -269,7 +276,8 @@ async function main() {
         totalSteps++;
 
         if (stopRequested || is_watchdog_reset_requested()) break;
-        if (totalSteps * maxBatch >= maxInst) break;
+        if (instCount >= BigInt(maxInst)) break;
+        await new Promise(r => setImmediate(r));
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -280,6 +288,8 @@ async function main() {
     if (uartOut) {
         console.log(`\n=== UART Output ===\n${uartOut}`);
     }
+
+    try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch (_) {}
 
     console.log(`\nDone: ${totalSteps} steps, ${instCount} instructions in ${elapsed}s`);
     console.log(`PC=0x${finalPc.toString(16)} SP=0x${finalSp.toString(16)}`);
@@ -302,3 +312,4 @@ main().catch(e => {
     console.error('Stack:', e.stack?.substring(0, 1000));
     process.exit(1);
 });
+
