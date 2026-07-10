@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs';
-import { periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte } from './stm32_periph_wasm.js';
+import { initSync, periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte } from './stm32_periph_wasm.js';
+initSync(readFileSync(new URL('stm32_periph_wasm_bg.wasm', import.meta.url)));
 
 async function getMUnicorn() {
     const { createRequire } = await import('module');
@@ -204,6 +205,7 @@ async function main() {
         while (!stopRequested) {
             const irq = get_next_pending_interrupt();
             if (irq <= -100) break;
+
             const sp = uc.reg_read_i32(Module.ARM_REG_SP);
             const pc = uc.reg_read_i32(Module.ARM_REG_PC);
             const lr = uc.reg_read_i32(Module.ARM_REG_LR);
@@ -234,9 +236,8 @@ async function main() {
                 // Handler likely crashed on bx lr (EXC_RETURN not supported)
                 // Pop the saved context to restore firmware state
             }
-            // After handler (or crash), restore context from stack
-            const savedSp = uc.reg_read_i32(Module.ARM_REG_SP);
-            const savedFrame = uc.mem_read(BigInt(savedSp), 32);
+            // After handler (or crash), restore context from where we saved it
+            const savedFrame = uc.mem_read(BigInt(sp - 32), 32);
             const savedSv = new DataView(savedFrame.buffer, savedFrame.byteOffset, savedFrame.byteLength);
             uc.reg_write_i32(Module.ARM_REG_R0, savedSv.getUint32(28, true));
             uc.reg_write_i32(Module.ARM_REG_R1, savedSv.getUint32(24, true));
@@ -245,7 +246,7 @@ async function main() {
             uc.reg_write_i32(Module.ARM_REG_R12, savedSv.getUint32(12, true));
             uc.reg_write_i32(Module.ARM_REG_LR, savedSv.getUint32(8, true));
             uc.reg_write_i32(Module.ARM_REG_PC, savedSv.getUint32(4, true) | 1);
-            uc.reg_write_i32(Module.ARM_REG_SP, savedSp + 32);
+            uc.reg_write_i32(Module.ARM_REG_SP, sp);
             processDma();
         }
     };

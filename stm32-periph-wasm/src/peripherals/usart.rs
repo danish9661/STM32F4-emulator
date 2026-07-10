@@ -6,9 +6,9 @@ const USART_IRQ_OFFSET: i32 = 37;
 
 fn usart_irq(name: &str) -> Option<i32> {
     match name {
-        "USART1" => Some(37),
-        "USART2" => Some(38),
-        "USART3" => Some(39),
+        "USART1" => Some(38),
+        "USART2" => Some(39),
+        "USART3" => Some(40),
         "UART4" => Some(52),
         "UART5" => Some(53),
         "USART6" => Some(71),
@@ -60,7 +60,7 @@ impl Usart {
         sr
     }
 
-    fn read_dr(&mut self) -> u32 {
+    fn read_dr(&mut self, sys: &System) -> u32 {
         let dr = if !self.rx_buf.is_empty() {
             self.rx_buf.remove(0) as u32
         } else {
@@ -70,6 +70,7 @@ impl Usart {
             self.sr &= !(1 << 5); // Clear RXNE only when buffer empty
         }
         self.sr |= 0x00C0; // TXE, TC
+        self.update_interrupt(sys);
         dr
     }
 
@@ -83,10 +84,10 @@ impl Usart {
 }
 
 impl Peripheral for Usart {
-    fn read(&mut self, _sys: &System, offset: u32) -> u32 {
+    fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => self.read_sr(),
-            0x04 => self.read_dr(),
+            0x04 => self.read_dr(sys),
             0x08 => self.brr,
             0x0C => self.cr1,
             0x10 => self.cr2,

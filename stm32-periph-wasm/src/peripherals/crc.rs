@@ -32,7 +32,7 @@ impl Peripheral for Crc {
         match offset {
             0x00 => self.dr = crc32_word(self.dr, value),
             0x04 => self.idr = value & 0xFF,
-            0x08 => { self.cr = value; if value & 1 != 0 { self.dr = 0xFFFF_FFFF; } }
+            0x08 => { self.cr = value & 0xFFFFFFFE; if value & 1 != 0 { self.dr = 0xFFFF_FFFF; } }
             _ => {}
         }
     }
