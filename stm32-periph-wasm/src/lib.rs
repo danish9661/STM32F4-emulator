@@ -102,6 +102,48 @@ pub fn uart_rx_byte(addr: u32, byte: u8) -> bool {
     sys().p.rx_byte(&*sys(), addr, byte)
 }
 
+/// Check if an Ethernet TX poll is pending (firmware wants to send a packet).
+#[wasm_bindgen]
+pub fn eth_is_tx_poll() -> bool { system::eth_is_tx_poll() }
+
+/// Get the TX descriptor list address for the current poll.
+#[wasm_bindgen]
+pub fn eth_get_tx_desc_addr() -> u32 { system::eth_get_tx_desc_addr() }
+
+/// Clear the TX poll flag (call after processing descriptors).
+#[wasm_bindgen]
+pub fn eth_clear_tx_poll() { system::eth_clear_tx_poll(); }
+
+/// Check if an Ethernet RX poll is pending (firmware wants to receive a packet).
+#[wasm_bindgen]
+pub fn eth_is_rx_poll() -> bool { system::eth_is_rx_poll() }
+
+/// Get the RX descriptor list address for the current poll.
+#[wasm_bindgen]
+pub fn eth_get_rx_desc_addr() -> u32 { system::eth_get_rx_desc_addr() }
+
+/// Clear the RX poll flag (call after processing descriptors).
+#[wasm_bindgen]
+pub fn eth_clear_rx_poll() { system::eth_clear_rx_poll(); }
+
+/// Signal to the peripheral that TX descriptor processing is complete.
+/// Call this after walking TX descriptors and sending the packet.
+#[wasm_bindgen]
+pub fn eth_tx_done() { system::eth_set_done(1); }
+
+/// Signal to the peripheral that RX descriptor processing is complete.
+/// Call this after writing received data into RX buffers.
+#[wasm_bindgen]
+pub fn eth_rx_done() { system::eth_set_done(2); }
+
+/// Re-arm the RX poll flag from JS (used when more packets are pending in gwRxQueue).
+#[wasm_bindgen]
+pub fn eth_signal_rx_poll(desc_addr: u32) { system::eth_signal_rx_poll(desc_addr); }
+
+/// Re-arm the TX poll flag from JS (used when more TX descriptors are pending).
+#[wasm_bindgen]
+pub fn eth_signal_tx_poll(desc_addr: u32) { system::eth_signal_tx_poll(desc_addr); }
+
 /// Collect UART output since last call.
 #[wasm_bindgen]
 pub fn get_uart_output() -> String {

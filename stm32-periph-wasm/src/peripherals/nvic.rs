@@ -54,6 +54,7 @@ impl Nvic {
         } else if let Some((idx, mask)) = Self::irq_reg_idx(irq) {
             self.pending |= 1u128 << (IRQ_OFFSET + irq);
             self.pending_reg[idx] |= mask;
+            self.enable[idx] |= mask;
         }
     }
 
@@ -136,6 +137,10 @@ impl Peripheral for Nvic {
             }
             0x100..=0x11C if offset < 0x100 + 4 * REG_WORDS as u32 => {
                 let i = ((offset - 0x100) / 4) as usize;
+                self.pending_reg[i]
+            }
+            0x180..=0x19C if offset < 0x180 + 4 * REG_WORDS as u32 => {
+                let i = ((offset - 0x180) / 4) as usize;
                 self.pending_reg[i]
             }
             0x200..=0x21C if offset < 0x200 + 4 * REG_WORDS as u32 => {

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, AtomicBool, AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -30,6 +30,26 @@ pub fn get_software_spi_configs() -> &'static Mutex<Vec<(String, Option<String>,
 }
 pub fn is_watchdog_reset_requested() -> bool { WATCHDOG_RESET.swap(false, Ordering::Acquire) }
 pub fn request_watchdog_reset() { WATCHDOG_RESET.store(true, Ordering::Release); }
+
+// Ethernet MAC event flags
+static ETH_TX_POLL: AtomicBool = AtomicBool::new(false);
+static ETH_RX_POLL: AtomicBool = AtomicBool::new(false);
+// 0=none, 1=TX done, 2=RX done, 3=both. Set by JS after descriptor processing.
+static ETH_DONE: AtomicU8 = AtomicU8::new(0);
+// TX/RX descriptor addresses captured when poll demand is written
+static ETH_TX_DESC_ADDR: AtomicU32 = AtomicU32::new(0);
+static ETH_RX_DESC_ADDR: AtomicU32 = AtomicU32::new(0);
+
+pub fn eth_signal_tx_poll(desc_addr: u32) { ETH_TX_POLL.store(true, Ordering::Release); ETH_TX_DESC_ADDR.store(desc_addr, Ordering::Release); }
+pub fn eth_signal_rx_poll(desc_addr: u32) { ETH_RX_POLL.store(true, Ordering::Release); ETH_RX_DESC_ADDR.store(desc_addr, Ordering::Release); }
+pub fn eth_is_tx_poll() -> bool { ETH_TX_POLL.load(Ordering::Acquire) }
+pub fn eth_clear_tx_poll() { ETH_TX_POLL.store(false, Ordering::Release); }
+pub fn eth_is_rx_poll() -> bool { ETH_RX_POLL.load(Ordering::Acquire) }
+pub fn eth_clear_rx_poll() { ETH_RX_POLL.store(false, Ordering::Release); }
+pub fn eth_get_tx_desc_addr() -> u32 { ETH_TX_DESC_ADDR.load(Ordering::Acquire) }
+pub fn eth_get_rx_desc_addr() -> u32 { ETH_RX_DESC_ADDR.load(Ordering::Acquire) }
+pub fn eth_set_done(flags: u8) { ETH_DONE.fetch_or(flags, Ordering::Release); }
+pub fn eth_take_done() -> u8 { ETH_DONE.swap(0, Ordering::Acquire) }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmaDir { Read, Write, MemCopy }

@@ -30,6 +30,7 @@ pub mod syscfg;
 pub mod dbgmcu;
 pub mod cryp;
 pub mod hash;
+pub mod eth;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -45,6 +46,7 @@ use syscfg::Syscfg;
 use dbgmcu::Dbgmcu;
 use cryp::Cryp;
 use hash::Hash;
+use eth::EthernetMac;
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
@@ -198,6 +200,7 @@ impl Peripherals {
                 .or_else(|| Cryp::new(name))
                 .or_else(|| Hash::new(name))
                 .or_else(|| Dbgmcu::new(name))
+                .or_else(|| EthernetMac::new(name))
             ;
 
             if let Some(peri) = peri {
@@ -244,6 +247,10 @@ impl Peripherals {
             (0x4002_1800, "GPIOG"), (0x4002_1C00, "GPIOH"), (0x4002_2000, "GPIOI"),
             (0x4002_3000, "CRC"),  (0x4002_3800, "RCC"),  (0x4002_3C00, "FLASH"),
             (0x4002_5800, "RNG"),  (0x4002_6400, "DMA2"),
+            (0x4002_8000, "Ethernet_MAC"),
+            (0x4002_8100, "Ethernet_MMC"),
+            (0x4002_8700, "Ethernet_PTP"),
+            (0x4002_9000, "Ethernet_DMA"),
             (0xE000_E000, "NVIC"), (0xE000_E010, "SysTick"), (0xE000_ED00, "SCB"),
             (0xE004_2000, "DBGMCU"),
         ];
@@ -286,6 +293,7 @@ impl Peripherals {
                 .or_else(|| Cryp::new(name))
                 .or_else(|| Hash::new(name))
                 .or_else(|| Dbgmcu::new(name))
+                .or_else(|| EthernetMac::new(name))
             ;
 
             if let Some(p) = p {

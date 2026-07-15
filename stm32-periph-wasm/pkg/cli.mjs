@@ -1,10 +1,11 @@
 import { readFileSync } from 'fs';
+import { spawn } from 'child_process';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const yaml = require('js-yaml');
 const path = require('path');
 import * as periph from './stm32_periph_wasm.js';
-const { periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte } = periph;
+const { periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte, eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll, eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done, eth_signal_rx_poll } = periph;
 
 const parseHex = (v) => typeof v === 'number' ? v : parseInt(v, 16);
 
@@ -20,6 +21,8 @@ async function main() {
     const posArgs = args.filter(a => !a.startsWith('--'));
     const maxInst = parseInt(posArgs[1] || process.env.MAX_INST || '1000000', 10);
     const showRegs = args.includes('--regs') || process.env.SHOW_REGS === '1';
+    const useGateway = (args.includes('--gateway') || args.includes('--connect')) || process.env.ETH_GATEWAY === '1';
+    const spawnGateway = args.includes('--gateway') && !args.includes('--connect');
     let uartAddr = parseInt(args.find(a => a.startsWith('--uart='))?.split('=')[1] || process.env.UART_ADDR || '0x40011000', 16);
 
     // Load and merge configs
@@ -206,6 +209,46 @@ async function main() {
     };
     uc.hook_add(Module.HOOK_CODE, codeHook, null);
 
+    // Gateway networking
+    let gwProcess = null;
+    let gwWs = null;
+    const gwRxQueue = [];
+    let gwConnected = false;
+    if (useGateway) {
+        try {
+            if (spawnGateway) {
+                const gwPath = 'C:\\Users\\Danish\\Documents\\openhw-local-gateway\\openhw-gw.exe';
+                gwProcess = spawn(gwPath, [], { stdio: 'pipe' });
+                gwProcess.stdout.on('data', d => process.stdout.write(d));
+                gwProcess.stderr.on('data', d => process.stderr.write(d));
+                gwProcess.on('error', e => console.warn('Gateway error:', e.message));
+                gwProcess.on('exit', c => console.log(`Gateway exited (code ${c})`));
+            }
+            gwWs = new WebSocket('ws://127.0.0.1:5099/api/network-gateway');
+            gwWs.binaryType = 'arraybuffer';
+            gwWs.onclose = () => { gwConnected = false; console.log('Gateway WebSocket disconnected'); };
+            gwWs.onerror = () => {};
+            gwWs.onmessage = (ev) => {
+                if (typeof ev.data === 'string') return;
+                let buf;
+                if (ArrayBuffer.isView(ev.data)) {
+                    buf = new Uint8Array(ev.data.buffer, ev.data.byteOffset, ev.data.byteLength);
+                } else if (ev.data instanceof ArrayBuffer) {
+                    buf = new Uint8Array(ev.data);
+                } else {
+                    return;
+                }
+                gwRxQueue.push(buf);
+            };
+            await new Promise((resolve) => {
+                const timeout = setTimeout(() => { if (!gwConnected) console.warn('WebSocket timeout'); resolve(); }, 5000);
+                gwWs.onopen = () => { clearTimeout(timeout); gwConnected = true; console.log('Gateway WebSocket connected'); resolve(); };
+            });
+        } catch (e) {
+            console.warn('Gateway startup failed:', e.message);
+        }
+    }
+
     // Stdin -> UART RX
     const stdinQueue = [];
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
@@ -229,6 +272,86 @@ async function main() {
         }
     };
     uc.hook_add(Module.HOOK_INTR, intrHook, null);
+
+    const processEth = (uc) => {
+        if (eth_is_tx_poll()) {
+            const ta = eth_get_tx_desc_addr();
+            const txDescAddr = eth_get_tx_desc_addr();
+            if (txDescAddr !== 0) {
+                let descAddr = txDescAddr;
+                const seen = new Set();
+                while (descAddr !== 0 && !seen.has(descAddr)) {
+                    seen.add(descAddr);
+                    const desc = uc.mem_read(BigInt(descAddr), 8);
+                    const dv = new DataView(desc.buffer, desc.byteOffset, desc.byteLength);
+                    const tdes0 = dv.getUint32(0, true);
+                    const tdes1 = dv.getUint32(4, true);
+                    if ((tdes0 & 0x80000000) === 0) break;
+                    const bufAddr = tdes1 & 0xFFFFFFFC;
+                    const bufSize = (tdes0 & 0x3FFF);
+                    if (bufAddr !== 0 && bufSize > 0 && bufSize <= 2000) {
+                        const pkt = new Uint8Array(uc.mem_read(BigInt(bufAddr), bufSize));
+                        if (gwConnected && gwWs?.readyState === WebSocket.OPEN) {
+                            gwWs.send(pkt);
+                        } else if (!useGateway) {
+                            console.log(`ETH TX ${bufSize} byte(s) from 0x${bufAddr.toString(16)}`);
+                        }
+                    }
+                    const ownClear = tdes0 & ~0x80000000;
+                    const status = ownClear | 0x20000000;
+                    const wb = new Uint8Array(4);
+                    new DataView(wb.buffer).setUint32(0, status, true);
+                    uc.mem_write(BigInt(descAddr), wb);
+                    if (tdes0 & (1 << 22)) descAddr = tdes1 & 0xFFFFFFFC;
+                    else descAddr = descAddr + 8;
+                }
+            }
+            eth_clear_tx_poll();
+            eth_tx_done();
+        }
+        if (eth_is_rx_poll()) {
+            const rxDescAddr = eth_get_rx_desc_addr();
+            let rxDelivered = 0;
+            if (rxDescAddr !== 0 && gwRxQueue.length > 0) {
+                let descAddr = rxDescAddr;
+                const seen = new Set();
+                let attempts = 0;
+                while (descAddr !== 0 && !seen.has(descAddr) && gwRxQueue.length > 0 && attempts < 1) {
+                    attempts++;
+                    seen.add(descAddr);
+                    let desc;
+                    try { desc = uc.mem_read(BigInt(descAddr), 8); } catch (e) { break; }
+                    const dv = new DataView(desc.buffer, desc.byteOffset, desc.byteLength);
+                    const rdes0 = dv.getUint32(0, true);
+                    if ((rdes0 & 0x80000000) === 0) break;
+                    const rdes1 = dv.getUint32(4, true);
+                    const bufAddr = rdes1 & 0xFFFFFFFC;
+                    const bufSize = (rdes0 & 0x3FFF);
+                    if (bufAddr !== 0 && bufSize >= 60) {
+                        const pkt = gwRxQueue.shift();
+                        const len = Math.min(pkt.length, bufSize);
+                        try { uc.mem_write(BigInt(bufAddr), new Uint8Array(pkt.buffer, pkt.byteOffset, len)); } catch (e) { break; }
+                        const rdes0_w = (1 << 28) | (1 << 27) | (len << 16);
+                        const wb = new Uint8Array(4);
+                        new DataView(wb.buffer).setUint32(0, rdes0_w, true);
+                        try { uc.mem_write(BigInt(descAddr), wb); } catch (e) { break; }
+                        rxDelivered = 1;
+                    }
+                    if (rdes1 & (1 << 29)) descAddr = rdes1 & 0xFFFFFFFC;
+                    else descAddr = descAddr + 8;
+                }
+            }
+            eth_clear_rx_poll();
+            if (rxDelivered) {
+                eth_rx_done();
+                // Re-arm RX poll if more packets pending so next iteration gets a separate IRQ
+                if (gwRxQueue.length > 0) {
+                    const rda = eth_get_rx_desc_addr();
+                    if (rda !== 0) eth_signal_rx_poll(rda);
+                }
+            }
+        }
+    };
 
     const processDma = () => {
         const count = dma_get_pending_count();
@@ -279,10 +402,14 @@ async function main() {
         }
     };
 
+    let lastUartLen = 0;
+    let uartStableCount = 0;
+
     const processInterrupts = () => {
         while (!stopRequested) {
             const irq = get_next_pending_interrupt();
             if (irq <= -100) break;
+            // console.log(`DEBUG: IRQ ${irq} at inst ${instCount}`);
 
             const savedAt = uc.reg_read_i32(Module.ARM_REG_SP);
             const pc = uc.reg_read_i32(Module.ARM_REG_PC);
@@ -325,6 +452,7 @@ async function main() {
             uc.reg_write_i32(Module.ARM_REG_PC, savedSv.getUint32(4, true) | 1);
             uc.reg_write_i32(Module.ARM_REG_SP, savedAt);
             processDma();
+            processEth(uc);
         }
     };
 
@@ -336,6 +464,8 @@ async function main() {
         while (stdinQueue.length > 0) uart_rx_byte(uartAddr, stdinQueue.shift());
 
         processDma();
+        processEth(uc);
+        tick();
         const curPc = uc.reg_read_i32(Module.ARM_REG_PC);
         try {
             uc.emu_start(BigInt(curPc | 1), 0n, 0n, maxBatch);
@@ -350,6 +480,8 @@ async function main() {
             }
         }
         processDma();
+        processEth(uc);
+        tick();
         processInterrupts();
         totalSteps++;
 
@@ -357,6 +489,9 @@ async function main() {
         if (instCount >= BigInt(maxInst)) break;
         await new Promise(r => setImmediate(r));
     }
+
+    if (gwWs) try { gwWs.close(); } catch (_) {}
+    if (gwProcess) try { gwProcess.kill(); } catch (_) {}
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
     const finalPc = uc.reg_read_i32(Module.ARM_REG_PC);
@@ -386,8 +521,7 @@ async function main() {
 }
 
 main().catch(e => {
-    console.error('Fatal:', e.name, e.message);
-    console.error('Stack:', e.stack?.substring(0, 1000));
+    console.error('Fatal:', typeof e, String(e));
     process.exit(1);
 });
 
