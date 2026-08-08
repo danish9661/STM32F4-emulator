@@ -1,264 +1,154 @@
-STM32 Emulator
-==============
+# STM32F4 Emulator
 
-This repo emulates an **STM32F407** microcontroller. In addition to the native
-SDL emulator described below, it ships a **headless WASM emulator** (Unicorn
-CPU + a Rust peripheral model compiled to WASM) that runs real Cortex-M4
-firmware in Node or in a browser tab, plus three sample network firmwares
-(`eth_http`, `eth_dhcp`, `eth_test`) and a demo web page. See
-[AGENTS.md](AGENTS.md) for the full architecture, build steps, and state.
+An STM32F407 microcontroller emulator that runs real Cortex-M4 firmware. It
+combines a **Unicorn CPU core** (QEMU-derived, compiled to WASM) with a
+**Rust peripheral model** (RCC, USART, GPIO, DMA, ETH, TIM, NVIC, ...) also
+compiled to WASM — so the whole machine runs headless in **Node.js or a
+browser tab**, with no SDL, no native deps, no hardware.
+
+It ships three real networking firmwares (`eth_http`, `eth_dhcp`, `eth_test`)
+that do DHCP + TCP + HTTP against a simulated (or a real gVisor-backed)
+network, a browser demo, and a publishable npm package.
+
+## Live demo
+
+The browser demo deploys to GitHub Pages:
+
+**https://danish9661.github.io/stm32F4-emulator/**
+
+It boots `eth_http` in your browser tab: live UART console, DHCP/TCP/HTTP
+packet viewer, instruction/round stats, and a panel to load your own `.bin`
+firmware (or pick a bundled one).
 
 ## Quickstart
 
 ```bash
-# 1) node E2E flow test (bundled firmware + simulated network)
-cd site && node test_flow.mjs          # asserts DHCP->TCP->HTTP completes
+# browser demo locally
+npm run serve                  # then open http://127.0.0.1:8123
 
-# 2) browser demo
-python3 -m http.server 8123 --directory site   # then open http://127.0.0.1:8123
-# auto-boots eth_http with a simulated network; also lets you load any .bin
+# node end-to-end flow test (boot -> DHCP -> TCP -> HTTP, 2 rounds)
+npm test                       # == node site/test_flow.mjs
 
-# 3) gateway-backed run (real gVisor stack, needs the Go gateway)
-cd stm32-periph-wasm/pkg && node cli.mjs ../../eth_http/eth_http.bin 10000000 \
+# gateway-backed run: firmware talks to a REAL network stack (gVisor)
+cd stm32-periph-wasm/pkg
+node cli.mjs ../../eth_http/eth_http.bin 10000000 \
   --gateway --config=../../eth_http/config.yaml
 # (requires an HTTP server at 127.0.0.1:8092; see AGENTS.md §10)
 ```
 
-## npm package
+## Use it as a library (npm package)
 
-`npm pack` produces `stm32f4-emulator` — the full emulator as a library
-(bundled WASM assets, SVD, firmware binaries):
+`npm pack` produces `stm32f4-emulator` — the full emulator as a library,
+with all WASM assets, the SVD register map, and the firmware binaries
+bundled:
 
 ```js
 import { createSTM32F407, createNetSim, FIRMWARES } from 'stm32f4-emulator';
 
-const netsim = createNetSim();
-const emu = await createSTM32F407({ firmware: FIRMWARES.eth_http.bytes, onTx: ... });
+const netsim = createNetSim();                        // canned DHCP/TCP/HTTP peer
+const emu = await createSTM32F407({
+    firmware: FIRMWARES.eth_http.bytes,               // any STM32F4 firmware blob
+    onTx: (frame) => {
+        for (const reply of netsim.onTx(frame)) emu.injectFrame(reply);
+    },
+});
 
 emu.step(100000);              // run up to 100k instructions
 const uart = emu.drainUart();  // collect UART output
 emu.injectFrame(packetBytes);  // inject an Ethernet frame
 ```
 
-Browser consumers import the ESM modules directly from the `site/` directory
-(`emulator.js` is import-free and universal; the vendor assets live in
-`site/vendor/`). Rebuild steps: `wasm-pack build --release --target web
---out-dir ../site/vendor` for the browser build (Node target goes to
-`stm32-periph-wasm/pkg`), and `node tools/make_firmware.mjs` to regenerate the
-embedded firmware binaries.
+See `site/test_flow.mjs` and the exports in `index.mjs` for the full API
+(`decodeFirmware`, `createEmulator`, `createNetSim` re-exports).
 
-The goal is to simulate 3D printers, but any sort of stm32 microcontroller firmware should work.
+## Firmwares
 
-The emulator is configured via a configuration file, see example
-[here](https://github.com/nviennot/stm32-emulator/blob/main/saturn/config.yaml).
+| Firmware | What it does | Success marker |
+|---|---|---|
+| `eth_http/` | DHCP + TCP client + HTTP GET + prints the response | `TCP connected`, `=== HTTP <len>b ===` |
+| `eth_dhcp/` | Loops DHCP Discover/Offer/Request/Ack | `DHCP SUCCESS` |
+| `eth_test/` | Raw ETH TX/RX self-test | `ETH Test: done` |
 
-In the following example, I show how to emulate the 3D printer of the Elegoo
-Saturn and Anycubic MonoX unmodified firmwares downloaded from the vendor website.
+All three are bare-metal (no RTOS), built with the Arduino core's
+arm-none-eabi-gcc, and driven purely through memory-mapped registers —
+the same firmware binaries run on the emulator and on real silicon.
 
-This emulator is done in the context of my work on [reverse engineering 3D
-printers](https://github.com/nviennot/reversing-mono4k) so I can write a Rust
-firmware for 3D printers, [Turbo Resin](https://github.com/nviennot/turbo-resin).
-
-## Table of content
-
-* [Emulating the Elegoo Saturn](#emulating-the-elegoo-saturn)
-* [Emulating the Anycubic Mono X](#emulating-the-anycubic-mono-x)
-* [Features](#emulator-features)
-* [Existing Work](#existing-work)
-
-
-## Emulating the Elegoo Saturn
-
-In the [configuration file](https://github.com/nviennot/stm32-emulator/blob/main/saturn/config.yaml),
-we provide an SVD file that provides all the peripheral register addresses for
-the STM32F407. We then configure various memory regions, framebuffers, and
-devices. We also patch two functions in the firmware just to speed things up as
-we don't need to wait for our devices to initialize.
-
-We also specify the firmware binary `saturn-v4.4.3-pj-v5.bin`, and that's the
-official binary downloaded from the Elegoo website.  The `ext-flash.bin` is the
-content of the external SPI flash dumped from the Saturn board itself (I cheated
-a bit here, I wish we could have just used the downloaded version, it wasn't
-working, and I was in a hurry).
-
-### Youtube demo (click on the image)
-
-[![Saturn](readme-assets/youtube-saturn.png)](https://www.youtube.com/watch?v=Uc8eq4JsJyM)
-
-### Try it out
+## Architecture
 
 ```
-$ git clone https://github.com/nviennot/stm32-emulator.git
-$ cd stm32-emulator/saturn
-$ cargo run --release -- config.yaml -v
+firmware .bin ──► Unicorn WASM CPU ──► memory hooks
+                          │
+                    periph_read/write ──► Rust peripheral model (WASM)
+                                          RCC USART GPIO DMA ETH TIM NVIC
+                          │
+                    UART out / ETH TX frames ──► driver (cli.mjs / site/emulator.js)
+                          │
+                    RX frames injected (netsim, or real gVisor gateway)
 ```
 
-### The output
+- **CPU**: Unicorn 2.1.4 compiled to WASM executes Thumb-2 code; every
+  read/write to a hooked MMIO range is routed into the Rust model, which
+  answers by writing the modeled register value back into guest memory.
+- **Peripherals**: a `wasm-bindgen` crate (`stm32-periph-wasm/`); registers
+  and bit fields come from the vendor SVD (`monox/stm32f407.svd`).
+- **Ethernet**: TX is captured from the DMA descriptors; RX frames are
+  injected into the RX ring and the firmware's `eth_irq_flag` (SRAM) drives
+  polling — no interrupts required. Optionally, a Go gateway
+  (`openhw-local-gateway/`) with a gVisor network stack makes the firmware
+  talk to a real network: `node cli.mjs <fw.bin> <inst> --gateway`.
+- **Browser build** (`site/`): same modules as ESM; `site/emulator.js` is an
+  import-free universal factory; `site/netsim.js` is a canned network peer.
 
-On the following we see some of the output.
-We can see how the firmware initialize the display for example. These are
-display commands we need to reproduce when implementing our own firmware.
-We can also see that it's emitting something on the UART.
-We also see its interaction with the SPI Flash.
-
-![Saturn trace](readme-assets/saturn-trace.png)
-
-We can also see that the firmware has issues. The init routines are messy from
-what I've seen in the decompilation. In the emulation, we can see NULL pointer
-exceptions, GPIO being re-configured multiple times.
-On the STM32, address 0 is actually mapped to the flash, and so the memory
-accesses in the first 4K don't actually fail, so failures of this nature go
-silent.
-
-![Saturn NULL](readme-assets/saturn-null.png)
-
-We can see how the GPIOs are getting configured:
-
-![Saturn GPIO](readme-assets/saturn-gpio.png)
-
-We can see how a specific peripheral gets initialized, like SPI2. That
-information is coming right off the SVD file.
-
-![Saturn SPI2](readme-assets/saturn-spi2.png)
-
-We can also do instruction tracing with `-vvvv`:
-
-![Saturn instructions](readme-assets/saturn-inst.png)
-
-Overall, the emulator is useful to understand what the firmware is doing without
-having the real printer on hand, which will be helpful in supporting additional
-printers for TurboResin.
-
-It would be fun to implement a GDB server provided by the emulator, this way we
-could use GDB to inspect the runtime, and even connect a decompiler like Ghirda
-or IDA Pro.
-
-## Emulating the Anycubic Mono X
-
-### Youtube demo (click on the image)
-
-[![MonoX](readme-assets/youtube-monox.png)](https://www.youtube.com/watch?v=VyB3ru0u4Go)
-
-### Try it out
+## Repository layout
 
 ```
-$ git clone https://github.com/nviennot/stm32-emulator.git
-$ cd stm32-emulator/monox
-$ cargo run --release -- config.yaml -v
+├── site/                    Browser demo + universal emulator factory
+│   ├── index.html, app.js   Demo UI (UART, packets, stats, fw loader)
+│   ├── emulator.js          Import-free emulator factory (Node + browser)
+│   ├── netsim.js            Canned DHCP/TCP/HTTP network peer
+│   ├── test_flow.mjs        Node E2E flow test (npm test)
+│   └── vendor/              Browser WASM build, SVD, Unicorn
+├── index.mjs, package.json  npm package entry (stm32f4-emulator)
+├── tools/make_firmware.mjs  Regenerates site/firmware.js from eth_*/.bin
+├── stm32-periph-wasm/       Rust peripheral model (WASM build + pkg/)
+├── eth_http/ eth_dhcp/ eth_test/   Sample network firmwares + configs
+├── openhw-local-gateway/    Go gateway (gVisor network stack)
+├── scripts/verify_ethernet.sh   Regression runner for all three firmwares
+├── src/, monox/, saturn/    Native SDL emulator (upstream heritage)
+└── AGENTS.md                Full architecture, build steps, runbook
 ```
 
----
+## Building from source
 
-## Emulator Features
+```bash
+# Rust peripheral model (Node target; browser target goes to site/vendor/)
+cd stm32-periph-wasm && wasm-pack build --release --target nodejs
 
-* The ARM instructions are emulated via Unicorn (a Qemu fork). We can register
-  hooks on memory read/write given memory range. This gives us a way to provide
-  implementations for all the internal peripherals as they are all accessible
-  via memory mapped registers. For example, writing `1` to the address `0x40020014`
-  means that the pin `PA0` should be driven to +3.3V.
-* There are a lot of registers, precisely 1537 of them for the STM32F407.
-  The emulator is configured via a [vendor provided SVD
-  file](https://github.com/stm32-rs/stm32-rs-mmaps). This way, we can easily
-  emulate many different STM32s without having to worry about peripheral
-  register addresses. The emulator also uses that to display traces of all
-  register accesses, useful for debugging the firmware.
-* The following internal peripherals are implemented, some just partially:
-  - Systick: Used by the firmware to schedule tasks, and perform long delays.
-    (short delays are typically done with empty `for` loops doing lots of
-    iterations).
-  - RCC: Clocks configuration. The firmware waits for the PLLs to be ready, so
-    we must give the illusion that some PLLs are ready.
-  - USART: Sometimes, the firmware emits debug messages (printf), we can collect
-    these messages on these devices and print it on stdout.
-  - SPI: SPI peripherals are connected to various external devices. For example,
-    both the Saturn and the Anycubic Mono X use the SPI interface for access
-    their on-board 16MB SPI flash.
-  - I2C: There's an EEPROM on board to store settings, like if the sound should
-    be on or off, or the chosen language.
-  - FSMC: Normally used for connecting external SDRAM chips, this is used for
-    connecting the display as this peripheral makes it easy to output data on
-    16 wires in parallel in a single instruction.
-  - GPIO: We want to see all the pin input/output configurations and monitor
-    all activity. That's a really important part of figuring out what the system
-    does.
-  - Software SPI: This is not a real internal peripheral. Sometimes, the
-    firmware implements its own bit-banging SPI algorithm by manipulating the
-    GPIO port directly  to communicate to various devices. For example, the
-    Saturn uses software SPI with the FPGA, and the Mono X uses software SPI to
-    communicate with its resistive touchscreen.
-  - DMA: The Saturn firmware uses DMA to send data to USART
-    peripherals at times. This means that instead of writing to the USART
-    data register one byte at a time, it instructs the DMA
-    engine to copy a memory region to the USART data register, byte after byte,
-    allowing the CPU to go do something else.
-  - NVIC a.k.a. the interrupt controller: The Unicorn engine does not handle
-    interrupts. We need it, as the Saturn OS uses PENDSV interrupts to perform
-    context switches between different execution threads. Here's what was
-    involved with implementing the interrupt controller. Here's how it works:
-    - After every single executed instruction, we check if there's a pending
-      interrupt that should be triggered.
-    - We push all the needed registers onto the stack. There's actually two
-      different stacks on the ARM CPU. The master stack and the process stack.
-      The one in use is indicated through the Control register. We must
-      also push floating point registers if they are enabled.
-    - Then we setup the LR register to a special value that will turn a regular
-      function return instruction into a return from interrupt instruction.
-      That special value encodes whether we are using the master or process
-      stack.
-    - Next, we setup the PC register to point to the correct interrupt vector
-      address configured via the vector table located at `0x08000000`.
-    - When the function returns, we read the LR register (modifiable by the
-      firmware to switch from the master stack to the process stack) to unwind
-      the interrupt stack correctly.
-* Next, we have external devices that can be plugged into internal devices like
-  USART, FSMC, I2C, software SPI, or directly on a specific GPIO pin. I have
-  implemented a few:
-  - SPI flash: Both the Saturn and Mono X use a SPI flash to store things like
-    fonts and graphics for the display. Reads happen at the same time as writes
-    (full-duplex), making the implementation a big streaming state machine.
-    There were challenging details such as supporting the SPI peripheral in both
-    8-bit and 16-bit mode, and having everything configurable via a config file.
-  - TFT display: This emulates an ILI9341 TFT display controller.
-    firmware can instruct commands like "The following data is the pixel data
-    to fill this (x1,y1,x2,y2) rectangle".  The pixel data can be configured to
-    go in two different framebuffers:
-    - A PNG file on disk, written after the emulation is stopped
-    - A live window showing in real time the content of the display. This is
-      implemented using the SDL2 library. I thought it would be a good idea
-      to use this one because it's used for video games and other performance
-      sensitive applications.
-  - Touch screen: This emulates an ADS7846 resistive touch screen. There's
-    various commands to handle, like MeasureX, MeasureY, MeasureZ (pressure),
-    which can be configured to be read in either 8 or 12 bits precision.
-    The Mono X relies on a separate GPIO pin to indicate when the display
-    detects a touch. Implementing this was important otherwise, it would ignore
-    the touch screen.
-  - LCD panel: We emulate the FPGA driving the LCD panel. It decodes and sends
-    the pixel data to a framebuffer similarly to the TFT display.
-* The emulated system is configurable through a yaml file. See example below.
-* Despite all the things we are doing, the emulator is reasonably fast. On my
-  laptop, the emulator is able to run on at around 50Mhz. That's 1/3 of the real
-  speed. That's much faster than the other emulators which are at least 10x
-  slower, if not more.
+# firmware (bare-metal Makefiles; toolchain from the Arduino core)
+TOOLCHAIN="$HOME/.arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/arm-none-eabi-" \
+  make -C eth_http          # also eth_dhcp, eth_test
 
-## Existing work
+# native SDL emulator (upstream heritage, not the headless path)
+cd stm32-emulator-main && cargo build --release
+```
 
-There's some existing work in the STM32 emulation space:
-* [Mini404](https://github.com/vintagepc/MINI404) emulates the Prusa Mini. Quite
-  a feat. See the project's hw/arm/prusa for the peripherals.
-* [Qiling](https://qiling.io/2022/04/14/intro/) emulates all kinds of devices,
-  including STM32s. It would be a good candidate, but wasn't fitting the bill
-  because 1) it's written in Python, and is very slow. 2) It doesn't support
-  what I really want which is tracing in registers that I care about.
-* [Renode](https://renode.io/): Emulate all sorts of devices, written in C#.
-  The configuration files are finicky, and it's overall pretty slow. I didn't
-  like it.
-* [Tinylabs' flexsoc-cm3](https://github.com/tinylabs/flexsoc_cm3): This is
-  Elliot's project to have the real stm32 peripherals to be accessible directly
-  to a host that is emulating a CPU. I haven't tried it, but it looks promising.
-* Use GDB and single step everything. That might be too slow.
+`wasm-pack` writes `site/vendor/.gitignore` containing `*` after a browser
+rebuild — delete it so the vendor assets stay tracked/committed.
 
-License
--------
+## Testing
 
-The code is released under the GPLv3
+- `npm test` — boot + DHCP + TCP + HTTP, asserts 2 clean rounds (exit 0 = PASS).
+- `scripts/verify_ethernet.sh [max_inst]` — runs all three firmwares through
+  the gateway, asserts the success markers and 0 `TCP fail`.
+- Soak-tested: 200M-instruction gateway runs with 1000+ consecutive TCP
+  rounds, 0 failures (details in AGENTS.md §10).
+
+## License
+
+GPL-3.0-only. See [LICENSE](LICENSE).
+
+*This repository is a fork/continuation of
+[nviennot/stm32-emulator](https://github.com/nviennot/stm32-emulator), which
+emulated 3D-printer firmwares (Elegoo Saturn, Anycubic Mono X) in a native
+SDL app. The WASM headless emulator, network firmwares, browser demo, and npm
+package are new work built on that base.*
