@@ -525,6 +525,33 @@ sensitive instruction. (Diagnosis used `DBG_FLAG=1` + `DBG_IRQF=1`:
 `[FLAG] wr 0x20000620 = 1 pc=0x80009bc` shows the ISR flag landing while
 `[IRQF] after-ISR r3=0x4 pc=0x-8` shows the machine left mid-abort.)
 
+### Throughput work (2026-08-08) — 1.0 → 1.25 MIPS, +48% rounds/s
+Measured on 20M-instruction `--connect` runs (eth_http, fresh gateway):
+
+| Config | Steps | Rounds | Wall | MIPS | rounds/s |
+|---|---|---|---|---|---|
+| Baseline (old cli.mjs) | ~2600 | 101 | ~20.0s | ~1.00 | 5.05 |
+| TICK_EVERY=1000 (no poll split) | 1939 | 67 | 11.05s | 1.81 | 6.06 |
+| TICK_EVERY=5000 (no poll split) | 2473 | 95 | 13.9–14.14s | 1.44 | 6.8 |
+| **POLL_EVERY=1000 + TICK_EVERY=5000 (final)** | **3061** | **118** | **15.8–16.0s** | **1.25** | **7.46** |
+
+Final config reproducible: 118 rounds, 0 TCP fail, 0 timeouts (two runs).
+
+Changes that produced it:
+- **`tick_n(delta)` export in Rust** (`src/lib.rs`): `INSTRUCTION_COUNT.fetch_add(delta)` + `sys().tick()`. Safe to batch because timers are instruction-count-delta driven (`elapsed_ticks = (now-last_tick)/prescaler`) and eth.rs consumes `eth_take_done()` atomics. WASM rebuilt with `wasm-pack build --release --target nodejs`.
+- **codeHook (cli.mjs)** does only `instCount++` per instruction plus the queue-stop, and batches the expensive WASM calls:
+  - every `TICK_EVERY=5000` inst: `tick_n(5000)`, watchdog check, `has_pending_interrupt()` → stop.
+  - every `POLL_EVERY=1000` inst: `dma_get_pending_count() > 0 || eth_is_tx_poll()` → stop.
+  - every instruction (cheap, all-JS): `gwRxQueue.length > 0 && eth_is_rx_poll()` → stop (prompt RX injection).
+- **smallBatch flip-back**: `smallBatch=true` on `!CONN` (round boundary, 1500-inst batches while the gateway restarts) flips back to `maxBatch=500000` when a UART chunk contains `Offer IP=` (DHCP re-established).
+- Removed the second main-loop `tick()` after processEth; removed unused `gwRestartWarned`.
+
+Two failures along the way (both avoided in the final design):
+1. **Unconditional queue-stop deadlock**: `if (gwRxQueue.length > 0) emu_stop()` froze the guest at 0x8000902 (recv-loop, 2 inst/step). Injection requires `eth_is_rx_poll()` armed (guest re-arms DMARPDR every 1024 loop iterations ≈ 9k inst at pc=0x800090c, `.ino` line 103), and processEth clears the poll at empty-queue boundaries — so a stop without the poll armed stalls forever. Queue-stop must AND `eth_is_rx_poll()`.
+2. **Sticky RX poll** (clear only on delivery, else re-signal): 1 round / 163.74s regression (stall at PC=0x8000954 after "RESPONSE:"). Reverted to clear-always.
+
+Gotchas: with `maxBatch=500000` and only-conditional stops, a dead/unreachable gateway (ws dial timeout, stale `WebSocket timeout` in the log) burns the whole budget in the DHCP wait with ~40-500k-inst batches and 0 rounds — always verify the gateway is listening (`ss -tlnp | grep <port>`) before trusting a 0-round result. The 95-round run from the intermediate config is NOT a code regression — it was a dead gateway.
+
 ### Changes committed with this port
 - `eth_http/eth_http.ino`: TCP src port now randomized per connect attempt
   (`49152 + ((tcp_attempt++*7) + port) % 2048`) — avoids stale-frame

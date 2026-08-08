@@ -46,6 +46,16 @@ pub fn tick() {
     sys().tick();
 }
 
+/// Same as tick() but accounts for `delta` instructions at once. Timer
+/// peripherals are instruction-count driven, so batching ticks with a
+/// delta is semantically identical to one tick per instruction.
+#[wasm_bindgen]
+pub fn tick_n(delta: u32) {
+    use std::sync::atomic::Ordering;
+    system::INSTRUCTION_COUNT.fetch_add(delta as u64, Ordering::Relaxed);
+    sys().tick();
+}
+
 /// Check if any interrupt is pending (non-consuming).
 #[wasm_bindgen]
 pub fn has_pending_interrupt() -> bool {

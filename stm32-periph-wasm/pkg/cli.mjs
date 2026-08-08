@@ -5,7 +5,7 @@ const require = createRequire(import.meta.url);
 const yaml = require('js-yaml');
 const path = require('path');
 import * as periph from './stm32_periph_wasm.js';
-const { periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte, eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll, eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done, eth_signal_rx_poll } = periph;
+const { periph_read, periph_write, tick, tick_n, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte, eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll, eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done, eth_signal_rx_poll } = periph;
 
 const parseHex = (v) => typeof v === 'number' ? v : parseInt(v, 16);
 
@@ -211,7 +211,10 @@ async function main() {
 
     let instCount = 0n;
     let stopRequested = false;
-    const tickInterval = 100000;
+    const TICK_EVERY = 5000;
+    const POLL_EVERY = 1000;
+    let tickAcc = 0;
+    let pollAcc = 0;
 
     const codeHook = (handle, address, size, user_data) => {
         instCount++;
@@ -223,19 +226,30 @@ async function main() {
                 }
             }
         }
-        tick();
-        if (is_watchdog_reset_requested()) {
-            stopRequested = true;
+        if (gwRxQueue.length > 0 && eth_is_rx_poll()) {
             uc.emu_stop();
             return;
         }
-        if (dma_get_pending_count() > 0) {
-            uc.emu_stop();
-            return;
-        }
-        if (instCount % BigInt(tickInterval) === 0n) {
+        tickAcc++;
+        if (tickAcc >= TICK_EVERY) {
+            tickAcc = 0;
+            tick_n(TICK_EVERY);
+            if (is_watchdog_reset_requested()) {
+                stopRequested = true;
+                uc.emu_stop();
+                return;
+            }
             if (has_pending_interrupt()) {
                 uc.emu_stop();
+                return;
+            }
+        }
+        pollAcc++;
+        if (pollAcc >= POLL_EVERY) {
+            pollAcc = 0;
+            if (dma_get_pending_count() > 0 || eth_is_tx_poll()) {
+                uc.emu_stop();
+                return;
             }
         }
     };
@@ -446,6 +460,7 @@ async function main() {
         if (eth_is_rx_poll()) {
             const rxDescAddr = eth_get_rx_desc_addr();
             let rxDelivered = 0;
+            if (process.env.DBG_RXP) console.log(`[RXP] rx_poll=true queue=${gwRxQueue.length} desc=0x${rxDescAddr.toString(16)} inst=${instCount}`);
             if (rxDescAddr !== 0 && gwRxQueue.length > 0) {
                 if (process.env.DBG_RX) console.log(`[RX] poll, queue=${gwRxQueue.length}, desc=0x${rxDescAddr.toString(16)}`);
                 let descAddr = rxDescAddr;
@@ -611,7 +626,7 @@ async function main() {
         }
     };
 
-    let maxBatch = 100000;
+    let maxBatch = 500000;
     let smallBatch = false;
     let totalSteps = 0;
     const startTime = Date.now();
@@ -624,6 +639,10 @@ async function main() {
             if (!smallBatch && uartChunk.includes('!CONN')) {
                 smallBatch = true;
                 console.log('[GW] round end detected, switching to small batches');
+            }
+            if (smallBatch && uartChunk.includes('Offer IP=')) {
+                smallBatch = false;
+                console.log('[GW] DHCP re-established, restoring large batches');
             }
         }
         while (stdinQueue.length > 0) uart_rx_byte(uartAddr, stdinQueue.shift());
@@ -646,7 +665,6 @@ async function main() {
         }
         processDma();
         processEth(uc);
-        tick();
         processInterrupts();
         totalSteps++;
         if (process.env.DBG_PC3) {
