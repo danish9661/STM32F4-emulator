@@ -452,6 +452,33 @@ fresh gateway. `DBG_TX=1` / `DBG_RX=1` env flags add TX/RX frame traces.
 Note: restart only works in `--gateway` mode (self-spawned); with
 `--connect` the stale-session round may still fail.
 
+### XPSR restore fix (2026-08-08) — TCP fail after ISR pump
+~1 round in ~2 failed at the ACK send with `TCP fail`, and `DBG_FLAG`
+showed the ISR correctly OR-ing `eth_irq_flag`=1, yet the guest never
+re-polled at 0x8001008. Root cause: `processInterrupts` (cli.mjs) saves
+r0-r3/r12/lr/pc/sp + XPSR into a 32-byte frame at `savedAt-32`, runs the
+guest `ETH_IRQHandler` (which aborts at the unsupported `bx lr`
+EXC_RETURN), then restores — but the restore **omitted XPSR**. The
+aborted ISR leaves its own condition flags; the guest resumes at
+`0x8001004: beq.w 0x8001306` (the TX countdown's "exhausted → TCP fail"
+branch) and that `beq` reads the stale Z flag from the ISR, jumping to
+the fail path even though the countdown r3 was still ~5M.
+
+Fix (cli.mjs):
+```js
+// Restore context from where we saved it (handlers may modify SP)
+const savedFrame = uc.mem_read(BigInt(savedAt - 32), 32);
+const savedSv = new DataView(savedFrame.buffer, savedFrame.byteOffset, savedFrame.byteLength);
+uc.reg_write_i32(Module.ARM_REG_XPSR, savedSv.getUint32(0, true));
+// ... then r0-r3, r12, lr, pc|1, sp
+```
+After the fix: 45 consecutive rounds with **0 TCP fail** (previously ~1
+per round). The pattern to remember: any restore of a saved guest
+context must include APSR/XPSR if the resume PC is a condition-code-
+sensitive instruction. (Diagnosis used `DBG_FLAG=1` + `DBG_IRQF=1`:
+`[FLAG] wr 0x20000620 = 1 pc=0x80009bc` shows the ISR flag landing while
+`[IRQF] after-ISR r3=0x4 pc=0x-8` shows the machine left mid-abort.)
+
 ### Changes committed with this port
 - `eth_http/eth_http.ino`: TCP src port now randomized per connect attempt
   (`49152 + ((tcp_attempt++*7) + port) % 2048`) — avoids stale-frame

@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { readFileSync, writeSync } from 'fs';
 import { spawn } from 'child_process';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -640,9 +640,10 @@ async function main() {
             const pc3 = uc.reg_read_i32(Module.ARM_REG_PC) & 0xFFFFFFFE;
             console.log(`[PC3] 0x${pc3.toString(16).padStart(8, '0')} n=${totalSteps} inst=${instCount}`);
         }
-        if (process.env.SOAK_STATS && totalSteps % 50000 === 0) {
+        if (process.env.SOAK_STATS && totalSteps % 2500 === 0) {
             const rssMB = (process.memoryUsage().rss / 1048576).toFixed(0);
-            console.log(`[SOAK] t=${((Date.now() - startTime) / 1000).toFixed(0)}s inst=${instCount} rxQ=${gwRxQueue.length} txQ=${gwTxPending.length} rounds=${gwRoundsSeen} rss=${rssMB}MB`);
+            const line = `[SOAK] t=${((Date.now() - startTime) / 1000).toFixed(0)}s inst=${instCount} rxQ=${gwRxQueue.length} txQ=${gwTxPending.length} rounds=${gwRoundsSeen} rss=${rssMB}MB\n`;
+            writeSync(1, line);
         }
 
         if (stopRequested || is_watchdog_reset_requested()) break;
