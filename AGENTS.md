@@ -481,6 +481,14 @@ by `globalVNMutex` (handleProxy reads it under RLock) to avoid a nil-deref
 race with the reset. Note: a stale gVisor stack is abandoned, not freed —
 idle goroutines linger until the gateway exits (acceptable for `--connect`).
 
+Connect-mode soak (2026-08-08, `SOAK_STATS=1`): two consecutive 100M-
+instruction `--connect` runs against the SAME gateway process
+(**1055 TCP rounds total**, 526 + 529 connected, **0 TCP fail, 0 SYN-ACK
+timeouts**, 525 RESETs logged in run 1's gateway session). RSS ~193MB at
+end of each run — the abandoned-stack leak stays bounded per run and does
+not accumulate across runs (each RESET nils globalVN, so memory resets
+with the room).
+
 Full 200M soak (2026-08-08, `SOAK_STATS=1`): 200,000,151 instructions in
 870.8 s, **1012 TCP connections, 0 TCP fail, 0 SYN-ACK timeouts**. RSS
 grew linearly 153→214 MB (~0.06 MB/round; not runaway, but not a
