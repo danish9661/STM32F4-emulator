@@ -177,12 +177,38 @@ async function main() {
     };
 
     const memWriteHook = (handle, type, address, size, value, user_data) => {
-        periph_write(Number(address), size, Number(value));
+        const a = Number(address);
+        if (process.env.DBG_DMA && (a === 0x40029004 || a === 0x40029018 || a === 0x40029010 || a === 0x40029014)) {
+            let pc = 0;
+            try { pc = uc.reg_read_i32(Module.ARM_REG_PC); } catch (_) {}
+            console.log(`[DMA] wr 0x${a.toString(16)} = 0x${(Number(value) >>> 0).toString(16)} pc=0x${(pc >>> 0).toString(16)}`);
+        }
+        if (process.env.DBG_DMA2 && a >= 0x40029000 && a <= 0x4002901c && (a & 3) === 0) {
+            let pc = 0;
+            try { pc = uc.reg_read_i32(Module.ARM_REG_PC); } catch (_) {}
+            console.log(`[DMA2] wr 0x${a.toString(16)} = 0x${(Number(value) >>> 0).toString(16)} pc=0x${(pc >>> 0).toString(16)}`);
+        }
+        periph_write(a, size, Number(value));
     };
 
     for (const [start, end] of periphRanges) {
         uc.hook_add(Module.HOOK_MEM_READ, memReadHook, null, start, end);
         uc.hook_add(Module.HOOK_MEM_WRITE, memWriteHook, null, start, end);
+    }
+
+    if (process.env.DBG_FLAG) {
+        let prevFlag = -1;
+        const flagHook = (handle, type, address, size, value, user_data) => {
+            const a = Number(address);
+            if (a >= 0x20000618 && a < 0x20000628) {
+                const pc = (uc.reg_read_i32(Module.ARM_REG_PC) >>> 0).toString(16);
+                const val = (Number(value) >>> 0).toString(2).padStart(32, '0');
+                console.log(`[FLAG] ${type === 2 ? 'WR' : 'rd'} 0x${a.toString(16)} = ${val} pc=0x${pc}`);
+                prevFlag = Number(value);
+            }
+        };
+        uc.hook_add(Module.HOOK_MEM_READ, flagHook, null, 0x20000600n, 0x20000640n);
+        uc.hook_add(Module.HOOK_MEM_WRITE, flagHook, null, 0x20000600n, 0x20000640n);
     }
 
     let instCount = 0n;
@@ -191,6 +217,14 @@ async function main() {
 
     const codeHook = (handle, address, size, user_data) => {
         instCount++;
+        if (process.env.DBG_PC) {
+            const a = Number(address) & 0xFFFFFFFE;
+            if ((a >= 0x8001080 && a <= 0x8001110)) {
+                if (a === 0x8001080 || a === 0x8001088 || a === 0x800108c || a === 0x8001098 || a === 0x8001092 || a === 0x80010b6 || a === 0x80010f8 || a === 0x8001100) {
+                    console.log(`[PC] 0x${a.toString(16)} inst=${instCount}`);
+                }
+            }
+        }
         tick();
         if (is_watchdog_reset_requested()) {
             stopRequested = true;
@@ -212,6 +246,7 @@ async function main() {
     // Gateway networking
     let gwProcess = null;
     let gwWs = null;
+    let gwDialSeq = 0;
     const gwRxQueue = [];
     const gwTxPending = [];
     let gwConnected = false;
@@ -220,9 +255,12 @@ async function main() {
     const connectGateway = () => new Promise((resolve) => {
         let ws;
         let timedOut = false;
+        gwDialSeq++;
+        if (process.env.DBG_GW) console.log(`[GW] dial #${gwDialSeq} at ${Date.now()}`);
         try { ws = new WebSocket('ws://127.0.0.1:5099/api/network-gateway'); }
         catch (e) { resolve(null); return; }
         ws.binaryType = 'arraybuffer';
+        ws.onclose = (ev) => { if (process.env.DBG_GW) console.log(`[GW] dial #${gwDialSeq} closed code=${ev.code}`); };
         const to = setTimeout(() => { timedOut = true; try { ws.close(); } catch (_) {} resolve(null); }, 4000);
         ws.onerror = () => { clearTimeout(to); resolve(null); };
         ws.onopen = () => {
@@ -240,6 +278,11 @@ async function main() {
                 }
                 gwRxQueue.push(buf);
                 if (process.env.DBG_RX) console.log(`[RX] ws msg ${buf.length}B, queue=${gwRxQueue.length}`);
+                if (process.env.DBG_PC2 && typeof uc !== 'undefined') {
+                    let pcr = 0;
+                    try { pcr = uc.reg_read_i32(Module.ARM_REG_PC); } catch (_) {}
+                    console.log(`[GWF] guest PC=0x${(pcr >>> 0).toString(16)} rxQ=${gwRxQueue.length}`);
+                }
             };
             ws.onclose = () => { if (gwWs === ws) { gwConnected = false; console.log('Gateway WebSocket disconnected'); } };
             gwWs = ws;
@@ -275,6 +318,15 @@ async function main() {
         }
     };
 
+    // A DHCP reply is the only stateless frame worth keeping across a gateway
+    // restart: Ethernet(14) | IPv4 | UDP dst port 68.
+    const isDhcpReply = (buf) => {
+        if (buf.length < 42) return false;
+        if (buf[12] !== 0x08 || buf[13] !== 0x00) return false;
+        if (buf[23] !== 17) return false;
+        return buf[36] === 0 && buf[37] === 68;
+    };
+
     const restartGateway = async () => {
         if (!spawnGateway) return;
         gwRestarts++;
@@ -282,6 +334,11 @@ async function main() {
         if (gwWs) try { gwWs.close(); } catch (_) {}
         gwWs = null;
         gwConnected = false;
+        // Drop stale TCP frames from the dying session; keep only DHCP replies
+        // (the firmware's next-round handshake must not see old-session data).
+        for (let i = gwRxQueue.length - 1; i >= 0; i--) {
+            if (!isDhcpReply(gwRxQueue[i])) gwRxQueue.splice(i, 1);
+        }
         if (gwProcess) {
             const old = gwProcess;
             try { old.kill(); } catch (_) {}
@@ -336,6 +393,7 @@ async function main() {
         if (eth_is_tx_poll()) {
             const ta = eth_get_tx_desc_addr();
             const txDescAddr = eth_get_tx_desc_addr();
+            if (process.env.DBG_TX) console.log(`[TX!] poll desc=0x${txDescAddr.toString(16)}`);
             if (txDescAddr !== 0) {
                 let descAddr = txDescAddr;
                 const seen = new Set();
@@ -478,6 +536,7 @@ async function main() {
         while (!stopRequested) {
             const irq = get_next_pending_interrupt();
             if (irq <= -100) break;
+            if (process.env.DBG_IRQ && (irq === 58 || irq === 61)) console.log(`[IRQ] ETH handler`);
             // console.log(`DEBUG: IRQ ${irq} at inst ${instCount}`);
 
             const savedAt = uc.reg_read_i32(Module.ARM_REG_SP);
@@ -504,14 +563,28 @@ async function main() {
             const handler_pc = read32(vector_table + 4 * (16 + irq));
             uc.reg_write_i32(Module.ARM_REG_LR, 0xFFFFFFF9);
             uc.reg_write_i32(Module.ARM_REG_PC, handler_pc);
+            if (process.env.DBG_IRQF) {
+                console.log(`[IRQF] irq=${irq} savedPC=0x${(pc & 0xFFFFFFFE).toString(16)} SP=0x${savedAt.toString(16)} r0=0x${r0.toString(16)} r1=0x${r1.toString(16)} r2=0x${r2.toString(16)} r3=0x${r3.toString(16)}`);
+            }
             try {
                 uc.emu_start(BigInt(handler_pc), 0n, 0n, 100000);
             } catch (e) {
+                if (process.env.DBG_IRQF) console.log(`[IRQF!] ISR aborted: ${String(e).slice(0, 60)}`);
                 // Handler crashed on BX LR (EXC_RETURN not supported)
+            }
+            const restoredR3 = uc.reg_read_i32(Module.ARM_REG_R3);
+            const restoredPC = uc.reg_read_i32(Module.ARM_REG_PC) & 0xFFFFFFFE;
+            if (process.env.DBG_IRQF) {
+                console.log(`[IRQF] after-ISR r3=0x${(restoredR3 >>> 0).toString(16)} pc=0x${restoredPC.toString(16)}`);
+            }
+            if (process.env.DBG_IRQSR) {
+                const hp = has_pending_interrupt();
+                console.log(`[IRQSR] has_pending_after_ISR: ${hp}`);
             }
             // Restore context from where we saved it (handlers may modify SP)
             const savedFrame = uc.mem_read(BigInt(savedAt - 32), 32);
             const savedSv = new DataView(savedFrame.buffer, savedFrame.byteOffset, savedFrame.byteLength);
+            uc.reg_write_i32(Module.ARM_REG_XPSR, savedSv.getUint32(0, true));
             uc.reg_write_i32(Module.ARM_REG_R0, savedSv.getUint32(28, true));
             uc.reg_write_i32(Module.ARM_REG_R1, savedSv.getUint32(24, true));
             uc.reg_write_i32(Module.ARM_REG_R2, savedSv.getUint32(20, true));
@@ -563,6 +636,14 @@ async function main() {
         tick();
         processInterrupts();
         totalSteps++;
+        if (process.env.DBG_PC3) {
+            const pc3 = uc.reg_read_i32(Module.ARM_REG_PC) & 0xFFFFFFFE;
+            console.log(`[PC3] 0x${pc3.toString(16).padStart(8, '0')} n=${totalSteps} inst=${instCount}`);
+        }
+        if (process.env.SOAK_STATS && totalSteps % 50000 === 0) {
+            const rssMB = (process.memoryUsage().rss / 1048576).toFixed(0);
+            console.log(`[SOAK] t=${((Date.now() - startTime) / 1000).toFixed(0)}s inst=${instCount} rxQ=${gwRxQueue.length} txQ=${gwTxPending.length} rounds=${gwRoundsSeen} rss=${rssMB}MB`);
+        }
 
         if (stopRequested || is_watchdog_reset_requested()) break;
         if (instCount >= BigInt(maxInst)) break;
