@@ -452,6 +452,15 @@ fresh gateway. `DBG_TX=1` / `DBG_RX=1` env flags add TX/RX frame traces.
 Note: restart only works in `--gateway` mode (self-spawned); with
 `--connect` the stale-session round may still fail.
 
+Full 200M soak (2026-08-08, `SOAK_STATS=1`): 200,000,151 instructions in
+870.8 s, **1012 TCP connections, 0 TCP fail, 0 SYN-ACK timeouts**. RSS
+grew linearly 153→214 MB (~0.06 MB/round; not runaway, but not a
+plateau — ~4 MB/min if a future run needs memory hygiene). First fully
+completed 200M run; earlier 320 s/250 s `timeout` attempts were killed
+mid-run, which is why soaks were incomplete before. Run command:
+`SOAK_STATS=1 node cli.mjs ../eth_http/eth_http.bin 200000000 --gateway --config=../../eth_http/config.yaml`
+(~14.5 min wall time; budget 20 min in the shell).
+
 ### XPSR restore fix (2026-08-08) — TCP fail after ISR pump
 ~1 round in ~2 failed at the ACK send with `TCP fail`, and `DBG_FLAG`
 showed the ISR correctly OR-ing `eth_irq_flag`=1, yet the guest never
