@@ -8,10 +8,6 @@ extern "C" {
     fn error(s: &str);
 }
 
-fn gdbg(s: &str) {
-    error(s);
-}
-
 // Interrupt bits for DMASR
 const DMA_TS:  u32 = 1 << 0;  // Transmit status
 const DMA_TPSS: u32 = 1 << 1; // Transmit process stopped
@@ -264,18 +260,13 @@ impl Peripheral for EthernetMac {
                 0x04 => {
                     self.dmatpdr = value;
                     if self.tx_enabled {
-                        gdbg(&format!("ETHDBG txpoll dlar=0x{:08x} pdr={}", self.dmatdlar, value));
                         system::eth_signal_tx_poll(self.dmatdlar);
-                    } else {
-                        gdbg("ETHDBG tx DROPPED (tx_enabled=0)");
                     }
                 }
                 0x08 => {
                     self.dmarpdr = value;
                     if self.rx_enabled {
                         system::eth_signal_rx_poll(self.dmardlar);
-                    } else {
-                        gdbg("ETHDBG rx DROPPED (rx_enabled=0)");
                     }
                 }
                 0x0C => self.dmardlar = value & !3,
@@ -288,7 +279,6 @@ impl Peripheral for EthernetMac {
                     self.dmaomr = value & 0x1FFFF;
                     self.rx_enabled = (value >> 1) & 1 != 0;
                     self.tx_enabled = (value >> 13) & 1 != 0;
-                    gdbg(&format!("ETHDBG OMR {:08x} rx={} tx={}", value, self.rx_enabled, self.tx_enabled));
                     if self.rx_enabled {
                         system::eth_signal_rx_poll(self.dmardlar);
                     }

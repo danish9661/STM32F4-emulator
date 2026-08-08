@@ -197,14 +197,12 @@ async function main() {
     }
 
     if (process.env.DBG_FLAG) {
-        let prevFlag = -1;
         const flagHook = (handle, type, address, size, value, user_data) => {
             const a = Number(address);
             if (a >= 0x20000618 && a < 0x20000628) {
                 const pc = (uc.reg_read_i32(Module.ARM_REG_PC) >>> 0).toString(16);
                 const val = (Number(value) >>> 0).toString(2).padStart(32, '0');
                 console.log(`[FLAG] ${type === 2 ? 'WR' : 'rd'} 0x${a.toString(16)} = ${val} pc=0x${pc}`);
-                prevFlag = Number(value);
             }
         };
         uc.hook_add(Module.HOOK_MEM_READ, flagHook, null, 0x20000600n, 0x20000640n);
