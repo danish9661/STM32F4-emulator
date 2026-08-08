@@ -1,0 +1,4 @@
+openhw-gw
+gw_stdout.txt
+gw_stderr.txt
+*.bak
