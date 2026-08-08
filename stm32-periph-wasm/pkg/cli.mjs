@@ -213,22 +213,22 @@ async function main() {
     let gwProcess = null;
     let gwWs = null;
     const gwRxQueue = [];
+    const gwTxPending = [];
     let gwConnected = false;
-    if (useGateway) {
-        try {
-            if (spawnGateway) {
-                const gwPath = process.env.GW_PATH || path.join(import.meta.dirname, '..', '..', 'openhw-local-gateway', 'openhw-gw');
-                gwProcess = spawn(gwPath, [], { stdio: 'pipe' });
-                gwProcess.stdout.on('data', d => process.stdout.write(d));
-                gwProcess.stderr.on('data', d => process.stderr.write(d));
-                gwProcess.on('error', e => console.warn('Gateway error:', e.message));
-                gwProcess.on('exit', c => console.log(`Gateway exited (code ${c})`));
-            }
-            gwWs = new WebSocket('ws://127.0.0.1:5099/api/network-gateway');
-            gwWs.binaryType = 'arraybuffer';
-            gwWs.onclose = () => { gwConnected = false; console.log('Gateway WebSocket disconnected'); };
-            gwWs.onerror = () => {};
-            gwWs.onmessage = (ev) => {
+    let gwRestarts = 0;
+
+    const connectGateway = () => new Promise((resolve) => {
+        let ws;
+        let timedOut = false;
+        try { ws = new WebSocket('ws://127.0.0.1:5099/api/network-gateway'); }
+        catch (e) { resolve(null); return; }
+        ws.binaryType = 'arraybuffer';
+        const to = setTimeout(() => { timedOut = true; try { ws.close(); } catch (_) {} resolve(null); }, 4000);
+        ws.onerror = () => { clearTimeout(to); resolve(null); };
+        ws.onopen = () => {
+            clearTimeout(to);
+            if (timedOut) { try { ws.close(); } catch (_) {} resolve(null); return; }
+            ws.onmessage = (ev) => {
                 if (typeof ev.data === 'string') return;
                 let buf;
                 if (ArrayBuffer.isView(ev.data)) {
@@ -239,15 +239,74 @@ async function main() {
                     return;
                 }
                 gwRxQueue.push(buf);
+                if (process.env.DBG_RX) console.log(`[RX] ws msg ${buf.length}B, queue=${gwRxQueue.length}`);
             };
-            await new Promise((resolve) => {
-                const timeout = setTimeout(() => { if (!gwConnected) console.warn('WebSocket timeout'); resolve(); }, 5000);
-                gwWs.onopen = () => { clearTimeout(timeout); gwConnected = true; console.log('Gateway WebSocket connected'); resolve(); };
-            });
+            ws.onclose = () => { if (gwWs === ws) { gwConnected = false; console.log('Gateway WebSocket disconnected'); } };
+            gwWs = ws;
+            gwConnected = true;
+            console.log('Gateway WebSocket connected');
+            while (gwTxPending.length > 0) {
+                try { ws.send(gwTxPending.shift()); } catch (_) { gwTxPending.unshift(); break; }
+            }
+            resolve(ws);
+        };
+    });
+
+    const startGateway = async () => {
+        if (!useGateway) return;
+        try {
+            if (spawnGateway) {
+                const gwPath = process.env.GW_PATH || path.join(import.meta.dirname, '..', '..', 'openhw-local-gateway', 'openhw-gw');
+                gwProcess = spawn(gwPath, [], { stdio: 'pipe' });
+                gwProcess.stdout.on('data', d => process.stdout.write(d));
+                gwProcess.stderr.on('data', d => process.stderr.write(d));
+                gwProcess.on('error', e => console.warn('Gateway error:', e.message));
+                gwProcess.on('exit', c => console.log(`Gateway exited (code ${c})`));
+            }
+            const deadline = Date.now() + 8000;
+            while (Date.now() < deadline) {
+                const ws = await connectGateway();
+                if (ws) return;
+                await new Promise(r => setTimeout(r, 600));
+            }
+            console.warn('WebSocket timeout');
         } catch (e) {
             console.warn('Gateway startup failed:', e.message);
         }
-    }
+    };
+
+    const restartGateway = async () => {
+        if (!spawnGateway) return;
+        gwRestarts++;
+        console.log(`\n[GW] restarting gateway for round ${gwRestarts + 1}...`);
+        if (gwWs) try { gwWs.close(); } catch (_) {}
+        gwWs = null;
+        gwConnected = false;
+        if (gwProcess) {
+            const old = gwProcess;
+            try { old.kill(); } catch (_) {}
+            await new Promise(r => { if (old.exitCode !== null) r(); else old.once('exit', r); });
+        }
+        gwProcess = null;
+        await startGateway();
+    };
+
+    // Round markers seen in UART (each round ends with "=== HTTP nnb ===")
+    let gwRoundsSeen = 0;
+    let gwRestartWarned = false;
+    const checkGwRestart = (chunk) => {
+        if (!useGateway || !chunk.includes('=== HTTP ')) return false;
+        const markers = (chunk.match(/=== HTTP .* ===/g) || []).length;
+        if (markers === 0) return false;
+        gwRoundsSeen += markers;
+        if (!spawnGateway && !gwRestartWarned) {
+            gwRestartWarned = true;
+            console.warn('[GW] --connect mode: cannot auto-restart gateway\n[GW] second and later HTTP rounds will likely fail (stale gVisor TCP session)');
+        }
+        return spawnGateway;
+    };
+
+    await startGateway();
 
     // Stdin -> UART RX
     const stdinQueue = [];
@@ -292,8 +351,12 @@ async function main() {
                     if (bufAddr !== 0 && bufSize > 0 && bufSize <= 2000) {
                         const pkt = new Uint8Array(uc.mem_read(BigInt(bufAddr), bufSize));
                         if (gwConnected && gwWs?.readyState === WebSocket.OPEN) {
+                            if (process.env.DBG_TX) console.log(`[TX] ${bufSize}B -> ws`);
                             gwWs.send(pkt);
-                        } else if (!useGateway) {
+                        } else if (useGateway) {
+                            if (process.env.DBG_TX) console.log(`[TX] ${bufSize}B queued (${gwConnected ? 'not-open' : 'disconnected'})`);
+                            gwTxPending.push(pkt);
+                        } else {
                             console.log(`ETH TX ${bufSize} byte(s) from 0x${bufAddr.toString(16)}`);
                         }
                     }
@@ -313,6 +376,7 @@ async function main() {
             const rxDescAddr = eth_get_rx_desc_addr();
             let rxDelivered = 0;
             if (rxDescAddr !== 0 && gwRxQueue.length > 0) {
+                if (process.env.DBG_RX) console.log(`[RX] poll, queue=${gwRxQueue.length}, desc=0x${rxDescAddr.toString(16)}`);
                 let descAddr = rxDescAddr;
                 const seen = new Set();
                 let attempts = 0;
@@ -461,11 +525,21 @@ async function main() {
         }
     };
 
-    const maxBatch = 100000;
+    let maxBatch = 100000;
+    let smallBatch = false;
     let totalSteps = 0;
     const startTime = Date.now();
 
     while (!stopRequested) {
+        const uartChunk = get_uart_output();
+        if (uartChunk) {
+            process.stdout.write(uartChunk);
+            if (checkGwRestart(uartChunk)) await restartGateway();
+            if (!smallBatch && uartChunk.includes('!CONN')) {
+                smallBatch = true;
+                console.log('[GW] round end detected, switching to small batches');
+            }
+        }
         while (stdinQueue.length > 0) uart_rx_byte(uartAddr, stdinQueue.shift());
 
         processDma();
@@ -473,7 +547,7 @@ async function main() {
         tick();
         const curPc = uc.reg_read_i32(Module.ARM_REG_PC);
         try {
-            uc.emu_start(BigInt(curPc | 1), 0n, 0n, maxBatch);
+            uc.emu_start(BigInt(curPc | 1), 0n, 0n, smallBatch ? 1500 : maxBatch);
         } catch (e) {
             const msg = String(e);
             if (msg.includes('UC_ERR_READ_UNMAPPED') || msg.includes('UC_ERR_FETCH_UNMAPPED')) {
@@ -503,7 +577,9 @@ async function main() {
     const finalSp = uc.reg_read_i32(Module.ARM_REG_SP);
 
     const uartOut = get_uart_output();
-    if (uartOut) {
+    if (!uartOut.trim()) {
+        process.stdout.write('\n');
+    } else {
         console.log(`\n=== UART Output ===\n${uartOut}`);
     }
 
