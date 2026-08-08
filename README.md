@@ -16,12 +16,13 @@ The browser demo deploys to GitHub Pages:
 
 **https://danish9661.github.io/stm32F4-emulator/**
 
-It boots `eth_http` in your browser tab: live UART console, DHCP/TCP/HTTP
-packet viewer, instruction/round stats, and a panel to load your own `.bin`
-firmware (or pick a bundled one). A second page,
-[`blinky.html`](site/blinky.html), runs a **non-ethernet** firmware — a
-bare-metal LED blinker — with the LED driven live by the emulated GPIO
-register (`GPIOA->ODR`), proving the emulator needs no network to be useful.
+A single console page: preset firmware dropdown (4 bundled binaries), custom
+firmware upload (`.bin`, Intel `.hex`, `.elf` — with loadable RAM segments and
+symbols — plus `.map` for a symbol table), Run/Stop/Reset, a **gateway URL
+field** to connect a real network stack (openhw-gw + gVisor) with a scripted
+network (netsim) as fallback, a live UART terminal, GPIO pin readout for
+banks A–E, and key peripheral registers. Presets: `?fw=eth_http`,
+`?fw=blinky`, …
 
 ## Quickstart
 
@@ -101,15 +102,20 @@ firmware .bin ──► Unicorn WASM CPU ──► memory hooks
   (`openhw-local-gateway/`) with a gVisor network stack makes the firmware
   talk to a real network: `node cli.mjs <fw.bin> <inst> --gateway`.
 - **Browser build** (`site/`): same modules as ESM; `site/emulator.js` is an
-  import-free universal factory; `site/netsim.js` is a canned network peer.
+  import-free universal factory; `site/netsim.js` is a canned network peer;
+  `site/loaders.js` parses Intel HEX / ELF32 / linker-map files. The demo
+  page's gateway mode uses the exact same protocol as the Node CLI:
+  raw Ethernet frames over a WebSocket (`/api/network-gateway`), `RESET`
+  control message on reboot.
 
 ## Repository layout
 
 ```
-├── site/                    Browser demo + universal emulator factory
-│   ├── index.html, app.js   Demo UI (UART, packets, stats, fw loader)
+├── site/                    Single-page console + universal emulator factory
+│   ├── index.html, app.js   Console UI (UART, presets, loaders, gateway, GPIO)
 │   ├── emulator.js          Import-free emulator factory (Node + browser)
-│   ├── netsim.js            Canned DHCP/TCP/HTTP network peer
+│   ├── netsim.js            Canned DHCP/TCP/HTTP network peer (fallback)
+│   ├── loaders.js           Intel HEX / ELF32 / linker-map parsers
 │   ├── test_flow.mjs        Node E2E flow test (npm test)
 │   └── vendor/              Browser WASM build, SVD, Unicorn
 ├── index.mjs, package.json  npm package entry (stm32f4-emulator)

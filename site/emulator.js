@@ -22,6 +22,7 @@ export async function createEmulator(opts) {
         onTx = null,          // (frame: Uint8Array, meta) called per TX capture
         eth = {},             // firmware-specific SRAM addresses (defaults above)
         ext_devices = {},
+        extra_mem = [],       // [{addr, data}] preloaded into mapped memory (ELF RAM segments)
     } = opts;
 
     const {
@@ -61,6 +62,9 @@ export async function createEmulator(opts) {
     uc.mem_map(vector_table & ~0x1FFFF, flash_size, Module.PROT_ALL);
     uc.mem_write(BigInt(vector_table), firmware);
     uc.mem_map(0x20000000, ram_size, Module.PROT_ALL);
+    for (const seg of extra_mem) {
+        uc.mem_write(BigInt(seg.addr), seg.data);
+    }
 
     const periphRanges = [
         [0x40000000, 0xB0000000],

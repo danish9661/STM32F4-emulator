@@ -1,10 +1,12 @@
-// In-browser driver for the STM32F407 demo.
-// Boots a bundled firmware, drives the emulator with requestAnimationFrame,
-// and renders UART output + stats + simulated network packets.
+// In-browser driver for the STM32F407 single-page console.
+// Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
+// an optional WebSocket gateway (real network stack) with a netsim fallback,
+// live UART terminal, GPIO/peripheral register readout, and packet viewer.
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
 import { FIRMWARES } from './firmware.js';
+import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 
 const $ = (id) => document.getElementById(id);
 const uartEl = $('uart'), statusEl = $('statusText'), dotEl = $('dot');
@@ -22,11 +24,15 @@ const hex = (arr, n = 32) => {
     if (arr.length > n) s += '…';
     return s.trim();
 };
+const hex32 = (v) => '0x' + (v >>> 0).toString(16).padStart(8, '0');
 
-let session = 0;           // bumped on every reset; stale loops exit
-let emu = null, netsim = null, running = false, paused = false;
+let session = 0;
+let emu = null, netsim = null, running = false;
 let uartBuf = '', totalInst = 0, t0 = performance.now(), lastInst = 0, lastT = t0;
+let stepsDone = 0;
+let image = null;          // { flash, ram, extraMem, entry, symbols, name }
 
+// ── status + UART ──────────────────────────────────────────────────────────
 const setStatus = (text, cls) => {
     statusEl.textContent = text;
     dotEl.className = 'dot ' + cls;
@@ -41,13 +47,14 @@ const appendUart = (chunk) => {
     if (wasAtBottom && $('chkAuto').checked) uartEl.scrollTop = uartEl.scrollHeight;
 };
 
+// ── packets ────────────────────────────────────────────────────────────────
 const addFrame = (dir, pkt) => {
     const meta = describeFrame(dir, pkt);
     const div = document.createElement('div');
     div.className = 'frame ' + dir;
-    div.innerHTML = `<span class="tag">${dir === 'tx' ? 'TX' : 'RX'}</span> ${pkt.length}B ${meta}<pre>${hex(pkt, 48)}</pre>`;
+    div.innerHTML = `<span class="tag">${dir === 'tx' ? 'TX' : 'RX'}</span> ${pkt.length}B ${meta}<pre style="margin:2px 0 0;font-size:11px;color:var(--dim);white-space:pre-wrap;word-break:break-all;">${hex(pkt, 32)}</pre>`;
     framesEl.prepend(div);
-    while (framesEl.children.length > 60) framesEl.lastChild.remove();
+    while (framesEl.children.length > 40) framesEl.lastChild.remove();
 };
 
 const describeFrame = (dir, pkt) => {
@@ -73,51 +80,131 @@ const describeFrame = (dir, pkt) => {
     return `IP proto ${proto}`;
 };
 
-const refreshStats = () => {
-    const regs = emu && emu.getRegisters ? emu.getRegisters() : null;
-    const now = performance.now();
-    const dt = (now - lastT) / 1000;
-    if (dt > 0.5) {
-        const mips = ((totalInst - lastInst) / dt / 1e6).toFixed(2);
-        lastInst = totalInst; lastT = now;
-        $('stMips').textContent = mips;
-    }
-    $('stInst').textContent = totalInst.toLocaleString();
-    $('stSteps').textContent = stepsDone.toLocaleString();
-    const rounds = (uartBuf.match(/=== HTTP \d+b ===/g) || []).length;
-    $('stRounds').textContent = rounds;
-    $('stPc').textContent = regs ? '0x' + (regs.PC >>> 0).toString(16) : '—';
-    const s = netsim ? netsim.stats : null;
-    $('stNet').textContent = s ? `${s.httpResponses} HTTP / ${s.dhcpAcks} DHCP / ${s.tx} TX` : '—';
+// ── gateway (real network stack, optional) ─────────────────────────────────
+const gw = { ws: null, connected: false };
+const setGwStatus = (connected, text) => {
+    gw.connected = connected;
+    $('gwDot').className = 'dot ' + (connected ? 'run' : 'stop');
+    $('gwStatus').textContent = text;
+    $('btnGw').textContent = connected ? 'Disconnect' : 'Connect';
 };
 
-let stepsDone = 0;
+const connectGateway = () => {
+    const url = $('gwUrl').value.trim() || 'ws://127.0.0.1:5099/api/network-gateway';
+    if (!/^wss?:\/\//.test(url)) return setGwStatus(false, 'bad URL — expected ws:// or wss://');
+    if (gw.ws) {
+        try { gw.ws.close(); } catch (e) {}
+        gw.ws = null;
+        setGwStatus(false, 'offline — using the scripted network (netsim)');
+        return;
+    }
+    let ws;
+    try { ws = new WebSocket(url); } catch (e) { return setGwStatus(false, 'connect failed: ' + e.message); }
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+        gw.ws = ws;
+        setGwStatus(true, 'connected — Ethernet frames go to the real stack');
+        appendUart(`── gateway connected (${url}) ──\r\n`);
+    };
+    ws.onmessage = (ev) => {
+        if (typeof ev.data === 'string') return; // control message (e.g. RESET)
+        const buf = new Uint8Array(ev.data);
+        if (emu) emu.injectFrame(buf);
+    };
+    ws.onclose = () => {
+        if (gw.ws !== ws) return;
+        gw.ws = null;
+        setGwStatus(false, 'disconnected — using the scripted network (netsim)');
+    };
+    ws.onerror = () => setGwStatus(false, 'connection error — using the scripted network (netsim)');
+};
+
+// ── firmware loading ───────────────────────────────────────────────────────
+const loadFirmwareBytes = (bytes, name) => {
+    image = { flash: new Uint8Array(bytes), ram: null, extraMem: [], entry: null, symbols: null, name };
+    boot();
+};
+
+const loadHex = (text, name) => {
+    const img = parseIntelHex(text);
+    if (!img.flash) throw new Error('no flash data found in HEX file');
+    image = { flash: img.flash, ram: img.ram, extraMem: [], entry: img.entry, symbols: null, name };
+    boot();
+};
+
+const loadElf = (bytes, name) => {
+    const img = parseElf(bytes);
+    if (!img.flash) throw new Error('ELF has no FLASH loadable segment');
+    image = { flash: img.flash, ram: img.ram, extraMem: img.extraMem, entry: img.entry, symbols: img.symbols, name };
+    renderSymbols(img.symbols);
+    boot();
+};
+
+$('btnBoot').addEventListener('click', () => {
+    const fw = $('fwSelect').value;
+    image = { flash: decodeB64(FIRMWARES[fw].bytes), ram: null, extraMem: [], entry: null, symbols: null, name: fw + '.bin' };
+    renderSymbols(null);
+    boot();
+});
+
+$('fwFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+    try {
+        if (ext === '.bin') {
+            loadFirmwareBytes(new Uint8Array(await file.arrayBuffer()), file.name);
+        } else if (ext === '.hex') {
+            loadHex(await file.text(), file.name);
+        } else if (ext === '.elf') {
+            loadElf(new Uint8Array(await file.arrayBuffer()), file.name);
+        } else if (ext === '.map') {
+            const symbols = parseMap(await file.text());
+            if (!symbols.length) throw new Error('no symbols found in map file');
+            if (image) image.symbols = symbols;
+            renderSymbols(symbols);
+            appendUart(`── loaded ${symbols.length} symbols from ${file.name} ──\r\n`);
+        } else {
+            throw new Error('unsupported file type: ' + ext);
+        }
+    } catch (err) {
+        setStatus('load error: ' + err.message, 'err');
+    }
+    e.target.value = '';
+});
+
+// ── boot / run / stop / reset ──────────────────────────────────────────────
 const raf = () => new Promise((r) => requestAnimationFrame(r));
 
-const boot = async (fw, uploadedBytes) => {
+const boot = async () => {
     const id = ++session;
-    paused = false;
+    running = false;
+    $('btnRun').textContent = 'Run';
     setStatus('booting…', 'stop');
     if (emu) { try { emu.close(); } catch (e) {} emu = null; }
 
-    const firmware = uploadedBytes || decodeB64(FIRMWARES[fw].bytes);
+    const fw = image.flash;
     uartEl.textContent = uartBuf = '';
     framesEl.textContent = '';
     totalInst = 0; stepsDone = 0;
     t0 = lastT = performance.now(); lastInst = 0;
+    $('stFw').textContent = image.name;
 
     const svdXml = await fetch('vendor/stm32f407.svd').then((r) => r.text());
-    if (id !== session) return; // reset while loading
+    if (id !== session) return;
 
-    netsim = uploadedBytes ? null : createNetSim();
+    netsim = gw.connected ? null : createNetSim();
     emu = await createEmulator({
-        firmware,
+        firmware: fw,
         bindings,
         unicorn: MUnicorn,
         svdXml,
+        extra_mem: image.extraMem,
         onTx: (pkt) => {
             addFrame('tx', pkt);
-            if (netsim) {
+            if (gw.connected && gw.ws) {
+                try { gw.ws.send(pkt); } catch (e) {}
+            } else if (netsim) {
                 for (const reply of netsim.onTx(pkt)) {
                     addFrame('rx', reply);
                     emu.injectFrame(reply);
@@ -127,9 +214,9 @@ const boot = async (fw, uploadedBytes) => {
     });
     if (id !== session) { emu.close(); return; }
 
-    appendUart(`── booted ${uploadedBytes ? 'custom firmware' : FIRMWARES[fw].name} ──\r\n`);
+    appendUart(`── booted ${image.name} ${gw.connected ? '(gateway)' : '(netsim)'} ──\r\n`);
     running = true;
-    $('btnRun').textContent = 'Pause';
+    $('btnRun').textContent = 'Stop';
     setStatus('running', 'run');
     loop(id);
 };
@@ -144,7 +231,7 @@ const loop = async (id) => {
         } catch (e) {
             setStatus('error: ' + e.message, 'err');
             running = false;
-            $('btnRun').textContent = 'Resume';
+            $('btnRun').textContent = 'Run';
             return;
         }
         appendUart(emu.drainUart());
@@ -155,19 +242,140 @@ const loop = async (id) => {
 
 $('btnRun').addEventListener('click', () => {
     if (!emu) return;
-    running = !running;
-    $('btnRun').textContent = running ? 'Pause' : 'Resume';
-    setStatus(running ? 'running' : 'paused', running ? 'run' : 'stop');
+    if (running) {
+        running = false;
+        $('btnRun').textContent = 'Run';
+        setStatus('stopped', 'stop');
+    } else {
+        running = true;
+        $('btnRun').textContent = 'Stop';
+        setStatus('running', 'run');
+        loop(session);
+    }
 });
-$('btnReset').addEventListener('click', () => boot($('fwSelect').value));
+$('btnStop').addEventListener('click', () => {
+    if (!emu) return;
+    running = false;
+    $('btnRun').textContent = 'Run';
+    setStatus('stopped', 'stop');
+});
+$('btnReset').addEventListener('click', () => {
+    if (gw.connected && gw.ws) {
+        try { gw.ws.send('RESET'); } catch (e) {}
+    }
+    if (image) boot();
+});
 $('btnClear').addEventListener('click', () => { uartEl.textContent = uartBuf = ''; });
-$('btnLoad').addEventListener('click', () => boot($('fwSelect').value));
-$('btnUpload').addEventListener('click', async () => {
-    const f = $('fwFile').files[0];
-    if (!f) return;
-    const bytes = new Uint8Array(await f.arrayBuffer());
-    await boot(null, bytes);
-});
+$('btnGw').addEventListener('click', connectGateway);
 window.addEventListener('error', (e) => setStatus('error: ' + e.message, 'err'));
 
-boot('eth_http');
+// ── stats ──────────────────────────────────────────────────────────────────
+const refreshStats = () => {
+    const regs = emu && emu.getRegisters ? emu.getRegisters() : null;
+    const now = performance.now();
+    const dt = (now - lastT) / 1000;
+    if (dt > 0.5) {
+        const mips = ((totalInst - lastInst) / dt / 1e6).toFixed(2);
+        lastInst = totalInst; lastT = now;
+        $('stMips').textContent = mips;
+    }
+    $('stInst').textContent = totalInst.toLocaleString();
+    $('stSteps').textContent = stepsDone.toLocaleString();
+    $('stRounds').textContent = (uartBuf.match(/=== HTTP \d+b ===/g) || []).length;
+    $('stPc').textContent = regs ? hex32(regs.PC) : '—';
+    $('stSp').textContent = regs ? hex32(regs.SP) : '—';
+    $('stXpsr').textContent = regs ? hex32(regs.XPSR) : '—';
+    refreshGpio();
+    refreshPeriph();
+};
+
+// ── GPIO banks A–E ─────────────────────────────────────────────────────────
+const GPIO_BASE = 0x40020000, GPIO_STRIDE = 0x400;
+const BANKS = ['A', 'B', 'C', 'D', 'E'];
+let gpioBuilt = false;
+
+const buildGpio = () => {
+    if (gpioBuilt) return;
+    gpioBuilt = true;
+    const el = $('gpio');
+    for (const b of BANKS) {
+        const div = document.createElement('div');
+        div.className = 'bank';
+        div.innerHTML = `<span class="bname">P${b}</span><span class="pins">${Array.from({ length: 16 }, (_, i) => `<span class="pin" id="pin${b}${i}"></span>`).join('')}</span>`;
+        const regs = document.createElement('div');
+        regs.className = 'regs';
+        regs.id = 'regs' + b;
+        div.appendChild(regs);
+        el.appendChild(div);
+    }
+};
+
+const refreshGpio = () => {
+    if (!emu) return;
+    buildGpio();
+    for (const b of BANKS) {
+        const idx = BANKS.indexOf(b);
+        const base = GPIO_BASE + idx * GPIO_STRIDE;
+        const moder = emu.read32(base + 0x00), odr = emu.read32(base + 0x14), idr = emu.read32(base + 0x10);
+        for (let p = 0; p < 16; p++) {
+            const mode = (moder >> (p * 2)) & 0x3;
+            const out = mode === 1;
+            const on = out ? ((odr >> p) & 1) !== 0 : ((idr >> p) & 1) !== 0;
+            const pin = $('pin' + b + p);
+            pin.className = 'pin ' + (out ? (on ? 'out-on' : 'out-off') : on ? 'in-on' : '');
+        }
+        $('regs' + b).textContent = `MODER=${hex32(moder)} ODR=${hex32(odr)} IDR=${hex32(idr)}`;
+    }
+};
+
+// ── peripherals ────────────────────────────────────────────────────────────
+const PERIPH_REGS = [
+    ['ETH DMASR', 0x40029014], ['ETH MACCR', 0x40028000],
+    ['USART1 SR', 0x40011000], ['USART1 BRR', 0x40011008],
+    ['RCC AHB1ENR', 0x40023830], ['GPIOA ODR', 0x40020014],
+];
+const refreshPeriph = () => {
+    if (!emu) return;
+    const el = $('periph');
+    el.innerHTML = '';
+    for (const [name, addr] of PERIPH_REGS) {
+        const div = document.createElement('div');
+        div.className = 'line';
+        div.innerHTML = `<span>${name} (${hex32(addr)})</span><b>${hex32(emu.read32(addr))}</b>`;
+        el.appendChild(div);
+    }
+};
+
+// ── symbols ────────────────────────────────────────────────────────────────
+const renderSymbols = (symbols) => {
+    const el = $('symbols');
+    el.textContent = '';
+    if (!symbols || !symbols.length) {
+        const p = document.createElement('p');
+        p.className = 'sec';
+        p.style.padding = '8px 12px';
+        p.textContent = 'Load a .map file or an .elf to list symbols here.';
+        el.appendChild(p);
+        return;
+    }
+    const max = 200;
+    for (const s of symbols.slice(0, max)) {
+        const div = document.createElement('div');
+        div.className = 'sym';
+        div.innerHTML = `<span>${s.name}</span><span>${hex32(s.addr)}${s.size ? ' (' + s.size + ')' : ''}</span>`;
+        el.appendChild(div);
+    }
+    if (symbols.length > max) {
+        const p = document.createElement('p');
+        p.className = 'sec';
+        p.style.padding = '4px 12px';
+        p.textContent = `… ${symbols.length - max} more`;
+        el.appendChild(p);
+    }
+};
+
+// ── boot the default preset (override with ?fw=blinky etc.) ────────────────
+const params = new URLSearchParams(location.search);
+const preset = params.get('fw');
+if (preset && FIRMWARES[preset]) $('fwSelect').value = preset;
+$('btnBoot').click();

@@ -9,6 +9,7 @@
     "./emulator": "./site/emulator.js",
     "./netsim": "./site/netsim.js",
     "./firmwares": "./site/firmware.js",
+    "./loaders": "./site/loaders.js",
     "./vendor": "./site/vendor/stm32_periph_wasm.js",
     "./vendor/unicorn": "./site/vendor/unicorn_arm.cjs",
     "./site": "./site/index.html"
@@ -19,10 +20,9 @@
     "site/emulator.js",
     "site/netsim.js",
     "site/firmware.js",
+    "site/loaders.js",
     "site/index.html",
-    "site/blinky.html",
     "site/app.js",
-    "site/app_blinky.js",
     "site/test_flow.mjs",
     "site/test_blinky.mjs",
     "site/vendor/"

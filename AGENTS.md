@@ -587,39 +587,55 @@ Gotchas: with `maxBatch=500000` and only-conditional stops, a dead/unreachable g
 ## 11. Browser demo + npm package (2026-08-09) — site/ and publishable library
 
 ### In-browser demo (`site/`)
-- `site/index.html` + `site/app.js`: dark console-style UI. Auto-boots
-  `eth_http` with `netsim` (no gateway needed), renders UART live, packet
-  viewer, stats (inst/MIPS/batches/rounds/PC), Pause/Reset/Clear, plus a
-  "run your own firmware" panel (select bundled fw or upload any .bin).
+- `site/index.html` + `site/app.js`: **single-page console**. Dark terminal
+  UI: UART terminal, preset dropdown (eth_http/eth_dhcp/eth_test/blinky,
+  `?fw=<name>` URL param), custom firmware upload (`.bin`, Intel `.hex`,
+  `.elf` — RAM segments preloaded via `extra_mem`, symbols from symtab —
+  and `.map` files for symbols only), Run/Stop/Reset buttons (Reset sends
+  the gateway `RESET` control message when connected), a **gateway URL**
+  field (WebSocket to openhw-gw `/api/network-gateway`; when connected all
+  TX frames go to the real gVisor stack and RX frames are injected from it;
+  otherwise netsim is the fallback), live GPIO pin grid for banks A–E
+  (MODER/ODR/IDR read every frame via `read32`), key peripheral registers
+  (ETH DMASR/MACCR, USART1 SR, RCC AHB1ENR), and a packet viewer.
 - Serve with `python3 -m http.server 8123 --directory site` (SVD + wasm are
   fetched at runtime — file:// won't work). Browser build of the peripheral
   model lives in `site/vendor/` (`wasm-pack build --release --target web
   --out-dir ../site/vendor`); the Node build stays in `stm32-periph-wasm/pkg`.
   `unicorn_arm.js` (browser IIFE -> global `MUnicorn`) vs `unicorn_arm.cjs`
   (require) are two copies of the same module.
+- `site/loaders.js`: `parseIntelHex`, `parseElf` (PT_LOAD segments split
+  into flash/RAM + `extra_mem` preload list + symtab symbols), `parseMap`.
+  Verified: hex/elf boot the blinky firmware through `createEmulator`.
 - `site/emulator.js` is the **universal factory** (no imports — caller passes
   bindings/unicorn/svdXml/firmware): memory hooks over the whole peripheral
   space, codeHook with `tick_n` batching (TICK_EVERY=5000) + poll checks
-  (POLL_EVERY=1000), TX capture + RX injection, and no interrupt pump (the
-  firmware polls `eth_irq_flag` in SRAM; the driver writes bits 0/2 directly).
+  (POLL_EVERY=1000), TX capture + RX injection, optional `extra_mem`
+  preload, and no interrupt pump (the firmware polls `eth_irq_flag` in SRAM;
+  the driver writes bits 0/2 directly).
 - `site/netsim.js`: canned DHCP Offer/Ack + TCP SYN-ACK + HTTP response
   (141B, fl=0x19) + bare ACK; no real stack. `site/test_flow.mjs` is the Node
   harness that asserts the whole flow (boot, DHCP, TCP connected, HTTP body,
   !CONN, >= 2 rounds) — `node site/test_flow.mjs`, PASS on exit 0.
+- Gateway protocol (same as cli.mjs `--connect`): WS `ws://host:port/api/network-gateway`,
+  binary frames = raw Ethernet both directions, text `RESET` = clear gVisor
+  session. Browser smoke (CDP): /tmp/opencode/gw_smoke.mjs — connects,
+  resets, asserts DHCP→TCP→HTTP through the real stack (passed: 3 rounds).
+  Note: GitHub Pages is https, which blocks plain `ws://` — gateway mode
+  needs the page served over http://.
 
-### Non-ethernet demo (`blinky/` + `site/blinky.html`) — 2026-08-09
+### Non-ethernet demo (`blinky/` + `?fw=blinky`) — 2026-08-09
 - `blinky/` is a bare-metal firmware with **no ETH/DMA/interrupts**: UART
   banner + `tick N LED=ON/OFF` prints + PA5 toggling every 100 ms via
   `GPIOA_MODER`/`GPIOA_ODR`. Built with the same Makefile pattern as
   `eth_test/` (startup.c `_start` does NOT zero .bss — keep globals static-
-  initialized or explicit).
-- `site/blinky.html` + `site/app_blinky.js`: same UI minus the network panel;
-  the LED circle is read live from the emulated GPIOA ODR bit 5
-  (`emu.read32(0x40020014) & 0x20`) every rAF — proves the peripheral model
-  round-trips GPIO writes. Nav between the two pages is in both headers.
+  initialized or explicit). Boot it in the console page with `?fw=blinky`;
+  the GPIO panel's PA5 pin is read live from the emulated ODR
+  (`read32(0x40020014) & 0x20`) every rAF — proves the peripheral model
+  round-trips GPIO writes.
 - `site/test_blinky.mjs` asserts boot banner + `tick 0/1` prints + ≥2 ODR
   toggles (~10M inst, 1.4 s). CDP smoke: /tmp/opencode/blinky_smoke.mjs
-  (passes; chrome on port 9223).
+  (single-page console with `?fw=blinky`; chrome on port 9223).
 - Gotcha: `delay_ms(n)` here is the `4000 nops/ms` convention — each
   `delay_ms(100)` is ~2.4M emulated instructions (6 inst/iter), so a full
   tick is ~5M inst (~2 s wall at 2.5 MIPS). Don't expect real-time blink
