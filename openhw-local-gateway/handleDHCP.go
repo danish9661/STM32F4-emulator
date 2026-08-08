@@ -189,12 +189,15 @@ func handleDHCP(msg []byte, packet gopacket.Packet, client *Client, room *Room) 
 
 func handleProxy(clientConn net.Conn, targetIP string) {
 	defer clientConn.Close()
-	
-	if globalVN == nil {
+
+	globalVNMutex.RLock()
+	vn := globalVN
+	globalVNMutex.RUnlock()
+	if vn == nil {
 		return
 	}
-	
-	destConn, err := globalVN.Dial("tcp", fmt.Sprintf("%s:80", targetIP))
+
+	destConn, err := vn.Dial("tcp", fmt.Sprintf("%s:80", targetIP))
 	if err != nil {
 		fmt.Printf("[Port Forward] Failed to connect to %s:80 - %v\n", targetIP, err)
 		return

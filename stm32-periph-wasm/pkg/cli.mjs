@@ -326,7 +326,27 @@ async function main() {
     };
 
     const restartGateway = async () => {
-        if (!spawnGateway) return;
+        if (!spawnGateway) {
+            // --connect mode: the gateway is external, ask it to reset its
+            // gVisor session state via a control message, then reconnect.
+            gwRestarts++;
+            console.log(`\n[GW] requesting gateway session reset for round ${gwRestarts + 1}...`);
+            if (gwWs && gwConnected) {
+                try { gwWs.send('RESET'); } catch (_) {}
+            }
+            const deadline = Date.now() + 2000;
+            while (gwConnected && Date.now() < deadline) await new Promise(r => setTimeout(r, 50));
+            if (gwWs) try { gwWs.close(); } catch (_) {}
+            gwWs = null;
+            // Drop stale TCP frames from the dying session; keep only DHCP
+            // replies (the firmware's next-round handshake must not see
+            // old-session data).
+            for (let i = gwRxQueue.length - 1; i >= 0; i--) {
+                if (!isDhcpReply(gwRxQueue[i])) gwRxQueue.splice(i, 1);
+            }
+            await startGateway();
+            return;
+        }
         gwRestarts++;
         console.log(`\n[GW] restarting gateway for round ${gwRestarts + 1}...`);
         if (gwWs) try { gwWs.close(); } catch (_) {}
@@ -348,17 +368,12 @@ async function main() {
 
     // Round markers seen in UART (each round ends with "=== HTTP nnb ===")
     let gwRoundsSeen = 0;
-    let gwRestartWarned = false;
     const checkGwRestart = (chunk) => {
         if (!useGateway || !chunk.includes('=== HTTP ')) return false;
         const markers = (chunk.match(/=== HTTP .* ===/g) || []).length;
         if (markers === 0) return false;
         gwRoundsSeen += markers;
-        if (!spawnGateway && !gwRestartWarned) {
-            gwRestartWarned = true;
-            console.warn('[GW] --connect mode: cannot auto-restart gateway\n[GW] second and later HTTP rounds will likely fail (stale gVisor TCP session)');
-        }
-        return spawnGateway;
+        return true;
     };
 
     await startGateway();

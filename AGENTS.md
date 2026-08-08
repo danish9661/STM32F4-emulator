@@ -468,8 +468,18 @@ Three fixes were needed to make consecutive rounds work:
 Verified: 200M-instruction run completes 3+ consecutive clean rounds
 (DHCP → `fl=12` → HTTP body → `!CONN` → next round), each with its own
 fresh gateway. `DBG_TX=1` / `DBG_RX=1` env flags add TX/RX frame traces.
-Note: restart only works in `--gateway` mode (self-spawned); with
-`--connect` the stale-session round may still fail.
+Note: in `--connect` mode (external gateway) `restartGateway` cannot kill
+the gateway process; instead cli.mjs sends a `RESET` control message
+(WebSocket text frame) and reconnects. The gateway tears down the room,
+closes the pipe, and nils its shared gVisor stack (`globalVN`), so the
+next connection builds a fresh session table. Verified 2026-08-08: two
+consecutive 15M-instruction `--connect` runs against the SAME gateway
+process (the second running into 74 stale sessions from the first):
+74/77 TCP connected, **0 TCP fail, 0 SYN-ACK timeouts** both runs
+(150 `RESET requested` lines in the gateway log). `globalVN` is guarded
+by `globalVNMutex` (handleProxy reads it under RLock) to avoid a nil-deref
+race with the reset. Note: a stale gVisor stack is abandoned, not freed —
+idle goroutines linger until the gateway exits (acceptable for `--connect`).
 
 Full 200M soak (2026-08-08, `SOAK_STATS=1`): 200,000,151 instructions in
 870.8 s, **1012 TCP connections, 0 TCP fail, 0 SYN-ACK timeouts**. RSS

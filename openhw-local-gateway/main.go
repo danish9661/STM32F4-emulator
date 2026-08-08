@@ -43,9 +43,10 @@ type Room struct {
 }
 
 var (
-	roomsMutex sync.Mutex
-	rooms      = make(map[string]*Room)
-	globalVN   *virtualnetwork.VirtualNetwork
+	roomsMutex    sync.Mutex
+	rooms         = make(map[string]*Room)
+	globalVNMutex sync.RWMutex
+	globalVN      *virtualnetwork.VirtualNetwork
 )
 
 const PORT = "5099"
@@ -328,6 +329,28 @@ func handleClient(client *Client, room *Room) {
 		if err != nil {
 			fmt.Printf("WebSocket Read Error: %v\n", err)
 			return
+		}
+
+		// Control message: tear down this room and drop the shared gVisor
+		// stack so the next connection starts with a clean session table
+		// (used by cli.mjs --connect mode between firmware rounds).
+		if messageType == websocket.TextMessage {
+			if string(msg) == "RESET" {
+				fmt.Printf("[Network Gateway] RESET requested for room %s — clearing gVisor session state\n", room.SessionId)
+				room.Cancel()
+				if room.PipeToVN != nil {
+					room.PipeToVN.Close()
+				}
+				roomsMutex.Lock()
+				delete(rooms, room.SessionId)
+				roomsMutex.Unlock()
+				globalVNMutex.Lock()
+				globalVN = nil
+				globalVNMutex.Unlock()
+				client.Conn.Close()
+				return
+			}
+			continue
 		}
 
 		if messageType == websocket.BinaryMessage {
