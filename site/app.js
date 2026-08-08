@@ -176,9 +176,14 @@ $('fwFile').addEventListener('change', async (e) => {
 // ── boot / run / stop / reset ──────────────────────────────────────────────
 const raf = () => new Promise((r) => requestAnimationFrame(r));
 
+const setBusy = (busy) => {
+    for (const id of ['btnRun', 'btnStop', 'btnReset']) $(id).disabled = !busy;
+};
+
 const boot = async () => {
     const id = ++session;
     running = false;
+    setBusy(false);
     $('btnRun').textContent = 'Run';
     setStatus('booting…', 'stop');
     if (emu) { try { emu.close(); } catch (e) {} emu = null; }
@@ -216,6 +221,7 @@ const boot = async () => {
 
     appendUart(`── booted ${image.name} ${gw.connected ? '(gateway)' : '(netsim)'} ──\r\n`);
     running = true;
+    setBusy(true);
     $('btnRun').textContent = 'Stop';
     setStatus('running', 'run');
     loop(id);
@@ -374,8 +380,15 @@ const renderSymbols = (symbols) => {
     }
 };
 
-// ── boot the default preset (override with ?fw=blinky etc.) ────────────────
+// ── idle until the user picks a firmware (auto-boot only via ?fw=) ─────────
+setBusy(false);
+$('btnRun').textContent = 'Run';
+setStatus('idle — select a firmware and press Boot', 'stop');
+appendUart('STM32F407 console ready.\r\nSelect a preset below or upload .bin/.hex/.elf/.map, then press Boot.\r\n');
+
 const params = new URLSearchParams(location.search);
 const preset = params.get('fw');
-if (preset && FIRMWARES[preset]) $('fwSelect').value = preset;
-$('btnBoot').click();
+if (preset && FIRMWARES[preset]) {
+    $('fwSelect').value = preset;
+    $('btnBoot').click();
+}

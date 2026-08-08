@@ -16,13 +16,15 @@ The browser demo deploys to GitHub Pages:
 
 **https://danish9661.github.io/stm32F4-emulator/**
 
-A single console page: preset firmware dropdown (4 bundled binaries), custom
-firmware upload (`.bin`, Intel `.hex`, `.elf` — with loadable RAM segments and
-symbols — plus `.map` for a symbol table), Run/Stop/Reset, a **gateway URL
-field** to connect a real network stack (openhw-gw + gVisor) with a scripted
-network (netsim) as fallback, a live UART terminal, GPIO pin readout for
-banks A–E, and key peripheral registers. Presets: `?fw=eth_http`,
-`?fw=blinky`, …
+A single console page that starts **idle** — nothing runs until you pick a
+firmware: a preset dropdown with 20 bundled binaries (network demos, a
+bare-metal LED blinker, peripheral/crypto/UART test binaries), custom
+firmware upload (`.bin`, Intel `.hex`, `.elf` — with loadable RAM segments
+and symbols — plus `.map` for a symbol table), Run/Stop/Reset, a **gateway
+URL field** to connect a real network stack (openhw-gw + gVisor) with a
+scripted network (netsim) as fallback, a live UART terminal, GPIO pin
+readout for banks A–E, and key peripheral registers. For automation, a
+preset can auto-boot via the URL: `?fw=eth_http`, `?fw=blinky`, `?fw=crypto_test`, …
 
 ## Quickstart
 
@@ -73,6 +75,11 @@ See `site/test_flow.mjs` and the exports in `index.mjs` for the full API
 | `eth_dhcp/` | Loops DHCP Discover/Offer/Request/Ack | `DHCP SUCCESS` |
 | `eth_test/` | Raw ETH TX/RX self-test | `ETH Test: done` |
 | `blinky/` | **No ethernet** — LED blinker on GPIOA PA5 + UART tick counter | `tick N LED=ON/OFF` |
+
+Plus 16 more test binaries (`crypto_test`, `hal_test`, `timer_test`,
+`periph_test`, `echo_test`, `blink_serial`, …) from the `*_test/` directories
+— all boot headless and print a banner over UART (probe:
+`node site/probe_firmwares.mjs`).
 
 All three are bare-metal (no RTOS), built with the Arduino core's
 arm-none-eabi-gcc, and driven purely through memory-mapped registers —

@@ -5,10 +5,29 @@ import { fileURLToPath } from 'url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const firmwares = [
+    // network
     ['eth_http', 'eth_http/eth_http.bin', 'eth_http.bin'],
     ['eth_dhcp', 'eth_dhcp/eth_dhcp.bin', 'eth_dhcp.bin'],
     ['eth_test', 'eth_test/eth_test.bin', 'eth_test.bin'],
+    // bare-metal demos
     ['blinky', 'blinky/blinky.bin', 'blinky.bin'],
+    // test binaries (boot + print on UART; see site/probe_firmwares.mjs)
+    ['hal_test', 'hal_test/hal_test.ino.bin', 'hal_test.ino.bin'],
+    ['crypto_test', 'crypto_test/build/crypto_test.ino.bin', 'crypto_test.ino.bin'],
+    ['crypto_deep_test', 'crypto_deep_test/crypto_deep_test.bin', 'crypto_deep_test.bin'],
+    ['rx_crypto_test', 'rx_crypto_test/rx_crypto_test.bin', 'rx_crypto_test.bin'],
+    ['periph_test', 'periph_test/periph_test.ino.bin', 'periph_test.ino.bin'],
+    ['new_periph_test', 'new_periph_test/new_periph_test.ino.bin', 'new_periph_test.ino.bin'],
+    ['deep_periph_test', 'deep_periph_test/build/deep_periph_test.ino.bin', 'deep_periph_test.ino.bin'],
+    ['comprehensive_test', 'comprehensive_test/comprehensive_test.bin', 'comprehensive_test.bin'],
+    ['edge_test', 'edge_test/edge_test.ino.bin', 'edge_test.ino.bin'],
+    ['echo_test', 'echo_test/build/echo_test.ino.bin', 'echo_test.ino.bin'],
+    ['rx_interrupt_test', 'rx_interrupt_test/build/rx_interrupt_test.ino.bin', 'rx_interrupt_test.ino.bin'],
+    ['blink_serial', 'blink_serial/build/blink_serial.ino.bin', 'blink_serial.ino.bin'],
+    ['timer_test', 'timer_test/build/timer_test.ino.bin', 'timer_test.ino.bin'],
+    ['test_firmware', 'test_firmware/test_firmware.bin', 'test_firmware.bin'],
+    ['arduino_test', 'arduino_test/arduino_test.ino.bin', 'arduino_test.ino.bin'],
+    ['i2s_sai_test', 'i2s_sai_test/i2s_sai_test.bin', 'i2s_sai_test.bin'],
 ];
 
 const lines = [
@@ -22,4 +41,4 @@ for (const [key, path, name] of firmwares) {
 }
 lines.push('};');
 writeFileSync(root + 'site/firmware.js', lines.join('\n') + '\n');
-console.log('wrote site/firmware.js');
+console.log('wrote site/firmware.js (' + firmwares.length + ' firmwares)');

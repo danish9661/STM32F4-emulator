@@ -122,14 +122,40 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
       <h2>Firmware</h2>
       <div class="sec">
         <select id="fwSelect">
-          <option value="eth_http">eth_http — web client (DHCP + TCP + HTTP)</option>
-          <option value="eth_dhcp">eth_dhcp — DHCP loop</option>
-          <option value="eth_test">eth_test — raw ETH TX test</option>
-          <option value="blinky">blinky — LED blinker (no ethernet)</option>
+          <optgroup label="Network">
+            <option value="eth_http">eth_http — web client (DHCP+TCP+HTTP)</option>
+            <option value="eth_dhcp">eth_dhcp — DHCP loop</option>
+            <option value="eth_test">eth_test — raw ETH TX test</option>
+          </optgroup>
+          <optgroup label="Bare-metal demo">
+            <option value="blinky">blinky — LED blinker, no network</option>
+            <option value="blink_serial">blink_serial — UART4 + blink loop</option>
+            <option value="timer_test">timer_test — TIM tick 1s prints</option>
+            <option value="arduino_test">arduino_test — Arduino core OK + ADC</option>
+            <option value="hal_test">hal_test — HAL init + SysTick</option>
+          </optgroup>
+          <optgroup label="Peripheral tests">
+            <option value="periph_test">periph_test — RCC/GPIO checks</option>
+            <option value="new_periph_test">new_periph_test — PWR/FSMC regs</option>
+            <option value="deep_periph_test">deep_periph_test — deep reg r/w</option>
+            <option value="comprehensive_test">comprehensive_test — EXTI/DMA/USART</option>
+            <option value="edge_test">edge_test — DMA edge cases</option>
+            <option value="i2s_sai_test">i2s_sai_test — I2S audio test</option>
+            <option value="test_firmware">test_firmware — TIM2/ADC dump</option>
+          </optgroup>
+          <optgroup label="Crypto">
+            <option value="crypto_test">crypto_test — AES-128 ECB/CBC</option>
+            <option value="crypto_deep_test">crypto_deep_test — AES CTR deep</option>
+            <option value="rx_crypto_test">rx_crypto_test — RX interrupt + CRC</option>
+          </optgroup>
+          <optgroup label="UART echo (needs input)">
+            <option value="echo_test">echo_test — UART echo server</option>
+            <option value="rx_interrupt_test">rx_interrupt_test — RX interrupt</option>
+          </optgroup>
         </select>
         <button id="btnBoot" class="primary" style="width:100%;">Boot preset</button>
         <input type="file" id="fwFile" accept=".bin,.hex,.elf,.map">
-        <p id="fwHint">Load a custom firmware: <b>.bin</b> (raw flash), <b>.hex</b> (Intel HEX), <b>.elf</b> (loadable segments + symbols), or a <b>.map</b> file for the symbol table only. Firmware files boot immediately.</p>
+        <p id="fwHint">Load a custom firmware: <b>.bin</b> (raw flash), <b>.hex</b> (Intel HEX), <b>.elf</b> (loadable segments + symbols), or a <b>.map</b> file for the symbol table only. Firmware files boot immediately. Nothing runs until you press <b>Boot preset</b> or load a file.</p>
       </div>
     </div>
     <div class="panel" style="margin-bottom:12px;">
