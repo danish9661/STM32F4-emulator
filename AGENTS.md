@@ -402,9 +402,17 @@ facts:
 # that require() can't load on Node 22)
 cd stm32-periph-wasm && wasm-pack build --release --target nodejs
 
-# Firmware (bare-metal Makefile; toolchain from Arduino core)
+# Firmware (bare-metal Makefile; toolchain from Arduino core).
+# NOTE: the Makefiles use `TOOLCHAIN ?=` — the env-var override above works,
+# and the committed eth_*.bin can be STALE relative to the .ino (the old
+# eth_dhcp.bin was built from an older source: it read rx_frame_len from
+# rdes0 bits [13:0] instead of [29:16], so DHCP Offer RX silently failed).
+# Rebuild + re-verify after any .ino change:
 TOOLCHAIN="$HOME/.arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/arm-none-eabi-" \
   make -C eth_http          # also eth_dhcp, eth_test
+# Configs for all three exist: eth_http/config.yaml, eth_dhcp/config.yaml,
+# eth_test/config.yaml (each sets its own `load:` firmware in the ROM region;
+# in config mode the positional firmware arg is IGNORED).
 
 # Gateway binary (sources are in openhw-local-gateway/; binary NOT committed)
 cd openhw-local-gateway && go build -mod=vendor -o openhw-gw .
@@ -413,7 +421,9 @@ cd openhw-local-gateway && go build -mod=vendor -o openhw-gw .
 ### Running the end-to-end test (proven working on Linux)
 
 ```bash
-# 1) local HTTP server the NAT forwards to (127.0.0.1:8092)
+# 1) local HTTP server the NAT forwards to (127.0.0.1:8092) — REQUIRED.
+#    If it is down, the gVisor replies RST-ACK and the firmware prints
+#    "TCP fl=14" (0x14 = ACK|RST) instead of the normal "TCP fl=12" SYN-ACK.
 node /tmp/opencode/http_server.js &
 
 # 2) run emulator + gateway in one shot
@@ -421,6 +431,9 @@ cd stm32-periph-wasm/pkg
 node cli.mjs ../../eth_http/eth_http.bin 10000000 --gateway --config=../../eth_http/config.yaml
 #   RX_HEX=1 same command dumps the first 64 B of each injected RX frame
 ```
+
+All three ethernet firmwares pass: eth_http (44+ rounds, 0 TCP fail),
+eth_dhcp (repeated DHCP SUCCESS), eth_test (TX completed, "ETH Test: done").
 
 Expected round-1 UART: `=== HTTP ... ===` → DHCP Discover/Offer/Ack →
 `TCP 010.150.211.085:8092` → `TCP SYN` → `TCP fl=12` (SYN-ACK) →
