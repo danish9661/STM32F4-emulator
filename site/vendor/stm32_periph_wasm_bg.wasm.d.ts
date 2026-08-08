@@ -1,0 +1,38 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const add_i2c_eeprom: (a: number, b: number, c: number, d: number, e: number) => void;
+export const add_software_spi: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
+export const add_spi_flash: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const dma_get_pending: (a: number) => [number, number];
+export const dma_get_pending_count: () => number;
+export const dma_set_completed: (a: number, b: number) => void;
+export const eth_clear_rx_poll: () => void;
+export const eth_clear_tx_poll: () => void;
+export const eth_get_rx_desc_addr: () => number;
+export const eth_get_tx_desc_addr: () => number;
+export const eth_is_rx_poll: () => number;
+export const eth_is_tx_poll: () => number;
+export const eth_rx_done: () => void;
+export const eth_signal_rx_poll: (a: number) => void;
+export const eth_signal_tx_poll: (a: number) => void;
+export const eth_tx_done: () => void;
+export const get_next_pending_interrupt: () => number;
+export const get_uart_output: () => [number, number];
+export const gpio_read_input: (a: number, b: number) => number;
+export const gpio_read_output: (a: number, b: number) => number;
+export const gpio_set_input: (a: number, b: number, c: number) => void;
+export const has_pending_interrupt: () => number;
+export const init: () => void;
+export const init_svd: (a: number, b: number) => void;
+export const is_watchdog_reset_requested: () => number;
+export const periph_read: (a: number, b: number) => number;
+export const periph_write: (a: number, b: number, c: number) => void;
+export const tick: () => void;
+export const tick_n: (a: number) => void;
+export const uart_rx_byte: (a: number, b: number) => number;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_start: () => void;

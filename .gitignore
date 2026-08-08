@@ -1,2 +1,4 @@
 /target
 /src
+# npm pack output
+*.tgz

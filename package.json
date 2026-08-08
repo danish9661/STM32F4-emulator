@@ -1,0 +1,46 @@
+{
+  "name": "stm32f4-emulator",
+  "version": "0.1.0",
+  "description": "STM32F407 emulator: Unicorn (WASM) CPU + Rust peripheral model. Runs real Cortex-M4 firmware in Node or the browser.",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./emulator": "./site/emulator.js",
+    "./netsim": "./site/netsim.js",
+    "./firmwares": "./site/firmware.js",
+    "./vendor": "./site/vendor/stm32_periph_wasm.js",
+    "./vendor/unicorn": "./site/vendor/unicorn_arm.cjs",
+    "./site": "./site/index.html"
+  },
+  "files": [
+    "index.mjs",
+    "README.md",
+    "site/emulator.js",
+    "site/netsim.js",
+    "site/firmware.js",
+    "site/index.html",
+    "site/vendor/"
+  ],
+  "keywords": [
+    "stm32",
+    "stm32f407",
+    "emulator",
+    "arm",
+    "cortex-m4",
+    "unicorn",
+    "wasm",
+    "embedded",
+    "firmware"
+  ],
+  "license": "GPL-3.0-only",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node site/test_flow.mjs",
+    "firmwares": "node tools/make_firmware.mjs",
+    "serve": "python3 -m http.server 8123 --directory site",
+    "prepack": "node tools/make_firmware.mjs"
+  }
+}

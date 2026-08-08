@@ -1,0 +1,15 @@
+{
+  "name": "stm32-periph-wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "stm32_periph_wasm_bg.wasm",
+    "stm32_periph_wasm.js",
+    "stm32_periph_wasm.d.ts"
+  ],
+  "main": "stm32_periph_wasm.js",
+  "types": "stm32_periph_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

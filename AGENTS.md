@@ -581,3 +581,63 @@ Gotchas: with `maxBatch=500000` and only-conditional stops, a dead/unreachable g
   here; `eth_http` is the actual web-client firmware used for verification.
 - Node buffers stdout: redirect to a file for long runs. The in-script
   timeout is 120 s; raise it for slow runs (10M instructions ≈ 5.6 s).
+
+---
+
+## 11. Browser demo + npm package (2026-08-09) — site/ and publishable library
+
+### In-browser demo (`site/`)
+- `site/index.html` + `site/app.js`: dark console-style UI. Auto-boots
+  `eth_http` with `netsim` (no gateway needed), renders UART live, packet
+  viewer, stats (inst/MIPS/batches/rounds/PC), Pause/Reset/Clear, plus a
+  "run your own firmware" panel (select bundled fw or upload any .bin).
+- Serve with `python3 -m http.server 8123 --directory site` (SVD + wasm are
+  fetched at runtime — file:// won't work). Browser build of the peripheral
+  model lives in `site/vendor/` (`wasm-pack build --release --target web
+  --out-dir ../site/vendor`); the Node build stays in `stm32-periph-wasm/pkg`.
+  `unicorn_arm.js` (browser IIFE -> global `MUnicorn`) vs `unicorn_arm.cjs`
+  (require) are two copies of the same module.
+- `site/emulator.js` is the **universal factory** (no imports — caller passes
+  bindings/unicorn/svdXml/firmware): memory hooks over the whole peripheral
+  space, codeHook with `tick_n` batching (TICK_EVERY=5000) + poll checks
+  (POLL_EVERY=1000), TX capture + RX injection, and no interrupt pump (the
+  firmware polls `eth_irq_flag` in SRAM; the driver writes bits 0/2 directly).
+- `site/netsim.js`: canned DHCP Offer/Ack + TCP SYN-ACK + HTTP response
+  (141B, fl=0x19) + bare ACK; no real stack. `site/test_flow.mjs` is the Node
+  harness that asserts the whole flow (boot, DHCP, TCP connected, HTTP body,
+  !CONN, >= 2 rounds) — `node site/test_flow.mjs`, PASS on exit 0.
+
+### The HTTP 000b bug (fixed 2026-08-09) — buffer-clobber race
+Symptom: response consumed but `=== HTTP 000b ===`, one ACK with
+ack=0x10000001, "TCP FIN" + "!CONN". Root cause (found via objdump of the
+inlined tcp_recv in `loop`): the guest's `eth_recv_packet` (eth_http.ino:101)
+re-arms `DMARPDR=1` at the END of consume, BEFORE tcp_recv parses the frame
+(disasm: `bl 80008e0` -> r6=pl, then sp/dp/fl reads from `pkt`). With two
+queued frames, the queue-stop fired mid-processing and `processEth` injected
+the second frame into the SAME `rx_buf[0]`, so the guest parsed
+pl=54 (old len) with the response's fl byte (0x19) -> td=0, fl&1=1 ->
+ack=0x10000000+0+1, "TCP FIN", return 0. Fix: `rxInjectIdx` now rotates
+`(idx+1) % rxDescs` (site/emulator.js) so consecutive injections land in
+different RX descriptor slots. Verified: test_flow.mjs PASS (087b + body),
+and a CDP-driven headless-Chrome smoke test completes 2 rounds.
+
+### npm package (prepare-only, dry-run verified)
+- Root `package.json` (`stm32f4-emulator`), `index.mjs` (Node API:
+  `createSTM32F407({firmware})` + `decodeFirmware`/`createNetSim`/
+  `createEmulator` re-exports), `tools/make_firmware.mjs` (regenerates
+  `site/firmware.js` base64 blobs from `eth_*/eth_*.bin`; runs on `prepack`).
+- `npm pack --dry-run` verified: 16 files, 1.2 MB tarball (includes
+  site/vendor wasm + SVD + both unicorn copies). NOT published. Consumer test
+  (install tarball into /tmp/opencode/pkgtest, `consumer.mjs`) completes a
+  full HTTP round — exit 0. Exports map covers `.`, `./emulator`,
+  `./netsim`, `./firmwares`, `./vendor`, `./site`.
+- **Gotcha**: wasm-pack writes `site/vendor/.gitignore` containing `*` —
+  delete it after each rebuild or git/npm pack will silently drop all vendor
+  assets (tracked: ~4.8 MB). `*.tgz` is gitignored.
+
+### Gotchas
+- Headless-chrome `--virtual-time-budget` + `--dump-dom` throttles rAF to a
+  few frames — it will NOT complete a run. Use the CDP driver
+  (script: /tmp/opencode/site_smoke.mjs) for browser verification.
+- The browser demo keeps 1 `emu.step()` per rAF; a step is up to 100k
+  instructions, so a full round completes in a few frames.

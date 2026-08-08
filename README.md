@@ -1,7 +1,51 @@
 STM32 Emulator
 ==============
 
-Test comment for git push verification.
+This repo emulates an **STM32F407** microcontroller. In addition to the native
+SDL emulator described below, it ships a **headless WASM emulator** (Unicorn
+CPU + a Rust peripheral model compiled to WASM) that runs real Cortex-M4
+firmware in Node or in a browser tab, plus three sample network firmwares
+(`eth_http`, `eth_dhcp`, `eth_test`) and a demo web page. See
+[AGENTS.md](AGENTS.md) for the full architecture, build steps, and state.
+
+## Quickstart
+
+```bash
+# 1) node E2E flow test (bundled firmware + simulated network)
+cd site && node test_flow.mjs          # asserts DHCP->TCP->HTTP completes
+
+# 2) browser demo
+python3 -m http.server 8123 --directory site   # then open http://127.0.0.1:8123
+# auto-boots eth_http with a simulated network; also lets you load any .bin
+
+# 3) gateway-backed run (real gVisor stack, needs the Go gateway)
+cd stm32-periph-wasm/pkg && node cli.mjs ../../eth_http/eth_http.bin 10000000 \
+  --gateway --config=../../eth_http/config.yaml
+# (requires an HTTP server at 127.0.0.1:8092; see AGENTS.md §10)
+```
+
+## npm package
+
+`npm pack` produces `stm32f4-emulator` — the full emulator as a library
+(bundled WASM assets, SVD, firmware binaries):
+
+```js
+import { createSTM32F407, createNetSim, FIRMWARES } from 'stm32f4-emulator';
+
+const netsim = createNetSim();
+const emu = await createSTM32F407({ firmware: FIRMWARES.eth_http.bytes, onTx: ... });
+
+emu.step(100000);              // run up to 100k instructions
+const uart = emu.drainUart();  // collect UART output
+emu.injectFrame(packetBytes);  // inject an Ethernet frame
+```
+
+Browser consumers import the ESM modules directly from the `site/` directory
+(`emulator.js` is import-free and universal; the vendor assets live in
+`site/vendor/`). Rebuild steps: `wasm-pack build --release --target web
+--out-dir ../site/vendor` for the browser build (Node target goes to
+`stm32-periph-wasm/pkg`), and `node tools/make_firmware.mjs` to regenerate the
+embedded firmware binaries.
 
 The goal is to simulate 3D printers, but any sort of stm32 microcontroller firmware should work.
 
