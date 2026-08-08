@@ -537,6 +537,14 @@ Measured on 20M-instruction `--connect` runs (eth_http, fresh gateway):
 
 Final config reproducible: 118 rounds, 0 TCP fail, 0 timeouts (two runs).
 
+100M soak with final config (2026-08-08, `SOAK_STATS=1`, fresh gateway):
+**586 TCP connected, 0 TCP fail, 0 SYN-ACK timeouts** in 78.29 s (≈1.28
+MIPS, 7.48 rounds/s) — up from the pre-speed 2x100M soak (526+529 rounds,
+~1.0 MIPS). A repeat soak on a gateway polluted with 300+ stale sessions
+failed at the first SYN with `TCP fl=10` + recv-wait stall (the documented
+environmental flake) — restart the gateway (`kill <pid>`, relaunch
+`openhw-gw -port 5099`) before long soaks.
+
 Changes that produced it:
 - **`tick_n(delta)` export in Rust** (`src/lib.rs`): `INSTRUCTION_COUNT.fetch_add(delta)` + `sys().tick()`. Safe to batch because timers are instruction-count-delta driven (`elapsed_ticks = (now-last_tick)/prescaler`) and eth.rs consumes `eth_take_done()` atomics. WASM rebuilt with `wasm-pack build --release --target nodejs`.
 - **codeHook (cli.mjs)** does only `instCount++` per instruction plus the queue-stop, and batches the expensive WASM calls:
