@@ -445,8 +445,9 @@ HTTP transaction per gateway session is the reliable pattern.
   paths, `PROT_ALL` (the `PERM_ALL` from the docs doesn't exist).
 - `stm32-periph-wasm/Cargo.toml`: added `[workspace]` so wasm-pack/cargo
   work from that dir.
-- `openhw-local-gateway/`: tracked sources only (main.go, handleDHCP.go,
-  bridge.go, go.mod/go.sum); the built binary/logs/*.bak are untracked.
+- `openhw-local-gateway/`: fully tracked (sources + vendored deps) after
+  removing its nested `.git`; the built `openhw-gw` binary, gw logs, and
+  `*.bak` are ignored.
 
 ### Notes / gotchas on Linux
 - The AGENTS.md §7 execution wedge was NOT reproduced under cli.mjs batch
