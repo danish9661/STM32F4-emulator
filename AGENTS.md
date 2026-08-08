@@ -427,13 +427,30 @@ Expected round-1 UART: `=== HTTP ... ===` → DHCP Discover/Offer/Ack →
 `TCP connected` → `Hello from openhw HTTP server` (the HTTP/1.1 200 body)
 → `TCP FIN` → `!CONN` → loop restart, DHCP renews OK.
 
-### Known limitation (round 2)
+### Multi-round support (fixed in cli.mjs)
 The Go (gVisor-tap-vsock) gateway keeps the round-1 TCP session alive and
-retransmits the round-1 server data at the new src port after the firmware
-restarts (firmware prints sp==8092/dp matched `TCP fl=18` frames). The
-firmware ignores them (`fl!=0x12`), so round-2 never receives a genuine
-SYN-ACK and times out. Fix: restart the gateway between runs. One full
-HTTP transaction per gateway session is the reliable pattern.
+retransmits old server data at the new src port after the firmware restarts
+(firmware prints `TCP fl=18` for those and ignores them). cli.mjs now
+**auto-restarts the gateway** when a round-end marker (`=== HTTP ... ===`) is
+seen in streamed UART, before the next round's DHCP Discover goes out.
+
+Three fixes were needed to make consecutive rounds work:
+1. **WS connect race**: the 1.5s dial timeout could fire while the gateway's
+   HTTP upgrade was still completing, creating a dead second connection that
+   stole the DHCP reply path. Now: 4s dial timeout + 600ms retry spacing.
+2. **Round-boundary batching**: once `!CONN` is seen, batches drop to 1500
+   instructions so the round-2 DHCP TX is processed after the restart, not
+   into the dying gateway.
+3. **RX queue wipe**: `restartGateway` used to clear `gwRxQueue`, destroying
+   the round-2 DHCP Offer that had already arrived on the old connection.
+   The queue now survives restarts (DHCP replies are stateless; stale TCP
+   frames are filtered by the firmware's `fl!=0x12` check).
+
+Verified: 200M-instruction run completes 3+ consecutive clean rounds
+(DHCP → `fl=12` → HTTP body → `!CONN` → next round), each with its own
+fresh gateway. `DBG_TX=1` / `DBG_RX=1` env flags add TX/RX frame traces.
+Note: restart only works in `--gateway` mode (self-spawned); with
+`--connect` the stale-session round may still fail.
 
 ### Changes committed with this port
 - `eth_http/eth_http.ino`: TCP src port now randomized per connect attempt
