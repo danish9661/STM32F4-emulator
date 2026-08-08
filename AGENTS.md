@@ -435,6 +435,12 @@ node cli.mjs ../../eth_http/eth_http.bin 10000000 --gateway --config=../../eth_h
 All three ethernet firmwares pass: eth_http (44+ rounds, 0 TCP fail),
 eth_dhcp (repeated DHCP SUCCESS), eth_test (TX completed, "ETH Test: done").
 
+### Regression script
+`scripts/verify_ethernet.sh [max_inst]` runs all three firmwares and
+asserts the success markers (TCP connected / DHCP SUCCESS / ETH Test:
+done) plus 0 `TCP fail` for eth_http. Starts the 127.0.0.1:8092 HTTP
+server itself if it isn't up. Exit 0 = all pass.
+
 Expected round-1 UART: `=== HTTP ... ===` → DHCP Discover/Offer/Ack →
 `TCP 010.150.211.085:8092` → `TCP SYN` → `TCP fl=12` (SYN-ACK) →
 `TCP connected` → `Hello from openhw HTTP server` (the HTTP/1.1 200 body)
