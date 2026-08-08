@@ -381,3 +381,77 @@ Once execution is reliable, finish `test_webserver_net.mjs`:
   re-init rather than trying to recover.
 - The step throughput degrades sharply over long runs (translation cache
   growth); prefer short runs and checkpointing to one long run.
+
+---
+
+## 10. Linux port (updated 2026-08-08) — this machine
+
+Windows/AGENTS-doc paths above no longer apply on this Linux box. Current
+facts:
+
+### Toolchain (all installed)
+- Rust + `wasm32-unknown-unknown`, `wasm-pack` 0.14.0 (`~/.local/bin`).
+- Arduino core `STMicroelectronics:stm32` 3.0.0 (installed via arduino-cli;
+  provides the xpack-arm-none-eabi-gcc toolchain below).
+- Go toolchain (used to build the gateway).
+
+### Build commands
+
+```bash
+# WASM peripheral model — MUST use --target nodejs (default bundler emits ESM
+# that require() can't load on Node 22)
+cd stm32-periph-wasm && wasm-pack build --release --target nodejs
+
+# Firmware (bare-metal Makefile; toolchain from Arduino core)
+TOOLCHAIN="$HOME/.arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/arm-none-eabi-" \
+  make -C eth_http          # also eth_dhcp, eth_test
+
+# Gateway binary (sources are in openhw-local-gateway/; binary NOT committed)
+cd openhw-local-gateway && go build -mod=vendor -o openhw-gw .
+```
+
+### Running the end-to-end test (proven working on Linux)
+
+```bash
+# 1) local HTTP server the NAT forwards to (127.0.0.1:8092)
+node /tmp/opencode/http_server.js &
+
+# 2) run emulator + gateway in one shot
+cd stm32-periph-wasm/pkg
+node cli.mjs ../../eth_http/eth_http.bin 10000000 --gateway --config=../../eth_http/config.yaml
+#   RX_HEX=1 same command dumps the first 64 B of each injected RX frame
+```
+
+Expected round-1 UART: `=== HTTP ... ===` → DHCP Discover/Offer/Ack →
+`TCP 010.150.211.085:8092` → `TCP SYN` → `TCP fl=12` (SYN-ACK) →
+`TCP connected` → `Hello from openhw HTTP server` (the HTTP/1.1 200 body)
+→ `TCP FIN` → `!CONN` → loop restart, DHCP renews OK.
+
+### Known limitation (round 2)
+The Go (gVisor-tap-vsock) gateway keeps the round-1 TCP session alive and
+retransmits the round-1 server data at the new src port after the firmware
+restarts (firmware prints sp==8092/dp matched `TCP fl=18` frames). The
+firmware ignores them (`fl!=0x12`), so round-2 never receives a genuine
+SYN-ACK and times out. Fix: restart the gateway between runs. One full
+HTTP transaction per gateway session is the reliable pattern.
+
+### Changes committed with this port
+- `eth_http/eth_http.ino`: TCP src port now randomized per connect attempt
+  (`49152 + ((tcp_attempt++*7) + port) % 2048`) — avoids stale-frame
+  collisions between rounds.
+- `stm32-periph-wasm/pkg/cli.mjs`: gateway path via `GW_PATH` env or
+  repo-relative `openhw-local-gateway/openhw-gw`; `RX_HEX=1` frame dump.
+- `stm32-periph-wasm/pkg/test_svd_run.cjs`: repo-relative firmware/SVD
+  paths, `PROT_ALL` (the `PERM_ALL` from the docs doesn't exist).
+- `stm32-periph-wasm/Cargo.toml`: added `[workspace]` so wasm-pack/cargo
+  work from that dir.
+- `openhw-local-gateway/`: tracked sources only (main.go, handleDHCP.go,
+  bridge.go, go.mod/go.sum); the built binary/logs/*.bak are untracked.
+
+### Notes / gotchas on Linux
+- The AGENTS.md §7 execution wedge was NOT reproduced under cli.mjs batch
+  stepping (10M-instruction runs are fine).
+- The repo's `webserver/` dir and `pkg/test_webserver_net.mjs` don't exist
+  here; `eth_http` is the actual web-client firmware used for verification.
+- Node buffers stdout: redirect to a file for long runs. The in-script
+  timeout is 120 s; raise it for slow runs (10M instructions ≈ 5.6 s).
