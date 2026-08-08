@@ -1,6 +1,8 @@
 STM32 Emulator
 ==============
 
+Test comment for git push verification.
+
 The goal is to simulate 3D printers, but any sort of stm32 microcontroller firmware should work.
 
 The emulator is configured via a configuration file, see example
