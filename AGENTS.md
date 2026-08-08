@@ -607,6 +607,24 @@ Gotchas: with `maxBatch=500000` and only-conditional stops, a dead/unreachable g
   harness that asserts the whole flow (boot, DHCP, TCP connected, HTTP body,
   !CONN, >= 2 rounds) — `node site/test_flow.mjs`, PASS on exit 0.
 
+### Non-ethernet demo (`blinky/` + `site/blinky.html`) — 2026-08-09
+- `blinky/` is a bare-metal firmware with **no ETH/DMA/interrupts**: UART
+  banner + `tick N LED=ON/OFF` prints + PA5 toggling every 100 ms via
+  `GPIOA_MODER`/`GPIOA_ODR`. Built with the same Makefile pattern as
+  `eth_test/` (startup.c `_start` does NOT zero .bss — keep globals static-
+  initialized or explicit).
+- `site/blinky.html` + `site/app_blinky.js`: same UI minus the network panel;
+  the LED circle is read live from the emulated GPIOA ODR bit 5
+  (`emu.read32(0x40020014) & 0x20`) every rAF — proves the peripheral model
+  round-trips GPIO writes. Nav between the two pages is in both headers.
+- `site/test_blinky.mjs` asserts boot banner + `tick 0/1` prints + ≥2 ODR
+  toggles (~10M inst, 1.4 s). CDP smoke: /tmp/opencode/blinky_smoke.mjs
+  (passes; chrome on port 9223).
+- Gotcha: `delay_ms(n)` here is the `4000 nops/ms` convention — each
+  `delay_ms(100)` is ~2.4M emulated instructions (6 inst/iter), so a full
+  tick is ~5M inst (~2 s wall at 2.5 MIPS). Don't expect real-time blink
+  rates in the emulator.
+
 ### The HTTP 000b bug (fixed 2026-08-09) — buffer-clobber race
 Symptom: response consumed but `=== HTTP 000b ===`, one ACK with
 ack=0x10000001, "TCP FIN" + "!CONN". Root cause (found via objdump of the

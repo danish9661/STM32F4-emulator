@@ -8,6 +8,7 @@ const firmwares = [
     ['eth_http', 'eth_http/eth_http.bin', 'eth_http.bin'],
     ['eth_dhcp', 'eth_dhcp/eth_dhcp.bin', 'eth_dhcp.bin'],
     ['eth_test', 'eth_test/eth_test.bin', 'eth_test.bin'],
+    ['blinky', 'blinky/blinky.bin', 'blinky.bin'],
 ];
 
 const lines = [

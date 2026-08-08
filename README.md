@@ -18,7 +18,10 @@ The browser demo deploys to GitHub Pages:
 
 It boots `eth_http` in your browser tab: live UART console, DHCP/TCP/HTTP
 packet viewer, instruction/round stats, and a panel to load your own `.bin`
-firmware (or pick a bundled one).
+firmware (or pick a bundled one). A second page,
+[`blinky.html`](site/blinky.html), runs a **non-ethernet** firmware — a
+bare-metal LED blinker — with the LED driven live by the emulated GPIO
+register (`GPIOA->ODR`), proving the emulator needs no network to be useful.
 
 ## Quickstart
 
@@ -68,6 +71,7 @@ See `site/test_flow.mjs` and the exports in `index.mjs` for the full API
 | `eth_http/` | DHCP + TCP client + HTTP GET + prints the response | `TCP connected`, `=== HTTP <len>b ===` |
 | `eth_dhcp/` | Loops DHCP Discover/Offer/Request/Ack | `DHCP SUCCESS` |
 | `eth_test/` | Raw ETH TX/RX self-test | `ETH Test: done` |
+| `blinky/` | **No ethernet** — LED blinker on GPIOA PA5 + UART tick counter | `tick N LED=ON/OFF` |
 
 All three are bare-metal (no RTOS), built with the Arduino core's
 arm-none-eabi-gcc, and driven purely through memory-mapped registers —
@@ -137,7 +141,8 @@ rebuild — delete it so the vendor assets stay tracked/committed.
 
 ## Testing
 
-- `npm test` — boot + DHCP + TCP + HTTP, asserts 2 clean rounds (exit 0 = PASS).
+- `npm test` — flow test (`site/test_flow.mjs`) + blinky test
+  (`site/test_blinky.mjs`), exit 0 = all PASS.
 - `scripts/verify_ethernet.sh [max_inst]` — runs all three firmwares through
   the gateway, asserts the success markers and 0 `TCP fail`.
 - Soak-tested: 200M-instruction gateway runs with 1000+ consecutive TCP

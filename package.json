@@ -20,6 +20,11 @@
     "site/netsim.js",
     "site/firmware.js",
     "site/index.html",
+    "site/blinky.html",
+    "site/app.js",
+    "site/app_blinky.js",
+    "site/test_flow.mjs",
+    "site/test_blinky.mjs",
     "site/vendor/"
   ],
   "keywords": [
@@ -38,7 +43,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node site/test_flow.mjs",
+    "test": "node site/test_flow.mjs && node site/test_blinky.mjs",
+    "test:flow": "node site/test_flow.mjs",
+    "test:blinky": "node site/test_blinky.mjs",
     "firmwares": "node tools/make_firmware.mjs",
     "serve": "python3 -m http.server 8123 --directory site",
     "prepack": "node tools/make_firmware.mjs"

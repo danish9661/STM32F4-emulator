@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>STM32F407 Emulator — In-Browser Demo</title>
+<title>STM32F407 Emulator — Blinky (no ethernet)</title>
 <style>
 :root {
   --bg: #0d1117;
@@ -53,9 +53,6 @@ main { display: grid; grid-template-columns: 1fr 340px; gap: 12px; padding: 12px
   font: inherit; white-space: pre-wrap; word-break: break-all;
   background: #010409; color: #c9d1d9;
 }
-#uart .ok { color: var(--green); }
-#uart .bad { color: var(--red); }
-#uart .net { color: var(--cyan); }
 .controls { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); }
 button {
   background: #21262d; color: var(--fg);
@@ -71,12 +68,17 @@ button:disabled { opacity: .45; cursor: default; }
 .stat { background: var(--panel); padding: 7px 12px; }
 .stat b { display: block; font-size: 15px; }
 .stat span { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
-#frames { max-height: 240px; overflow-y: auto; }
-.frame { padding: 6px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
-.frame .tag { font-weight: 700; }
-.frame.tx .tag { color: var(--yellow); }
-.frame.rx .tag { color: var(--cyan); }
-.frame pre { margin: 4px 0 0; font-size: 11px; color: var(--dim); white-space: pre-wrap; word-break: break-all; }
+.ledpanel { display: flex; align-items: center; gap: 16px; padding: 14px 12px; }
+.led {
+  width: 46px; height: 46px; border-radius: 50%;
+  border: 2px solid var(--border);
+  background: #161b22;
+  transition: background .1s;
+}
+.led.on { background: var(--green); box-shadow: 0 0 18px var(--green); }
+.led.off { background: #21262d; box-shadow: inset 0 0 8px #000; }
+.ledpanel div { color: var(--dim); font-size: 12px; line-height: 1.7; }
+.ledpanel b { color: var(--fg); }
 .upload { padding: 12px; }
 .upload input[type=file] { width: 100%; margin-bottom: 8px; font: inherit; font-size: 12px; color: var(--dim); }
 .upload p { color: var(--dim); font-size: 11px; margin: 8px 0 0; }
@@ -88,8 +90,8 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
 <header>
   <h1>STM32F407 in the Browser</h1>
   <nav>
-    <a href="index.html" class="active">Network demo</a>
-    <a href="blinky.html">Blinky (no ethernet)</a>
+    <a href="index.html">Network demo</a>
+    <a href="blinky.html" class="active">Blinky (no ethernet)</a>
   </nav>
   <span id="status"><span class="dot" id="dot"></span><span id="statusText">booting…</span></span>
 </header>
@@ -113,28 +115,35 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
         <div class="stat"><b id="stInst">0</b><span>instructions</span></div>
         <div class="stat"><b id="stMips">0.0</b><span>MIPS</span></div>
         <div class="stat"><b id="stSteps">0</b><span>batches</span></div>
-        <div class="stat"><b id="stRounds">0</b><span>rounds</span></div>
+        <div class="stat"><b id="stToggles">0</b><span>LED toggles</span></div>
         <div class="stat"><b id="stPc">—</b><span>PC</span></div>
-        <div class="stat"><b id="stNet">—</b><span>network</span></div>
+        <div class="stat"><b id="stLedHex">—</b><span>GPIOA ODR</span></div>
       </div>
     </div>
     <div class="panel" style="margin-bottom:12px;">
-      <h2>Network packets (simulated)</h2>
-      <div id="frames"></div>
+      <h2>Emulated LED — GPIOA PA5</h2>
+      <div class="ledpanel">
+        <div class="led off" id="led"></div>
+        <div>
+          <b>PA5</b> output toggled by the firmware<br>
+          live from the emulated <b>GPIOA-&gt;ODR</b> register<br>
+          (0x40020014, read back through the peripheral model)
+        </div>
+      </div>
     </div>
     <div class="panel">
       <h2>Run your own firmware</h2>
       <div class="upload">
         <select id="fwSelect">
-          <option value="eth_http">eth_http (web client demo)</option>
-          <option value="eth_dhcp">eth_dhcp (DHCP only)</option>
-          <option value="eth_test">eth_test (TX loop test)</option>
-          <option value="blinky">blinky (LED, no network — see blinky page)</option>
+          <option value="blinky">blinky (LED + UART, no network)</option>
+          <option value="eth_http">eth_http (needs network demo)</option>
+          <option value="eth_dhcp">eth_dhcp (needs network demo)</option>
+          <option value="eth_test">eth_test (needs network demo)</option>
         </select>
         <button id="btnLoad" class="primary" style="width:100%;margin-bottom:10px;">Boot selected firmware</button>
         <input type="file" id="fwFile" accept=".bin">
         <button id="btnUpload" style="width:100%;">Load .bin file</button>
-        <p>Bare-metal ARM Cortex-M4 (Thumb-2) binary. Must target the STM32F407 peripheral map. The network simulator only understands the three bundled firmwares.</p>
+        <p>Bare-metal ARM Cortex-M4 (Thumb-2) binary targeting the STM32F407. Network-capable firmwares will wait for packets — open the network demo page for those.</p>
       </div>
     </div>
   </aside>
@@ -144,6 +153,6 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
 </footer>
 
 <script src="vendor/unicorn_arm.js"></script>
-<script type="module" src="app.js"></script>
+<script type="module" src="app_blinky.js"></script>
 </body>
 </html>
