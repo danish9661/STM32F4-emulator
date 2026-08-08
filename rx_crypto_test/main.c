@@ -65,8 +65,8 @@ int main(void) {
     CRC_CR |= 1;
     while (CRC_CR & 1);
 
-    // Enable USART1 IRQ 38 in NVIC ISER1 (bit 6)
-    NVIC_ISER1 |= (1 << 6);
+    // Enable USART1 IRQ 37 in NVIC ISER1 (bit 5)
+    NVIC_ISER1 |= (1 << 5);
 
     uart_puts("=== RX INT + CRC ===\n");
     uart_puts("Sending \"Hello\" via pipe...\n");

@@ -116,6 +116,10 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
         <input type="checkbox" id="chkAuto" checked> autoscroll
       </label>
     </div>
+    <div class="controls" style="border-top:none;padding-top:0;">
+      <input type="text" id="rxInput" placeholder="UART RX — type bytes to send to the firmware (Enter to send)" style="flex:1;background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font:inherit;font-size:12px;">
+      <button id="btnSend">Send RX</button>
+    </div>
   </section>
   <aside>
     <div class="panel" style="margin-bottom:12px;">

@@ -37,9 +37,7 @@ void (* const vector_table[97 + 16])(void) = {
     DH,DH,DH,DH,DH,DH,DH,DH,  // 8-15
     DH,DH,DH,DH,DH,DH,DH,DH,  // 16-23
     DH,DH,DH,DH,DH,DH,DH,DH,  // 24-31
-    DH,DH,DH,DH,DH,DH,        // 32-37
-    // IRQ 38: USART1
-    U1,
+    DH,DH,DH,DH,DH,U1,        // 32-37; IRQ 37 = USART1
 };
 
 __attribute__((naked)) void _start(void) {

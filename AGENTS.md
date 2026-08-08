@@ -655,8 +655,28 @@ ack=0x10000000+0+1, "TCP FIN", return 0. Fix: `rxInjectIdx` now rotates
 different RX descriptor slots. Verified: test_flow.mjs PASS (087b + body),
 and a CDP-driven headless-Chrome smoke test completes 2 rounds.
 
-### npm package (prepare-only, dry-run verified)
-- Root `package.json` (`stm32f4-emulator`), `index.mjs` (Node API:
+### Interrupt pump — opt-in per firmware (fixed 2026-08-09)
+The guest-IRQ pump (`processInterrupts` in site/emulator.js, ported from
+cli.mjs) now runs **only when `enable_irqs: true`** (app.js enables it for
+`rx_interrupt_test` + `rx_crypto_test`). OFF by default — the ETH firmware
+is corrupted by it: the driver signals TX/RX done by writing SRAM `irq_flag`
++ model DMASR, and a guest `ETH_IRQHandler` run on top re-reads DMASR and
+re-scans `rx_desc`, stomping `rx_frame_idx/len` (observed: response body
+followed by raw RX-buffer/TX-packet garbage and a mojibake `=== HTTP «75b
+===`). In cli.mjs there is only ONE irq_flag writer (the ISR), so the pump
+there is safe; emulator.js must never combine both.
+While wiring the pump, fixed a latent `rx_crypto_test` firmware bug: it
+numbered USART1 as IRQ 38 (NVIC bit 6, vector slot 16+38) but the model
+(and the real F407) pends USART1 as IRQ 37 — the ISR never ran. Fixed
+startup.c (handler now in the IRQ 37 slot) + main.c (ISER1 bit 5). Also
+fixed its Makefile (`TOOLCHAIN ?=`, output names `rx_crypto_test.*` —
+previously built `comprehensive_test.*` and left the .bin stale). Rebuilt
+and re-ran `tools/make_firmware.mjs`. Tests: `node site/test_rx_interrupt.mjs`
+(PASS both RX firmware), `site/test_flow.mjs`, `site/test_blinky.mjs`.
+`rx_crypto_test/run.mjs` is a legacy standalone harness (HOOK_INTR-based),
+not the createEmulator path.
+
+### npm package (prepare-only, dry-run verified)- Root `package.json` (`stm32f4-emulator`), `index.mjs` (Node API:
   `createSTM32F407({firmware})` + `decodeFirmware`/`createNetSim`/
   `createEmulator` re-exports), `tools/make_firmware.mjs` (regenerates
   `site/firmware.js` base64 blobs from `eth_*/eth_*.bin`; runs on `prepack`).

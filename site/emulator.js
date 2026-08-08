@@ -23,6 +23,13 @@ export async function createEmulator(opts) {
         eth = {},             // firmware-specific SRAM addresses (defaults above)
         ext_devices = {},
         extra_mem = [],       // [{addr, data}] preloaded into mapped memory (ELF RAM segments)
+        uart_addr = 0x40011000, // USART base for uart_rx_byte injection (UART4 = 0x40004C00)
+        // Run guest IRQ handlers (USART RXNE etc.) between batches. OFF by
+        // default: the ETH firmware is driven by writing irq_flag in SRAM and
+        // is corrupted if the guest ETH_IRQHandler also runs (it re-reads
+        // DMASR and re-scans rx_desc, stomping rx_frame_idx/len). Enable only
+        // for interrupt-driven firmware (rx_interrupt_test, rx_crypto_test).
+        enable_irqs = false,
     } = opts;
 
     const {
@@ -31,6 +38,7 @@ export async function createEmulator(opts) {
         is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd,
         eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll,
         eth_is_rx_poll, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
+        get_next_pending_interrupt, has_pending_interrupt, uart_rx_byte,
     } = bindings;
 
     const E = {
@@ -223,6 +231,55 @@ export async function createEmulator(opts) {
         }
     };
 
+    // ── interrupt pump (runs guest IRQ handlers between batches) ───────────
+    // Port of cli.mjs processInterrupts: pushes an exception frame, runs the
+    // handler until it aborts on bx lr (EXC_RETURN unsupported), then restores
+    // the full context incl. XPSR (condition flags!).
+    // Enabled ONLY for interrupt-driven firmware (enable_irqs) — the ETH
+    // firmware must NOT use it: the driver signals TX/RX done via SRAM
+    // irq_flag + model DMASR, and a guest ETH_IRQHandler run on top re-scans
+    // rx_desc and corrupts rx_frame_idx/len (observed garbage response body).
+    const processInterrupts = () => {
+        while (!stopRequested) {
+            const irq = get_next_pending_interrupt();
+            if (irq <= -100) break;
+            const savedAt = uc.reg_read_i32(Module.ARM_REG_SP);
+            const frame = new Uint8Array(32);
+            const sv = new DataView(frame.buffer);
+            sv.setUint32(0, uc.reg_read_i32(Module.ARM_REG_XPSR), true);
+            sv.setUint32(4, uc.reg_read_i32(Module.ARM_REG_PC), true);
+            sv.setUint32(8, uc.reg_read_i32(Module.ARM_REG_LR), true);
+            sv.setUint32(12, uc.reg_read_i32(Module.ARM_REG_R12), true);
+            sv.setUint32(16, uc.reg_read_i32(Module.ARM_REG_R3), true);
+            sv.setUint32(20, uc.reg_read_i32(Module.ARM_REG_R2), true);
+            sv.setUint32(24, uc.reg_read_i32(Module.ARM_REG_R1), true);
+            sv.setUint32(28, uc.reg_read_i32(Module.ARM_REG_R0), true);
+            uc.mem_write(BigInt(savedAt - 32), frame);
+            uc.reg_write_i32(Module.ARM_REG_SP, savedAt - 32);
+            const handler_pc = read32(vector_table + 4 * (16 + irq));
+            uc.reg_write_i32(Module.ARM_REG_LR, 0xFFFFFFF9);
+            uc.reg_write_i32(Module.ARM_REG_PC, handler_pc);
+            try {
+                uc.emu_start(BigInt(handler_pc), 0n, 0n, 100000);
+            } catch (e) {
+                // handler aborted on bx lr (EXC_RETURN not supported) — expected
+            }
+            const savedFrame = uc.mem_read(BigInt(savedAt - 32), 32);
+            const savedSv = new DataView(savedFrame.buffer, savedFrame.byteOffset, savedFrame.byteLength);
+            uc.reg_write_i32(Module.ARM_REG_XPSR, savedSv.getUint32(0, true));
+            uc.reg_write_i32(Module.ARM_REG_R0, savedSv.getUint32(28, true));
+            uc.reg_write_i32(Module.ARM_REG_R1, savedSv.getUint32(24, true));
+            uc.reg_write_i32(Module.ARM_REG_R2, savedSv.getUint32(20, true));
+            uc.reg_write_i32(Module.ARM_REG_R3, savedSv.getUint32(16, true));
+            uc.reg_write_i32(Module.ARM_REG_R12, savedSv.getUint32(12, true));
+            uc.reg_write_i32(Module.ARM_REG_LR, savedSv.getUint32(8, true));
+            uc.reg_write_i32(Module.ARM_REG_PC, savedSv.getUint32(4, true) | 1);
+            uc.reg_write_i32(Module.ARM_REG_SP, savedAt);
+            processDma();
+            processEth();
+        }
+    };
+
     const step = (max_inst = maxBatch) => {
         processDma();
         processEth();
@@ -231,6 +288,7 @@ export async function createEmulator(opts) {
         tick();
         processDma();
         processEth();
+        if (enable_irqs) processInterrupts();
         const stopped = stopRequested || is_watchdog_reset_requested();
         return { pc: uc.reg_read_i32(Module.ARM_REG_PC), stopped, instCount };
     };
@@ -251,6 +309,10 @@ export async function createEmulator(opts) {
         step, run,
         drainUart() { return get_uart_output(); },
         injectFrame(frame) { rxQueue.push(frame); },
+        sendUartByte(b) { return uart_rx_byte(uart_addr, b & 0xFF); },
+        sendUart(bytes) {
+            for (const b of bytes) uart_rx_byte(uart_addr, b & 0xFF);
+        },
         rxQueue,
         stop() {
             stopRequested = true;

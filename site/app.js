@@ -30,7 +30,16 @@ let session = 0;
 let emu = null, netsim = null, running = false;
 let uartBuf = '', totalInst = 0, t0 = performance.now(), lastInst = 0, lastT = t0;
 let stepsDone = 0;
-let image = null;          // { flash, ram, extraMem, entry, symbols, name }
+let image = null;          // { flash, ram, extraMem, entry, symbols, name, uartAddr }
+
+// Firmwares on UART4 (0x40004C00) instead of USART1 (0x40011000).
+const UART4_FIRMWARES = new Set(['echo_test', 'blink_serial']);
+const uartAddrFor = (name) => UART4_FIRMWARES.has(name) ? 0x40004C00 : 0x40011000;
+
+// Interrupt-driven firmware: the emulator pumps guest IRQ handlers (USART RXNE
+// etc.). OFF for ETH firmware — the driver signals completion via SRAM
+// irq_flag and the guest ETH_IRQHandler would double-process DMASR/rx_desc.
+const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test']);
 
 // ── status + UART ──────────────────────────────────────────────────────────
 const setStatus = (text, cls) => {
@@ -121,28 +130,28 @@ const connectGateway = () => {
 
 // ── firmware loading ───────────────────────────────────────────────────────
 const loadFirmwareBytes = (bytes, name) => {
-    image = { flash: new Uint8Array(bytes), ram: null, extraMem: [], entry: null, symbols: null, name };
+    image = { flash: new Uint8Array(bytes), ram: null, extraMem: [], entry: null, symbols: null, name, uartAddr: uartAddrFor(name) };
     boot();
 };
 
 const loadHex = (text, name) => {
     const img = parseIntelHex(text);
     if (!img.flash) throw new Error('no flash data found in HEX file');
-    image = { flash: img.flash, ram: img.ram, extraMem: [], entry: img.entry, symbols: null, name };
+    image = { flash: img.flash, ram: img.ram, extraMem: [], entry: img.entry, symbols: null, name, uartAddr: uartAddrFor(name) };
     boot();
 };
 
 const loadElf = (bytes, name) => {
     const img = parseElf(bytes);
     if (!img.flash) throw new Error('ELF has no FLASH loadable segment');
-    image = { flash: img.flash, ram: img.ram, extraMem: img.extraMem, entry: img.entry, symbols: img.symbols, name };
+    image = { flash: img.flash, ram: img.ram, extraMem: img.extraMem, entry: img.entry, symbols: img.symbols, name, uartAddr: uartAddrFor(name) };
     renderSymbols(img.symbols);
     boot();
 };
 
 $('btnBoot').addEventListener('click', () => {
     const fw = $('fwSelect').value;
-    image = { flash: decodeB64(FIRMWARES[fw].bytes), ram: null, extraMem: [], entry: null, symbols: null, name: fw + '.bin' };
+    image = { flash: decodeB64(FIRMWARES[fw].bytes), ram: null, extraMem: [], entry: null, symbols: null, name: fw, uartAddr: uartAddrFor(fw) };
     renderSymbols(null);
     boot();
 });
@@ -205,6 +214,8 @@ const boot = async () => {
         unicorn: MUnicorn,
         svdXml,
         extra_mem: image.extraMem,
+        uart_addr: image.uartAddr,
+        enable_irqs: IRQ_FIRMWARES.has(image.name),
         onTx: (pkt) => {
             addFrame('tx', pkt);
             if (gw.connected && gw.ws) {
@@ -273,6 +284,21 @@ $('btnReset').addEventListener('click', () => {
 });
 $('btnClear').addEventListener('click', () => { uartEl.textContent = uartBuf = ''; });
 $('btnGw').addEventListener('click', connectGateway);
+
+const sendRx = () => {
+    const input = $('rxInput');
+    const text = input.value;
+    if (!text || !emu) return;
+    appendUart('> ' + text + '\r\n');
+    const bytes = new Uint8Array(text.length);
+    for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xFF;
+    emu.sendUart(bytes);
+    input.value = '';
+};
+$('btnSend').addEventListener('click', sendRx);
+$('rxInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') sendRx();
+});
 window.addEventListener('error', (e) => setStatus('error: ' + e.message, 'err'));
 
 // ── stats ──────────────────────────────────────────────────────────────────
