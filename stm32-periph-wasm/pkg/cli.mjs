@@ -217,7 +217,7 @@ async function main() {
     if (useGateway) {
         try {
             if (spawnGateway) {
-                const gwPath = 'C:\\Users\\Danish\\Documents\\openhw-local-gateway\\openhw-gw.exe';
+                const gwPath = process.env.GW_PATH || path.join(import.meta.dirname, '..', '..', 'openhw-local-gateway', 'openhw-gw');
                 gwProcess = spawn(gwPath, [], { stdio: 'pipe' });
                 gwProcess.stdout.on('data', d => process.stdout.write(d));
                 gwProcess.stderr.on('data', d => process.stderr.write(d));
@@ -330,6 +330,11 @@ async function main() {
                     if (bufAddr !== 0 && bufSize >= 60) {
                         const pkt = gwRxQueue.shift();
                         const len = Math.min(pkt.length, bufSize);
+                        if (process.env.RX_HEX === '1') {
+                            let hex = [];
+                            for (let i = 0; i < len && i < 64; i++) hex.push(pkt[i].toString(16).padStart(2, '0'));
+                            console.log(`[RXHEX len=${len}] ${hex.join('')}`);
+                        }
                         try { uc.mem_write(BigInt(bufAddr), new Uint8Array(pkt.buffer, pkt.byteOffset, len)); } catch (e) { break; }
                         const rdes0_w = (1 << 28) | (1 << 27) | (len << 16);
                         const wb = new Uint8Array(4);

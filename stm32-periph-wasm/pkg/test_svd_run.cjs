@@ -3,14 +3,12 @@ const periph = require('./stm32_periph_wasm.js');
 const fs = require('fs');
 
 async function main() {
-    const firmwarePath = process.argv[2] || 'C:\\Users\\Danish\\Documents\\stm32-emu\\arduino_test\\arduino_test.ino.bin';
+    const firmwarePath = process.argv[2] || '../../arduino_test/arduino_test.ino.bin';
     const firmware = fs.readFileSync(firmwarePath);
-    const svdXml = fs.readFileSync('C:\\Users\\Danish\\Documents\\stm32-emu\\monox\\stm32f407.svd', 'utf8');
+    const svdXml = fs.readFileSync('../../monox/stm32f407.svd', 'utf8');
 
     console.log('Initializing Unicorn...');
     const Module = await MUnicorn({});
-    const periphWasmBuf = fs.readFileSync('./stm32_periph_wasm_bg.wasm');
-    await periph.default({ module_or_path: periphWasmBuf.buffer });
     periph.init_svd(svdXml);
 
     const uc = new Module.Unicorn(Module.ARCH_ARM, Module.MODE_MCLASS | Module.MODE_LITTLE_ENDIAN);
@@ -18,10 +16,10 @@ async function main() {
     console.log('Module.PERM_ALL:', Module.PERM_ALL);
     console.log('Module.PROT_READ:', Module.PROT_READ, 'PROT_WRITE:', Module.PROT_WRITE, 'PROT_EXEC:', Module.PROT_EXEC);
 
-    uc.mem_map(0x08000000, 0x100000, Module.PERM_ALL);
+    uc.mem_map(0x08000000, 0x100000, Module.PROT_ALL);
     uc.mem_write(0x08000000, firmware);
 
-    uc.mem_map(0x20000000, 0x20000, Module.PERM_ALL);
+    uc.mem_map(0x20000000, 0x20000, Module.PROT_ALL);
 
     const read32 = (addr) => {
         const b = uc.mem_read(BigInt(addr), 4);

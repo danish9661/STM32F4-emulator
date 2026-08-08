@@ -49,6 +49,8 @@ static volatile uint32_t rx_frame_len = 0;
 static volatile uint32_t rx_frame_idx = 0;
 static uint8_t my_ip[4] = {0,0,0,0};
 static uint32_t dhcp_xid = 0x87654321;
+static uint16_t tcp_src_port = 49152;
+static uint32_t tcp_attempt = 0;
 
 // ── USART ──
 static void uart_init(void) {
@@ -153,7 +155,7 @@ static int build_tcp_frame(uint8_t flags, const uint8_t *payload, int plen, cons
     // TCP header (20 bytes)
     uint8_t *tcph = p;
     memset(p, 0, 20);
-    p[0]=49152>>8; p[1]=49152&0xFF; // src port
+    p[0]=tcp_src_port>>8; p[1]=tcp_src_port&0xFF; // src port
     p[2]=dport>>8; p[3]=dport&0xFF; // dst port
     p[4]=seq>>24; p[5]=seq>>16; p[6]=seq>>8; p[7]=seq;
     p[8]=ack>>24; p[9]=ack>>16; p[10]=ack>>8; p[11]=ack;
@@ -287,6 +289,7 @@ static int tcp_connect(const uint8_t *ip, uint16_t port) {
     for(int i=0;i<4;i++) tcp_target_ip[i]=ip[i];
     tcp_target_port=port;
     tcp_seq=10000; tcp_ack=0; tcp_connected=0;
+    tcp_src_port = 49152 + ((uint32_t)(tcp_attempt++ * 7) + (uint32_t)port) % 2048;
 
     // Send SYN
     int len = build_tcp_frame(0x02, 0, 0, tcp_target_ip, tcp_target_port, tcp_seq, 0);
@@ -304,7 +307,7 @@ static int tcp_connect(const uint8_t *ip, uint16_t port) {
         if(ip2[9]!=6) continue;
         uint8_t *tcp2=ip2+ih;
         uint16_t sp=(tcp2[0]<<8)|tcp2[1], dp=(tcp2[2]<<8)|tcp2[3];
-        if(sp!=tcp_target_port||dp!=49152) continue;
+        if(sp!=tcp_target_port||dp!=tcp_src_port) continue;
         int fl=tcp2[13];
         uart_puts("TCP fl="); uart_hex8(fl); uart_puts("\r\n");
         if(fl==0x12||fl==0x1A||fl==0x1E){
@@ -342,7 +345,7 @@ static int tcp_recv(uint8_t **buf, uint32_t *len) {
         if(ip2[9]!=6) continue;
         uint8_t *tcp2=ip2+ih;
         uint16_t sp=(tcp2[0]<<8)|tcp2[1], dp=(tcp2[2]<<8)|tcp2[3];
-        if(sp!=tcp_target_port||dp!=49152) continue;
+        if(sp!=tcp_target_port||dp!=tcp_src_port) continue;
         int fl=tcp2[13];
         int th=((tcp2[12]>>4)&0x0F)*4;
         int td=pl-14-ih-th;
