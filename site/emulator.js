@@ -38,7 +38,7 @@ export async function createEmulator(opts) {
         is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd,
         eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll,
         eth_is_rx_poll, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
-        get_next_pending_interrupt, has_pending_interrupt, uart_rx_byte,
+        get_next_pending_interrupt, uart_rx_byte,
     } = bindings;
 
     const E = {

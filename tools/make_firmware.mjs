@@ -28,6 +28,7 @@ const firmwares = [
     ['test_firmware', 'test_firmware/test_firmware.bin', 'test_firmware.bin'],
     ['arduino_test', 'arduino_test/arduino_test.ino.bin', 'arduino_test.ino.bin'],
     ['i2s_sai_test', 'i2s_sai_test/i2s_sai_test.bin', 'i2s_sai_test.bin'],
+    ['spi_tft_test', 'spi_tft_test/spi_tft_test.bin', 'spi_tft_test.bin'],
 ];
 
 const lines = [

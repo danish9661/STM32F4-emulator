@@ -231,6 +231,8 @@ const boot = async () => {
     if (id !== session) { emu.close(); return; }
 
     appendUart(`── booted ${image.name} ${gw.connected ? '(gateway)' : '(netsim)'} ──\r\n`);
+    window.__emu = emu;          // debug handle (CDP smoke tests)
+    window.__bindings = bindings;
     running = true;
     setBusy(true);
     $('btnRun').textContent = 'Stop';

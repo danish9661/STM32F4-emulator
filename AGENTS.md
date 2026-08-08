@@ -695,3 +695,15 @@ not the createEmulator path.
   (script: /tmp/opencode/site_smoke.mjs) for browser verification.
 - The browser demo keeps 1 `emu.step()` per rAF; a step is up to 100k
   instructions, so a full round completes in a few frames.
+- **`<input>.value` strips CR/LF (HTML spec)** — the UART RX input box cannot
+  send `\n`/`\r`, so newline-terminated RX firmware (rx_interrupt_test,
+  rx_crypto_test) can't be driven from the UI box. The CDP smoke
+  (`/tmp/opencode/rx_smoke.mjs`) sends control chars via `window.__emu
+  .sendUart([...])` — app.js exposes `window.__emu`/`window.__bindings`
+  debug handles for this (verified 2026-08-09: both RX firmwares reach
+  `CRC=EFE8B569` / `INT CRC matches polling` in the browser in ~0.4 s).
+- `rx_interrupt_test`'s interrupt pump also services the model's SysTick
+  pending (Arduino core configures it); each service runs the real
+  SysTick_Handler, which aborts on `pop {pc}` with the fake EXC_RETURN LR —
+  cheap, but the pump should never be enabled for ETH firmware (see the
+  interrupt-pump section).
