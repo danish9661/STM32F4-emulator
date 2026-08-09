@@ -51,6 +51,26 @@ pub fn eth_get_rx_desc_addr() -> u32 { ETH_RX_DESC_ADDR.load(Ordering::Acquire) 
 pub fn eth_set_done(flags: u8) { ETH_DONE.fetch_or(flags, Ordering::Release); }
 pub fn eth_take_done() -> u8 { ETH_DONE.swap(0, Ordering::Acquire) }
 
+// FLASH programming/erase state shared with the JS driver (which applies the
+// actual memory mutations to guest memory).
+static FLASH_PROGRAMMING: AtomicBool = AtomicBool::new(false);
+static FLASH_ERASE: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+
+pub fn set_flash_programming(v: bool) { FLASH_PROGRAMMING.store(v, Ordering::Release); }
+pub fn flash_is_programming() -> bool { FLASH_PROGRAMMING.load(Ordering::Acquire) }
+pub fn queue_flash_erase(start: u32, len: u32) {
+    *FLASH_ERASE.lock().unwrap() = Some((start, len));
+}
+pub fn take_flash_erase() -> Option<(u32, u32)> {
+    FLASH_ERASE.lock().unwrap().take()
+}
+
+impl WasmSystem {
+    pub fn flash_erase_applied(&self) {
+        self.p.flash_erase_applied();
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmaDir { Read, Write, MemCopy }
 
@@ -105,6 +125,17 @@ pub fn set_dma_intr_info(stream_idx: usize, irq: i32, flags: u8) {
 pub struct WasmSystem {
     pub p: Rc<Peripherals>,
     pending_dma: RefCell<Vec<DmaTransfer>>,
+}
+
+#[cfg(test)]
+pub fn test_dummy_system() -> ::std::rc::Rc<crate::system::System> {
+    use crate::peripherals::Peripherals;
+    ::std::rc::Rc::new(crate::system::WasmSystem::new())
+}
+
+#[cfg(test)]
+pub fn dummy_gpio() -> crate::peripherals::gpio::GpioPorts {
+    crate::peripherals::gpio::GpioPorts::default()
 }
 
 impl WasmSystem {

@@ -82,6 +82,7 @@ enum Access {
 }
 
 impl Peripheral for Fsmc {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match Self::access(offset) {
             Access::Data(bank, off) => self.banks[bank].read_data(sys, off),

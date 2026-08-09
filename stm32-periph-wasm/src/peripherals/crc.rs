@@ -24,6 +24,7 @@ impl Crc {
 }
 
 impl Peripheral for Crc {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         match offset { 0x00 => self.dr, 0x04 => self.idr, 0x08 => self.cr, _ => 0 }
     }

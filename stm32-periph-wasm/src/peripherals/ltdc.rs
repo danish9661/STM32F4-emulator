@@ -60,6 +60,7 @@ impl Ltdc {
 }
 
 impl Peripheral for Ltdc {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         if let Some((_li, lr)) = lx_bis(offset) {
             return match lr {

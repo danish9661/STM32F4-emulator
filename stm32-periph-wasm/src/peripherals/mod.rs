@@ -50,11 +50,15 @@ use eth::EthernetMac;
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
-pub trait Peripheral {
+pub trait Peripheral: std::any::Any {
     fn read(&mut self, sys: &System, offset: u32) -> u32;
     fn write(&mut self, sys: &System, offset: u32, value: u32);
     fn tick(&mut self, _sys: &System) {}
     fn rx_byte(&mut self, _sys: &System, _byte: u8) {}
+    /// JS driver called this after applying the queued FLASH erase to guest
+    /// memory; default no-op, overridden by FLASH.
+    fn flash_erase_applied(&mut self) {}
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 pub struct PeripheralSlot<T> {
@@ -67,6 +71,24 @@ pub struct Peripherals {
 pub(crate) peripherals: Vec<PeripheralSlot<RefCell<Box<dyn Peripheral>>>>,
     pub nvic: RefCell<nvic::Nvic>,
     pub gpio: RefCell<GpioPorts>,
+    pub syscfg: RefCell<syscfg::Syscfg>,
+}
+
+pub const SYSCFG_BASE: u32 = 0x4001_3800;
+pub const SYSCFG_END: u32 = 0x4001_3900;
+pub const FLASH_REGS_BASE: u32 = 0x4002_3C00;
+
+impl Peripherals {
+    /// The JS driver applied the queued FLASH erase to guest memory; tell the
+    /// FLASH model so it can clear BSY and let the firmware's busy-wait exit.
+    pub fn flash_erase_applied(&self) {
+        for slot in &self.peripherals {
+            if slot.start == FLASH_REGS_BASE {
+                slot.peripheral.borrow_mut().flash_erase_applied();
+                break;
+            }
+        }
+    }
 }
 
 fn extract_svd_max_offset(p: &PeripheralInfo) -> u32 {
@@ -142,6 +164,7 @@ impl Peripherals {
             peripherals: Vec::new(),
             nvic: RefCell::new(nvic::Nvic::default()),
             gpio: RefCell::new(gpio),
+            syscfg: RefCell::new(syscfg::Syscfg::default()),
         };
 
         let svd_map: HashMap<&str, &PeripheralInfo> = device.peripherals.iter()
@@ -211,8 +234,23 @@ impl Peripherals {
             }
         }
 
+        peripherals.wire_spi_flash_cs_callbacks();
         peripherals.finish_registration();
         peripherals
+    }
+
+    fn wire_spi_flash_cs_callbacks(&mut self) {
+        // Wire SPI-flash CS pins to GPIO write callbacks so deassert edges
+        // (which commit flash transactions) are observed immediately.
+        let mut gpio = self.gpio.borrow_mut();
+        for slot in &mut self.peripherals {
+            let mut p = slot.peripheral.borrow_mut();
+            let any = p.as_any_mut();
+            if let Some(spi) = any.downcast_mut::<spi::Spi>() {
+                spi.register_cs_callbacks(&mut *gpio);
+            }
+        }
+        drop(gpio);
     }
 
     pub fn new_wasm(gpio: GpioPorts, ext_devices: &ExtDevices) -> Self {
@@ -220,6 +258,7 @@ impl Peripherals {
             peripherals: Vec::new(),
             nvic: RefCell::new(nvic::Nvic::default()),
             gpio: RefCell::new(gpio),
+            syscfg: RefCell::new(syscfg::Syscfg::default()),
         };
 
         // STM32F407 peripheral base addresses (sorted)
@@ -306,6 +345,10 @@ impl Peripherals {
             peripherals.peripherals.push(PeripheralSlot { start: 0x6000_0000, end: 0xA000_1000, peripheral: RefCell::new(p) });
         }
 
+        // Wire SPI-flash CS pins to GPIO write callbacks so deassert edges
+        // (which commit flash transactions) are observed immediately.
+        peripherals.wire_spi_flash_cs_callbacks();
+
         peripherals.finish_registration();
         peripherals
     }
@@ -363,6 +406,8 @@ impl Peripherals {
         } else { (addr, 0) };
         let value = if Self::NVIC_REGS_BASE <= addr && addr < Self::NVIC_REGS_END {
             self.nvic.borrow_mut().read(sys, addr - Self::NVIC_REGS_BASE)
+        } else if SYSCFG_BASE <= addr && addr < SYSCFG_END {
+            self.syscfg.borrow_mut().read(sys, addr - SYSCFG_BASE)
         } else if let Some(p) = Self::get_peripheral(&self.peripherals, addr) {
             p.peripheral.borrow_mut().read(sys, addr - p.start)
         } else { 0 };
@@ -385,6 +430,8 @@ impl Peripherals {
         }
         if Self::NVIC_REGS_BASE <= addr && addr < Self::NVIC_REGS_END {
             self.nvic.borrow_mut().write(sys, addr - Self::NVIC_REGS_BASE, value);
+        } else if SYSCFG_BASE <= addr && addr < SYSCFG_END {
+            self.syscfg.borrow_mut().write(sys, addr - SYSCFG_BASE, value);
         } else if let Some(p) = Self::get_peripheral(&self.peripherals, addr) {
             p.peripheral.borrow_mut().write(sys, addr - p.start, value);
         }

@@ -8,7 +8,7 @@ document is the readable summary.
 ### Emulator core
 - Full Cortex-M4 Thumb-2 execution via Unicorn 2.1.4 (WASM) — the same
   firmware binaries run here and on real silicon.
-- 33 peripheral modules, 22 detailed (see [peripherals.md](peripherals.md)).
+- 33 peripheral modules, 26 detailed (see [peripherals.md](peripherals.md)).
 - Deterministic instruction-count clock (timers, ADC, RNG, RTC, watchdogs).
 - NVIC interrupt model with an opt-in guest-IRQ pump for interrupt-driven
   firmware (UART RX + crypto firmwares verified in Node and in a browser).
@@ -51,6 +51,28 @@ document is the readable summary.
   Fix: rotate the injection index across RX descriptor slots.
 - **Per-round gateway restart** now opt-in (`GW_RESTART=1`); default mode
   runs consecutive rounds at full speed with no restart.
+- **SPI NOR flash write path** (full): real-MISO timing (a dummy byte
+  shifts out while the command/address bytes clock in — `dummy_pending`
+  in `SpiFlash`), WriteEnable-gated PageProgram/SectorErase4k that commit
+  on CS deassert (program ANDs bits, erase writes 0xFF, WEL auto-clears on
+  completion like real W25Q). Program/erase buffering lives in `self.cmd`
+  args so data bytes aren't mis-parsed as new opcodes. CS deassert edges
+  reach the flash via GPIO write callbacks (`register_cs_callbacks`,
+  wired in both `from_svd` and `new_wasm` — `from_svd` was missing the
+  wiring, which silently killed commit for the SVD/`init_svd` path).
+  `spi_flash_test` firmware: 9/9 PASS (JEDEC, WEL set/cleared, readback,
+  second program, erase). Native integration test
+  `peripherals::spi::tests::firmware_flow_via_gpio_cs` exercises the same
+  flow through real MMIO + GPIO edges.
+- **EXTI GPIO edge path** (new): `Exti::scan_lines` runs per tick, reads
+  the GPIO line level of the SYSCFG-selected port, and pends IRQs on
+  RTSR/FTSR edges; `exti_test` firmware: 3/3 PASS (fired once, PR cleared
+  by handler, fired on 2nd edge). Test-driver note: an edge must be
+  observed low by a tick before re-raising — injecting low+high in one
+  JS iteration is invisible to the model.
+- **FLASH program/erase** (new): `spi_flash_test`'s flash region now
+  programs (PG) and sector-erases (SER) the backing buffer via the JS
+  flash-command driver; `flash_test` 11/11 PASS.
 
 ## Known limitations
 
@@ -59,11 +81,9 @@ document is the readable summary.
 2. **Guest-IRQ pump vs ETH firmware**: the pump must stay disabled for ETH
    firmware (an emulated ETH_IRQHandler re-scans `rx_desc` and stomps the
    driver's frame bookkeeping).
-3. **Hardware paths not modeled**: EXTI has no GPIO edge path; FLASH cannot
-   program/erase; DCMI/LTDC/SAI/I2S are synthetic-data only; DMA copies
-   happen in JS; CAN has no bus peer.
-4. **SPI flash write path** parsed but not implemented (read-only emulation).
-5. **Timers are instruction-count driven**, not wall-clock driven — a
+3. **Hardware paths not modeled**: DCMI/LTDC/SAI/I2S are synthetic-data
+   only; DMA copies happen in JS; CAN has no bus peer.
+4. **Timers are instruction-count driven**, not wall-clock driven — a
    `delay_ms(100)` is ~2.4M emulated instructions, so real-time blink
    rates don't hold (documented in AGENTS.md §11).
 
@@ -83,7 +103,6 @@ document is the readable summary.
       per-transfer).
 
 ### Priority 2 — peripheral depth
-- [ ] SPI NOR flash write support (page program + sector erase).
 - [ ] DCMI real pixel source, LTDC framebuffer scanout with a display
       sink.
 - [ ] CAN bus peer / arbitration with a second node.
@@ -113,6 +132,10 @@ npm test                                    # flow + blinky + rx-interrupt
 scripts/verify_ethernet.sh 10000000         # 3 firmwares through gateway
 node site/probe_firmwares.mjs               # every preset boots to a banner
 node site/test_rx_interrupt.mjs             # interrupt-driven UART/CRC
+node site/test_flash.mjs                    # FLASH program/erase (11/11)
+node site/test_spi_flash.mjs                # SPI NOR write path (9/9)
+node site/test_exti.mjs                     # EXTI GPIO edges (3/3)
+(cd stm32-periph-wasm && cargo test --lib)  # native unit + integration tests
 SOAK_STATS=1 node cli.mjs ../eth_http/eth_http.bin 200000000 \
   --gateway --config=../../eth_http/config.yaml   # long soak (≈15 min)
 ```

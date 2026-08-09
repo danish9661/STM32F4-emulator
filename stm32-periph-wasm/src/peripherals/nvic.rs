@@ -125,6 +125,7 @@ impl Nvic {
 }
 
 impl Peripheral for Nvic {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         match offset {
             0x00..=0x1C if offset < 4 * REG_WORDS as u32 => {

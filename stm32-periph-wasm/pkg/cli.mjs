@@ -126,6 +126,34 @@ async function main() {
     // Also write firmware to the exact vector_table region if different
     if (romStart !== vector_table) uc.mem_write(BigInt(vector_table), firmware);
 
+    // FLASH program/erase gating: guest stores to 0x08000000..0x08100000 are
+    // only permitted while the model is in programming mode; otherwise the
+    // region is read/exec and stray stores fault (skipped by the driver).
+    const FLASH_GUEST_START = 0x08000000n;
+    const FLASH_GUEST_LEN = 0x100000;
+    let flashWritable = false;
+    const syncFlashProtection = () => {
+        const pg = periph.flash_is_programming();
+        if (pg && !flashWritable) {
+            uc.mem_protect(FLASH_GUEST_START, FLASH_GUEST_LEN, Module.PROT_ALL);
+            flashWritable = true;
+        } else if (!pg && flashWritable) {
+            uc.mem_protect(FLASH_GUEST_START, FLASH_GUEST_LEN, Module.PROT_READ | Module.PROT_EXEC);
+            flashWritable = false;
+        }
+    };
+    if (0x08000000 >= romStart && 0x08000000 < romStart + (memRegions[0]?.size || 0x100000)) {
+        uc.mem_protect(FLASH_GUEST_START, FLASH_GUEST_LEN, Module.PROT_READ | Module.PROT_EXEC);
+    }
+
+    const stepThroughFlashFault = () => {
+        const pc = uc.reg_read_i32(Module.ARM_REG_PC) >>> 0;
+        const b = uc.mem_read(BigInt(pc & ~1), 2);
+        const h = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint16(0, true);
+        const size = (h & 0xE000) === 0xE000 ? 4 : 2; // Thumb-2 wide vs halfword
+        uc.reg_write_i32(Module.ARM_REG_PC, (pc + size) | 1);
+    };
+
     // Peripheral ranges
     const periphRanges = [
         [0x40000000, 0xB0000000],
@@ -144,7 +172,7 @@ async function main() {
                     add_i2c_eeprom(d.peripheral, parseHex(d.addr), data);
                 } else if (type === 'spi_flash') {
                     const data = d.file ? readFileSync(path.resolve(config._devices_dir, d.file)) : new Uint8Array(d.size || 0);
-                    add_spi_flash(d.peripheral, parseHex(d.jedec_id), data, null);
+                    add_spi_flash(d.peripheral, parseHex(d.jedec_id), data, d.cs ?? null);
                 } else if (type === 'usart_probe') {
                     uartAddr = parseHex(d.peripheral.match(/[0-9a-fA-F]+/)?.[0]) ? parseInt(d.peripheral, 16) : (PERIPH_ADDR[d.peripheral] || uartAddr);
                 }
@@ -189,12 +217,44 @@ async function main() {
             console.log(`[DMA2] wr 0x${a.toString(16)} = 0x${(Number(value) >>> 0).toString(16)} pc=0x${(pc >>> 0).toString(16)}`);
         }
         periph_write(a, size, Number(value));
+        if (a >= 0x40023C00 && a <= 0x40023C18) syncFlashProtection(); // FLASH CR writes flip the pg gate
     };
 
     for (const [start, end] of periphRanges) {
         uc.hook_add(Module.HOOK_MEM_READ, memReadHook, null, start, end);
         uc.hook_add(Module.HOOK_MEM_WRITE, memWriteHook, null, start, end);
     }
+
+    // FLASH program writes: guest writes to the flash region only stick when
+    // the model says programming is active (unlocked + PG + !BSY); the JS
+    // driver applies them to guest memory because uc.mem_write from the API
+    // does not trigger memory hooks (no recursion risk).
+    const flashWriteHook = (handle, type, address, size, value, user_data) => {
+        if (periph.flash_is_programming()) {
+            const a = Number(address);
+            if (a >= 0x08000000 && a < 0x08100000) {
+                const bytes = new Uint8Array(size);
+                const v = Number(value) >>> 0;
+                for (let i = 0; i < size; i++) bytes[i] = (v >> (i * 8)) & 0xFF;
+                uc.mem_write(address, bytes);
+            }
+        }
+    };
+    uc.hook_add(Module.HOOK_MEM_WRITE, flashWriteHook, null, 0x08000000n, 0x08100000n);
+
+    const applyFlashErase = () => {
+        const er = periph.flash_take_erase();
+        if (er.length === 2) {
+            const [start, len] = er;
+            const ff = new Uint8Array(4096).fill(0xFF);
+            for (let off = 0; off < len; off += 4096) {
+                const chunk = Math.min(4096, len - off);
+                uc.mem_write(BigInt(start + off), ff.subarray(0, chunk));
+            }
+            periph.flash_erase_applied();
+            if (process.env.DBG_FLASH) console.log(`[FLASH] erased ${len} bytes @ 0x${start.toString(16)}`);
+        }
+    };
 
     if (process.env.DBG_FLAG) {
         const flagHook = (handle, type, address, size, value, user_data) => {
@@ -247,6 +307,7 @@ async function main() {
         pollAcc++;
         if (pollAcc >= POLL_EVERY) {
             pollAcc = 0;
+            applyFlashErase(); // model holds BSY until the erase is applied
             if (dma_get_pending_count() > 0 || eth_is_tx_poll()) {
                 uc.emu_stop();
                 return;
@@ -678,6 +739,17 @@ async function main() {
             if (msg.includes('UC_ERR_READ_UNMAPPED') || msg.includes('UC_ERR_FETCH_UNMAPPED')) {
                 const pc2 = uc.reg_read_i32(Module.ARM_REG_PC);
                 uc.reg_write_i32(Module.ARM_REG_PC, (pc2 + 2) | 1);
+            } else if (msg.includes('WRITE_PROT')) {
+                if (periph.flash_is_programming()) {
+                    // pg is active but the gate flipped late: re-enable writes
+                    // and re-execute the store from the same PC.
+                    uc.mem_protect(FLASH_GUEST_START, FLASH_GUEST_LEN, Module.PROT_ALL);
+                    flashWritable = true;
+                    const pc2 = uc.reg_read_i32(Module.ARM_REG_PC);
+                    uc.emu_start(BigInt(pc2 | 1), 0n, 0n, maxBatch);
+                } else {
+                    stepThroughFlashFault();
+                }
             } else {
                 console.error('Emulation error:', e.message || e);
                 break;
@@ -686,6 +758,7 @@ async function main() {
         processDma();
         await processEth(uc);
         processInterrupts();
+        applyFlashErase();
         totalSteps++;
         if (process.env.DBG_PC3) {
             const pc3 = uc.reg_read_i32(Module.ARM_REG_PC) & 0xFFFFFFFE;

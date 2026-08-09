@@ -39,6 +39,7 @@ export async function createEmulator(opts) {
         eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll,
         eth_is_rx_poll, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
         get_next_pending_interrupt, uart_rx_byte,
+        flash_is_programming, flash_take_erase, flash_erase_applied,
     } = bindings;
 
     const E = {
@@ -100,12 +101,56 @@ export async function createEmulator(opts) {
         uc.mem_write(address, bytes);
     };
     const memWriteHook = (handle, type, address, size, value, user_data) => {
-        periph_write(Number(address), size, Number(value));
+        const a = Number(address);
+        periph_write(a, size, Number(value));
+        if (a >= 0x40023C00 && a <= 0x40023C18) syncFlashProtection(); // FLASH CR writes flip pg
     };
     for (const [start, end] of periphRanges) {
         uc.hook_add(Module.HOOK_MEM_READ, memReadHook, null, start, end);
         uc.hook_add(Module.HOOK_MEM_WRITE, memWriteHook, null, start, end);
     }
+
+    // FLASH regions: guest stores are hardware-gated by programming mode.
+    // While the model says programming is active (unlocked + PG + !BSY) the
+    // region is writable so stores land directly; otherwise it is read/exec
+    // only — the guest's useless stores fault with UC_ERR_WRITE_PROT and the
+    // driver skips the instruction (Unicorn 2.1.4 WASM fires HOOK_MEM_WRITE
+    // before the store and cannot block it; WRITE_PROT is the only gate).
+    const FLASH_GUEST_START = 0x08000000n;
+    const FLASH_GUEST_LEN = 0x100000;
+    let flashWritable = false;
+    const syncFlashProtection = () => {
+        const pg = flash_is_programming();
+        if (pg && !flashWritable) {
+            uc.mem_protect(FLASH_GUEST_START, FLASH_GUEST_LEN, Module.PROT_ALL);
+            flashWritable = true;
+        } else if (!pg && flashWritable) {
+            uc.mem_protect(FLASH_GUEST_START, FLASH_GUEST_LEN, Module.PROT_READ | Module.PROT_EXEC);
+            flashWritable = false;
+        }
+    };
+    uc.mem_protect(FLASH_GUEST_START, FLASH_GUEST_LEN, Module.PROT_READ | Module.PROT_EXEC);
+
+    const stepThroughFlashFault = () => {
+        const pc = uc.reg_read_i32(Module.ARM_REG_PC) >>> 0;
+        const b = uc.mem_read(BigInt(pc & ~1), 2);
+        const h = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint16(0, true);
+        const size = (h & 0xE000) === 0xE000 ? 4 : 2; // Thumb-2 wide vs halfword
+        uc.reg_write_i32(Module.ARM_REG_PC, (pc + size) | 1);
+    };
+
+    const applyFlashErase = () => {
+        const er = flash_take_erase();
+        if (er.length === 2) {
+            const [start, len] = er;
+            const ff = new Uint8Array(4096).fill(0xFF);
+            for (let off = 0; off < len; off += 4096) {
+                const chunk = Math.min(4096, len - off);
+                uc.mem_write(BigInt(start + off), ff.subarray(0, chunk));
+            }
+            flash_erase_applied();
+        }
+    };
 
     const sp_init = read32(vector_table);
     const pc_init = read32(vector_table + 4);
@@ -137,6 +182,7 @@ export async function createEmulator(opts) {
         pollAcc++;
         if (pollAcc >= pollEvery) {
             pollAcc = 0;
+            applyFlashErase(); // model holds BSY until the erase is applied
             if (dma_get_pending_count() > 0 || eth_is_tx_poll()) {
                 uc.emu_stop();
                 return;
@@ -283,9 +329,26 @@ export async function createEmulator(opts) {
     const step = (max_inst = maxBatch) => {
         processDma();
         processEth();
+        syncFlashProtection();
         const current_pc = uc.reg_read_i32(Module.ARM_REG_PC);
-        uc.emu_start(BigInt(current_pc | 1), 0n, 0n, max_inst);
+        try {
+            uc.emu_start(BigInt(current_pc | 1), 0n, 0n, max_inst);
+        } catch (e) {
+            if (String(e).includes('WRITE_PROT')) {
+                if (flash_is_programming()) {
+                    // Region toggled late: pg is active, so re-enable writes
+                    // and re-execute the store from the same PC.
+                    uc.mem_protect(FLASH_GUEST_START, FLASH_GUEST_LEN, Module.PROT_ALL);
+                    flashWritable = true;
+                    uc.emu_start(BigInt(uc.reg_read_i32(Module.ARM_REG_PC) | 1), 0n, 0n, max_inst);
+                } else {
+                    stepThroughFlashFault();
+                }
+            } else throw e;
+        }
         tick();
+        applyFlashErase();
+        syncFlashProtection();
         processDma();
         processEth();
         if (enable_irqs) processInterrupts();

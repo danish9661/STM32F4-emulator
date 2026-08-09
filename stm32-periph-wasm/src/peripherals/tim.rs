@@ -158,6 +158,7 @@ impl Timer {
 }
 
 impl Peripheral for Timer {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn tick(&mut self, sys: &System) {
         self.advance(sys);
     }

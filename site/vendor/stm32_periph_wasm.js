@@ -1,7 +1,6 @@
 /* @ts-self-types="./stm32_periph_wasm.d.ts" */
 
 /**
- * Add an I2C EEPROM device. Must be called before init().
  * @param {string} peripheral
  * @param {number} address
  * @param {Uint8Array} data
@@ -163,6 +162,36 @@ export function eth_tx_done() {
 }
 
 /**
+ * Called by the JS driver after it applied the queued erase to guest memory;
+ * clears BSY/EOP so the firmware's busy-wait can proceed.
+ */
+export function flash_erase_applied() {
+    wasm.flash_erase_applied();
+}
+
+/**
+ * True when the FLASH peripheral is unlocked with PG set and !BSY — the
+ * JS driver applies program writes to guest memory when this is true.
+ * @returns {boolean}
+ */
+export function flash_is_programming() {
+    const ret = wasm.flash_is_programming();
+    return ret !== 0;
+}
+
+/**
+ * Consume a completed erase request (start, len) the JS driver must apply
+ * to guest memory (all bytes 0xFF). Empty vec = nothing pending.
+ * @returns {Uint32Array}
+ */
+export function flash_take_erase() {
+    const ret = wasm.flash_take_erase();
+    var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v1;
+}
+
+/**
  * @returns {number}
  */
 export function get_next_pending_interrupt() {
@@ -269,6 +298,20 @@ export function periph_read(addr, width) {
  */
 export function periph_write(addr, width, value) {
     wasm.periph_write(addr, width, value);
+}
+
+/**
+ * Debug: flash state summary [wel, status1, cs_state, dummy_pending, pending_program_len]
+ * @param {string} peripheral
+ * @returns {Uint32Array}
+ */
+export function spi_flash_debug(peripheral) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.spi_flash_debug(ptr0, len0);
+    var v2 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v2;
 }
 
 export function tick() {

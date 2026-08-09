@@ -36,8 +36,8 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 | DCMI | 81 | Partial | CR/SR/RIS/IER/ICR/ESCR/ESUR/CWSTRT/CWSIZ/DR; synthetic pattern data (0x01020304 increments) on DR read when enabled, VSYNC in SR | Y (78) | N | N |
 | DMA | 212 | Detailed | LISR/HISR/IFCR + 8 streams (CR/NDTR/PAR/M0AR/M1AR/FCR); EN queues a `DmaTransfer` (copy done by JS via `dma_get_pending`/`dma_set_completed`), TCIF/HTIF, stream IRQ, double-buffer M1AR, dir/mem2mem | Y (11-18, 56-63) | N | N |
 | ETH | 311 | Detailed | All 4 blocks (MAC/MMC/PTP/DMA) full register maps; PHY emulation (MIIAR read → fixed PHY regs), write-1-clear DMASR, DMAIER masking, AIS/NIS, TX/RX done → TS/RS bits, DMABMR soft-reset, DMAOMR ST/SR → `eth_signal_tx/rx_poll` atomics | Y (61) | Y | N |
-| EXTI | 70 | Partial | IMR/EMR/RTSR/FTSR/SWIER/PR with correct line→IRQ mapping; **software-trigger only** — no GPIO edge hardware path | Y (6-10/23/40) | N | N |
-| FLASH | 80 | Partial | ACR, KEYR two-step unlock (0x45670123→0xCDEF89AB), OPTKEYR, SR write-1-clear, CR + LOCK/PSIZE, OPTCR1; **no program/erase of flash contents** | N | N | N |
+| EXTI | 70 | Detailed | IMR/EMR/RTSR/FTSR/SWIER/PR with correct line→IRQ mapping; **GPIO edge-trigger path**: `scan_lines` per tick compares GPIO line levels vs `last_state`, RTSR/FTSR gating, line→IRQ map (0-4→6-10, 5-9→23, 10-15→40) | Y (6-10/23/40) | N | N |
+| FLASH | 80 | Detailed | ACR, KEYR two-step unlock (0x45670123→0xCDEF89AB), OPTKEYR, SR write-1-clear, CR + LOCK/PSIZE, OPTCR1; program (PG) and sector-erase (SER) dispatch into the emulated flash backing buffer via `flash_erase_applied` (JS driver gated on `syncFlashProtection`) | N | N | N |
 | FSMC | 111 | Detailed | 4 banks 0x60000000-0xA0001000; accesses forwarded to attached memory-mapped ext device (display); BCR/BTR/PCR stored per bank | N | N | Y |
 | GPIO | 229 | Detailed | MODER/OTYPER/OSPEEDR/PUPDR/IDR/ODR/BSRR/LCKR/AFRL/AFRH; ODR/BSRR drive output_state + write callbacks, MODER→input clears output, IDR = input_state + read callbacks, 11 ports (A-K) | N | N | Y |
 | HASH | 164 | Detailed | Real SHA-1/MD5/SHA-256 (sha1/md5/sha2 crates) with NBLW/length handling; CR/INIT, DIN FIFO, STR, HR + HASH_HR, IMR/SR, 54 CSR words | Y (80) | N | N |
@@ -53,7 +53,7 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 | SAI | 102 | Partial | GCR + 2 blocks (CR1/CR2/FRCR/SLOTR/IM/SR/CLRFR/DR); SR flags on DR access, masked interrupt; no real audio | Y (87) | N | N |
 | SCB | 130 | Detailed | CPUID (Cortex-M4 r0p1), ICSR set/clear pending (PendSV/SysTick) + pending-vector report, AIRCR VECTKEY + SYSRESETREQ → `request_watchdog_reset()`, VTOR, SCR/CCR/SHPR/SHCSR/CFSR/HFSR/DFSR/MMFAR/BFAR/AFSR/CPACR | indirect (PendSV/SysTick) | N | N |
 | SDIO | 143 | Detailed | Full register set + emulated SD card state machine (Idle→Ident→Stby→Tran), canned responses for CMD0/2/3/5/7/8/9/10/13/16/17/18/41/55, RCA matching, data-transfer simulation (DCOUNT/FIFOCNT, CMD17/18), status flags + ICR/MASK | Y (49) | N | N |
-| SPI | 157 | Detailed | CR1/CR2/SR/DR/RXCRC/TXCRC/I2SCFGR/I2SPR; full-duplex 8/16-bit transfers to attached device with CS selection via GPIO, I2S mode audio generation, TXE/RXNE toggling | Y (35/36/51) | N | Y |
+| SPI | 157 | Detailed | CR1/CR2/SR/DR/RXCRC/TXCRC/I2SCFGR/I2SPR; full-duplex 8/16-bit transfers to attached device with CS selection via GPIO, I2S mode audio generation, TXE/RXNE toggling; **CS edges delivered via GPIO write callbacks** (`register_cs_callbacks`, sw_spi pattern) so attached-device CS deassert is observed immediately | Y (35/36/51) | N | Y |
 | SW_SPI | 105 | Detailed | Bit-banged SPI via GPIO callbacks (CS/CLK/MOSI/MISO): shift register, 8-bit framing, forwards bytes to attached device; CS edge resets | N | N | Y |
 | SYSCFG | 52 | Partial | MEMRM/PMC/EXTICR[4]/CMPCR masked storage; CMPCR read toggles COMP bit | N | N | N |
 | SYSTICK | 55 | Detailed | CSR/RVR/CVR/CALIB; enabling programs `nvic.systick_period` → periodic SYSTICK pending from `System::tick`; CVR write resets trigger point | indirect (SYSTICK) | N | N |
@@ -65,7 +65,7 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 
 | Device | Lines | Behavior |
 |---|---|---|
-| SpiFlash | 167 | SPI NOR flash: JEDEC ID (0x9F), device ID (0x90), status regs (0x05/0x35), ReadData (0x03)/FastRead (0x0B) streaming. Write-enable/page-program/erase parsed but **not implemented** |
+| SpiFlash | 167 | SPI NOR flash: JEDEC ID (0x9F), device ID (0x90), status regs (0x05/0x35), ReadData (0x03)/FastRead (0x0B) streaming, WriteEnable (0x06), PageProgram (0x02), SectorErase4k (0x20) **with CS-deassert commit** (program ANDs bits, erase sets 0xFF, WEL auto-clears after program/erase like real W25Q). MISO timing: `dummy_pending` returns 0 while the command+address bytes are clocked in (one dummy per written byte), so the first real data byte appears only on the byte after the address phase |
 | I2cEeprom | 78 | I²C EEPROM: 1/2-byte address phase, sequential byte read/write into RAM copy |
 | Lcd | 65 | 128×64 SPI LCD: 0xFB → drawing mode, cursor advances on writes |
 | Touchscreen | 40 | Stub: GPIO touch-detect pin callback (always true), reads 0 |
@@ -92,11 +92,10 @@ prints a banner over UART when it boots.
 
 - NVIC `set_intr_pending` **auto-enables** the IRQ — convenient, not
   hardware-accurate.
-- EXTI has no GPIO edge-trigger path; GPIO does not link into EXTI.
 - USART ignores its ext-device argument (uses the global UART buffer);
   the UsartProbe device is wired through the SPI lookup instead.
 - DMA copies are executed by the JS driver, not inside the Rust model.
-- FLASH can't program/erase emulated flash; DCMI produces synthetic data;
+- FLASH programs/erases emulated flash; DCMI produces synthetic data;
   LTDC has no scanout; SAI/I2S produce synthetic audio; CAN drives the
   mailbox/status machinery but no bus arbitration with a peer.
 - Timers/ADC/RNG/RTC/IWDG/WWDG are instruction-count driven, not

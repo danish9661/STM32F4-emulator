@@ -154,6 +154,28 @@ pub fn eth_signal_rx_poll(desc_addr: u32) { system::eth_signal_rx_poll(desc_addr
 #[wasm_bindgen]
 pub fn eth_signal_tx_poll(desc_addr: u32) { system::eth_signal_tx_poll(desc_addr); }
 
+/// True when the FLASH peripheral is unlocked with PG set and !BSY — the
+/// JS driver applies program writes to guest memory when this is true.
+#[wasm_bindgen]
+pub fn flash_is_programming() -> bool { system::flash_is_programming() }
+
+/// Consume a completed erase request (start, len) the JS driver must apply
+/// to guest memory (all bytes 0xFF). Empty vec = nothing pending.
+#[wasm_bindgen]
+pub fn flash_take_erase() -> Vec<u32> {
+    match system::take_flash_erase() {
+        Some((start, len)) => vec![start, len],
+        None => Vec::new(),
+    }
+}
+
+/// Called by the JS driver after it applied the queued erase to guest memory;
+/// clears BSY/EOP so the firmware's busy-wait can proceed.
+#[wasm_bindgen]
+pub fn flash_erase_applied() {
+    sys().flash_erase_applied();
+}
+
 /// Collect UART output since last call.
 #[wasm_bindgen]
 pub fn get_uart_output() -> String {
@@ -177,7 +199,24 @@ pub fn add_spi_flash(peripheral: &str, jedec_id: u32, data: &[u8], cs: Option<St
         .push(std::rc::Rc::new(std::cell::RefCell::new(flash)));
 }
 
-/// Add an I2C EEPROM device. Must be called before init().
+/// Debug: flash state summary [wel, status1, cs_state, dummy_pending, pending_program_len]
+#[wasm_bindgen]
+pub fn spi_flash_debug(peripheral: &str) -> Vec<u32> {
+    use crate::ext_devices::SpiFlash;
+    let mut out = vec![];
+    for f in system::get_ext_devices().lock().unwrap().spi_flashes.iter() {
+        let f = f.borrow();
+        if f.config.peripheral == peripheral {
+            out.push(if f.wel { 1 } else { 0 });
+            out.push(f.status1 as u32);
+            out.push(if f.cs_state { 1 } else { 0 });
+            out.push(f.dummy_pending as u32);
+            out.push(f.pending_program.as_ref().map(|p| p.data.len() as u32).unwrap_or(0));
+            out.push(f.reply.as_ref().map(|_| 1u32).unwrap_or(0));
+        }
+    }
+    out
+}
 #[wasm_bindgen]
 pub fn add_i2c_eeprom(peripheral: &str, address: u8, data: &[u8]) {
     use crate::ext_devices::i2c_eeprom::{I2cEeprom, I2cEepromConfig};

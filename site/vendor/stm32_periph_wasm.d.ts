@@ -1,9 +1,6 @@
 /* tslint:disable */
 /* eslint-disable */
 
-/**
- * Add an I2C EEPROM device. Must be called before init().
- */
 export function add_i2c_eeprom(peripheral: string, address: number, data: Uint8Array): void;
 
 /**
@@ -74,6 +71,24 @@ export function eth_signal_tx_poll(desc_addr: number): void;
  */
 export function eth_tx_done(): void;
 
+/**
+ * Called by the JS driver after it applied the queued erase to guest memory;
+ * clears BSY/EOP so the firmware's busy-wait can proceed.
+ */
+export function flash_erase_applied(): void;
+
+/**
+ * True when the FLASH peripheral is unlocked with PG set and !BSY — the
+ * JS driver applies program writes to guest memory when this is true.
+ */
+export function flash_is_programming(): boolean;
+
+/**
+ * Consume a completed erase request (start, len) the JS driver must apply
+ * to guest memory (all bytes 0xFF). Empty vec = nothing pending.
+ */
+export function flash_take_erase(): Uint32Array;
+
 export function get_next_pending_interrupt(): number;
 
 /**
@@ -110,6 +125,11 @@ export function periph_read(addr: number, width: number): number;
 
 export function periph_write(addr: number, width: number, value: number): void;
 
+/**
+ * Debug: flash state summary [wel, status1, cs_state, dummy_pending, pending_program_len]
+ */
+export function spi_flash_debug(peripheral: string): Uint32Array;
+
 export function tick(): void;
 
 /**
@@ -145,6 +165,9 @@ export interface InitOutput {
     readonly eth_signal_rx_poll: (a: number) => void;
     readonly eth_signal_tx_poll: (a: number) => void;
     readonly eth_tx_done: () => void;
+    readonly flash_erase_applied: () => void;
+    readonly flash_is_programming: () => number;
+    readonly flash_take_erase: () => [number, number];
     readonly get_next_pending_interrupt: () => number;
     readonly get_uart_output: () => [number, number];
     readonly gpio_read_input: (a: number, b: number) => number;
@@ -156,6 +179,7 @@ export interface InitOutput {
     readonly is_watchdog_reset_requested: () => number;
     readonly periph_read: (a: number, b: number) => number;
     readonly periph_write: (a: number, b: number, c: number) => void;
+    readonly spi_flash_debug: (a: number, b: number) => [number, number];
     readonly tick: () => void;
     readonly tick_n: (a: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;

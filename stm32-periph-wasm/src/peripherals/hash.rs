@@ -104,6 +104,7 @@ impl Hash {
 }
 
 impl Peripheral for Hash {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => {

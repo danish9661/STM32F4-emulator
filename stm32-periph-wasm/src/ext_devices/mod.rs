@@ -125,6 +125,8 @@ pub trait ExtDevice<A, T> {
     fn read(&mut self, sys: &crate::system::System, addr: A) -> T;
     fn write(&mut self, sys: &crate::system::System, addr: A, v: T);
     fn reset(&mut self) {}
+    /// Called when the SPI bus selects/deselects this device (CS edge).
+    fn cs_changed(&mut self, _sys: &crate::system::System, _asserted: bool) {}
 }
 
 // SAFETY: WASM is single-threaded; Rc/RefCell are safe

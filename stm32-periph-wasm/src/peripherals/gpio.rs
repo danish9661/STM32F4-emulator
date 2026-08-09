@@ -21,6 +21,10 @@ impl Pin {
         assert!(pin < 16);
         Self { port, pin }
     }
+
+    pub fn new(port: u8, pin: u8) -> Self {
+        Self { port, pin }
+    }
 }
 
 pub struct GpioPorts {
@@ -80,7 +84,8 @@ impl GpioPorts {
     }
 
     pub fn read_port(&mut self, sys: &System, port: u8) -> u16 {
-        let mut v = self.input_state[port as usize];
+        // A pin driven as output (ODR/BSRR) reads back as that level on STM32.
+        let mut v = self.input_state[port as usize] | self.output_state[port as usize];
         for (pin, cb) in &mut self.read_callbacks[port as usize] {
             if cb(sys) {
                 v |= 1 << *pin;
@@ -149,6 +154,7 @@ impl Gpio {
 }
 
 impl Peripheral for Gpio {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => {

@@ -2,8 +2,9 @@ use crate::system::System;
 use super::Peripheral;
 
 pub struct Syscfg {
-    memrm: u32, pmc: u32,
-    exticr: [u32; 4],
+    pub memrm: u32,
+    pub pmc: u32,
+    pub exticr: [u32; 4],
     cmpc_read: bool,
 }
 
@@ -15,11 +16,21 @@ impl Default for Syscfg {
 
 impl Syscfg {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
-        if name == "SYSCFG" { Some(Box::new(Self::default())) } else { None }
+        // Handled as a named field in Peripherals (EXTI needs EXTICR access)
+        let _ = name;
+        None
+    }
+
+    /// Port selected for EXTI line (0-15): 0=A, 1=B, ... 10=K
+    pub fn line_port(&self, line: u8) -> Option<u8> {
+        if line >= 16 { return None; }
+        let port = (self.exticr[(line / 4) as usize] >> (4 * (line % 4))) & 0xF;
+        if port <= 10 { Some(port as u8) } else { None }
     }
 }
 
 impl Peripheral for Syscfg {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => self.memrm & 0x03,

@@ -88,6 +88,7 @@ impl Default for I2s {
 }
 
 impl Peripheral for I2s {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => self.cr1,

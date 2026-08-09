@@ -41,6 +41,7 @@ impl Rng {
 }
 
 impl Peripheral for Rng {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => self.cr,

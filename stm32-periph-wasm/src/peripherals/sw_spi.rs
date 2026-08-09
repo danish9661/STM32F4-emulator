@@ -56,7 +56,12 @@ impl SoftwareSpi {
         gpio.add_write_callback(mosi, move |sys, v| { s.borrow_mut().write_mosi(sys, v) });
     }
 
-    pub fn write_cs(&mut self, _sys: &System, value: bool) {
+    pub fn write_cs(&mut self, sys: &System, value: bool) {
+        if self.cs != value {
+            if let Some(ref d) = self.ext_device {
+                d.borrow_mut().cs_changed(sys, !value);
+            }
+        }
         if self.cs && !value {
             self.data_mosi = 0;
             self.data_miso = 0;
