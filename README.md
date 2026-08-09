@@ -173,6 +173,19 @@ rebuild — delete it so the vendor assets stay tracked/committed.
 - Soak-tested: 200M-instruction gateway runs with 1000+ consecutive TCP
   rounds, 0 failures (details in AGENTS.md §10).
 
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md) — how the emulator is put
+  together (CPU, peripheral model, drivers, ETH flow, interrupts).
+- [docs/peripherals.md](docs/peripherals.md) — all 33 peripherals and the
+  level each is implemented to, plus external devices and known gaps.
+- [docs/usage.md](docs/usage.md) — CLI, browser, and npm-library usage,
+  config files, env vars, building.
+- [docs/benchmarks.md](docs/benchmarks.md) — throughput numbers, soak
+  results, tunables.
+- [docs/progress-and-future.md](docs/progress-and-future.md) — status,
+  known limitations, roadmap.
+
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).
