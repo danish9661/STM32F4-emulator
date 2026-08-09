@@ -114,7 +114,7 @@ impl Peripheral for Usart {
     }
 
     fn rx_byte(&mut self, sys: &System, byte: u8) {
-        if self.rx_buf.len() < 16 {
+        if self.rx_buf.len() < 64 {
             self.rx_buf.push(byte);
             self.sr |= 1 << 5; // RXNE
         } else {
