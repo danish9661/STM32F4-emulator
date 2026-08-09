@@ -1,4 +1,4 @@
-import initPeriph, { init, periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, gpio_read_output, gpio_set_input, gpio_read_input, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom } from './stm32_periph_wasm.js';
+import initPeriph, { init, periph_read, periph_write, tick, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, dma_periph_read, dma_periph_write, gpio_read_output, gpio_set_input, gpio_read_input, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom } from './stm32_periph_wasm.js';
 
 const PERIPH_RANGES = [
     [0x40000000, 0xB0000000],
@@ -166,6 +166,7 @@ export async function createEmulator(opts) {
     uc.hook_add(Module.HOOK_CODE, codeHook, null);
 
     const processDma = () => {
+        const isPeriphAddr = (a) => a >= 0x40000000 && a < 0x50000000;
         const count = dma_get_pending_count();
         for (let i = 0; i < count; i++) {
             const pending = dma_get_pending(0);
@@ -178,43 +179,15 @@ export async function createEmulator(opts) {
             const peri_addr = pending[5] || 0;
             const peripheral = pending[6] || 0;
 
-            const DmaDir_Read = 0;
-            const DmaDir_Write = 1;
-            const DmaDir_MemCopy = 2;
-
             try {
-                if (dir === DmaDir_MemCopy) {
+                if (dir === 2 || !peripheral || !isPeriphAddr(peri_addr)) {
                     const data = uc.mem_read(BigInt(src), size);
                     uc.mem_write(BigInt(dst), data);
-                } else if (dir === DmaDir_Read) {
-                    const data = uc.mem_read(BigInt(src), size);
-                    if (peripheral) {
-                        for (let j = 0; j < size; j += 4) {
-                            const chunk = Math.min(4, size - j);
-                            let val = 0;
-                            for (let k = 0; k < chunk; k++) {
-                                val |= data[j + k] << (k * 8);
-                            }
-                            periph_write(peri_addr, chunk, val);
-                        }
-                    } else {
-                        uc.mem_write(BigInt(dst), data);
-                    }
-                } else if (dir === DmaDir_Write) {
-                    if (peripheral) {
-                        for (let j = 0; j < size; j += 4) {
-                            const chunk = Math.min(4, size - j);
-                            const val = periph_read(peri_addr, chunk);
-                            const bytes = new Uint8Array(chunk);
-                            for (let k = 0; k < chunk; k++) {
-                                bytes[k] = (val >> (k * 8)) & 0xFF;
-                            }
-                            uc.mem_write(BigInt(dst + j), bytes);
-                        }
-                    } else {
-                        const data = uc.mem_read(BigInt(src), size);
-                        uc.mem_write(BigInt(dst), data);
-                    }
+                } else if (dir === 0) {
+                    const data = dma_periph_read(peri_addr, size);
+                    uc.mem_write(BigInt(dst), data);
+                } else {
+                    dma_periph_write(peri_addr, uc.mem_read(BigInt(src), size));
                 }
             } catch (e) {
                 console.warn('DMA transfer failed:', e);

@@ -108,8 +108,11 @@ document is the readable summary.
 - [x] EXTI ↔ GPIO edge-trigger wiring (GPIO config drives EXTI pends).
 - [x] FLASH program/erase emulation (write to the flash backing buffer),
       needed for DFU-style and bootloader firmwares.
-- [ ] Move DMA memory copies into Rust (one less JS round-trip, faster
-      per-transfer).
+- [x] DMA peripheral-side copies chunked in Rust (`dma_periph_read`/
+      `dma_periph_write`): one WASM call per transfer instead of size/4
+      per-chunk calls from JS; also fixed M2P which previously wrote
+      peripheral bytes back into guest RAM. RAM-to-RAM copies stay in
+      JS (Unicorn owns guest memory).
 
 ### Priority 2 — peripheral depth
 - [ ] DCMI real pixel source, LTDC framebuffer scanout with a display

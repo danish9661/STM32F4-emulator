@@ -6,6 +6,8 @@ export const add_software_spi: (a: number, b: number, c: number, d: number, e: n
 export const add_spi_flash: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
 export const dma_get_pending: (a: number) => [number, number];
 export const dma_get_pending_count: () => number;
+export const dma_periph_read: (a: number, b: number) => [number, number];
+export const dma_periph_write: (a: number, b: number, c: number) => void;
 export const dma_set_completed: (a: number, b: number) => void;
 export const eth_clear_rx_poll: () => void;
 export const eth_clear_tx_poll: () => void;

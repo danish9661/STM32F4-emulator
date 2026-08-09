@@ -85,6 +85,41 @@ pub fn dma_set_completed(stream_idx: u32, success: bool) {
     sys().mark_dma_completed(stream_idx as usize, success);
 }
 
+/// DMA peripheral-side chunked read: read `size` bytes from peripheral
+/// `addr` (4-byte-aligned, tail chunk partial). Replaces the JS per-chunk
+/// periph_read loop (one WASM call instead of size/4).
+#[wasm_bindgen]
+pub fn dma_periph_read(addr: u32, size: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size as usize);
+    let mut off = 0u32;
+    while off < size {
+        let chunk = std::cmp::min(4, size - off);
+        let val = sys().p.read(&*sys(), addr + off, chunk as u8);
+        for k in 0..chunk {
+            out.push((val >> (k * 8)) as u8);
+        }
+        off += chunk;
+    }
+    out
+}
+
+/// DMA peripheral-side chunked write: write `bytes` to peripheral `addr` in
+/// 4-byte chunks (tail chunk partial). Replaces the JS per-chunk periph_write
+/// loop (one WASM call instead of size/4).
+#[wasm_bindgen]
+pub fn dma_periph_write(addr: u32, bytes: Vec<u8>) {
+    let mut j = 0usize;
+    while j < bytes.len() {
+        let chunk = std::cmp::min(4, bytes.len() - j);
+        let mut val = 0u32;
+        for k in 0..chunk {
+            val |= (bytes[j + k] as u32) << (k * 8);
+        }
+        sys().p.write(&*sys(), addr + j as u32, chunk as u8, val);
+        j += chunk;
+    }
+}
+
 #[wasm_bindgen]
 pub fn gpio_read_output(port: u32, pin: u32) -> bool {
     sys().p.gpio.borrow().read_output_pin(port as u8, pin as u8)

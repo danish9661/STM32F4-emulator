@@ -17,6 +17,20 @@ export function dma_get_pending(index: number): Uint32Array;
 
 export function dma_get_pending_count(): number;
 
+/**
+ * DMA peripheral-side chunked read: read `size` bytes from peripheral
+ * `addr` (4-byte-aligned, tail chunk partial). Replaces the JS per-chunk
+ * periph_read loop (one WASM call instead of size/4).
+ */
+export function dma_periph_read(addr: number, size: number): Uint8Array;
+
+/**
+ * DMA peripheral-side chunked write: write `bytes` to peripheral `addr` in
+ * 4-byte chunks (tail chunk partial). Replaces the JS per-chunk periph_write
+ * loop (one WASM call instead of size/4).
+ */
+export function dma_periph_write(addr: number, bytes: Uint8Array): void;
+
 export function dma_set_completed(stream_idx: number, success: boolean): void;
 
 /**
@@ -154,6 +168,8 @@ export interface InitOutput {
     readonly add_spi_flash: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly dma_get_pending: (a: number) => [number, number];
     readonly dma_get_pending_count: () => number;
+    readonly dma_periph_read: (a: number, b: number) => [number, number];
+    readonly dma_periph_write: (a: number, b: number, c: number) => void;
     readonly dma_set_completed: (a: number, b: number) => void;
     readonly eth_clear_rx_poll: () => void;
     readonly eth_clear_tx_poll: () => void;

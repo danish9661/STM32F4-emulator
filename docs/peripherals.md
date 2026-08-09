@@ -94,7 +94,10 @@ prints a banner over UART when it boots.
   the pump only ever runs enabled IRQs.
 - USART ignores its ext-device argument (uses the global UART buffer);
   the UsartProbe device is wired through the SPI lookup instead.
-- DMA copies are executed by the JS driver, not inside the Rust model.
+- DMA peripheral-side accesses are chunked in Rust (`dma_periph_read`/
+  `dma_periph_write` — one WASM call per transfer instead of size/4);
+  RAM-to-RAM copies still run in the JS driver because guest memory lives
+  in Unicorn, not in the Rust model.
 - FLASH programs/erases emulated flash; DCMI produces synthetic data;
   LTDC has no scanout; SAI/I2S produce synthetic audio; CAN drives the
   mailbox/status machinery but no bus arbitration with a peer.

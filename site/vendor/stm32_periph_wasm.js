@@ -72,6 +72,34 @@ export function dma_get_pending_count() {
 }
 
 /**
+ * DMA peripheral-side chunked read: read `size` bytes from peripheral
+ * `addr` (4-byte-aligned, tail chunk partial). Replaces the JS per-chunk
+ * periph_read loop (one WASM call instead of size/4).
+ * @param {number} addr
+ * @param {number} size
+ * @returns {Uint8Array}
+ */
+export function dma_periph_read(addr, size) {
+    const ret = wasm.dma_periph_read(addr, size);
+    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v1;
+}
+
+/**
+ * DMA peripheral-side chunked write: write `bytes` to peripheral `addr` in
+ * 4-byte chunks (tail chunk partial). Replaces the JS per-chunk periph_write
+ * loop (one WASM call instead of size/4).
+ * @param {number} addr
+ * @param {Uint8Array} bytes
+ */
+export function dma_periph_write(addr, bytes) {
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.dma_periph_write(addr, ptr0, len0);
+}
+
+/**
  * @param {number} stream_idx
  * @param {boolean} success
  */
@@ -383,6 +411,11 @@ function __wbg_get_imports() {
 function getArrayU32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
+function getArrayU8FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
 }
 
 let cachedDataViewMemory0 = null;
