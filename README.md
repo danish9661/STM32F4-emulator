@@ -1,5 +1,8 @@
 # STM32F4 Emulator
 
+[![CI](https://github.com/danish9661/stm32F4-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/danish9661/stm32F4-emulator/actions/workflows/ci.yml)
+[![Pages](https://github.com/danish9661/stm32F4-emulator/actions/workflows/pages.yml/badge.svg)](https://github.com/danish9661/stm32F4-emulator/actions/workflows/pages.yml)
+
 An STM32F407 microcontroller emulator that runs real Cortex-M4 firmware. It
 combines a **Unicorn CPU core** (QEMU-derived, compiled to WASM) with a
 **Rust peripheral model** (RCC, USART, GPIO, DMA, ETH, TIM, NVIC, ...) also
@@ -17,13 +20,17 @@ The browser demo deploys to GitHub Pages:
 **https://danish9661.github.io/stm32F4-emulator/**
 
 A single console page that starts **idle** — nothing runs until you pick a
-firmware: a preset dropdown with 20 bundled binaries (network demos, a
-bare-metal LED blinker, peripheral/crypto/UART test binaries), custom
+firmware: a preset dropdown with 21 bundled binaries (network demos, a
+bare-metal LED blinker, peripheral/crypto/UART/SPI test binaries), custom
 firmware upload (`.bin`, Intel `.hex`, `.elf` — with loadable RAM segments
 and symbols — plus `.map` for a symbol table), Run/Stop/Reset, a **gateway
 URL field** to connect a real network stack (openhw-gw + gVisor) with a
-scripted network (netsim) as fallback, a live UART terminal, GPIO pin
-readout for banks A–E, and key peripheral registers. For automation, a
+scripted network (netsim) as fallback, a live UART terminal (with **UART
+RX input** — type into the console and the firmware reads it; newline
+characters excluded per HTML spec, see AGENTS.md §11), GPIO pin readout
+for banks A–E, and key peripheral registers. Interrupt-driven firmware
+(`rx_interrupt_test`, `rx_crypto_test`) is serviced by an opt-in guest-IRQ
+pump; polling firmware (the ETH demos) never uses it. For automation, a
 preset can auto-boot via the URL: `?fw=eth_http`, `?fw=blinky`, `?fw=crypto_test`, …
 
 ## Quickstart
@@ -76,12 +83,12 @@ See `site/test_flow.mjs` and the exports in `index.mjs` for the full API
 | `eth_test/` | Raw ETH TX/RX self-test | `ETH Test: done` |
 | `blinky/` | **No ethernet** — LED blinker on GPIOA PA5 + UART tick counter | `tick N LED=ON/OFF` |
 
-Plus 16 more test binaries (`crypto_test`, `hal_test`, `timer_test`,
-`periph_test`, `echo_test`, `blink_serial`, …) from the `*_test/` directories
-— all boot headless and print a banner over UART (probe:
-`node site/probe_firmwares.mjs`).
+Plus 17 more test binaries (`crypto_test`, `hal_test`, `timer_test`,
+`periph_test`, `echo_test`, `blink_serial`, `rx_interrupt_test`,
+`spi_tft_test`, …) from the `*_test/` directories — all boot headless and
+print a banner over UART (probe: `node site/probe_firmwares.mjs`).
 
-All three are bare-metal (no RTOS), built with the Arduino core's
+All are bare-metal (no RTOS), built with the Arduino core's
 arm-none-eabi-gcc, and driven purely through memory-mapped registers —
 the same firmware binaries run on the emulator and on real silicon.
 
@@ -124,8 +131,11 @@ firmware .bin ──► Unicorn WASM CPU ──► memory hooks
 │   ├── netsim.js            Canned DHCP/TCP/HTTP network peer (fallback)
 │   ├── loaders.js           Intel HEX / ELF32 / linker-map parsers
 │   ├── test_flow.mjs        Node E2E flow test (npm test)
+│   ├── test_blinky.mjs      Node blinky GPIO test (npm test)
+│   ├── test_rx_interrupt.mjs Node UART-interrupt test (npm test)
 │   └── vendor/              Browser WASM build, SVD, Unicorn
 ├── index.mjs, package.json  npm package entry (stm32f4-emulator)
+├── .github/workflows/       CI (test suite) + GitHub Pages deploy
 ├── tools/make_firmware.mjs  Regenerates site/firmware.js from eth_*/.bin
 ├── stm32-periph-wasm/       Rust peripheral model (WASM build + pkg/)
 ├── eth_http/ eth_dhcp/ eth_test/   Sample network firmwares + configs
@@ -155,7 +165,9 @@ rebuild — delete it so the vendor assets stay tracked/committed.
 ## Testing
 
 - `npm test` — flow test (`site/test_flow.mjs`) + blinky test
-  (`site/test_blinky.mjs`), exit 0 = all PASS.
+  (`site/test_blinky.mjs`) + interrupt-UART test (`site/test_rx_interrupt.mjs`),
+  exit 0 = all PASS. The same suite runs in CI
+  ([.github/workflows/ci.yml](.github/workflows/ci.yml)) on every push.
 - `scripts/verify_ethernet.sh [max_inst]` — runs all three firmwares through
   the gateway, asserts the success markers and 0 `TCP fail`.
 - Soak-tested: 200M-instruction gateway runs with 1000+ consecutive TCP

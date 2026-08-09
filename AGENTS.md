@@ -137,8 +137,9 @@ JS-visible exports (see `stm32_periph_wasm.d.ts`):
 - `eth_tx_done()`, `eth_rx_done()`, `eth_signal_rx_poll(desc_addr)`
 
 The reference gateway `cli.mjs` uses batch execution (`maxBatch`, default
-100000) with `HOOK_BLOCK` calling `tick()`, and `uc.emu_stop()` when DMA is
-pending or an interrupt is pending; it then services TX/RX and resumes.
+20000 — capped below the §7 wedge threshold) with a code hook calling
+`tick_n(delta)`, and `uc.emu_stop()` when TX/RX/DMA is pending or an
+interrupt is pending; it then services TX/RX and resumes.
 
 ---
 
@@ -288,6 +289,13 @@ the hook mem-write pattern.
   translation cache, a specific Thumb block, or an internal TCG state) wedges
   the WASM instance. The broken timeout path (`qemu_thread_create: Not
   supported`) is strong evidence the WASM port is incomplete.
+- **2026-08-09: confirmed the wedge is instruction-count-per-call based, not
+  region-based.** Under cli.mjs, an empty-RX-queue recv-wait spin (guest
+  polling `eth_irq_flag` in SRAM) runs the full `emu_start` budget with no
+  stop condition firing; a 500000-inst batch wedges the instance
+  permanently (mid-soak, at ~90-150 rounds). The same soak with
+  `maxBatch=20000` completes 600+ rounds cleanly. Fix: cli.mjs caps the
+  main-loop and ISR-pump batch budgets at 20000 (env `MAX_BATCH`).
 
 ### Options already tried
 
@@ -447,13 +455,27 @@ Expected round-1 UART: `=== HTTP ... ===` → DHCP Discover/Offer/Ack →
 → `TCP FIN` → `!CONN` → loop restart, DHCP renews OK.
 
 ### Multi-round support (fixed in cli.mjs)
-The Go (gVisor-tap-vsock) gateway keeps the round-1 TCP session alive and
-retransmits old server data at the new src port after the firmware restarts
-(firmware prints `TCP fl=18` for those and ignores them). cli.mjs now
-**auto-restarts the gateway** when a round-end marker (`=== HTTP ... ===`) is
-seen in streamed UART, before the next round's DHCP Discover goes out.
+The Go (gVisor-tap-vsock) gateway keeps a TCP session alive briefly after the
+firmware FINs and may retransmit old server data at a new src port after the
+firmware restarts (firmware prints `TCP fl=18` for those and ignores them).
+Historically cli.mjs **auto-restarted the gateway** when a round-end marker
+(`=== HTTP ... ===`) was seen in streamed UART, before the next round's DHCP
+Discover went out.
 
-Three fixes were needed to make consecutive rounds work:
+**2026-08-09: per-round restart is now OFF by default** (opt-in via
+`GW_RESTART=1`). gVisor opens a fresh session per connection and the firmware
+skips stale `fl=18` frames, so consecutive rounds work at full speed without
+any restart. Verified 100M-instruction soak: **604 TCP connected, 0 TCP
+fail, 0 `fl=18`, 0 timeouts, 47.9s (~12.6 rounds/s)** — beats the old
+586-round/78s restart-mode record. The old restart mode measured ~1.3
+rounds/s (each kill+spawn+reconnect costs ~0.7s). When `GW_RESTART=1`, the
+restart is **deferred to the next-round TX** (the first frame after the
+`=== HTTP` marker — usually the DHCP Request): restarting on the UART marker
+alone was racy (the round-2 DHCP Discover could already be TX'd into the
+dying gateway, and the firmware never retransmits the Discover → permanent
+"Wait DHCP Offer" stall).
+
+Legacy fixes that made consecutive rounds work (still in place):
 1. **WS connect race**: the 1.5s dial timeout could fire while the gateway's
    HTTP upgrade was still completing, creating a dead second connection that
    stole the DHCP reply path. Now: 4s dial timeout + 600ms retry spacing.
@@ -545,20 +567,28 @@ failed at the first SYN with `TCP fl=10` + recv-wait stall (the documented
 environmental flake) — restart the gateway (`kill <pid>`, relaunch
 `openhw-gw -port 5099`) before long soaks.
 
+**2026-08-09 update** (wedge fix + no-restart default, see §7): the same
+100M soak now runs **604 TCP connected, 0 TCP fail, 0 `fl=18`, 0 timeouts
+in 47.9s (~12.6 rounds/s)** with per-round restart OFF. The old restart-mode
+figures above (7.48 rounds/s at ~1.3 MIPS) predate the `maxBatch=20000`
+cap; restart-mode today measures ~1.27 rounds/s (each kill+spawn+reconnect
+≈ 0.7s), so it is only for pathological stale-session cases (`GW_RESTART=1`).
+
 Changes that produced it:
 - **`tick_n(delta)` export in Rust** (`src/lib.rs`): `INSTRUCTION_COUNT.fetch_add(delta)` + `sys().tick()`. Safe to batch because timers are instruction-count-delta driven (`elapsed_ticks = (now-last_tick)/prescaler`) and eth.rs consumes `eth_take_done()` atomics. WASM rebuilt with `wasm-pack build --release --target nodejs`.
 - **codeHook (cli.mjs)** does only `instCount++` per instruction plus the queue-stop, and batches the expensive WASM calls:
   - every `TICK_EVERY=5000` inst: `tick_n(5000)`, watchdog check, `has_pending_interrupt()` → stop.
   - every `POLL_EVERY=1000` inst: `dma_get_pending_count() > 0 || eth_is_tx_poll()` → stop.
   - every instruction (cheap, all-JS): `gwRxQueue.length > 0 && eth_is_rx_poll()` → stop (prompt RX injection).
-- **smallBatch flip-back**: `smallBatch=true` on `!CONN` (round boundary, 1500-inst batches while the gateway restarts) flips back to `maxBatch=500000` when a UART chunk contains `Offer IP=` (DHCP re-established).
+- **smallBatch flip-back**: `smallBatch=true` on `!CONN` (round boundary, 1500-inst batches while the gateway restarts) flips back to `maxBatch=20000` when a UART chunk contains `Offer IP=` (DHCP re-established).
+- **maxBatch=20000 default** (env `MAX_BATCH` override): keeps every `emu_start` below the ~40k-instruction wedge threshold of the Unicorn WASM build (see §7). Without the cap, an empty-RX-queue recv-wait spin runs the full 500k-inst batch and wedges the instance permanently.
 - Removed the second main-loop `tick()` after processEth; removed unused `gwRestartWarned`.
 
 Two failures along the way (both avoided in the final design):
 1. **Unconditional queue-stop deadlock**: `if (gwRxQueue.length > 0) emu_stop()` froze the guest at 0x8000902 (recv-loop, 2 inst/step). Injection requires `eth_is_rx_poll()` armed (guest re-arms DMARPDR every 1024 loop iterations ≈ 9k inst at pc=0x800090c, `.ino` line 103), and processEth clears the poll at empty-queue boundaries — so a stop without the poll armed stalls forever. Queue-stop must AND `eth_is_rx_poll()`.
 2. **Sticky RX poll** (clear only on delivery, else re-signal): 1 round / 163.74s regression (stall at PC=0x8000954 after "RESPONSE:"). Reverted to clear-always.
 
-Gotchas: with `maxBatch=500000` and only-conditional stops, a dead/unreachable gateway (ws dial timeout, stale `WebSocket timeout` in the log) burns the whole budget in the DHCP wait with ~40-500k-inst batches and 0 rounds — always verify the gateway is listening (`ss -tlnp | grep <port>`) before trusting a 0-round result. The 95-round run from the intermediate config is NOT a code regression — it was a dead gateway.
+Gotchas: with `maxBatch=500000` and only-conditional stops, a dead/unreachable gateway (ws dial timeout, stale `WebSocket timeout` in the log) burns the whole budget in the DHCP wait with ~40-500k-inst batches and 0 rounds — always verify the gateway is listening (`ss -tlnp | grep <port>`) before trusting a 0-round result. The 95-round run from the intermediate config is NOT a code regression — it was a dead gateway. The `maxBatch=20000` cap (2026-08-09) makes even that case safe: empty-queue recv-waits now wedge-free (see §7).
 
 ### Changes committed with this port
 - `eth_http/eth_http.ino`: TCP src port now randomized per connect attempt
@@ -575,8 +605,11 @@ Gotchas: with `maxBatch=500000` and only-conditional stops, a dead/unreachable g
   `*.bak` are ignored.
 
 ### Notes / gotchas on Linux
-- The AGENTS.md §7 execution wedge was NOT reproduced under cli.mjs batch
-  stepping (10M-instruction runs are fine).
+- The AGENTS.md §7 execution wedge WAS reproduced under cli.mjs (2026-08-09):
+  an empty-RX-queue recv-wait spin with no stop condition firing makes one
+  `emu_start` batch run 40k+ instructions, wedging the Unicorn WASM instance.
+  Fixed by capping `maxBatch` at 20000 (env `MAX_BATCH` override); the
+  pump's ISR `emu_start` is likewise capped. See §7 for details.
 - The repo's `webserver/` dir and `pkg/test_webserver_net.mjs` don't exist
   here; `eth_http` is the actual web-client firmware used for verification.
 - Node buffers stdout: redirect to a file for long runs. The in-script

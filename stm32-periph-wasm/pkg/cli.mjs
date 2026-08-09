@@ -274,7 +274,7 @@ async function main() {
         ws.binaryType = 'arraybuffer';
         ws.onclose = (ev) => { if (process.env.DBG_GW) console.log(`[GW] dial #${gwDialSeq} closed code=${ev.code}`); };
         const to = setTimeout(() => { timedOut = true; try { ws.close(); } catch (_) {} resolve(null); }, 4000);
-        ws.onerror = () => { clearTimeout(to); resolve(null); };
+        ws.onerror = () => { clearTimeout(to); if (process.env.DBG_GW) console.log(`[GW] dial #${gwDialSeq} ERROR`); resolve(null); };
         ws.onopen = () => {
             clearTimeout(to);
             if (timedOut) { try { ws.close(); } catch (_) {} resolve(null); return; }
@@ -377,11 +377,13 @@ async function main() {
             await new Promise(r => { if (old.exitCode !== null) r(); else old.once('exit', r); });
         }
         gwProcess = null;
+        if (process.env.DBG_GW) console.log('[GW] old gateway dead, spawning fresh');
         await startGateway();
     };
 
     // Round markers seen in UART (each round ends with "=== HTTP nnb ===")
     let gwRoundsSeen = 0;
+    let gwRestartPending = false;
     const checkGwRestart = (chunk) => {
         if (!useGateway || !chunk.includes('=== HTTP ')) return false;
         const markers = (chunk.match(/=== HTTP .* ===/g) || []).length;
@@ -416,7 +418,7 @@ async function main() {
     };
     uc.hook_add(Module.HOOK_INTR, intrHook, null);
 
-    const processEth = (uc) => {
+    const processEth = async (uc) => {
         if (eth_is_tx_poll()) {
             const ta = eth_get_tx_desc_addr();
             const txDescAddr = eth_get_tx_desc_addr();
@@ -434,6 +436,15 @@ async function main() {
                     const bufAddr = tdes1 & 0xFFFFFFFC;
                     const bufSize = (tdes0 & 0x3FFF);
                     if (bufAddr !== 0 && bufSize > 0 && bufSize <= 2000) {
+                        // Round boundary: the guest already printed "=== HTTP ==="
+                        // and is now TXing the next round's first frame (DHCP
+                        // Discover). Restart the gateway BEFORE the frame goes
+                        // out, so the fresh stack sees the new transaction.
+                        if (gwRestartPending) {
+                            gwRestartPending = false;
+                            console.log(`[GW] restarting gateway on next-round TX (${bufSize}B)...`);
+                            await restartGateway();
+                        }
                         const pkt = new Uint8Array(uc.mem_read(BigInt(bufAddr), bufSize));
                         if (gwConnected && gwWs?.readyState === WebSocket.OPEN) {
                             if (process.env.DBG_TX) console.log(`[TX] ${bufSize}B -> ws`);
@@ -595,7 +606,7 @@ async function main() {
                 console.log(`[IRQF] irq=${irq} savedPC=0x${(pc & 0xFFFFFFFE).toString(16)} SP=0x${savedAt.toString(16)} r0=0x${r0.toString(16)} r1=0x${r1.toString(16)} r2=0x${r2.toString(16)} r3=0x${r3.toString(16)}`);
             }
             try {
-                uc.emu_start(BigInt(handler_pc), 0n, 0n, 100000);
+                uc.emu_start(BigInt(handler_pc), 0n, 0n, 20000);
             } catch (e) {
                 if (process.env.DBG_IRQF) console.log(`[IRQF!] ISR aborted: ${String(e).slice(0, 60)}`);
                 // Handler crashed on BX LR (EXC_RETURN not supported)
@@ -626,7 +637,7 @@ async function main() {
         }
     };
 
-    let maxBatch = 500000;
+    let maxBatch = Number(process.env.MAX_BATCH) || 20000;
     let smallBatch = false;
     let totalSteps = 0;
     const startTime = Date.now();
@@ -635,7 +646,16 @@ async function main() {
         const uartChunk = get_uart_output();
         if (uartChunk) {
             process.stdout.write(uartChunk);
-            if (checkGwRestart(uartChunk)) await restartGateway();
+            if (checkGwRestart(uartChunk)) {
+                if (process.env.GW_RESTART) {
+                    // GW_RESTART=1: kill+respawn the gateway per round (slow,
+                    // ~0.7s/round). Default: no restart — gVisor opens a fresh
+                    // session per connection and the firmware skips stale
+                    // frames (TCP fl=18), so consecutive rounds work at speed.
+                    gwRestartPending = true;
+                    console.log(`[GW] round end detected (${gwRoundsSeen}), restart deferred to next-round TX`);
+                }
+            }
             if (!smallBatch && uartChunk.includes('!CONN')) {
                 smallBatch = true;
                 console.log('[GW] round end detected, switching to small batches');
@@ -648,7 +668,7 @@ async function main() {
         while (stdinQueue.length > 0) uart_rx_byte(uartAddr, stdinQueue.shift());
 
         processDma();
-        processEth(uc);
+        await processEth(uc);
         tick();
         const curPc = uc.reg_read_i32(Module.ARM_REG_PC);
         try {
@@ -664,7 +684,7 @@ async function main() {
             }
         }
         processDma();
-        processEth(uc);
+        await processEth(uc);
         processInterrupts();
         totalSteps++;
         if (process.env.DBG_PC3) {
