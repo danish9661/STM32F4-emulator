@@ -96,8 +96,8 @@ document is the readable summary.
 - [ ] Hardware-accurate NVIC: don't auto-enable IRQs in
       `set_intr_pending`; make the pump deliver pending interrupts only
       when ISER bits are set by firmware.
-- [ ] EXTI ↔ GPIO edge-trigger wiring (GPIO config drives EXTI pends).
-- [ ] FLASH program/erase emulation (write to the flash backing buffer),
+- [x] EXTI ↔ GPIO edge-trigger wiring (GPIO config drives EXTI pends).
+- [x] FLASH program/erase emulation (write to the flash backing buffer),
       needed for DFU-style and bootloader firmwares.
 - [ ] Move DMA memory copies into Rust (one less JS round-trip, faster
       per-transfer).

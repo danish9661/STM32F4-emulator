@@ -19,8 +19,8 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 | | Count |
 |---|---|
 | Modules | 33 |
-| Detailed | 22 |
-| Partial | 9 |
+| Detailed | 26 |
+| Partial | 7 |
 | Stub / passthrough-only | 0 |
 
 ## The matrix
