@@ -39,7 +39,7 @@ const uartAddrFor = (name) => UART4_FIRMWARES.has(name) ? 0x40004C00 : 0x4001100
 // Interrupt-driven firmware: the emulator pumps guest IRQ handlers (USART RXNE
 // etc.). OFF for ETH firmware — the driver signals completion via SRAM
 // irq_flag and the guest ETH_IRQHandler would double-process DMASR/rx_desc.
-const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test']);
+const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehensive_test']);
 
 // ── status + UART ──────────────────────────────────────────────────────────
 const setStatus = (text, cls) => {
