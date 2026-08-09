@@ -73,6 +73,15 @@ document is the readable summary.
 - **FLASH program/erase** (new): `spi_flash_test`'s flash region now
   programs (PG) and sector-erases (SER) the backing buffer via the JS
   flash-command driver; `flash_test` 11/11 PASS.
+- **Hardware-accurate NVIC** (new): `set_intr_pending` no longer
+  auto-enables IRQs. Pending is set regardless of ISER; delivery (pump)
+  happens only when the firmware sets the enable bit — a disabled pending
+  IRQ stays pending until taken or cleared via ICPR, exactly like real
+  hardware. `has_pending`/`get_pending_vector` now report only deliverable
+  pending, and ICSR VECTPENDING returns the exception vector number (was
+  returning the 0-based IRQ number). All interrupt-driven firmwares
+  (rx_interrupt, rx_crypto, exti, eth_http/dhcp/test) set ISER explicitly
+  and pass unchanged; 20M-inst soak: 121 TCP connected, 0 TCP fail.
 
 ## Known limitations
 
@@ -93,7 +102,7 @@ document is the readable summary.
 - [ ] Replace/repair the Unicorn WASM build (native binding or newer
       wasm build with working timeouts + no 40k-instruction wedge), then
       raise `maxBatch` back and re-measure.
-- [ ] Hardware-accurate NVIC: don't auto-enable IRQs in
+- [x] Hardware-accurate NVIC: don't auto-enable IRQs in
       `set_intr_pending`; make the pump deliver pending interrupts only
       when ISER bits are set by firmware.
 - [x] EXTI ↔ GPIO edge-trigger wiring (GPIO config drives EXTI pends).

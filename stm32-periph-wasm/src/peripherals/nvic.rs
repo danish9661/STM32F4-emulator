@@ -54,7 +54,8 @@ impl Nvic {
         } else if let Some((idx, mask)) = Self::irq_reg_idx(irq) {
             self.pending |= 1u128 << (IRQ_OFFSET + irq);
             self.pending_reg[idx] |= mask;
-            self.enable[idx] |= mask;
+            // Do NOT auto-enable: pending stays set but is only delivered
+            // when the firmware sets the ISER bit (real NVIC behavior).
         }
     }
 
@@ -65,43 +66,65 @@ impl Nvic {
         }
     }
 
-    pub fn has_pending(&self) -> bool { self.pending != 0 }
+    /// True iff a pending exception can actually be taken: system exceptions
+    /// always can, external IRQs only when the ISER bit is set.
+    pub fn has_pending(&self) -> bool {
+        self.next_deliverable_pending().is_some()
+    }
+
+    /// Highest-priority bit in `pending` that is deliverable (system
+    /// exception, or external IRQ with ISER set). Returns None if none.
+    fn next_deliverable_pending(&self) -> Option<u32> {
+        let mut pend = self.pending;
+        while pend != 0 {
+            let bit = pend.trailing_zeros();
+            if bit < IRQ_OFFSET as u32 {
+                return Some(bit);
+            }
+            let irq_num = (bit - IRQ_OFFSET as u32) as usize;
+            let idx = irq_num / 32;
+            let mask = 1u32 << (irq_num % 32);
+            if self.enable[idx] & mask != 0 {
+                return Some(bit);
+            }
+            pend &= !(1u128 << bit);
+        }
+        None
+    }
 
     pub fn get_pending_vector(&self) -> u32 {
-        if self.pending != 0 {
-            let bit = self.pending.trailing_zeros();
-            bit - IRQ_OFFSET as u32
-        } else {
-            0
-        }
+        // Exception vector number (SysTick=15, IRQ0=16, ...); 0 = none.
+        self.next_deliverable_pending().unwrap_or(0)
     }
 
     pub fn get_and_clear_next_intr_pending(&mut self) -> Option<i32> {
-        if self.pending != 0 {
-            let bit = self.pending.trailing_zeros();
+        let mut pend = self.pending;
+        while pend != 0 {
+            let bit = pend.trailing_zeros();
             let irq = (bit as i32) - IRQ_OFFSET;
-            // External IRQs (bit >= 16) need ISER enable; system exceptions always fire
-            if bit >= 16 {
+            let deliverable = if bit < IRQ_OFFSET as u32 {
+                true
+            } else {
                 let irq_num = irq as usize;
                 let idx = irq_num / 32;
                 let mask = 1u32 << (irq_num % 32);
-                if self.enable[idx] & mask == 0 {
-                    self.pending &= !(1u128 << bit);
+                self.enable[idx] & mask != 0
+            };
+            if deliverable {
+                self.pending &= !(1u128 << bit);
+                if irq >= 0 {
+                    let idx = (irq as usize) / 32;
+                    let mask = 1u32 << (irq as usize % 32);
                     self.pending_reg[idx] &= !mask;
-                    return None;
+                    self.active[idx] |= mask;
                 }
+                return Some(irq);
             }
-            self.pending &= !(1u128 << bit);
-            if irq >= 0 {
-                let idx = (irq as usize) / 32;
-                let mask = 1u32 << (irq as usize % 32);
-                self.pending_reg[idx] &= !mask;
-                self.active[idx] |= mask;
-            }
-            Some(irq)
-        } else {
-            None
+            // Disabled: leave pending (clears only when the ISR runs or via
+            // ICPR), skip to the next bit.
+            pend &= !(1u128 << bit);
         }
+        None
     }
 
     pub fn maybe_set_systick_intr_pending(&mut self) {

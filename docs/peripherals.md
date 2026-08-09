@@ -45,7 +45,7 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 | I2S | 144 | Partial | CR1/CR2/SR/DR/CRC/I2SCFGR/I2SPR; synthetic triangle-wave audio on DR write, SR flags | Y (35/36/51) | N | N |
 | IWDG | 70 | Detailed | KR keys (0x5555 write-enable, 0xAAAA reload, 0xCCCC start), PR prescaler, RLR; instruction-count driven; underflow → `request_watchdog_reset()`; SR PVU/RVU | reset (not IRQ) | N (self-timed) | N |
 | LTDC | 146 | Partial | Global regs + 2 layers (CR/whpcr/wvpcr/ckcr/pfcr/cacr/dccr/bfcr/cfbar/cfblr/cfblnr/clutwr); SRCR triggers ISR bits; **no framebuffer scanout** | Y (88) | N | N |
-| NVIC | 226 | Detailed | ISER/ICER/ISPR/ICPR/IABR/priority; u128 pending mask, enable/active arrays; `set_intr_pending` auto-enables; `get_and_clear_next_intr_pending` honors enable for external IRQs; SysTick periodic pending; `in_interrupt` | controller | via System::tick | N |
+| NVIC | 226 | Detailed | ISER/ICER/ISPR/ICPR/IABR/priority; u128 pending mask, enable/active arrays; `set_intr_pending` sets pending only (no auto-enable — pending is delivered only when ISER is set, and disabled pending stays set until taken or ICPR); `get_and_clear_next_intr_pending` delivers the highest-priority enabled IRQ, skips disabled ones without clearing; `has_pending` reflects deliverable-only; ICSR VECTPENDING returns the exception vector number; SysTick periodic pending; `in_interrupt` | controller | via System::tick | N |
 | PWR | 47 | Partial | CR/CSR masked storage, WUF on valid wakeup write pattern | N | N | N |
 | RCC | 221 | Detailed | CR/PLLCFGR/CFGR/CIR/reset-enable/low-power/BDCR/CSR/SSCG/PLLI2SCFGR/PLLSAI/DCKCFGR/CKGATENR/DCKCFGR2; HSE/PLL ready after instruction-count delays, HSIRDY, SWS mirrors SW, real freq math (system/pll/ahb/apb1/apb2), enable-bit gating map, LSE/LSI ready timing | N | N | N |
 | RNG | 85 | Detailed | CR/SR/DR; LCG pseudo-random 32-bit values regenerated every 40 inst, DRDY, error flags + IRQ | Y (80) | N | N |
@@ -90,8 +90,8 @@ prints a banner over UART when it boots.
 
 ## Known gaps / model shortcuts
 
-- NVIC `set_intr_pending` **auto-enables** the IRQ — convenient, not
-  hardware-accurate.
+- NVIC pending is set by peripherals regardless of ISER (hardware-accurate);
+  the pump only ever runs enabled IRQs.
 - USART ignores its ext-device argument (uses the global UART buffer);
   the UsartProbe device is wired through the SPI lookup instead.
 - DMA copies are executed by the JS driver, not inside the Rust model.
