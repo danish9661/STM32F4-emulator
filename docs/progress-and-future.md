@@ -132,9 +132,13 @@ document is the readable summary.
 - [ ] VS Code extension / devcontainer with the full toolchain
       (wasm-pack, arduino-cli, go).
 - [ ] Waveform/DMA trace view in the browser console.
-- [ ] More firmware samples: USB CDC echo, FreeRTOS port, an
-      interrupt-driven ETH driver (would exercise the pump + ETH together
-      properly).
+- [x] Interrupt-driven ETH driver (`eth_irq_test`): NVIC ETH IRQ 61 +
+      DMAIER, the pump runs `ETH_IRQHandler` which reads DMASR TS/RS,
+      scans/re-arms RX descriptors; the driver only signals the model
+      (`irq_eth` mode — no SRAM flag writes). Also fixed the RX descriptor
+      format: FS/LS marker bits at 28/27 corrupted the frame-length window
+      [29:16] (`len<<16` only, like real F407).
+- [ ] More firmware samples: USB CDC echo, FreeRTOS port.
 - [ ] Windows/macOS CI coverage (currently Linux runner).
 
 ## Verification checklist (regression)

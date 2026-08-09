@@ -20,6 +20,7 @@ const firmwares = [
     ['new_periph_test', 'new_periph_test/new_periph_test.ino.bin', 'new_periph_test.ino.bin'],
     ['deep_periph_test', 'deep_periph_test/build/deep_periph_test.ino.bin', 'deep_periph_test.ino.bin'],
     ['comprehensive_test', 'comprehensive_test/comprehensive_test.bin', 'comprehensive_test.bin'],
+    ['eth_irq_test', 'eth_irq_test/eth_irq_test.bin', 'eth_irq_test.bin'],
     ['edge_test', 'edge_test/edge_test.ino.bin', 'edge_test.ino.bin'],
     ['echo_test', 'echo_test/build/echo_test.ino.bin', 'echo_test.ino.bin'],
     ['rx_interrupt_test', 'rx_interrupt_test/build/rx_interrupt_test.ino.bin', 'rx_interrupt_test.ino.bin'],

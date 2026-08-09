@@ -558,7 +558,9 @@ async function main() {
                             console.log(`[RXHEX len=${len}] ${hex.join('')}`);
                         }
                         try { uc.mem_write(BigInt(bufAddr), new Uint8Array(pkt.buffer, pkt.byteOffset, len)); } catch (e) { break; }
-                        const rdes0_w = (1 << 28) | (1 << 27) | (len << 16);
+                        // Real F407: RDES0 high word = frame length [29:16], OWN cleared; FS/LS
+                        // live in the low status word. No marker bits here.
+                        const rdes0_w = len << 16;
                         const wb = new Uint8Array(4);
                         new DataView(wb.buffer).setUint32(0, rdes0_w, true);
                         try { uc.mem_write(BigInt(descAddr), wb); } catch (e) { break; }

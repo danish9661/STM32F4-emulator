@@ -691,13 +691,31 @@ and a CDP-driven headless-Chrome smoke test completes 2 rounds.
 ### Interrupt pump — opt-in per firmware (fixed 2026-08-09)
 The guest-IRQ pump (`processInterrupts` in site/emulator.js, ported from
 cli.mjs) now runs **only when `enable_irqs: true`** (app.js enables it for
-`rx_interrupt_test` + `rx_crypto_test`). OFF by default — the ETH firmware
-is corrupted by it: the driver signals TX/RX done by writing SRAM `irq_flag`
+`rx_interrupt_test` + `rx_crypto_test` + `comprehensive_test` +
+`eth_irq_test`). OFF by default — the polling ETH firmware (eth_http) is
+corrupted by it: the driver signals TX/RX done by writing SRAM `irq_flag`
 + model DMASR, and a guest `ETH_IRQHandler` run on top re-reads DMASR and
 re-scans `rx_desc`, stomping `rx_frame_idx/len` (observed: response body
 followed by raw RX-buffer/TX-packet garbage and a mojibake `=== HTTP «75b
 ===`). In cli.mjs there is only ONE irq_flag writer (the ISR), so the pump
 there is safe; emulator.js must never combine both.
+**Interrupt-driven ETH firmware (`eth_irq_test/`, 2026-08-09)**: the proper
+way to run the pump + ETH together. The firmware enables NVIC ETH IRQ 61
+(ISER1 bit 29) + DMAIER (TSE|RSE|NIE); `ETH_IRQHandler` reads DMASR TS/RS,
+sets its own SRAM `eth_irq_flag`, scans/re-arms RX descriptors, and
+write-1-clears DMASR. The driver runs with `irq_eth: true` (emulator.js
+opt, app.js `IRQ_ETH_FIRMWARES`): processEth skips the SRAM
+irq_flag/rx_frame_idx/rx_frame_len writes — it only signals the model
+(eth_tx_done/eth_rx_done) and injects frames. Verified: TX PING -> ISR
+sets flag -> RX PONG -> echo -> "ETH IRQ Test: done" (Node test +
+headless-Chrome smoke). Also fixed the RX descriptor format: drivers used
+to write `(1<<28)|(1<<27)|(len<<16)` — the FS/LS marker bits at 28/27 fall
+inside the frame-length window [29:16], so a guest ISR reading
+`(rdes0>>16)&0x3FFF` saw `0x183C` instead of 60. Real F407 keeps FS/LS in
+the low status word; drivers now write `len<<16` (eth_http tolerates
+either). Firmware RX wait loops should re-arm `DMARPDR=1` periodically
+(every 0x3FF iters like eth_http) so the model's poll desc addr tracks
+DMARDLAR.
 While wiring the pump, fixed a latent `rx_crypto_test` firmware bug: it
 numbered USART1 as IRQ 38 (NVIC bit 6, vector slot 16+38) but the model
 (and the real F407) pends USART1 as IRQ 37 — the ISR never ran. Fixed

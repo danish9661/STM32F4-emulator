@@ -110,6 +110,18 @@ export function createNetSim({ log = () => {} } = {}) {
         if (frame.length < 14) return replies;
         const et = (frame[12] << 8) | frame[13];
 
+        if (et === 0x1234) { // eth_irq_test: echo PING -> PONG
+            if (new TextDecoder().decode(frame.subarray(14, 27)).includes('PING')) {
+                const r = new Uint8Array(60);
+                r.set(frame.subarray(6, 12), 0);  // dst = requester MAC
+                r.set(frame.subarray(0, 6), 6);   // src = requester's dst MAC
+                r[12] = 0x12; r[13] = 0x34;
+                r.set(new TextEncoder().encode('ETH IRQ PONG'), 14);
+                replies.push(r);
+            }
+            return replies;
+        }
+
         if (et === 0x0806) { // ARP: answer requests for the server IP
             const a = 14;
             if (frame[a] === 0 && frame[a + 1] === 1 && frame[a + 6] === 0 && frame[a + 7] === 1) {

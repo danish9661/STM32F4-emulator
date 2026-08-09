@@ -30,6 +30,11 @@ export async function createEmulator(opts) {
         // DMASR and re-scans rx_desc, stomping rx_frame_idx/len). Enable only
         // for interrupt-driven firmware (rx_interrupt_test, rx_crypto_test).
         enable_irqs = false,
+        // Interrupt-driven ETH firmware: the guest ETH_IRQHandler (run by the
+        // pump) reads DMASR and scans rx_desc itself, so the driver must NOT
+        // write the SRAM irq_flag / rx_frame_idx / rx_frame_len globals that
+        // the polling ETH firmware (eth_http) expects. Requires enable_irqs.
+        irq_eth = false,
     } = opts;
 
     const {
@@ -215,7 +220,7 @@ export async function createEmulator(opts) {
             }
             eth_clear_tx_poll();
             eth_tx_done();
-            write32(E.irqFlag, read32(E.irqFlag) | 1);
+            if (!irq_eth) write32(E.irqFlag, read32(E.irqFlag) | 1);
         }
 
         if (eth_is_rx_poll() && rxQueue.length > 0) {
@@ -227,11 +232,17 @@ export async function createEmulator(opts) {
             const len = Math.min(frame.length, E.rxStride);
             uc.mem_write(BigInt(bufAddr), frame.subarray(0, len));
             const wb = new Uint8Array(4);
-            new DataView(wb.buffer).setUint32(0, (1 << 28) | (1 << 27) | (len << 16), true);
+            // Real F407: RDES0 high word = frame length [29:16], OWN cleared
+            // for CPU ownership; FS/LS live in the low status word (set by
+            // the DMA, not the driver). Writing FS/LS marker bits at 28/27
+            // would corrupt the length read by the guest ISR.
+            new DataView(wb.buffer).setUint32(0, len << 16, true);
             uc.mem_write(BigInt(descAddr), wb);
-            write32(E.rxFrameIdx, idx);
-            write32(E.rxFrameLen, len);
-            write32(E.irqFlag, read32(E.irqFlag) | 2);
+            if (!irq_eth) {
+                write32(E.rxFrameIdx, idx);
+                write32(E.rxFrameLen, len);
+                write32(E.irqFlag, read32(E.irqFlag) | 2);
+            }
             eth_clear_rx_poll();
             eth_rx_done();
         }

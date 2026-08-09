@@ -36,10 +36,21 @@ let image = null;          // { flash, ram, extraMem, entry, symbols, name, uart
 const UART4_FIRMWARES = new Set(['echo_test', 'blink_serial']);
 const uartAddrFor = (name) => UART4_FIRMWARES.has(name) ? 0x40004C00 : 0x40011000;
 
+// Per-firmware ETH RX descriptor/buffer SRAM addresses (driver injects frames
+// directly into guest memory). Defaults match eth_http (emulator.js E).
+const ETH_RX_MAP = {
+    eth_irq_test: { rxDesc: 0x20000050, rxBuf: 0x2000005c },
+};
+
 // Interrupt-driven firmware: the emulator pumps guest IRQ handlers (USART RXNE
 // etc.). OFF for ETH firmware — the driver signals completion via SRAM
 // irq_flag and the guest ETH_IRQHandler would double-process DMASR/rx_desc.
-const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehensive_test']);
+const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehensive_test', 'eth_irq_test']);
+
+// Interrupt-driven ETH firmware: the guest ETH_IRQHandler (run by the pump)
+// reads DMASR and scans rx_desc itself, so the driver must not write the
+// SRAM irq_flag/rx_frame_idx globals (irq_eth mode in emulator.js).
+const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test']);
 
 // ── status + UART ──────────────────────────────────────────────────────────
 const setStatus = (text, cls) => {
@@ -216,6 +227,8 @@ const boot = async () => {
         extra_mem: image.extraMem,
         uart_addr: image.uartAddr,
         enable_irqs: IRQ_FIRMWARES.has(image.name),
+        irq_eth: IRQ_ETH_FIRMWARES.has(image.name),
+        eth: ETH_RX_MAP[image.name],
         onTx: (pkt) => {
             addFrame('tx', pkt);
             if (gw.connected && gw.ws) {
