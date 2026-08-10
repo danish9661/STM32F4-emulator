@@ -91,7 +91,8 @@ document is the readable summary.
    firmware (an emulated ETH_IRQHandler re-scans `rx_desc` and stomps the
    driver's frame bookkeeping).
 3. **Hardware paths not modeled**: DCMI/LTDC/SAI/I2S are synthetic-data
-   only; DMA copies happen in JS; CAN has no bus peer.
+   only; DMA copies happen in JS; USB OTG has no model (CAN now has a real
+   two-node bus with arbitration).
 4. **Timers are instruction-count driven**, not wall-clock driven — a
    `delay_ms(100)` is ~2.4M emulated instructions, so real-time blink
    rates don't hold (documented in AGENTS.md §11).
@@ -117,7 +118,21 @@ document is the readable summary.
 ### Priority 2 — peripheral depth
 - [ ] DCMI real pixel source, LTDC framebuffer scanout with a display
       sink.
-- [ ] CAN bus peer / arbitration with a second node.
+- [x] CAN bus peer / arbitration between CAN1 and CAN2 on a shared bus:
+      TX requests stage frames; each tick arbitrates (lowest arbitration
+      ID wins, ties by node then mailbox), the winner's mailbox completes
+      (TSR TXOK|TME|RQCP) and the frame broadcasts to every node's RX that
+      passes its filter banks (winning transmitter receives its own frame
+      like real CAN); losers stay staged for the next free round. Real
+      filter semantics: 28 global banks (CAN2 = 14..27), mask/list modes,
+      32/16-bit scale, FFA1R FIFO assignment; 3 mailboxes per FIFO at the
+      real addresses, FMP/FULL/FOVR and RFOM release. BTR LBKM loopback
+      delivers only to the sender. `can_test` firmware: loopback echo
+      (id/payload verified) + two-node arbitration (both nodes end with
+      both frames); 4 Rust unit tests cover arbitration, loopback,
+      filter gating, FIFO overflow/release. Also fixed the minimal
+      (no-SVD) register list — it was missing CAN1/CAN2 entirely, so CAN
+      firmware silently did nothing in browser/test builds.
 - [ ] I2S/SAI real audio (WAV-backed DMA).
 - [ ] USB OTG (huge: host/device state machine) — biggest single gap.
 - [ ] EtherCAT / timers in PWM servo mode for the printer heritage
@@ -151,6 +166,7 @@ node site/test_rx_interrupt.mjs             # interrupt-driven UART/CRC
 node site/test_flash.mjs                    # FLASH program/erase (11/11)
 node site/test_spi_flash.mjs                # SPI NOR write path (9/9)
 node site/test_exti.mjs                     # EXTI GPIO edges (3/3)
+node site/test_can.mjs                      # CAN loopback + 2-node arbitration
 (cd stm32-periph-wasm && cargo test --lib)  # native unit + integration tests
 SOAK_STATS=1 node cli.mjs ../eth_http/eth_http.bin 200000000 \
   --gateway --config=../../eth_http/config.yaml   # long soak (≈15 min)

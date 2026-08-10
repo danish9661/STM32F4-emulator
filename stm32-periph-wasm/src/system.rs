@@ -122,6 +122,42 @@ pub fn set_dma_intr_info(stream_idx: usize, irq: i32, flags: u8) {
     }
 }
 
+// --- CAN bus: staged transmit requests arbitrate globally across CAN1/CAN2.
+// A TXRQ mailbox write stages a frame; the next system tick runs arbitration
+// (lowest arbitration ID wins; ties broken by node, then mailbox index). The
+// winner's mailbox completes (TSR TXOK|TME|RQCP) and the frame is delivered
+// to every node's RX FIFO that passes its filter banks (the transmitter also
+// receives its own frame, matching real CAN self-ACK traffic). Losers stay
+// staged and complete on the next free round.
+#[derive(Debug, Clone, Copy)]
+pub struct CanFrame {
+    pub node: u8,        // 1 = CAN1, 2 = CAN2
+    pub mailbox: usize,  // 0..=2
+    pub id: u32,         // 11-bit STID, or 29-bit value for extended frames
+    pub ext: bool,
+    pub rtr: bool,
+    pub dlc: u8,
+    pub data: [u8; 8],
+    pub loopback: bool,  // BTR LBKM: deliver only to the transmitting node
+}
+
+static CAN_STAGED: OnceLock<Mutex<Vec<CanFrame>>> = OnceLock::new();
+fn can_staged() -> &'static Mutex<Vec<CanFrame>> {
+    CAN_STAGED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+pub fn can_stage_tx(f: CanFrame) {
+    can_staged().lock().unwrap().push(f);
+}
+
+pub(crate) fn can_take_staged() -> Vec<CanFrame> {
+    std::mem::take(&mut *can_staged().lock().unwrap())
+}
+
+pub(crate) fn can_restage(frames: Vec<CanFrame>) {
+    can_staged().lock().unwrap().extend(frames);
+}
+
 pub struct WasmSystem {
     pub p: Rc<Peripherals>,
     pending_dma: RefCell<Vec<DmaTransfer>>,
@@ -213,6 +249,7 @@ impl WasmSystem {
         for slot in &p.peripherals {
             slot.peripheral.borrow_mut().tick(self);
         }
+        crate::peripherals::can::arbitrate_bus(self);
         p.nvic.borrow_mut().maybe_set_systick_intr_pending();
     }
 

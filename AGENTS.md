@@ -590,6 +590,49 @@ Two failures along the way (both avoided in the final design):
 
 Gotchas: with `maxBatch=500000` and only-conditional stops, a dead/unreachable gateway (ws dial timeout, stale `WebSocket timeout` in the log) burns the whole budget in the DHCP wait with ~40-500k-inst batches and 0 rounds — always verify the gateway is listening (`ss -tlnp | grep <port>`) before trusting a 0-round result. The 95-round run from the intermediate config is NOT a code regression — it was a dead gateway. The `maxBatch=20000` cap (2026-08-09) makes even that case safe: empty-queue recv-waits now wedge-free (see §7).
 
+### CAN bus peer / arbitration (2026-08-10)
+The CAN model is now a real two-node bus (CAN1 + CAN2) instead of a
+register file that completes TX instantly:
+
+- **Staging**: a TXRQ mailbox write (TIR bit 0, not in init mode) pushes a
+  `CanFrame` onto a global staged queue in `system.rs`
+  (`CAN_STAGED` + `can_stage_tx`/`can_take_staged`/`can_restage`). TSR gets
+  TXRQ + CODE bits at stage; TXOK/TME/RQCP are deferred to arbitration.
+- **Arbitration**: `Can::arbitrate_bus(sys)` runs at every
+  `WasmSystem::tick` (after peripheral ticks): lowest arbitration ID wins
+  (ties: lower node, then mailbox index; single staged frame wins alone —
+  so single-node TX behavior is unchanged). Winner's node gets
+  `complete_tx` (TXOK bit 8+i, TME bit 16+i, RQCP bits 31/27/23). Losers
+  are re-staged and complete on the next free round. TXRQ bits stay set
+  (historic observable behavior; comprehensive_test checks TSR bit 0).
+- **Delivery**: the winning frame broadcasts to EVERY node (including the
+  transmitter — real CAN self-ACK traffic) whose filter banks pass it;
+  under BTR bit 30 (LBKM loopback) it goes only to the sender. RX FIFO
+  selection per FFA1R; 3 mailboxes per FIFO at the real addresses
+  (0x1B0/0x1C0/0x1D0 FIFO0, 0x1E0/0x1F0/0x200 FIFO1 — `rx: [Mailbox; 6]`),
+  FMP++/FULL/FOVR semantics; RFOM write-1 releases (FMP--, FULL cleared).
+- **Filters**: 28 global banks (CAN2 maps local bank i to global 14+i via
+  `filter_off`; the fm1r/fs1r/ffa1r/fa1r registers store bits shifted by
+  `filter_off` and read back shifted). Mask/list modes, 32/16-bit scale
+  (16-bit = two standard-frame entries), masks in bank word 2b+1.
+- **Fixes along the way**: the minimal (no-SVD) register list in
+  `Peripherals::new_wasm` was missing CAN1/CAN2 entirely — added, so CAN
+  firmware works in browser/`new_wasm` builds too; RF0R/RF1R writes no
+  longer clobber FMP/FULL/FOVR (only RTOM/bit4 and RFOM/bit5 are writable,
+  matching the real w1c semantics).
+- **`can_test/` firmware** (`make -C can_test`, polling — no interrupts):
+  phase 1 BTR-LBKM loopback TX id 0x123 "CANLOOP!" verified end-to-end
+  (id + payload constant check), phase 2 stages 0x200 (CAN2) and 0x300
+  (CAN1) back-to-back and asserts both nodes drain 2 frames each and both
+  TME bits set. `node site/test_can.mjs` asserts the full log.
+- **Unit tests** (`can.rs` tests, 4): lowest-ID wins + broadcast +
+  loser-retry, loopback self-delivery only, filter-gated delivery (mask
+  mode), FIFO fill to 3 + FOVR + RFOM release.
+- IRQ side effects preserved: TMEIE fires on TME bits 16..18 (plus legacy
+  CODE bits 24..26 at stage time); RX FMPIE0/1 fire per FIFO; CAN2 base
+  63 (TX=63, RX0=64, RX1=65, SCE=66). comprehensive_test's CAN1 section
+  (TME0 + IRQ19 ISR) still passes.
+
 ### Changes committed with this port
 - `eth_http/eth_http.ino`: TCP src port now randomized per connect attempt
   (`49152 + ((tcp_attempt++*7) + port) % 2048`) — avoids stale-frame
