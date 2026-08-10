@@ -801,3 +801,100 @@ not the createEmulator path.
   SysTick_Handler, which aborts on `pop {pc}` with the fake EXC_RETURN LR —
   cheap, but the pump should never be enabled for ETH firmware (see the
   interrupt-pump section).
+
+---
+
+## 12. I2S audio + LTDC display + DMA depth (2026-08-10) — WAV DMA, scanout sink
+
+### I2S/SAI audio (WAV-backed, DMA-driven)
+- `audio_load_wav(wav_bytes)` (lib.rs export) parses RIFF/WAVE (fmt PCM16 +
+  data chunks) into a global sample source. I2S/SAI DR reads consume the
+  next sample (or `generate_i2s_audio()` when no WAV was loaded); DR writes
+  push into a capture FIFO drained via `audio_take_capture()`.
+- **SPI1/I2S1 share one silicon register block at 0x40013000**; the map
+  registers it as `Spi::new` (wins over `I2s::new`). The I2S routing lives
+  in `spi.rs`: when `i2scfgr & 1` (I2SMOD) is set, DR (0x0C) reads take the
+  audio path and writes push capture samples. Do NOT add a separate I2S
+  peripheral to the map for 0x40013000.
+- `audio_test/` firmware: I2S2? — no: SPI1/I2S1 block. I2SCFGR=1 (I2SMOD),
+  DMA1 Stream0 PERIPH->MEM from I2S1_DR (0x4001300C), 64 16-bit samples,
+  checksum 0x93C40 over samples `(i*300+7)&0xFFFF`; then TX writes 16 words
+  1000..1015 to DR. Marker "RX n=64 sum=93C40" (8-digit hex, NO `0x` prefix
+  in the marker — matches printf `%08X`) + "TX n=16 OK". Harness:
+  `node site/test_audio.mjs` loads a generated Buffer WAV via
+  `bindings.audio_load_wav` right after `createEmulator` returns (before
+  the run loop starts).
+- DMA details that made it work:
+  - **PINC + PSIZE**: `DmaTransfer` carries `pinc` (sidestream wander) and
+    `p_size` (peripheral width). `dma_periph_read(addr,size,pinc,psize)`
+    chunks at PSIZE and re-reads the SAME address when PINC=0 — a fixed
+    16-bit DR FIFO now yields a contiguous sample stream (previously
+    4-byte chunks with zero padding). JS call sites (emulator.js
+    processDma + pkg/cli.mjs): `dma_periph_read(peri_addr, size,
+    (pending[7]||0)===1, pending[8]||4)`; the transfer vector is now
+    9 elements [dir, stream, src, dst, size, peri_addr, peripheral,
+    pinc, p_size].
+  - **Completion latching**: TCIF(1<<4)/HTIF(1<<3) are NO LONGER set at
+    CR-EN write. The JS driver calls `dma_set_completed` when the transfer
+    finishes; the guest's LISR/HISR read latches them into stream status
+    via `dma_check_completion(i)` (atomically consumed, IFCR w1c clears).
+    Needed because firmware polls LISR then RE-READS it after masking.
+
+### LTDC scanout + browser sink
+- Model (`ltdc.rs`): when GCR (0x18) has LTEN (bit 0) + L1CR (0x84) has
+  LEN (bit 0), `scan_tick` advances a 2-px-per-call scanline driven by the
+  real geometry regs (SSCR 0x08, BPCR 0x0C, AWCR 0x10: line span =
+  hsw+1+hbp+W-1, frame = vsw+1+vbp+H-1 lines). At LIPCR (0x40) the
+  `ltdc_lif` flag (LIF bit 0) is set and IRQ 88 pends; at frame end the
+  F flag (bit 1) is set and `frame_count` increments. Exports:
+  `ltdc_get_scanline`, `ltdc_get_frame_count`. 1 tick = 1 inst, so a
+  64×32 frame costs ~82px×49 lines... scans at 2px/tick (41 ticks/line).
+- `ltdc_test/` firmware: framebuffer PINNED at 0x20002000 via macro (the
+  .fb linker section was unused — don't rely on it), 64×32 ARGB8888 with
+  pixel(x,y)=0xFF000000|x<<16|y<<8|(x+y); SSC R = 8-1, BPCR 9-1, AWCR
+  (H-1, W-1), LIPCR=48, IER=0xF; layer0: CR 0x84 (needs ctrl bit),
+  PFCR 0x94 = 0 (ARGB8888), **WHPCR 0x88 / WVPCR 0x8C = (w-1)|((h-1)<<16)
+  (must be set — JS dimensions come from them)**, CFBAR 0xAC,
+  CFBLR 0xB0 = pitch<<16|linebytes, CFBLNR 0xB4 = H. Waits on ISR (0x38)
+  bit 1 (F flag). Checksum 0xFC7F1F9E. Harness `site/test_ltdc.mjs`:
+  asserts markers, extra 300 steps after "pixels OK" so frames accumulate,
+  `ltdc_get_frame_count() >= 2`, per-pixel spot checks.
+- Browser: `site/index.html` LTDC panel (canvas 320×160 pixelated,
+  `#ltdcInfo`); `site/app.js` `renderLtdc()` runs in the rAF loop after
+  refreshStats — reads GCR/L1CR/PFCR/CFBAR/CFBLR/CFBLNR/WHPCR/WVPCR,
+  supports pf 0 (ARGB8888) + 2 (RGB565), reads rows from guest RAM with
+  pitch, cache key includes frame count (repaints only on new frames),
+  draws via an offscreen canvas + drawImage. Note: width falls back to
+  CFBLR line bytes if WHPCR is 0 (unconfigured layer).
+- Browser smoke: `/tmp/opencode/ltdc_smoke.mjs` (headless Chrome CDP via
+  global WebSocket, site served on 8123) asserts `#ltdcInfo` text
+  "layer0 64×32 ARGB8888 @ 0x20002000". `?fw=ltdc_test` in the console.
+
+### cargo test parallelization (fixes for process-global races)
+- The core problem: `ExtDevices` is `unsafe impl Send+Sync` and holds
+  Rc<RefCell> links; Rust 2024 runs lib tests in parallel THREADS, so
+  shared mutable state across tests raced (RefCell "already borrowed" @
+  spi.rs:80, CAN "TXOK0 after free round", SPI "jedec 0xFF", audio
+  "wav_parse/capture").
+- Fixes (all in the model crate):
+  - `test_dummy_system()` (system.rs): now builds `WasmSystem` directly
+    with an EMPTY ExtDevices (no `register_software_spis`) — it no longer
+    calls `WasmSystem::new()` (global read) → full isolation.
+  - `spi.rs::sys_with_flash` must NOT use test_dummy_system (unregistered
+    spis would crash); uses `WasmSystem::new()` directly.
+  - can.rs tests: `static CAN_TEST_LOCK: Mutex<()>` locked in all 4 tests
+    (global CAN_STAGED queue is shared).
+  - system.rs audio_tests: `static AUDIO_TEST_LOCK` locked in all 4 tests
+    (global AUDIO_SOURCE/AUDIO_CAPTURE).
+- Verified: `cargo test` 15/15 green across 8 consecutive runs
+  (previously flaky). NVIC gained a pub accessor `irq_pending(irq)`
+  (raw pending, regardless of ISER) used by the ltdc tests.
+
+### Regressions this session
+- cargo 15/15 · site tests: blinky, eth_irq, can, audio, ltdc, flow,
+  rx_interrupt (rx_crypto_test) all PASS · comprehensive_test via
+  pkg/cli.mjs: 42 PASS, "FAIL: 00000000" (0-count counter, not a
+  failure) · browser LTDC smoke PASS. `node site/test_audio.mjs` +
+  `node site/test_ltdc.mjs` + `node tools/make_firmware.mjs` (24
+  firmwares, includes audio_test + ltdc_test) + `?fw=audio_test` /
+  `?fw=ltdc_test` dropdown entries.

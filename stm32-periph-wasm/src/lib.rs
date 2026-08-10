@@ -89,12 +89,18 @@ pub fn dma_set_completed(stream_idx: u32, success: bool) {
 /// `addr` (4-byte-aligned, tail chunk partial). Replaces the JS per-chunk
 /// periph_read loop (one WASM call instead of size/4).
 #[wasm_bindgen]
-pub fn dma_periph_read(addr: u32, size: u32) -> Vec<u8> {
+pub fn dma_periph_read(addr: u32, size: u32, pinc: bool, psize: u32) -> Vec<u8> {
+    let psize = psize.max(1);
     let mut out = Vec::with_capacity(size as usize);
     let mut off = 0u32;
     while off < size {
-        let chunk = std::cmp::min(4, size - off);
-        let val = sys().p.read(&*sys(), addr + off, chunk as u8);
+        let chunk = std::cmp::min(psize, size - off);
+        // PINC (peripheral increment) walks addresses; otherwise the same
+        // register (e.g. an I2S/SAI data register FIFO) is read repeatedly.
+        // Chunks follow PSIZE so 16-bit data registers yield contiguous
+        // sample streams instead of zero-padded 4-byte groups.
+        let ra = if pinc { addr + off } else { addr };
+        let val = sys().p.read(&*sys(), ra, chunk as u8);
         for k in 0..chunk {
             out.push((val >> (k * 8)) as u8);
         }
@@ -145,6 +151,57 @@ pub fn is_watchdog_reset_requested() -> bool {
 #[wasm_bindgen]
 pub fn uart_rx_byte(addr: u32, byte: u8) -> bool {
     sys().p.rx_byte(&*sys(), addr, byte)
+}
+
+/// Load a WAV file (PCM 16-bit) as the I2S/SAI sample source. DR reads then
+/// consume samples from it. Returns an error string on malformed input.
+#[wasm_bindgen]
+pub fn audio_load_wav(bytes: Vec<u8>) -> Result<(), String> {
+    system::audio_load_wav(&bytes)
+}
+
+/// Drain the I2S/SAI TX capture FIFO (all DR writes since the last call).
+#[wasm_bindgen]
+pub fn audio_take_capture() -> Vec<u16> {
+    system::audio_take_capture()
+}
+
+/// Remaining source samples (0 when no WAV is loaded or it is exhausted).
+#[wasm_bindgen]
+pub fn audio_source_remaining() -> u32 {
+    system::audio_source_remaining()
+}
+
+/// Reset the audio source and capture FIFO.
+#[wasm_bindgen]
+pub fn audio_clear() {
+    system::audio_clear();
+}
+
+/// Current LTDC scanline (0xFFFF when the controller is disabled).
+#[wasm_bindgen]
+pub fn ltdc_get_scanline() -> u32 {
+    let p = sys().p.clone();
+    for slot in &p.peripherals {
+        let mut b = slot.peripheral.borrow_mut();
+        if let Some(l) = b.as_any_mut().downcast_mut::<peripherals::ltdc::Ltdc>() {
+            return l.scanline();
+        }
+    }
+    0xFFFF
+}
+
+/// Frames completed by the LTDC scanout since enable.
+#[wasm_bindgen]
+pub fn ltdc_get_frame_count() -> u32 {
+    let p = sys().p.clone();
+    for slot in &p.peripherals {
+        let mut b = slot.peripheral.borrow_mut();
+        if let Some(l) = b.as_any_mut().downcast_mut::<peripherals::ltdc::Ltdc>() {
+            return l.frame_count();
+        }
+    }
+    0
 }
 
 /// Check if an Ethernet TX poll is pending (firmware wants to send a packet).

@@ -30,6 +30,9 @@ const firmwares = [
     ['arduino_test', 'arduino_test/arduino_test.ino.bin', 'arduino_test.ino.bin'],
     ['i2s_sai_test', 'i2s_sai_test/i2s_sai_test.bin', 'i2s_sai_test.bin'],
     ['spi_tft_test', 'spi_tft_test/spi_tft_test.bin', 'spi_tft_test.bin'],
+    // audio + display
+    ['audio_test', 'audio_test/audio_test.bin', 'audio_test.bin'],
+    ['ltdc_test', 'ltdc_test/ltdc_test.bin', 'ltdc_test.bin'],
 ];
 
 const lines = [

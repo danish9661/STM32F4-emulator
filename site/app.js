@@ -268,6 +268,7 @@ const loop = async (id) => {
         }
         appendUart(emu.drainUart());
         refreshStats();
+        renderLtdc();
         await raf();
     }
 };
@@ -334,6 +335,74 @@ const refreshStats = () => {
     $('stXpsr').textContent = regs ? hex32(regs.XPSR) : '—';
     refreshGpio();
     refreshPeriph();
+};
+
+// ── LTDC display sink ──────────────────────────────────────────────────────
+// Renders layer-0's framebuffer (ARGB8888 / RGB565) into the aside canvas
+// each rAF once the guest enables the controller + layer. Cache-keyed so we
+// only repaint when the framebuffer content actually changes (the model
+// doesn't signal frame boundaries through a JS-readable counter change alone).
+const LTDC = 0x40016800;
+const ltdcCanvas = $('ltdcCanvas'), ltdcInfo = $('ltdcInfo');
+let ltdcCtx = ltdcCanvas.getContext('2d');
+let ltdcCacheKey = '';
+let ltdcOff = document.createElement('canvas');
+
+const renderLtdc = () => {
+    if (!emu || !ltdcCanvas.width) return;
+    try {
+        const gcr = emu.read32(LTDC + 0x18);
+        const l1cr = emu.read32(LTDC + 0x84);
+        if (!(gcr & 1) || !(l1cr & 1)) { ltdcInfo.textContent = 'scanout idle'; return; }
+        const pf = emu.read32(LTDC + 0x94) & 7;
+        const cfbar = emu.read32(LTDC + 0xAC) >>> 0;
+        const cfblr = emu.read32(LTDC + 0xB0) >>> 0;
+        const cfblnr = emu.read32(LTDC + 0xB4) & 0x7FF;
+        const whpcr = emu.read32(LTDC + 0x88) >>> 0;
+        const wvpcr = emu.read32(LTDC + 0x8C) >>> 0;
+        const bpp = pf === 2 ? 2 : 4;
+        const lineBytes = Math.min(cfblr & 0x1FFF, 640 * bpp);
+        const w = Math.min((((whpcr & 0xFFF) + 1) || (lineBytes / bpp)) | 0, 640);
+        const h = Math.min((((whpcr >> 16) & 0xFFF) + 1) | 0, 640);
+        const lines = Math.min(cfblnr || h, 640);
+        const pitch = Math.min((cfblr >>> 16) || lineBytes, w * bpp + 8);
+        if (!w || !lines || cfbar < 0x20000000 || cfbar >= 0x20040000) {
+            ltdcInfo.textContent = 'layer enabled, waiting for framebuffer…';
+            return;
+        }
+        const key = pf + ':' + w + 'x' + lines + ':' + cfbar + ':' + pitch + ':' + (bindings.ltdc_get_frame_count ? bindings.ltdc_get_frame_count() : 0);
+        if (key === ltdcCacheKey) return;
+        ltdcCacheKey = key;
+        // Read (only the used width bytes per line — the model guest RAM is
+        // byte-exact, so no opacity/color-key handling beyond the format).
+        const rowBytes = Math.min(w * bpp, pitch || w * bpp);
+        const bytes = new Uint8Array(w * lines * bpp);
+        for (let y = 0; y < lines; y++) {
+            const row = emu.uc.mem_read(BigInt(cfbar + y * pitch), rowBytes);
+            bytes.set(new Uint8Array(row.buffer, row.byteOffset, rowBytes), y * w * bpp);
+        }
+        ltdcOff.width = w; ltdcOff.height = lines;
+        const octx = ltdcOff.getContext('2d');
+        const img = octx.createImageData(w, lines);
+        const d = img.data;
+        for (let i = 0, p = 0; i < w * lines; i++) {
+            if (pf === 2) {
+                const v = bytes[p] | (bytes[p + 1] << 8); p += 2;
+                d[i * 4] = ((v >> 11) & 0x1F) << 3;
+                d[i * 4 + 1] = ((v >> 5) & 0x3F) << 2;
+                d[i * 4 + 2] = (v & 0x1F) << 3;
+                d[i * 4 + 3] = 255;
+            } else {
+                d[i * 4] = bytes[p + 2]; d[i * 4 + 1] = bytes[p + 1];
+                d[i * 4 + 2] = bytes[p]; d[i * 4 + 3] = bytes[p + 3];
+                p += 4;
+            }
+        }
+        octx.putImageData(img, 0, 0);
+        ltdcCtx.imageSmoothingEnabled = false;
+        ltdcCtx.drawImage(ltdcOff, 0, 0, ltdcCanvas.width, ltdcCanvas.height);
+        ltdcInfo.textContent = `layer0 ${w}×${lines} ${pf === 2 ? 'RGB565' : 'ARGB8888'} @ ${hex32(cfbar)}`;
+    } catch (e) { /* device disabled mid-read — repaint next rAF */ }
 };
 
 // ── GPIO banks A–E ─────────────────────────────────────────────────────────

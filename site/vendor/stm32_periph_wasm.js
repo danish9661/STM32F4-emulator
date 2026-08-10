@@ -53,6 +53,47 @@ export function add_spi_flash(peripheral, jedec_id, data, cs) {
 }
 
 /**
+ * Reset the audio source and capture FIFO.
+ */
+export function audio_clear() {
+    wasm.audio_clear();
+}
+
+/**
+ * Load a WAV file (PCM 16-bit) as the I2S/SAI sample source. DR reads then
+ * consume samples from it. Returns an error string on malformed input.
+ * @param {Uint8Array} bytes
+ */
+export function audio_load_wav(bytes) {
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.audio_load_wav(ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Remaining source samples (0 when no WAV is loaded or it is exhausted).
+ * @returns {number}
+ */
+export function audio_source_remaining() {
+    const ret = wasm.audio_source_remaining();
+    return ret >>> 0;
+}
+
+/**
+ * Drain the I2S/SAI TX capture FIFO (all DR writes since the last call).
+ * @returns {Uint16Array}
+ */
+export function audio_take_capture() {
+    const ret = wasm.audio_take_capture();
+    var v1 = getArrayU16FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 2, 2);
+    return v1;
+}
+
+/**
  * @param {number} index
  * @returns {Uint32Array}
  */
@@ -77,10 +118,12 @@ export function dma_get_pending_count() {
  * periph_read loop (one WASM call instead of size/4).
  * @param {number} addr
  * @param {number} size
+ * @param {boolean} pinc
+ * @param {number} psize
  * @returns {Uint8Array}
  */
-export function dma_periph_read(addr, size) {
-    const ret = wasm.dma_periph_read(addr, size);
+export function dma_periph_read(addr, size, pinc, psize) {
+    const ret = wasm.dma_periph_read(addr, size, pinc, psize);
     var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v1;
@@ -310,6 +353,24 @@ export function is_watchdog_reset_requested() {
 }
 
 /**
+ * Frames completed by the LTDC scanout since enable.
+ * @returns {number}
+ */
+export function ltdc_get_frame_count() {
+    const ret = wasm.ltdc_get_frame_count();
+    return ret >>> 0;
+}
+
+/**
+ * Current LTDC scanline (0xFFFF when the controller is disabled).
+ * @returns {number}
+ */
+export function ltdc_get_scanline() {
+    const ret = wasm.ltdc_get_scanline();
+    return ret >>> 0;
+}
+
+/**
  * @param {number} addr
  * @param {number} width
  * @returns {number}
@@ -392,6 +453,11 @@ function __wbg_get_imports() {
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
+        __wbindgen_cast_0000000000000001: function(arg0, arg1) {
+            // Cast intrinsic for `Ref(String) -> Externref`.
+            const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
+        },
         __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;
             const offset = table.grow(4);
@@ -406,6 +472,11 @@ function __wbg_get_imports() {
         __proto__: null,
         "./stm32_periph_wasm_bg.js": import0,
     };
+}
+
+function getArrayU16FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint16ArrayMemory0().subarray(ptr / 2, ptr / 2 + len);
 }
 
 function getArrayU32FromWasm0(ptr, len) {
@@ -428,6 +499,14 @@ function getDataViewMemory0() {
 
 function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
+}
+
+let cachedUint16ArrayMemory0 = null;
+function getUint16ArrayMemory0() {
+    if (cachedUint16ArrayMemory0 === null || cachedUint16ArrayMemory0.byteLength === 0) {
+        cachedUint16ArrayMemory0 = new Uint16Array(wasm.memory.buffer);
+    }
+    return cachedUint16ArrayMemory0;
 }
 
 let cachedUint32ArrayMemory0 = null;
@@ -494,6 +573,12 @@ function passStringToWasm0(arg, malloc, realloc) {
     return ptr;
 }
 
+function takeFromExternrefTable0(idx) {
+    const value = wasm.__wbindgen_externrefs.get(idx);
+    wasm.__externref_table_dealloc(idx);
+    return value;
+}
+
 let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
 cachedTextDecoder.decode();
 const MAX_SAFARI_DECODE_BYTES = 2146435072;
@@ -529,6 +614,7 @@ function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     wasmModule = module;
     cachedDataViewMemory0 = null;
+    cachedUint16ArrayMemory0 = null;
     cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();

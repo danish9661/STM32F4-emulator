@@ -261,7 +261,7 @@ export async function createEmulator(opts) {
                 if (dir === 2 || !peripheral || !isPeriphAddr(peri_addr)) {
                     uc.mem_write(BigInt(dst), uc.mem_read(BigInt(src), size));
                 } else if (dir === 0) { // read: peri -> RAM
-                    const data = dma_periph_read(peri_addr, size);
+                    const data = dma_periph_read(peri_addr, size, (pending[7] || 0) === 1, pending[8] || 4);
                     uc.mem_write(BigInt(dst), data);
                 } else { // dir === 1: write: RAM -> peri
                     dma_periph_write(peri_addr, uc.mem_read(BigInt(src), size));

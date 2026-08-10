@@ -29,6 +29,12 @@ pub struct Ltdc {
     gcr: u32, srcr: u32, bccr: u32,
     ier: u32, isr: u32, lipcr: u32,
     layers: [Lx; NUM_LAYERS as usize],
+    // Scanout pacing: pixel/line counters advanced per tick while LTDCEN
+    // is set. Drives line (LIPCR) and frame-end (F) interrupt flags so the
+    // JS display sink can render each frame.
+    scan_px: u32,
+    scan_line: u32,
+    scan_frame: u32,
 }
 
 impl Default for Ltdc {
@@ -43,6 +49,53 @@ impl Default for Ltdc {
                 lx[1].bfcr = 0x0607;
                 lx
             },
+            scan_px: 0, scan_line: 0, scan_frame: 0,
+        }
+    }
+}
+
+impl Ltdc {
+    /// Current scanline within the frame (0 = just after sync). 0xFFFF when
+    /// the controller is disabled.
+    pub fn scanline(&self) -> u32 {
+        if self.gcr & 1 == 0 { 0xFFFF } else { self.scan_line }
+    }
+
+    /// Completed frames since enable.
+    pub fn frame_count(&self) -> u32 {
+        self.scan_frame
+    }
+
+    /// Advance the scanout: a few pixels per tick keeps this cheap; line
+    /// geometry follows the real SSCR/BPCR/AWCR values. The line interrupt
+    /// fires when the scanline crosses LIPCR; the frame-end flag (ISR bit 1)
+    /// fires after the active + vertical-blanking lines.
+    fn scan_tick(&mut self, sys: &System) {
+        if self.gcr & 1 == 0 {
+            return;
+        }
+        let active_w = ((self.awcr & 0xFFF) + 1) as u32;
+        let hbp = ((self.bpcr & 0xFFF) + 1) as u32;
+        let hspw = ((self.sscr & 0xFFF) + 1) as u32;
+        let line_px = active_w + hbp + hspw + 1;
+        self.scan_px += 2; // 2 px per instruction-clock tick
+        if self.scan_px < line_px {
+            return;
+        }
+        self.scan_px = 0;
+        self.scan_line += 1;
+        if self.scan_line == (self.lipcr & 0x7FF) {
+            self.isr |= 1 << 0; // LIF
+            self.fire_interrupts(sys);
+        }
+        let active_h = ((self.awcr >> 16) & 0xFFF) as u32 + 1;
+        let vbp = ((self.bpcr >> 16) & 0xFFF) as u32 + 1;
+        let vspw = ((self.sscr >> 16) & 0xFFF) as u32 + 1;
+        if self.scan_line >= active_h + vbp + vspw {
+            self.scan_line = 0;
+            self.scan_frame = self.scan_frame.wrapping_add(1);
+            self.isr |= 1 << 1; // F flag
+            self.fire_interrupts(sys);
         }
     }
 }
@@ -61,6 +114,9 @@ impl Ltdc {
 
 impl Peripheral for Ltdc {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn tick(&mut self, sys: &System) {
+        self.scan_tick(sys);
+    }
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         if let Some((_li, lr)) = lx_bis(offset) {
             return match lr {
@@ -143,5 +199,62 @@ impl Peripheral for Ltdc {
             0x40 => self.lipcr = value & 0x07FF,
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scanout_advances_line_and_frame_flags() {
+        let mut l = Ltdc::default();
+        // active 40x20; HSPW=4,HBP=4 -> 5 each with the +1 -> line span
+        // 40 + 5 + 5 + 1 = 51 px; at 2 px/tick a line takes 26 ticks.
+        l.sscr = 0x0003_0004;
+        l.bpcr = 0x0003_0004;
+        l.awcr = (20 - 1) << 16 | (40 - 1);
+        l.lipcr = 10;
+        l.ier = 0x0F;
+        let sys = crate::system::test_dummy_system();
+        l.gcr |= 1; // LTDCEN
+        for _ in 0..26 { l.scan_tick(&sys); }
+        assert_eq!(l.scanline(), 1);
+        for _ in 0..(26 * 9) { l.scan_tick(&sys); }
+        assert_eq!(l.scanline(), 10);
+        assert_ne!(l.isr & 1, 0, "LIF set");
+        // frame end after active 20 + VBP 4 + VSPW 4 = 28 lines
+        for _ in 0..(26 * 18) { l.scan_tick(&sys); }
+        assert_eq!(l.scanline(), 0, "scanline wraps");
+        assert_ne!(l.isr & 2, 0, "F flag set");
+        assert_eq!(l.frame_count(), 1);
+    }
+
+    #[test]
+    fn scanout_idle_when_disabled() {
+        let mut l = Ltdc::default();
+        l.awcr = (20 - 1) << 16 | (40 - 1);
+        let sys = crate::system::test_dummy_system();
+        for _ in 0..1000 { l.scan_tick(&sys); }
+        assert_eq!(l.scanline(), 0xFFFF);
+        assert_eq!(l.frame_count(), 0);
+        assert_eq!(l.isr & 3, 0);
+    }
+
+    #[test]
+    fn fire_interrupts_on_line_flag() {
+        let mut l = Ltdc::default();
+        l.sscr = 0x0003_0004;
+        l.bpcr = 0x0003_0004;
+        l.awcr = (20 - 1) << 16 | (40 - 1);
+        l.lipcr = 2;
+        l.ier = 0x0F;
+        let sys = crate::system::test_dummy_system();
+        assert!(!sys.p.nvic.borrow().irq_pending(LTDC_IRQ));
+        l.gcr |= 1;
+        for _ in 0..(26 * 3) { l.scan_tick(&sys); }
+        assert_ne!(l.isr & 1, 0);
+        // Pending is set even without ISER (delivery is what needs enable).
+        assert!(sys.p.nvic.borrow().irq_pending(LTDC_IRQ));
     }
 }

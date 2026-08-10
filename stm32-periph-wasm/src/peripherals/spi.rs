@@ -131,8 +131,12 @@ impl Peripheral for Spi {
             }
             0x000C => {
                 let v = if self.is_i2s() {
-                    // I2S mode: generate received audio data
-                    self.generate_i2s_audio()
+                    // I2S mode: consume the WAV source when loaded (DMA
+                    // PERIPH->MEM reads go through this path), else the
+                    // synthetic generator.
+                    crate::system::audio_source_next()
+                        .map(|s| s as u32 & 0xFFFF)
+                        .unwrap_or_else(|| self.generate_i2s_audio())
                 } else {
                     self.rx_buffer
                 };
@@ -157,7 +161,9 @@ impl Peripheral for Spi {
             }
              0x000C => {
                 if self.is_i2s() {
-                    // I2S mode: write data generates receive data
+                    // I2S mode: TX data push to the capture FIFO; RX mirror
+                    // comes from the generator.
+                    crate::system::audio_capture_push(value as u16);
                     self.rx_buffer = self.generate_i2s_audio();
                 } else {
                     let device = self.active_device(sys);
@@ -201,7 +207,7 @@ mod tests {
             });
         ext.spi_flashes.push(std::rc::Rc::new(std::cell::RefCell::new(flash)));
         drop(ext);
-        crate::system::test_dummy_system()
+        ::std::rc::Rc::new(crate::system::WasmSystem::new())
     }
 
     fn w(sys: &crate::system::System, addr: u32, v: u32) {

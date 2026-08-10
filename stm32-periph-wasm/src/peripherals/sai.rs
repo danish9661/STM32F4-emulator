@@ -12,7 +12,9 @@ struct SaiBlock {
 impl SaiBlock {
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         if offset == 0x1C {
-            let v = self.dr;
+            let v = crate::system::audio_source_next()
+                .map(|s| s as u32 & 0xFFFF)
+                .unwrap_or(self.dr);
             self.sr = 0x08;
             self.fire_interrupts(sys);
             v
@@ -44,6 +46,7 @@ impl SaiBlock {
             }
             0x1C => {
                 self.dr = value;
+                crate::system::audio_capture_push(value as u16);
                 self.sr = 0x13;
                 self.fire_interrupts(sys);
             }

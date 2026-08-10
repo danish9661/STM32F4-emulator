@@ -90,9 +90,9 @@ document is the readable summary.
 2. **Guest-IRQ pump vs ETH firmware**: the pump must stay disabled for ETH
    firmware (an emulated ETH_IRQHandler re-scans `rx_desc` and stomps the
    driver's frame bookkeeping).
-3. **Hardware paths not modeled**: DCMI/LTDC/SAI/I2S are synthetic-data
-   only; DMA copies happen in JS; USB OTG has no model (CAN now has a real
-   two-node bus with arbitration).
+3. **Hardware paths not modeled**: DCMI has no pixel source; USB OTG has
+   no model (CAN now has a real two-node bus with arbitration; I2S/SAI have
+   a WAV-backed DMA capture path; LTDC has real scanout + a browser sink).
 4. **Timers are instruction-count driven**, not wall-clock driven — a
    `delay_ms(100)` is ~2.4M emulated instructions, so real-time blink
    rates don't hold (documented in AGENTS.md §11).
@@ -116,8 +116,33 @@ document is the readable summary.
       JS (Unicorn owns guest memory).
 
 ### Priority 2 — peripheral depth
-- [ ] DCMI real pixel source, LTDC framebuffer scanout with a display
-      sink.
+- [x] LTDC scanout + display sink: the model advances a scanline/scanframe
+      (2 px per tick from the real SSCR/BPCR/AWCR geometry), fires LIF at
+      LIPCR and the frame-end F flag, and pends LTDC IRQ 88; exports
+      `ltdc_get_scanline` / `ltdc_get_frame_count`. `ltdc_test` firmware
+      paints an ARGB8888 gradient layer, and the browser console renders
+      layer0's framebuffer into a canvas panel live (`?fw=ltdc_test`;
+      ARGB8888 + RGB565 handled).
+- [x] I2S/SAI real audio (WAV-backed DMA): `audio_load_wav` parses a
+      RIFF/WAVE PCM16 file into the model source; I2S/SAI DR reads consume
+      it (falling back to the synthetic generator), DR writes push into a
+      capture FIFO (`audio_take_capture`). The shared SPI block routes
+      DR to audio when I2SMOD is set (real silicon shares the register
+      block). `audio_test` firmware runs a full DMA1 PERIPH->MEM transfer
+      from I2S1_DR and checks the sample checksum — this drove DMA
+      fixes below.
+- [x] DMA PINC + PSIZE-aware peripheral reads: transfers now carry PINC and
+      the peripheral width, so a fixed-address 16-bit DR FIFO yields
+      contiguous sample streams (`pinc=0` re-reads the same register in
+      `psize` chunks) instead of zero-padded 4-byte groups. Completion
+      flags (TCIF/HTIF) are no longer set at EN-write: they latch from the
+      JS driver's `dma_set_completed` (via `dma_check_completion` in the
+      LISR/HISR read path) and stay set until the guest clears them through
+      IFCR — real-w1c semantics.
+- [ ] DCMI real pixel source.
+- [ ] USB OTG (huge: host/device state machine) — biggest single gap.
+- [ ] EtherCAT / timers in PWM servo mode for the printer heritage
+      firmwares.
 - [x] CAN bus peer / arbitration between CAN1 and CAN2 on a shared bus:
       TX requests stage frames; each tick arbitrates (lowest arbitration
       ID wins, ties by node then mailbox), the winner's mailbox completes
@@ -135,8 +160,6 @@ document is the readable summary.
       firmware silently did nothing in browser/test builds.
 - [ ] I2S/SAI real audio (WAV-backed DMA).
 - [ ] USB OTG (huge: host/device state machine) — biggest single gap.
-- [ ] EtherCAT / timers in PWM servo mode for the printer heritage
-      firmwares.
 
 ### Priority 3 — product / ecosystem
 - [ ] Publish `stm32f4-emulator` to npm (README documents `npm pack` flow
@@ -167,6 +190,8 @@ node site/test_flash.mjs                    # FLASH program/erase (11/11)
 node site/test_spi_flash.mjs                # SPI NOR write path (9/9)
 node site/test_exti.mjs                     # EXTI GPIO edges (3/3)
 node site/test_can.mjs                      # CAN loopback + 2-node arbitration
+node site/test_audio.mjs                    # I2S DMA WAV replay + TX capture
+node site/test_ltdc.mjs                     # LTDC scanout + framebuffer pixels
 (cd stm32-periph-wasm && cargo test --lib)  # native unit + integration tests
 SOAK_STATS=1 node cli.mjs ../eth_http/eth_http.bin 200000000 \
   --gateway --config=../../eth_http/config.yaml   # long soak (≈15 min)

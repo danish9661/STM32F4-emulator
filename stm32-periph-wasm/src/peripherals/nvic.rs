@@ -66,6 +66,11 @@ impl Nvic {
         }
     }
 
+    /// Whether the given IRQ is pending (regardless of ISER enablement).
+    pub fn irq_pending(&self, irq: i32) -> bool {
+        self.pending & (1u128 << (IRQ_OFFSET + irq)) != 0
+    }
+
     /// True iff a pending exception can actually be taken: system exceptions
     /// always can, external IRQs only when the ISER bit is set.
     pub fn has_pending(&self) -> bool {

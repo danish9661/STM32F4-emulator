@@ -13,6 +13,27 @@ export function add_software_spi(name: string, cs: string | null | undefined, cl
  */
 export function add_spi_flash(peripheral: string, jedec_id: number, data: Uint8Array, cs?: string | null): void;
 
+/**
+ * Reset the audio source and capture FIFO.
+ */
+export function audio_clear(): void;
+
+/**
+ * Load a WAV file (PCM 16-bit) as the I2S/SAI sample source. DR reads then
+ * consume samples from it. Returns an error string on malformed input.
+ */
+export function audio_load_wav(bytes: Uint8Array): void;
+
+/**
+ * Remaining source samples (0 when no WAV is loaded or it is exhausted).
+ */
+export function audio_source_remaining(): number;
+
+/**
+ * Drain the I2S/SAI TX capture FIFO (all DR writes since the last call).
+ */
+export function audio_take_capture(): Uint16Array;
+
 export function dma_get_pending(index: number): Uint32Array;
 
 export function dma_get_pending_count(): number;
@@ -22,7 +43,7 @@ export function dma_get_pending_count(): number;
  * `addr` (4-byte-aligned, tail chunk partial). Replaces the JS per-chunk
  * periph_read loop (one WASM call instead of size/4).
  */
-export function dma_periph_read(addr: number, size: number): Uint8Array;
+export function dma_periph_read(addr: number, size: number, pinc: boolean, psize: number): Uint8Array;
 
 /**
  * DMA peripheral-side chunked write: write `bytes` to peripheral `addr` in
@@ -135,6 +156,16 @@ export function init_svd(svd_xml: string): void;
 
 export function is_watchdog_reset_requested(): boolean;
 
+/**
+ * Frames completed by the LTDC scanout since enable.
+ */
+export function ltdc_get_frame_count(): number;
+
+/**
+ * Current LTDC scanline (0xFFFF when the controller is disabled).
+ */
+export function ltdc_get_scanline(): number;
+
 export function periph_read(addr: number, width: number): number;
 
 export function periph_write(addr: number, width: number, value: number): void;
@@ -166,9 +197,13 @@ export interface InitOutput {
     readonly add_i2c_eeprom: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly add_software_spi: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
     readonly add_spi_flash: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly audio_clear: () => void;
+    readonly audio_load_wav: (a: number, b: number) => [number, number];
+    readonly audio_source_remaining: () => number;
+    readonly audio_take_capture: () => [number, number];
     readonly dma_get_pending: (a: number) => [number, number];
     readonly dma_get_pending_count: () => number;
-    readonly dma_periph_read: (a: number, b: number) => [number, number];
+    readonly dma_periph_read: (a: number, b: number, c: number, d: number) => [number, number];
     readonly dma_periph_write: (a: number, b: number, c: number) => void;
     readonly dma_set_completed: (a: number, b: number) => void;
     readonly eth_clear_rx_poll: () => void;
@@ -193,6 +228,8 @@ export interface InitOutput {
     readonly init: () => void;
     readonly init_svd: (a: number, b: number) => void;
     readonly is_watchdog_reset_requested: () => number;
+    readonly ltdc_get_frame_count: () => number;
+    readonly ltdc_get_scanline: () => number;
     readonly periph_read: (a: number, b: number) => number;
     readonly periph_write: (a: number, b: number, c: number) => void;
     readonly spi_flash_debug: (a: number, b: number) => [number, number];
@@ -203,6 +240,7 @@ export interface InitOutput {
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;
 }
 

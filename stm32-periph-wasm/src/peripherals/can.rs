@@ -358,6 +358,11 @@ mod tests {
     use crate::system::{test_dummy_system, can_stage_tx};
     use std::rc::Rc;
 
+    // The staged TX queue is process-global (shared by the node wrappers),
+    // so CAN tests must run serially — otherwise parallel tests steal each
+    // other's staged frames mid-arbitration.
+    static CAN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     const CAN1: u32 = 0x4000_6400;
     const CAN2: u32 = 0x4000_6800;
 
@@ -389,6 +394,7 @@ mod tests {
 
     #[test]
     fn arbitration_lowest_id_wins_and_broadcasts() {
+        let _g = CAN_TEST_LOCK.lock().unwrap();
         let sys = test_dummy_system();
         enable_rx(&sys, CAN1);
         enable_rx(&sys, CAN2);
@@ -425,6 +431,7 @@ mod tests {
 
     #[test]
     fn loopback_delivers_only_to_sender() {
+        let _g = CAN_TEST_LOCK.lock().unwrap();
         let sys = test_dummy_system();
         enable_rx(&sys, CAN1);
         // CAN2 has no filter enabled — remains empty.
@@ -443,6 +450,7 @@ mod tests {
 
     #[test]
     fn filter_gated_delivery() {
+        let _g = CAN_TEST_LOCK.lock().unwrap();
         let sys = test_dummy_system();
         sys.p.write(&sys, CAN1 + 0x200, 4, 1);
         sys.p.write(&sys, CAN1 + 0x21C, 4, 1);       // bank 0 active
@@ -461,6 +469,7 @@ mod tests {
 
     #[test]
     fn fifo_release_and_fill_to_overflow() {
+        let _g = CAN_TEST_LOCK.lock().unwrap();
         let sys = test_dummy_system();
         enable_rx(&sys, CAN1);
         sys.p.write(&sys, CAN2 + 0x21C, 4, 0);

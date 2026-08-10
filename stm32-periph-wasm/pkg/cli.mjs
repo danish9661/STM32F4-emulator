@@ -600,7 +600,7 @@ async function main() {
                     const data = uc.mem_read(BigInt(src), size);
                     uc.mem_write(BigInt(dst), data);
                 } else if (dir === 0) {
-                    const data = dma_periph_read(peri_addr, size);
+                    const data = dma_periph_read(peri_addr, size, (pending[7] || 0) === 1, pending[8] || 4);
                     uc.mem_write(BigInt(dst), data);
                 } else {
                     dma_periph_write(peri_addr, uc.mem_read(BigInt(src), size));

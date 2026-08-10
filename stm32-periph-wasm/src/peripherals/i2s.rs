@@ -95,8 +95,12 @@ impl Peripheral for I2s {
             0x04 => self.cr2,
             0x08 => self.sr,
             0x0C => {
-                let v = self.rx_buffer;
-                self.rx_buffer = 0;
+                // RX: consume from the WAV source when loaded (DMA PERIPH->MEM
+                // reads go through this path), else the synthetic generator.
+                let v = crate::system::audio_source_next()
+                    .map(|s| s as u32 & 0xFFFF)
+                    .unwrap_or_else(|| self.generate_audio_data());
+                self.rx_buffer = v;
                 self.update_sr_and_fire(sys, 1 << 1);
                 self.sr &= !1;
                 v
@@ -121,6 +125,7 @@ impl Peripheral for I2s {
             }
             0x0C => {
                 self.tx_buffer = value;
+                crate::system::audio_capture_push(value as u16);
                 self.rx_buffer = self.generate_audio_data();
                 self.update_sr_and_fire(sys, 3);
             }

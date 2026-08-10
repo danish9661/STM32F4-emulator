@@ -31,12 +31,25 @@ impl Peripheral for Dma {
         match offset {
             0x00 => {
                 let mut v = 0u32;
-                for i in 0..=3 { v |= (self.streams[i].status as u32) << (i * 6); }
+                for i in 0..=3 {
+                    // Completion latches TCIF/HTIF into the stream status
+                    // (real IFCR w1c semantics) so repeated reads keep
+                    // seeing it until the guest clears it.
+                    if _sys.dma_check_completion(i) {
+                        self.streams[i].status |= (1 << 4) | (1 << 3);
+                    }
+                    v |= (self.streams[i].status as u32) << (i * 6);
+                }
                 v
             }
             0x04 => {
                 let mut v = 0u32;
-                for i in 0..=3 { v |= (self.streams[i + 4].status as u32) << (i * 6); }
+                for i in 0..=3 {
+                    if _sys.dma_check_completion(i + 4) {
+                        self.streams[i + 4].status |= (1 << 4) | (1 << 3);
+                    }
+                    v |= (self.streams[i + 4].status as u32) << (i * 6);
+                }
                 v
             }
             _ => {
@@ -129,6 +142,8 @@ impl Stream {
         };
 
         let peripheral = dir != Dir::MemCopy;
+        let pinc = (self.cr >> 10) & 1 != 0; // PINC: increment PA per transfer
+        let p_size = Self::dma_size((self.cr >> 11) & 0b11);
         sys.queue_dma_transfer(DmaTransfer {
             direction: dma_dir,
             stream_idx,
@@ -137,6 +152,8 @@ impl Stream {
             size,
             peri_addr,
             peripheral,
+            pinc,
+            p_size,
         });
 
         log::debug!("{} queued DMA xfer stream={} dir={:?} src=0x{:08x} dst=0x{:08x} size={}",
@@ -170,8 +187,10 @@ impl Stream {
                 self.cr = value;
                 if value & 1 != 0 {
                     self.do_xfer(name, sys, stream_idx);
-                    self.status |= 1 << 4; // TCIF
-                    self.status |= 1 << 3; // HTIF
+                    // TCIF/HTIF are NOT set here: completion flags appear only
+                    // once the JS driver services the queue (dma_set_completed
+                    // -> dma_check_completion in the LISR/HISR read path).
+                    self.status &= !((1 << 4) | (1 << 3));
                     let tcie = ((value >> 4) & 1) as u8;
                     let htie = ((value >> 3) & 1) as u8;
                     let teie = ((value >> 2) & 1) as u8;

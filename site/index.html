@@ -147,6 +147,8 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
             <option value="edge_test">edge_test — DMA edge cases</option>
             <option value="i2s_sai_test">i2s_sai_test — I2S audio test</option>
             <option value="spi_tft_test">spi_tft_test — SPI TFT LCD test</option>
+            <option value="audio_test">audio_test — I2S DMA WAV play + capture</option>
+            <option value="ltdc_test">ltdc_test — LTDC scanout gradient (draws in the display panel)</option>
             <option value="test_firmware">test_firmware — TIM2/ADC dump</option>
           </optgroup>
           <optgroup label="Crypto">
@@ -191,6 +193,15 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
     <div class="panel" style="margin-bottom:12px;">
       <h2>GPIO</h2>
       <div id="gpio" class="gpio"></div>
+    </div>
+    <div class="panel" style="margin-bottom:12px;">
+      <h2>LTDC display</h2>
+      <canvas id="ltdcCanvas" width="320" height="160"
+        style="width:100%;box-sizing:border-box;display:block;background:#000;
+               image-rendering:pixelated;border-bottom:1px solid var(--border);"></canvas>
+      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
+        <span id="ltdcInfo">scanout idle</span>
+      </div>
     </div>
     <div class="panel" style="margin-bottom:12px;">
       <h2>Peripherals</h2>
