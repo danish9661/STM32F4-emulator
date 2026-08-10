@@ -100,10 +100,15 @@ document is the readable summary.
 ## Roadmap / future implementation
 
 ### Priority 1 — emulator robustness
-- [ ] Replace/repair the Unicorn WASM build (native binding or newer
-      wasm build with working timeouts + no 40k-instruction wedge), then
-      raise `maxBatch` back and re-measure.
-- [x] Hardware-accurate NVIC: don't auto-enable IRQs in
+- [x] Unicorn WASM wedge: not reproducible on Node 22.22 (2026-08-10 —
+      count-based `emu_start` returns cleanly at any budget, 500k batches
+      × thousands of rounds; the vendored build IS the current unicorn.js
+      v2.1.4 arm release). `cli.mjs` default `MAX_BATCH` raised 20k →
+      200k (~2.96–3.2 MIPS vs ~2.1). Remaining known landmine: the
+      `timeout` argument to `emu_start` aborts the instance
+      (`qemu_thread_create: Not supported`) — nothing in the repo passes
+      it; a native Node addon or V8-upgrade would fully retire this.
+- [ ] Hardware-accurate NVIC: don't auto-enable IRQs in
       `set_intr_pending`; make the pump deliver pending interrupts only
       when ISER bits are set by firmware.
 - [x] EXTI ↔ GPIO edge-trigger wiring (GPIO config drives EXTI pends).

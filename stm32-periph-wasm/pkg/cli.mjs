@@ -681,7 +681,11 @@ async function main() {
         }
     };
 
-    let maxBatch = Number(process.env.MAX_BATCH) || 20000;
+    // Default batch budget. The old 20k cap guarded against the Unicorn
+    // WASM ~40k-instruction wedge; on Node 22.22 (V8) batches up to 500k
+    // run indefinitely without wedging (2000+ rounds, multiple soaks).
+    // 200k is a safe 10x default; MAX_BATCH overrides for tuning.
+    let maxBatch = Number(process.env.MAX_BATCH) || 200000;
     let smallBatch = false;
     let totalSteps = 0;
     const startTime = Date.now();

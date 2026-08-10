@@ -252,6 +252,25 @@ zeroes .bss (0x20000008..0x20001e60), copies .data, then calls `main`.
 
 ## 7. CURRENT STATE: the hang (what we know)
 
+> **STATUS (2026-08-10): the wedge does NOT reproduce on Node 22.22 (V8).**
+> Fresh characterization with the exact repro paths — pure nop loops, firmware
+> boot, mem hooks, no hooks, theory-café matrix in /tmp/opencode/wedge*.cjs,
+> hang2.cjs, soak.cjs — shows count-based `emu_start` returning cleanly at
+> n = 1000..1,000,000 both with and without memory hooks. Real cli.mjs soaks
+> with `MAX_BATCH=500000` (303 no-gateway rounds + 2000+ gateway rounds,
+> 150M instructions) complete without a single wedge; comprehensive_test
+> (ISR pump) at MAX_BATCH=500000 also clean. The ONE guaranteed instance
+> killer that is still reproducible is passing the **timeout argument** to
+> `emu_start` (aborts with `qemu_thread_create: Not supported`, machine left
+> unusable) — nothing in the repo passes it.
+> Ruling: the old wedge was build/env-specific (likely an older Node/V8 WASM
+> engine bug in the same Unicorn 2.1.4 build; the vendored `unicorn_arm.cjs`
+> is byte-compatible with the official AlexAltea/unicorn.js v2.1.4 arm
+> release — no newer build exists). `cli.mjs` default `maxBatch` raised
+> 20000 → 200000 (env `MAX_BATCH`); measured ~2.96–3.2 MIPS (100M in 33.8s,
+> 150M in 46.3s) vs ~2.1 MIPS at the old cap. History below is preserved
+> for context.
+
 ### Symptom
 
 `uc.emu_start(...)` fails to return. It is reproducible and tied to a fixed
@@ -309,10 +328,13 @@ the hook mem-write pattern.
 ### Options not yet fully explored
 
 - **Block-stepping**: drive execution one basic block at a time via
-  `HOOK_BLOCK` + `uc.emu_stop()` (the pattern `cli.mjs` uses for DMA). Test if
-  single-block steps avoid the wedge.
+  `HOOK_BLOCK` + `uc.emu_stop()` — obsolete since the wedge no longer
+  reproduces on Node 22.22 (any `emu_start` budget returns; see STATUS).
 - **Fresh Unicorn build**: the WASM port may be the problem; try a newer/native
   (Node addon) Unicorn, or recompile with assertions to locate the abort.
+  Checked 2026-08-10: the vendored build IS the current release — the
+  official unicorn.js v2.1.4 arm bundle (2026-06-19) is byte-comparable;
+  no newer unicorn.js exists.
 - **Reduce firmware code path**: build a minimal firmware that exercises the
   same region to isolate whether a specific instruction sequence (e.g. the
   `mov.w r3,#8000` + nop loop, or a Thumb-2 wide instruction) triggers it.
@@ -581,7 +603,10 @@ Changes that produced it:
   - every `POLL_EVERY=1000` inst: `dma_get_pending_count() > 0 || eth_is_tx_poll()` → stop.
   - every instruction (cheap, all-JS): `gwRxQueue.length > 0 && eth_is_rx_poll()` → stop (prompt RX injection).
 - **smallBatch flip-back**: `smallBatch=true` on `!CONN` (round boundary, 1500-inst batches while the gateway restarts) flips back to `maxBatch=20000` when a UART chunk contains `Offer IP=` (DHCP re-established).
-- **maxBatch=20000 default** (env `MAX_BATCH` override): keeps every `emu_start` below the ~40k-instruction wedge threshold of the Unicorn WASM build (see §7). Without the cap, an empty-RX-queue recv-wait spin runs the full 500k-inst batch and wedges the instance permanently.
+- **maxBatch=200000 default** (env `MAX_BATCH` override): 10x the old 20k
+  cap (raised 2026-08-10 — the wedge no longer reproduces on Node 22.22;
+  soaks at 500k batches are clean, see §7). A dead/unreachable gateway now
+  just burns bigger batches in the DHCP wait instead of hanging.
 - Removed the second main-loop `tick()` after processEth; removed unused `gwRestartWarned`.
 
 Two failures along the way (both avoided in the final design):
@@ -652,7 +677,8 @@ register file that completes TX instantly:
   an empty-RX-queue recv-wait spin with no stop condition firing makes one
   `emu_start` batch run 40k+ instructions, wedging the Unicorn WASM instance.
   Fixed by capping `maxBatch` at 20000 (env `MAX_BATCH` override); the
-  pump's ISR `emu_start` is likewise capped. See §7 for details.
+  pump's ISR `emu_start` is likewise capped. On Node 22.22 the cap is
+  unnecessary (see §7 STATUS); the default is now 200000.
 - The repo's `webserver/` dir and `pkg/test_webserver_net.mjs` don't exist
   here; `eth_http` is the actual web-client firmware used for verification.
 - Node buffers stdout: redirect to a file for long runs. The in-script
