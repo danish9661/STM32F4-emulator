@@ -373,16 +373,18 @@ export function i2c_register_slave(peripheral, address) {
 }
 
 /**
- * Drain all bytes the master wrote to a tapped I2C slave since last call.
+ * Drain all events for a tapped I2C slave since the last call. Each entry
+ * is a u32: bit31 = START/STOP boundary event (bit30 = 1 START / 0 STOP),
+ * otherwise the low byte is one byte the master wrote to the slave.
  * @param {string} peripheral
- * @returns {Uint8Array}
+ * @returns {Uint32Array}
  */
-export function i2c_take_tx(peripheral) {
+export function i2c_take_events(peripheral) {
     const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.i2c_take_tx(ptr0, len0);
-    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    const ret = wasm.i2c_take_events(ptr0, len0);
+    var v2 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
     return v2;
 }
 
@@ -494,16 +496,21 @@ export function spi_take_events(peripheral) {
 /**
  * Register a protocol-agnostic tap on an SPI peripheral. Must be called
  * before init(). `cs` optionally names the GPIO pin used as chip select
- * ("PA4"); when given, CS edges are reported in the event stream.
+ * ("PA4"); when given, CS edges are reported in the event stream. `dc`
+ * optionally names a data/command pin; its level is reported in bit 29 of
+ * each byte event (1 = data) so the JS device can parse TFT-style traffic.
  * @param {string} peripheral
  * @param {string | null} [cs]
+ * @param {string | null} [dc]
  */
-export function spi_tap(peripheral, cs) {
+export function spi_tap(peripheral, cs, dc) {
     const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     var ptr1 = isLikeNone(cs) ? 0 : passStringToWasm0(cs, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     var len1 = WASM_VECTOR_LEN;
-    wasm.spi_tap(ptr0, len0, ptr1, len1);
+    var ptr2 = isLikeNone(dc) ? 0 : passStringToWasm0(dc, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    var len2 = WASM_VECTOR_LEN;
+    wasm.spi_tap(ptr0, len0, ptr1, len1, ptr2, len2);
 }
 
 export function tick() {

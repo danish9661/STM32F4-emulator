@@ -810,6 +810,19 @@ not the createEmulator path.
   assets (tracked: ~4.8 MB). `*.tgz` is gitignored.
 
 ### Gotchas
+- **Boot failures are now visible** (2026-08-11): app.js adds an
+  `unhandledrejection` listener (the page previously showed only a silent
+  "Uncaught (in promise)" + stuck `booting…` status), and emulator.js wraps
+  `uc.mem_map` with labeled errors incl. `uc.mem_regions()` on failure.
+  Intermittent `uc_mem_map failed with code 1` (ARG) on the 1.75GB periph
+  range was traced to **system memory pressure on this 16GB box (~1.2GB
+  free)** — it killed Chrome (renderer OOM) and corrupted long-lived
+  instances; a fresh headless-Chrome instance passes 60+ consecutive
+  ?fw= navigation boots and 8/8 same-page click-boots with the JS heap
+  bounded at 15-17MB. If boots start failing with mem_map errors, restart
+  Chrome (fresh `--user-data-dir`) — the page code is not at fault.
+  `performance.memory` only counts the JS heap, NOT the wasm heaps
+  (unicorn ~40MB + rust per boot) that actually accumulate.
 - Headless-chrome `--virtual-time-budget` + `--dump-dom` throttles rAF to a
   few frames — it will NOT complete a run. Use the CDP driver
   (script: /tmp/opencode/site_smoke.mjs) for browser verification.
@@ -993,3 +1006,111 @@ flash/eeprom devices.
 - Site suite 11/11 exit 0: flow, blinky, audio, ltdc, can, dma
   (comprehensive_test, `FAIL: 00000000` = known 0-count artifact), eth_irq,
   exti, flash, rx_interrupt, spi_flash.
+
+---
+
+## 14. Peripheral devices: OLED / TFT / buzzer / speaker (2026-08-11)
+
+Four JS-visible "peripheral devices" driven through the existing protocol-tap
+machinery (§13) + model registers. All of them are **opt-in per firmware**
+via `ext_devices.{oled,tft,buzzer,speaker}` (browser: `DEVICE_FIRMWARES` in
+app.js; Node: the `ext_devices` arg of `createEmulator`).
+
+| Device | Transport | Parser location | Firmware | Node test |
+|---|---|---|---|---|
+| SSD1306 OLED 128×64 | I2C (I2C1 @ 0x3C) | `site/emulator.js` `processOled` | `oled_test/` | `site/test_oled.mjs` |
+| ILI9341 TFT 240×320 RGB565 | SPI (SPI2, CS PB12, DC PB11) | `site/emulator.js` `processTft` | `tft_test/` | `site/test_tft.mjs` |
+| Buzzer (TIM PWM) | none — reads TIM regs | `site/emulator.js` `processBuzzer` | `buzzer_test/` | `site/test_buzzer.mjs` |
+| Speaker (I2S capture) | none — drains model capture | `site/emulator.js` `processSpeaker` | `audio_play_test/` | `site/test_audio_play.mjs` |
+
+### I2C tap START/STOP boundaries (Rust, i2c.rs)
+`i2c_register_slave` already pushed per-byte events; this session added
+transaction boundaries so multi-byte command/data groups parse correctly:
+- **START** (CR1 bit 8 rising edge, i2c.rs:147): pushes `(1<<31)|(1<<30)`
+  and clears `active_device` (next DR write = address byte).
+- **STOP** (CR1 bit 9, i2c.rs:157): pushes `1<<31`; Active/AddrSent state
+  resets (real w1c-ish behavior preserved: the firmware's START→addr→SR1/SR2
+  latch flow in §13 is untouched).
+- JS consumers: `ev & 0x80000000` = edge event; `ev & 0x40000000` = START
+  (for I2C: begin a new group — the next byte is a control byte); plain STOP
+  ends the group. Same bit layout as the SPI CS events.
+
+### processOled (SSD1306, page-addressed framebuffer)
+- On START, the next byte is a **control byte**: 0x00 = command group,
+  0x40 = data group (`needControl` latch).
+- Command state machine: page 0xB0-0xB7, col low 0x00-0x0F, col high
+  0x10-0x1F, arg commands (0x20/0x21/0x22/0x81/0x8D/0xA8/0xD3/0xD5/0xD9/
+  0xDA/0xDB take 1 arg); single-byte commands (0xAE/0xAF/0x40/0xA4/0xA6)
+  ignored.
+- Data bytes: 8 vertical bits per column into `fb[(page*8 + bit)*128 + col]`
+  (column-major, row-major `fb[bit*128+col]` in the renderers/tests).
+- `frame` counts event batches. Exposed as `emu.oled = { fb, frame() }`.
+
+### processTft (ILI9341, RGB565)
+- CS asserted (edge) resets the transaction; `dc` bit = (ev>>29)&1.
+- Commands with args: 0x2A/0x2B (4), 0x36/0x3A/0x35/0x53 (1), 0xC0 (2),
+  0xC1 (1), 0xC5 (2), 0xC7 (1), 0xE0/0xE1 (15), 0xF6 (3). Only 0x2A/0x2B
+  args are interpreted (window); everything else is consumed.
+- 0x2C enters pixel-write mode: two bytes (big-endian RGB565) per pixel,
+  `fb[(y*240 + x)*2]` big-endian (renderTft decodes `(fb[p]<<8)|fb[p+1]`).
+  `frame` increments per row wrap; window wrap returns to (x0,y0).
+- Exposed as `emu.tft = { fb, w, h, frame() }`.
+
+### processBuzzer (TIM PWM probe)
+Reads TIM2 (default; TIM3/4/5 via `ext_devices.buzzer.tim`) CR1/CCER/PSC/ARR/
+CCR1 directly from the modeled registers: `freq = 84MHz/((psc+1)(arr+1))`,
+`duty = ccr/(arr+1)`, active when CR1 bit 0 (CEN) + CCER bit 0 (CC1E).
+`change` counts freq/duty transitions (note changes). Exposed as
+`emu.buzzer = { freq, duty, change }` (getters).
+
+### processSpeaker (I2S TX capture drain)
+`audio_take_capture()` (Rust, I2S1 DR writes, see §12) drained each
+`processDevices` pass into a Float32 ring (`emu.takeSpeakerSamples()`).
+Browser `renderSpeaker` (app.js:479) schedules chunks through WebAudio
+(BufferSource chain, `audioNextTime`). `audioCtx` is created lazily and
+closed/recreated per boot (autoplay policy: created on first samples).
+
+### Browser UI
+`site/index.html` aside panels: `#oledCanvas` (128×64, putImageData) +
+`#oledInfo`, `#tftCanvas` (240×320) + `#tftInfo`, `#buzzerInfo`,
+`#speakerInfo`. `renderDevices()` (app.js:506) runs in the rAF loop;
+renderers are frame-cache-keyed (no repaint when nothing changed).
+`?fw=oled_test|tft_test|buzzer_test|audio_play_test` in the console page.
+
+### Firmwares (all bare-metal, same Makefile pattern as blinky/)
+- `oled_test/`: SSD1306 init sequence, text page ("F407 OLED"), empty rows,
+  solid bottom bar; prints "OLED init done" / "OLED draw done".
+- `tft_test/`: ILI9341 init, four color quadrants (R/G/B/W 0xF800/0x07E0/
+  0x001F/0xFFFF), "TFT init done" / "TFT draw done".
+- `buzzer_test/`: TIM2 CH1 PWM 294 Hz @ 50% duty, two note changes
+  (on→off→on), "BUZZER note A" / "BUZZER done".
+- `audio_play_test/`: I2S1 TX (SPI1 block 0x40013000, I2SMOD set) writes a
+  256-sample sine table repeatedly (continuous tone).
+
+### Tests
+- Node: `node site/test_oled.mjs` (textPixels > 30 on page 0, barPixels =
+  128*8 on page 7, empty pages 1/2/4/6), `site/test_tft.mjs` (quadrant
+  colors + done markers), `site/test_buzzer.mjs` (294 Hz / 50% / 2 changes),
+  `site/test_audio_play.mjs` (samples drain non-zero).
+- Browser smoke (`/tmp/opencode/devices_smoke.mjs`): boots all four via
+  `?fw=` navigation on headless Chrome (port 9223, site on 8123), asserts
+  OLED lit=1452 + bar=1024, TFT quadrant pixels
+  `#f80000,#00fc00,#0000f8,#f8fcf8` (RGB565: red 0xF800 → #f80000, green
+  0x07E0 → #00fc00, blue 0x001F → #0000f8, white → #f8fcf8), buzzer
+  "294 Hz, duty 50%", speaker "playing".
+
+### Gotchas
+- **TFT framebuffer byte order**: `processTft` stores RGB565 **big-endian**
+  (`fb[off] = hi, fb[off+1] = lo` — bytes as transmitted), so `renderTft`
+  and `test_tft` must decode `(fb[p]<<8)|fb[p+1]`, NOT little-endian.
+- **I2C group boundaries**: without the START/STOP events, command args run
+  into data groups and the framebuffer shifts. The firmware MUST use
+  START/STOP per group (the Arduino-style SSD1306 drivers do).
+- **audio_play_test boot order**: `createEmulator` must be created before
+  the run loop; the capture FIFO only fills while the guest writes DR.
+- **Timing**: `buzzer_test` and the I2C/SPI parsers are step-count-driven —
+  the smoke boots each firmware and waits for the terminal marker before
+  reading device state (no fixed wall-clock sleeps).
+- **Reboots**: boot failures were silent before 2026-08-11 (see §11 Gotchas
+  — unhandledrejection + labeled mem_map). Device panel state resets per
+  boot via `oledCacheKey/tftCacheKey/buzzerCacheKey = ''` in `boot()`.

@@ -167,9 +167,11 @@ export function i2c_push_rx(peripheral: string, bytes: Uint8Array): void;
 export function i2c_register_slave(peripheral: string, address: number): void;
 
 /**
- * Drain all bytes the master wrote to a tapped I2C slave since last call.
+ * Drain all events for a tapped I2C slave since the last call. Each entry
+ * is a u32: bit31 = START/STOP boundary event (bit30 = 1 START / 0 STOP),
+ * otherwise the low byte is one byte the master wrote to the slave.
  */
-export function i2c_take_tx(peripheral: string): Uint8Array;
+export function i2c_take_events(peripheral: string): Uint32Array;
 
 /**
  * Initialize the emulator with hardcoded peripheral map.
@@ -217,9 +219,11 @@ export function spi_take_events(peripheral: string): Uint32Array;
 /**
  * Register a protocol-agnostic tap on an SPI peripheral. Must be called
  * before init(). `cs` optionally names the GPIO pin used as chip select
- * ("PA4"); when given, CS edges are reported in the event stream.
+ * ("PA4"); when given, CS edges are reported in the event stream. `dc`
+ * optionally names a data/command pin; its level is reported in bit 29 of
+ * each byte event (1 = data) so the JS device can parse TFT-style traffic.
  */
-export function spi_tap(peripheral: string, cs?: string | null): void;
+export function spi_tap(peripheral: string, cs?: string | null, dc?: string | null): void;
 
 export function tick(): void;
 
@@ -275,7 +279,7 @@ export interface InitOutput {
     readonly has_pending_interrupt: () => number;
     readonly i2c_push_rx: (a: number, b: number, c: number, d: number) => void;
     readonly i2c_register_slave: (a: number, b: number, c: number) => void;
-    readonly i2c_take_tx: (a: number, b: number) => [number, number];
+    readonly i2c_take_events: (a: number, b: number) => [number, number];
     readonly init: () => void;
     readonly init_svd: (a: number, b: number) => void;
     readonly is_watchdog_reset_requested: () => number;
@@ -286,7 +290,7 @@ export interface InitOutput {
     readonly spi_flash_debug: (a: number, b: number) => [number, number];
     readonly spi_push_miso: (a: number, b: number, c: number, d: number) => void;
     readonly spi_take_events: (a: number, b: number) => [number, number];
-    readonly spi_tap: (a: number, b: number, c: number, d: number) => void;
+    readonly spi_tap: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly tick: () => void;
     readonly tick_n: (a: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;

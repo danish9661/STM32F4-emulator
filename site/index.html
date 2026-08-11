@@ -149,6 +149,10 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
             <option value="spi_tft_test">spi_tft_test — SPI TFT LCD test</option>
             <option value="audio_test">audio_test — I2S DMA WAV play + capture</option>
             <option value="ltdc_test">ltdc_test — LTDC scanout gradient (draws in the display panel)</option>
+            <option value="oled_test">oled_test — SSD1306 OLED over I2C (draws in the OLED panel)</option>
+            <option value="tft_test">tft_test — ILI9341 TFT over SPI (draws in the TFT panel)</option>
+            <option value="buzzer_test">buzzer_test — TIM2 PWM melody (live frequency in the buzzer panel)</option>
+            <option value="audio_play_test">audio_play_test — I2S sine playback (speaker panel plays the samples)</option>
             <option value="test_firmware">test_firmware — TIM2/ADC dump</option>
           </optgroup>
           <optgroup label="Crypto">
@@ -201,6 +205,36 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
                image-rendering:pixelated;border-bottom:1px solid var(--border);"></canvas>
       <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
         <span id="ltdcInfo">scanout idle</span>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:12px;">
+      <h2>OLED SSD1306 (I2C)</h2>
+      <canvas id="oledCanvas" width="256" height="128"
+        style="width:100%;box-sizing:border-box;display:block;background:#000;
+               image-rendering:pixelated;border-bottom:1px solid var(--border);"></canvas>
+      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
+        <span id="oledInfo">no OLED firmware</span>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:12px;">
+      <h2>TFT ILI9341 (SPI)</h2>
+      <canvas id="tftCanvas" width="240" height="320"
+        style="width:100%;box-sizing:border-box;display:block;background:#000;
+               image-rendering:pixelated;border-bottom:1px solid var(--border);"></canvas>
+      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
+        <span id="tftInfo">no TFT firmware</span>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:12px;">
+      <h2>Buzzer (TIM PWM)</h2>
+      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
+        <span id="buzzerInfo">no buzzer firmware</span>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:12px;">
+      <h2>Speaker (I2S)</h2>
+      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
+        <span id="speakerInfo">no audio firmware</span>
       </div>
     </div>
     <div class="panel" style="margin-bottom:12px;">

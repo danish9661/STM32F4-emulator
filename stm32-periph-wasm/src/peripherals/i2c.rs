@@ -150,6 +150,7 @@ impl Peripheral for I2c {
                     self.sr2 = (1 << 0) | (1 << 1);
                     self.active_device = None;
                     self.cr1 &= !(1 << 8);
+                    crate::system::i2c_tap_push_event(&self.name, (1 << 31) | (1 << 30));
                     self.fire_interrupts(sys);
                 }
 
@@ -158,6 +159,7 @@ impl Peripheral for I2c {
                         self.reset();
                     }
                     self.cr1 &= !(1 << 9);
+                    crate::system::i2c_tap_push_event(&self.name, 1 << 31);
                 }
             }
             0x04 => {

@@ -52,6 +52,16 @@ const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehen
 // SRAM irq_flag/rx_frame_idx globals (irq_eth mode in emulator.js).
 const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test']);
 
+// Virtual hardware attached to the emulator per firmware: the JS device
+// layer parses the peripheral traffic and renders it (OLED fb, TFT fb,
+// buzzer freq, speaker samples). Matches emulator.js ext_devices.
+const DEVICE_FIRMWARES = {
+    oled_test: { oled: { i2c: 'I2C1', addr: 0x3C } },
+    tft_test: { tft: { spi: 'SPI2', cs: 'PB12', dc: 'PB11' } },
+    buzzer_test: { buzzer: { tim: 'TIM2' } },
+    audio_play_test: { speaker: true },
+};
+
 // ── status + UART ──────────────────────────────────────────────────────────
 const setStatus = (text, cls) => {
     statusEl.textContent = text;
@@ -207,6 +217,8 @@ const boot = async () => {
     $('btnRun').textContent = 'Run';
     setStatus('booting…', 'stop');
     if (emu) { try { emu.close(); } catch (e) {} emu = null; }
+    oledCacheKey = ''; tftCacheKey = ''; buzzerCacheKey = '';
+    if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; audioQueued = 0; }
 
     const fw = image.flash;
     uartEl.textContent = uartBuf = '';
@@ -229,6 +241,7 @@ const boot = async () => {
         enable_irqs: IRQ_FIRMWARES.has(image.name),
         irq_eth: IRQ_ETH_FIRMWARES.has(image.name),
         eth: ETH_RX_MAP[image.name],
+        ext_devices: DEVICE_FIRMWARES[image.name],
         onTx: (pkt) => {
             addFrame('tx', pkt);
             if (gw.connected && gw.ws) {
@@ -269,6 +282,7 @@ const loop = async (id) => {
         appendUart(emu.drainUart());
         refreshStats();
         renderLtdc();
+        renderDevices();
         await raf();
     }
 };
@@ -316,6 +330,7 @@ $('rxInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') sendRx();
 });
 window.addEventListener('error', (e) => setStatus('error: ' + e.message, 'err'));
+window.addEventListener('unhandledrejection', (e) => setStatus('boot error: ' + String(e.reason?.message || e.reason).replace(/\s+/g, ' ').slice(0, 300), 'err'));
 
 // ── stats ──────────────────────────────────────────────────────────────────
 const refreshStats = () => {
@@ -404,6 +419,91 @@ const renderLtdc = () => {
         ltdcInfo.textContent = `layer0 ${w}×${lines} ${pf === 2 ? 'RGB565' : 'ARGB8888'} @ ${hex32(cfbar)}`;
     } catch (e) { /* device disabled mid-read — repaint next rAF */ }
 };
+
+// ── virtual devices (OLED / TFT / buzzer / speaker) ────────────────────────
+const oledCanvas = $('oledCanvas'), oledInfo = $('oledInfo');
+const oledCtx = oledCanvas.getContext('2d');
+let oledCacheKey = '';
+const renderOled = () => {
+    if (!emu || !emu.oled) { oledInfo.textContent = 'no OLED firmware'; return; }
+    const key = emu.oled.frame();
+    if (key === oledCacheKey) return;
+    oledCacheKey = key;
+    const fb = emu.oled.fb, img = oledCtx.createImageData(128, 64), d = img.data;
+    for (let i = 0; i < 128 * 64; i++) {
+        const v = fb[i] ? 255 : 0;
+        d[i * 4] = v; d[i * 4 + 1] = v; d[i * 4 + 2] = v; d[i * 4 + 3] = 255;
+    }
+    oledCtx.imageSmoothingEnabled = false;
+    oledCtx.putImageData(img, 0, 0);
+    oledInfo.textContent = `SSD1306 128×64 framebuffer — frame ${key}`;
+};
+
+const tftCanvas = $('tftCanvas'), tftInfo = $('tftInfo');
+const tftCtx = tftCanvas.getContext('2d');
+let tftCacheKey = '';
+const renderTft = () => {
+    if (!emu || !emu.tft) { tftInfo.textContent = 'no TFT firmware'; return; }
+    const { w, h, fb } = emu.tft;
+    const key = emu.tft.frame() + ':' + w + 'x' + h;
+    if (key === tftCacheKey) return;
+    tftCacheKey = key;
+    const img = tftCtx.createImageData(w, h), d = img.data;
+    for (let i = 0, p = 0; i < w * h; i++, p += 2) {
+        const v = (fb[p] << 8) | fb[p + 1];   // parser stores RGB565 big-endian
+        d[i * 4] = ((v >> 11) & 0x1F) << 3;
+        d[i * 4 + 1] = ((v >> 5) & 0x3F) << 2;
+        d[i * 4 + 2] = (v & 0x1F) << 3;
+        d[i * 4 + 3] = 255;
+    }
+    tftCtx.imageSmoothingEnabled = false;
+    tftCtx.putImageData(img, 0, 0);
+    tftInfo.textContent = `ILI9341 ${w}×${h} RGB565 — frame ${emu.tft.frame()}`;
+};
+
+const buzzerInfo = $('buzzerInfo');
+let buzzerCacheKey = '';
+const renderBuzzer = () => {
+    if (!emu || !emu.buzzer) { buzzerInfo.textContent = 'no buzzer firmware'; return; }
+    const f = emu.buzzer.freq, duty = emu.buzzer.duty, ch = emu.buzzer.change;
+    const key = f.toFixed(1) + '/' + duty.toFixed(3);
+    if (key === buzzerCacheKey) return;
+    buzzerCacheKey = key;
+    buzzerInfo.textContent = f > 1
+        ? `TIM2 CH1 PWM ${f.toFixed(0)} Hz, duty ${(duty * 100).toFixed(0)}% — ${ch} note changes`
+        : `TIM2 idle — ${ch} note changes`;
+};
+
+const speakerInfo = $('speakerInfo');
+let audioCtx = null, audioNextTime = 0, audioQueued = 0;
+const renderSpeaker = () => {
+    if (!emu || !emu.takeSpeakerSamples) { speakerInfo.textContent = 'no audio firmware'; return; }
+    const samples = emu.takeSpeakerSamples();
+    if (!samples.length) return;
+    if (!audioCtx) {
+        try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+        if (!audioCtx) { speakerInfo.textContent = 'WebAudio unavailable'; return; }
+        audioNextTime = audioCtx.currentTime + 0.05;
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    let off = 0;
+    while (off < samples.length) {
+        const n = Math.min(4096, samples.length - off);
+        const buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+        const ch = buf.getChannelData(0);
+        for (let i = 0; i < n; i++) ch[i] = samples[off + i];
+        const src = audioCtx.createBufferSource();
+        src.buffer = buf;
+        src.connect(audioCtx.destination);
+        src.start(audioNextTime);
+        audioNextTime += n / audioCtx.sampleRate;
+        off += n;
+        audioQueued += n;
+    }
+    speakerInfo.textContent = `I2S capture playing — ${(audioQueued / audioCtx.sampleRate).toFixed(1)} s queued`;
+};
+
+const renderDevices = () => { renderOled(); renderTft(); renderBuzzer(); renderSpeaker(); };
 
 // ── GPIO banks A–E ─────────────────────────────────────────────────────────
 const GPIO_BASE = 0x40020000, GPIO_STRIDE = 0x400;

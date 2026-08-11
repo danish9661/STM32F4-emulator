@@ -33,6 +33,11 @@ const firmwares = [
     // audio + display
     ['audio_test', 'audio_test/audio_test.bin', 'audio_test.bin'],
     ['ltdc_test', 'ltdc_test/ltdc_test.bin', 'ltdc_test.bin'],
+    // virtual devices (OLED / TFT / buzzer / speaker panels)
+    ['oled_test', 'oled_test/oled_test.bin', 'oled_test.bin'],
+    ['tft_test', 'tft_test/tft_test.bin', 'tft_test.bin'],
+    ['buzzer_test', 'buzzer_test/buzzer_test.bin', 'buzzer_test.bin'],
+    ['audio_play_test', 'audio_play_test/audio_play_test.bin', 'audio_play_test.bin'],
 ];
 
 const lines = [

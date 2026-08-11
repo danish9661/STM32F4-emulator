@@ -269,8 +269,9 @@ pub(crate) fn audio_buses_ready() -> bool {
 
 // ── SPI bus taps (JS hardware layer plumbing) ──────────────────────────────
 // Event word layout: bit 31 = CS edge event, bit 30 = asserted (1) when CS
-// is a CS event, bits 7..0 = the shifted byte. Byte and CS events interleave
-// in the order the controller produced them.
+// is a CS event, bit 29 = DC level (1 = data) when the tap has a DC pin,
+// bits 7..0 = the shifted byte. Byte and CS events interleave in the order
+// the controller produced them.
 static SPI_TAP_EVENTS: OnceLock<Mutex<std::collections::HashMap<String, Vec<u32>>>> = OnceLock::new();
 static SPI_TAP_MISO: OnceLock<Mutex<std::collections::HashMap<String, Vec<u8>>>> = OnceLock::new();
 
@@ -281,8 +282,8 @@ fn spi_tap_miso() -> &'static Mutex<std::collections::HashMap<String, Vec<u8>>> 
     SPI_TAP_MISO.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-pub fn spi_tap_push_byte(peri: &str, v: u8) {
-    spi_tap_events().lock().unwrap().entry(peri.to_string()).or_default().push(v as u32 & 0xFF);
+pub fn spi_tap_push_byte(peri: &str, v: u32) {
+    spi_tap_events().lock().unwrap().entry(peri.to_string()).or_default().push(v & 0x2FF);
 }
 pub fn spi_tap_push_cs(peri: &str, asserted: bool) {
     let e = 0x8000_0000u32 | (if asserted { 1 << 30 } else { 0 });
@@ -299,10 +300,14 @@ pub(crate) fn spi_tap_miso_pop(peri: &str) -> u8 {
 }
 
 // ── I2C bus taps (JS hardware layer plumbing) ─────────────────────────────
-static I2C_TAP_TX: OnceLock<Mutex<std::collections::HashMap<String, Vec<u8>>>> = OnceLock::new();
+// The TX queue carries u32 events: bit31 = boundary event (bit30 = 1 START /
+// 0 STOP), otherwise the low byte is one master-write byte. START/STOP let
+// the JS device parser find transaction group boundaries (SSD1306 needs
+// them: a data group's length is only terminated by STOP).
+static I2C_TAP_TX: OnceLock<Mutex<std::collections::HashMap<String, Vec<u32>>>> = OnceLock::new();
 static I2C_TAP_RX: OnceLock<Mutex<std::collections::HashMap<String, Vec<u8>>>> = OnceLock::new();
 
-fn i2c_tap_tx() -> &'static Mutex<std::collections::HashMap<String, Vec<u8>>> {
+fn i2c_tap_tx() -> &'static Mutex<std::collections::HashMap<String, Vec<u32>>> {
     I2C_TAP_TX.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 fn i2c_tap_rx() -> &'static Mutex<std::collections::HashMap<String, Vec<u8>>> {
@@ -310,9 +315,12 @@ fn i2c_tap_rx() -> &'static Mutex<std::collections::HashMap<String, Vec<u8>>> {
 }
 
 pub fn i2c_tap_push_tx(peri: &str, v: u8) {
-    i2c_tap_tx().lock().unwrap().entry(peri.to_string()).or_default().push(v);
+    i2c_tap_tx().lock().unwrap().entry(peri.to_string()).or_default().push(v as u32);
 }
-pub fn i2c_tap_take_tx(peri: &str) -> Vec<u8> {
+pub fn i2c_tap_push_event(peri: &str, ev: u32) {
+    i2c_tap_tx().lock().unwrap().entry(peri.to_string()).or_default().push(ev);
+}
+pub fn i2c_tap_take_tx(peri: &str) -> Vec<u32> {
     i2c_tap_tx().lock().unwrap().get_mut(peri).map(std::mem::take).unwrap_or_default()
 }
 pub fn i2c_tap_rx_push(peri: &str, bytes: &[u8]) {

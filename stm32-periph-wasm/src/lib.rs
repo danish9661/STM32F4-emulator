@@ -338,13 +338,16 @@ pub fn add_software_spi(name: &str, cs: Option<String>, clk: &str, miso: &str, m
 
 /// Register a protocol-agnostic tap on an SPI peripheral. Must be called
 /// before init(). `cs` optionally names the GPIO pin used as chip select
-/// ("PA4"); when given, CS edges are reported in the event stream.
+/// ("PA4"); when given, CS edges are reported in the event stream. `dc`
+/// optionally names a data/command pin; its level is reported in bit 29 of
+/// each byte event (1 = data) so the JS device can parse TFT-style traffic.
 #[wasm_bindgen]
-pub fn spi_tap(peripheral: &str, cs: Option<String>) {
+pub fn spi_tap(peripheral: &str, cs: Option<String>, dc: Option<String>) {
     use crate::ext_devices::spi_tap::{SpiTap, SpiTapConfig};
     let config = SpiTapConfig {
         peripheral: peripheral.to_string(),
         cs,
+        dc,
     };
     system::get_ext_devices().lock().unwrap().spi_taps
         .push(std::rc::Rc::new(std::cell::RefCell::new(SpiTap::new(config))));
@@ -379,9 +382,11 @@ pub fn i2c_register_slave(peripheral: &str, address: u8) {
         .push(std::rc::Rc::new(std::cell::RefCell::new(I2cTap::new(config))));
 }
 
-/// Drain all bytes the master wrote to a tapped I2C slave since last call.
+/// Drain all events for a tapped I2C slave since the last call. Each entry
+/// is a u32: bit31 = START/STOP boundary event (bit30 = 1 START / 0 STOP),
+/// otherwise the low byte is one byte the master wrote to the slave.
 #[wasm_bindgen]
-pub fn i2c_take_tx(peripheral: &str) -> Vec<u8> {
+pub fn i2c_take_events(peripheral: &str) -> Vec<u32> {
     system::i2c_tap_take_tx(peripheral)
 }
 
