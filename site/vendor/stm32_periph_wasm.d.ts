@@ -159,6 +159,25 @@ export function has_pending_interrupt(): boolean;
 export function i2c_push_rx(peripheral: string, bytes: Uint8Array): void;
 
 /**
+ * Read one register of the first matching regfile on a peripheral.
+ */
+export function i2c_regfile_get(peripheral: string, offset: number): number;
+
+/**
+ * Write one register of the first matching regfile on a peripheral
+ * (JS-side poke, e.g. temperature coming from outside the guest).
+ */
+export function i2c_regfile_set(peripheral: string, offset: number, value: number): void;
+
+/**
+ * Register a pointer-addressed register file (DS3231 RTC style) on an I2C
+ * peripheral. Must be called before init(). The first write byte of each
+ * transaction is the register pointer, subsequent bytes land at `ptr++`;
+ * reads return `regs[ptr++]` (pointer persists across address matches).
+ */
+export function i2c_register_regfile(peripheral: string, address: number, size: number, init: Uint8Array): void;
+
+/**
  * Register a protocol-agnostic I2C slave on a peripheral. Must be called
  * before init(). The address is ACKed like any other registered slave;
  * master writes queue for JS (`i2c_take_tx`) and JS-pushed bytes are
@@ -278,6 +297,9 @@ export interface InitOutput {
     readonly gpio_set_input: (a: number, b: number, c: number) => void;
     readonly has_pending_interrupt: () => number;
     readonly i2c_push_rx: (a: number, b: number, c: number, d: number) => void;
+    readonly i2c_regfile_get: (a: number, b: number, c: number) => number;
+    readonly i2c_regfile_set: (a: number, b: number, c: number, d: number) => void;
+    readonly i2c_register_regfile: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly i2c_register_slave: (a: number, b: number, c: number) => void;
     readonly i2c_take_events: (a: number, b: number) => [number, number];
     readonly init: () => void;

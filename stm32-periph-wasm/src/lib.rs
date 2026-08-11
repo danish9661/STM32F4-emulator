@@ -396,6 +396,45 @@ pub fn i2c_push_rx(peripheral: &str, bytes: &[u8]) {
     system::i2c_tap_rx_push(peripheral, bytes);
 }
 
+// ── I2C register-file devices (DS3231 RTC) ─────────────────────────────────
+
+/// Register a pointer-addressed register file (DS3231 RTC style) on an I2C
+/// peripheral. Must be called before init(). The first write byte of each
+/// transaction is the register pointer, subsequent bytes land at `ptr++`;
+/// reads return `regs[ptr++]` (pointer persists across address matches).
+#[wasm_bindgen]
+pub fn i2c_register_regfile(peripheral: &str, address: u8, size: usize, init: &[u8]) {
+    use crate::ext_devices::i2c_regfile::{I2cRegFile, I2cRegFileConfig};
+    let config = I2cRegFileConfig {
+        peripheral: peripheral.to_string(),
+        address,
+        size,
+        init: init.to_vec(),
+    };
+    system::get_ext_devices().lock().unwrap().i2c_regfiles
+        .push(std::rc::Rc::new(std::cell::RefCell::new(I2cRegFile::new(config))));
+}
+
+/// Read one register of the first matching regfile on a peripheral.
+#[wasm_bindgen]
+pub fn i2c_regfile_get(peripheral: &str, offset: usize) -> u8 {
+    system::get_ext_devices().lock().unwrap().i2c_regfiles.iter()
+        .find(|d| d.borrow().config.peripheral == peripheral)
+        .map(|d| d.borrow().get(offset))
+        .unwrap_or(0)
+}
+
+/// Write one register of the first matching regfile on a peripheral
+/// (JS-side poke, e.g. temperature coming from outside the guest).
+#[wasm_bindgen]
+pub fn i2c_regfile_set(peripheral: &str, offset: usize, value: u8) {
+    if let Some(d) = system::get_ext_devices().lock().unwrap().i2c_regfiles.iter()
+        .find(|d| d.borrow().config.peripheral == peripheral)
+    {
+        d.borrow_mut().set(offset, value);
+    }
+}
+
 // ── DCMI frame source (JS camera sensor) ───────────────────────────────────
 // The camera sensor is external hardware (JS). This feeds one captured
 // frame (8-bit pixels, row-major) into the on-chip DCMI controller, which

@@ -47,6 +47,7 @@ export async function createEmulator(opts) {
         get_next_pending_interrupt, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
         spi_tap, spi_take_events, i2c_register_slave, i2c_take_events,
+        i2c_register_regfile, i2c_regfile_get,
         audio_take_capture,
     } = bindings;
 
@@ -69,6 +70,24 @@ export async function createEmulator(opts) {
     }
     for (const cfg of (ext_devices.i2c_eeprom || [])) {
         add_i2c_eeprom(cfg.peripheral, cfg.address, cfg.data);
+    }
+    // Register-file I2C devices (DS3231 RTC). init is a &[u8] snapshot of the
+    // register file: BCD time regs 0x00-0x06, temp MSB/LSB 0x11/0x12. The
+    // `rtc` device config is shorthand for a regfile at 0x68 that also
+    // enables the emu.rtc time/temp decoder.
+    const regfileCfg = [
+        ...(ext_devices.regfile || []),
+        ...(ext_devices.rtc ? [{
+            peripheral: ext_devices.rtc.i2c || 'I2C1',
+            address: ext_devices.rtc.addr || 0x68,
+            size: ext_devices.rtc.size || 20,
+            init: ext_devices.rtc.init || [],
+        }] : []),
+    ];
+    for (const cfg of regfileCfg) {
+        i2c_register_regfile(
+            cfg.peripheral || 'I2C1', cfg.address || 0x68, cfg.size || 20,
+            new Uint8Array(cfg.init || []));
     }
     // Virtual peripheral devices (JS hardware layer). Each is a real device
     // protocol implemented in JS on top of the bus taps, driven by the
@@ -388,11 +407,36 @@ export async function createEmulator(opts) {
         return out;
     };
 
+    // DS3231 RTC: register file behind the tap (BCD time regs 0x00-0x06,
+    // temp MSB/LSB 0x11/0x12). Read live from the modeled registers; the
+    // JS driver seeds the register file (init) and the guest writes it.
+    const rtc = ext_devices.rtc ? {
+        peri: ext_devices.rtc.i2c || 'I2C1', change: 0, time: null, temp: null,
+        lastKey: '',
+    } : null;
+    const bcd2n = (v) => ((v >> 4) * 10) + (v & 0x0F);
+    const processRtc = () => {
+        if (!rtc) return;
+        const r = (o) => i2c_regfile_get(rtc.peri, o);
+        const time = {
+            sec: bcd2n(r(0x00)), min: bcd2n(r(0x01)), hour: bcd2n(r(0x02)),
+            dow: bcd2n(r(0x03)), day: bcd2n(r(0x04)), mon: bcd2n(r(0x05)),
+            year: bcd2n(r(0x06)),
+        };
+        const tmsb = r(0x11), tlsb = r(0x12);
+        const temp = (tmsb & 0x80 ? tmsb - 0x100 : tmsb) + (tlsb >> 6) * 0.25;
+        rtc.time = time;
+        rtc.temp = temp;
+        const key = `${time.sec}:${time.min}:${time.hour}:${time.day}:${time.mon}:${time.year}:${temp}`;
+        if (key !== rtc.lastKey) { rtc.lastKey = key; rtc.change++; }
+    };
+
     const processDevices = () => {
         processOled();
         processTft();
         processBuzzer();
         processSpeaker();
+        processRtc();
     };
 
     // ── ETH TX capture + RX injection ──
@@ -574,6 +618,7 @@ export async function createEmulator(opts) {
         tft: tft ? { fb: tft.fb, w: tft.w, h: tft.h, frame: () => tft.frame } : null,
         buzzer: buzzer ? { get freq() { return buzzer.freq; }, get duty() { return buzzer.duty; }, get change() { return buzzer.change; } } : null,
         takeSpeakerSamples,
+        rtc: rtc ? { get time() { return rtc.time; }, get temp() { return rtc.temp; }, get change() { return rtc.change; } } : null,
         stop() {
             stopRequested = true;
             try { uc.emu_stop(); } catch (e) {}

@@ -359,6 +359,50 @@ export function i2c_push_rx(peripheral, bytes) {
 }
 
 /**
+ * Read one register of the first matching regfile on a peripheral.
+ * @param {string} peripheral
+ * @param {number} offset
+ * @returns {number}
+ */
+export function i2c_regfile_get(peripheral, offset) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.i2c_regfile_get(ptr0, len0, offset);
+    return ret;
+}
+
+/**
+ * Write one register of the first matching regfile on a peripheral
+ * (JS-side poke, e.g. temperature coming from outside the guest).
+ * @param {string} peripheral
+ * @param {number} offset
+ * @param {number} value
+ */
+export function i2c_regfile_set(peripheral, offset, value) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.i2c_regfile_set(ptr0, len0, offset, value);
+}
+
+/**
+ * Register a pointer-addressed register file (DS3231 RTC style) on an I2C
+ * peripheral. Must be called before init(). The first write byte of each
+ * transaction is the register pointer, subsequent bytes land at `ptr++`;
+ * reads return `regs[ptr++]` (pointer persists across address matches).
+ * @param {string} peripheral
+ * @param {number} address
+ * @param {number} size
+ * @param {Uint8Array} init
+ */
+export function i2c_register_regfile(peripheral, address, size, init) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(init, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    wasm.i2c_register_regfile(ptr0, len0, address, size, ptr1, len1);
+}
+
+/**
  * Register a protocol-agnostic I2C slave on a peripheral. Must be called
  * before init(). The address is ACKed like any other registered slave;
  * master writes queue for JS (`i2c_take_tx`) and JS-pushed bytes are

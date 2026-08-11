@@ -153,6 +153,7 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
             <option value="tft_test">tft_test — ILI9341 TFT over SPI (draws in the TFT panel)</option>
             <option value="buzzer_test">buzzer_test — TIM2 PWM melody (live frequency in the buzzer panel)</option>
             <option value="audio_play_test">audio_play_test — I2S sine playback (speaker panel plays the samples)</option>
+            <option value="rtc_test">rtc_test — DS3231 RTC time/temp over I2C1 (live clock in the RTC panel)</option>
             <option value="test_firmware">test_firmware — TIM2/ADC dump</option>
           </optgroup>
           <optgroup label="Crypto">
@@ -235,6 +236,12 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
       <h2>Speaker (I2S)</h2>
       <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
         <span id="speakerInfo">no audio firmware</span>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:12px;">
+      <h2>RTC DS3231 (I2C)</h2>
+      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
+        <span id="rtcInfo">no RTC firmware</span>
       </div>
     </div>
     <div class="panel" style="margin-bottom:12px;">

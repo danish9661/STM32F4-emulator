@@ -55,11 +55,20 @@ const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test']);
 // Virtual hardware attached to the emulator per firmware: the JS device
 // layer parses the peripheral traffic and renders it (OLED fb, TFT fb,
 // buzzer freq, speaker samples). Matches emulator.js ext_devices.
+// RTC register-file seed: BCD time 0x00-0x06 (10:45:30 dow3 15/07/26),
+// temp MSB/LSB 0x11/0x12 = 27.50 C. The guest overwrites the time regs.
+const RTC_INIT = (() => {
+    const b = new Uint8Array(20);
+    b.set([0x30, 0x45, 0x10, 0x03, 0x15, 0x07, 0x26]);
+    b[0x11] = 0x1B; b[0x12] = 0x80;
+    return b;
+})();
 const DEVICE_FIRMWARES = {
     oled_test: { oled: { i2c: 'I2C1', addr: 0x3C } },
     tft_test: { tft: { spi: 'SPI2', cs: 'PB12', dc: 'PB11' } },
     buzzer_test: { buzzer: { tim: 'TIM2' } },
     audio_play_test: { speaker: true },
+    rtc_test: { rtc: { i2c: 'I2C1', addr: 0x68, init: RTC_INIT } },
 };
 
 // ── status + UART ──────────────────────────────────────────────────────────
@@ -217,7 +226,7 @@ const boot = async () => {
     $('btnRun').textContent = 'Run';
     setStatus('booting…', 'stop');
     if (emu) { try { emu.close(); } catch (e) {} emu = null; }
-    oledCacheKey = ''; tftCacheKey = ''; buzzerCacheKey = '';
+    oledCacheKey = ''; tftCacheKey = ''; buzzerCacheKey = ''; rtcCacheKey = '';
     if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; audioQueued = 0; }
 
     const fw = image.flash;
@@ -503,7 +512,23 @@ const renderSpeaker = () => {
     speakerInfo.textContent = `I2S capture playing — ${(audioQueued / audioCtx.sampleRate).toFixed(1)} s queued`;
 };
 
-const renderDevices = () => { renderOled(); renderTft(); renderBuzzer(); renderSpeaker(); };
+let rtcCacheKey = '';
+const renderRtc = () => {
+    if (!emu || !emu.rtc || !emu.rtc.time) {
+        if (!emu || !emu.rtc) $('rtcInfo').textContent = 'no RTC firmware';
+        return;
+    }
+    const t = emu.rtc.time, temp = emu.rtc.temp;
+    const key = `${t.sec}:${t.min}:${t.hour}:${t.dow}:${t.day}:${t.mon}:${t.year}:${temp}`;
+    if (key === rtcCacheKey) return;
+    rtcCacheKey = key;
+    const pad = (n) => String(n).padStart(2, '0');
+    $('rtcInfo').textContent =
+        `time ${pad(t.hour)}:${pad(t.min)}:${pad(t.sec)} DOW=${t.dow} ` +
+        `${pad(t.day)}/${pad(t.mon)}/${pad(t.year)} temp=${temp.toFixed(2)} C`;
+};
+
+const renderDevices = () => { renderOled(); renderTft(); renderBuzzer(); renderSpeaker(); renderRtc(); };
 
 // ── GPIO banks A–E ─────────────────────────────────────────────────────────
 const GPIO_BASE = 0x40020000, GPIO_STRIDE = 0x400;

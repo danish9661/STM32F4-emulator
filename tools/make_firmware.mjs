@@ -38,6 +38,7 @@ const firmwares = [
     ['tft_test', 'tft_test/tft_test.bin', 'tft_test.bin'],
     ['buzzer_test', 'buzzer_test/buzzer_test.bin', 'buzzer_test.bin'],
     ['audio_play_test', 'audio_play_test/audio_play_test.bin', 'audio_play_test.bin'],
+    ['rtc_test', 'rtc_test/rtc_test.bin', 'rtc_test.bin'],
 ];
 
 const lines = [

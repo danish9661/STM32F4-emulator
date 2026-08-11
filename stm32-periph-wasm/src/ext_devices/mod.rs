@@ -2,11 +2,13 @@ pub mod spi_flash;
 pub mod i2c_eeprom;
 pub mod spi_tap;
 pub mod i2c_tap;
+pub mod i2c_regfile;
 
 pub use spi_flash::SpiFlash;
 pub use i2c_eeprom::I2cEeprom;
 pub use spi_tap::SpiTap;
 pub use i2c_tap::I2cTap;
+pub use i2c_regfile::I2cRegFile;
 
 use std::{rc::Rc, cell::RefCell};
 
@@ -35,6 +37,10 @@ pub struct ExtDevices {
     /// Protocol-agnostic I2C slaves: an address acknowledged on the bus
     /// routes its bytes to the JS hardware layer. Chip-side plumbing only.
     pub i2c_taps: Vec<Rc<RefCell<I2cTap>>>,
+    /// Pointer-addressed register files (DS3231 RTC style): first write byte
+    /// = register pointer, then data auto-increments; reads follow the
+    /// current pointer. Device-side protocol, model-side chip.
+    pub i2c_regfiles: Vec<Rc<RefCell<I2cRegFile>>>,
 }
 
 impl ExtDevices {
@@ -88,6 +94,15 @@ impl ExtDevices {
                     address: d.borrow().config.address,
                     device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
                     name: format!("{} i2c-tap", peri_name),
+                });
+            }
+        }
+        for d in &self.i2c_regfiles {
+            if d.borrow().config.peripheral == peri_name {
+                out.push(I2cDeviceEntry {
+                    address: d.borrow().config.address,
+                    device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
+                    name: format!("{} i2c-regfile", peri_name),
                 });
             }
         }

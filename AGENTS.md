@@ -1118,3 +1118,74 @@ renderers are frame-cache-keyed (no repaint when nothing changed).
 - **Reboots**: boot failures were silent before 2026-08-11 (see §11 Gotchas
   — unhandledrejection + labeled mem_map). Device panel state resets per
   boot via `oledCacheKey/tftCacheKey/buzzerCacheKey = ''` in `boot()`.
+
+---
+
+## 15. DS3231 RTC device + I2C register-file taps (2026-08-11)
+
+A pointer-addressed register-file I2C device (DS3231 RTC semantics), the
+fifth virtual peripheral. Unlike the SSD1306/TFT (pure protocol taps
+parsed in JS), the RTC's read path pre-pushes bytes at address-match —
+racing a pure-JS parser — so it needed a **device-side tap in Rust**.
+
+### Rust (`i2c_regfile.rs`, ext_devices/)
+- `I2cRegFile`: register file with a 1-byte pointer. First write byte of
+  each transaction = register pointer (phase `Addr`), subsequent bytes land
+  at `ptr++`; reads return `regs[ptr++]`. The pointer **persists across
+  address matches** (real DS3231: reads continue from the last-accessed
+  register); `reset()` (i2c.rs calls it per address match) only re-arms the
+  pointer-byte phase for the NEXT write transaction. Out-of-range pointers
+  clamp `% size`; `get(offset)`/`set(offset,v)` for JS pokes.
+- Registered like the eeprom: `ExtDevices.i2c_regfiles` vec + entry in
+  `find_i2c_devices` (`i2c-regfile` device name) so the address ACK/routing
+  machinery is shared.
+- Exports: `i2c_register_regfile(peripheral, address, size, init)` (must be
+  called before init), `i2c_regfile_get(peripheral, offset) -> u8`,
+  `i2c_regfile_set(peripheral, offset, value)` (JS-side poke, e.g. ambient
+  temperature changes from outside the guest).
+- Unit tests (3, in-module): pointer-write-then-read starts at the pointer;
+  data writes auto-increment from the pointer (reads then continue after the
+  last written register); out-of-range pointer clamps.
+
+### Firmware `rtc_test/` (bare-metal, I2C1 master, same driver as oled_test)
+- Writes pointer 0x00 + 7 BCD bytes (sec 30/min 45/hr 10/dow 3/day 15/mon 7/
+  yr 26) in ONE transaction (auto-increment), then a pointer-only transaction
+  + streaming read of 7 bytes (pointer persistence), verifies all 7
+  ("RTC verify OK"), then reads the temp pair at 0x11/0x12 and prints
+  "RTC temp=27.50". Markers: `RTC set done` / `RTC read done` /
+  `RTC time=10:45:30 DOW=3 15/07/26` / `RTC test done`.
+- I2C read flow the model requires: START → `DR=(addr<<1)|1` → wait ADDR →
+  read SR1 (latch) → read SR2 (Active + RXNE armed, byte prefetched) →
+  per byte: wait SR1 bit 5 (RXNE), read DR (returns prefetched byte and
+  prefetches the next — the last read prefetches one harmless extra byte).
+
+### emulator.js / app.js / index.html
+- `ext_devices.regfile[]` is the generic list; `ext_devices.rtc` is shorthand
+  (regfile at 0x68) that ALSO enables `emu.rtc` = live BCD-decoded time
+  (`{sec,min,hour,dow,day,mon,year}`), `temp` (signed MSB + (LSB>>6)*0.25),
+  `change` counter. Seed via `init` (20-byte &[u8]: BCD time 0x00-0x06, temp
+  MSB/LSB 0x11/0x12; the guest overwrites time, temp stays read-only).
+- `site/index.html`: dropdown entry + `#rtcInfo` panel ("RTC DS3231 (I2C)");
+  app.js `DEVICE_FIRMWARES.rtc_test` with `RTC_INIT` seed, `renderRtc()`
+  (frame-cache-keyed, `rtcCacheKey` reset in boot()).
+
+### Tests
+- `cargo test --release`: 19/19. Site suite 16/16: flow, blinky, audio,
+  ltdc, can, dma, eth_irq, exti, flash, rx_interrupt, spi_flash, oled, tft,
+  buzzer, audio_play, **rtc**.
+- `node site/test_rtc.mjs`: asserts the 7 markers + `emu.rtc.time` BCD
+  decode (10:45:30 dow3 15/07/26) + `temp === 27.5` + `change === 1`.
+- Browser smoke (`/tmp/opencode/devices_smoke.mjs`, 5 devices): RTC panel
+  shows `time 10:45:30 DOW=3 15/07/26 temp=27.50 C` + `RTC verify OK` in the
+  UART. NOTE: the smoke now **restarts Chrome between every boot** — the
+  1.75GB periph `mem_map` fails with UC_ERR_NOMEM once wasm heaps accumulate
+  after ~4 boots on this memory-starved box (see §11).
+
+### Gotchas
+- Regfile test expectations: after a pointer+data write transaction, reads
+  continue from the register AFTER the last written one (pointer advanced),
+  NOT from the original pointer — the first test iteration got this wrong.
+- The `rtc` device config registers the regfile AND enables `emu.rtc`;
+  passing only `regfile` in a test yields `emu.rtc === null` (silently).
+- BCD: `bcd2n`/`bin2bcd` in JS/firmware; the DS3231 dow register is raw
+  (not BCD) — stored as 3 = 0x03, BCD decode yields 3 either way.
