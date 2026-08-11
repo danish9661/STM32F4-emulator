@@ -145,6 +145,10 @@ interrupt is pending; it then services TX/RX and resumes.
 
 ## 5. Test drivers in `pkg/`
 
+> **Peripheral test reference:** `site/PERIPHERAL_TESTS.md` documents what
+> every peripheral test (site/test_*.mjs) does, its expected UART output
+> markers, and pass conditions.
+
 | File | Purpose |
 |---|---|
 | `test_webserver_net.mjs` | **Main target.** Boots webserver firmware, injects DHCP Offer/Ack + TCP SYN/ACK + HTTP GET, expects to capture the 3 HTTP response TX packets. Currently stalls (see §7). |
