@@ -291,6 +291,7 @@ impl Peripherals {
             (0x4002_8100, "Ethernet_MMC"),
             (0x4002_8700, "Ethernet_PTP"),
             (0x4002_9000, "Ethernet_DMA"),
+            (0x5005_0000, "DCMI"),
             (0xE000_E000, "NVIC"), (0xE000_E010, "SysTick"), (0xE000_ED00, "SCB"),
             (0xE004_2000, "DBGMCU"),
         ];

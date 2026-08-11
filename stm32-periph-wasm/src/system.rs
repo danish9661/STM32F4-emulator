@@ -267,6 +267,75 @@ pub(crate) fn audio_buses_ready() -> bool {
     AUDIO_SOURCE.get().is_some() && AUDIO_CAPTURE.get().is_some()
 }
 
+// ── SPI bus taps (JS hardware layer plumbing) ──────────────────────────────
+// Event word layout: bit 31 = CS edge event, bit 30 = asserted (1) when CS
+// is a CS event, bits 7..0 = the shifted byte. Byte and CS events interleave
+// in the order the controller produced them.
+static SPI_TAP_EVENTS: OnceLock<Mutex<std::collections::HashMap<String, Vec<u32>>>> = OnceLock::new();
+static SPI_TAP_MISO: OnceLock<Mutex<std::collections::HashMap<String, Vec<u8>>>> = OnceLock::new();
+
+fn spi_tap_events() -> &'static Mutex<std::collections::HashMap<String, Vec<u32>>> {
+    SPI_TAP_EVENTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+fn spi_tap_miso() -> &'static Mutex<std::collections::HashMap<String, Vec<u8>>> {
+    SPI_TAP_MISO.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+pub fn spi_tap_push_byte(peri: &str, v: u8) {
+    spi_tap_events().lock().unwrap().entry(peri.to_string()).or_default().push(v as u32 & 0xFF);
+}
+pub fn spi_tap_push_cs(peri: &str, asserted: bool) {
+    let e = 0x8000_0000u32 | (if asserted { 1 << 30 } else { 0 });
+    spi_tap_events().lock().unwrap().entry(peri.to_string()).or_default().push(e);
+}
+pub fn spi_tap_take_events(peri: &str) -> Vec<u32> {
+    spi_tap_events().lock().unwrap().get_mut(peri).map(std::mem::take).unwrap_or_default()
+}
+pub fn spi_tap_miso_push(peri: &str, bytes: &[u8]) {
+    spi_tap_miso().lock().unwrap().entry(peri.to_string()).or_default().extend_from_slice(bytes);
+}
+pub(crate) fn spi_tap_miso_pop(peri: &str) -> u8 {
+    spi_tap_miso().lock().unwrap().get_mut(peri).and_then(|q| q.first().copied().map(|b| { q.remove(0); b })).unwrap_or(0xFF)
+}
+
+// ── I2C bus taps (JS hardware layer plumbing) ─────────────────────────────
+static I2C_TAP_TX: OnceLock<Mutex<std::collections::HashMap<String, Vec<u8>>>> = OnceLock::new();
+static I2C_TAP_RX: OnceLock<Mutex<std::collections::HashMap<String, Vec<u8>>>> = OnceLock::new();
+
+fn i2c_tap_tx() -> &'static Mutex<std::collections::HashMap<String, Vec<u8>>> {
+    I2C_TAP_TX.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+fn i2c_tap_rx() -> &'static Mutex<std::collections::HashMap<String, Vec<u8>>> {
+    I2C_TAP_RX.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+pub fn i2c_tap_push_tx(peri: &str, v: u8) {
+    i2c_tap_tx().lock().unwrap().entry(peri.to_string()).or_default().push(v);
+}
+pub fn i2c_tap_take_tx(peri: &str) -> Vec<u8> {
+    i2c_tap_tx().lock().unwrap().get_mut(peri).map(std::mem::take).unwrap_or_default()
+}
+pub fn i2c_tap_rx_push(peri: &str, bytes: &[u8]) {
+    i2c_tap_rx().lock().unwrap().entry(peri.to_string()).or_default().extend_from_slice(bytes);
+}
+pub(crate) fn i2c_tap_rx_pop(peri: &str) -> u8 {
+    i2c_tap_rx().lock().unwrap().get_mut(peri).and_then(|q| q.first().copied().map(|b| { q.remove(0); b })).unwrap_or(0xFF)
+}
+
+// ── DCMI frame source (JS camera sensor plumbing) ─────────────────────────
+static DCMI_FRAME: OnceLock<Mutex<Option<(u32, u32, Vec<u8>)>>> = OnceLock::new();
+pub fn dcmi_feed_frame(w: u32, h: u32, pixels: &[u8]) {
+    *DCMI_FRAME.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some((w, h, pixels.to_vec()));
+}
+pub(crate) fn dcmi_frame() -> Option<(u32, u32, Vec<u8>)> {
+    DCMI_FRAME.get()?.lock().unwrap().clone()
+}
+pub fn dcmi_clear() {
+    if let Some(m) = DCMI_FRAME.get() {
+        *m.lock().unwrap() = None;
+    }
+}
+
 pub struct WasmSystem {
     pub p: Rc<Peripherals>,
     pending_dma: RefCell<Vec<DmaTransfer>>,

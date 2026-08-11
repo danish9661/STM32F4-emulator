@@ -94,6 +94,26 @@ export function audio_take_capture() {
 }
 
 /**
+ * Forget any fed frame (stop the camera).
+ */
+export function dcmi_clear() {
+    wasm.dcmi_clear();
+}
+
+/**
+ * Provide the next camera frame to the DCMI controller (8-bit pixels,
+ * row-major, width x height). The next CAPTURE start consumes it.
+ * @param {number} w
+ * @param {number} h
+ * @param {Uint8Array} pixels
+ */
+export function dcmi_feed_frame(w, h, pixels) {
+    const ptr0 = passArray8ToWasm0(pixels, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.dcmi_feed_frame(w, h, ptr0, len0);
+}
+
+/**
  * @param {number} index
  * @returns {Uint32Array}
  */
@@ -326,6 +346,47 @@ export function has_pending_interrupt() {
 }
 
 /**
+ * Queue bytes the tapped I2C slave answers on master reads.
+ * @param {string} peripheral
+ * @param {Uint8Array} bytes
+ */
+export function i2c_push_rx(peripheral, bytes) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    wasm.i2c_push_rx(ptr0, len0, ptr1, len1);
+}
+
+/**
+ * Register a protocol-agnostic I2C slave on a peripheral. Must be called
+ * before init(). The address is ACKed like any other registered slave;
+ * master writes queue for JS (`i2c_take_tx`) and JS-pushed bytes are
+ * returned on master reads (`i2c_push_rx`).
+ * @param {string} peripheral
+ * @param {number} address
+ */
+export function i2c_register_slave(peripheral, address) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.i2c_register_slave(ptr0, len0, address);
+}
+
+/**
+ * Drain all bytes the master wrote to a tapped I2C slave since last call.
+ * @param {string} peripheral
+ * @returns {Uint8Array}
+ */
+export function i2c_take_tx(peripheral) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.i2c_take_tx(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
  * Initialize the emulator with hardcoded peripheral map.
  * Must be called after adding all ext devices (add_spi_flash, add_i2c_eeprom).
  */
@@ -401,6 +462,48 @@ export function spi_flash_debug(peripheral) {
     var v2 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
     return v2;
+}
+
+/**
+ * Push bytes the JS device answers on the MISO line (read transactions).
+ * @param {string} peripheral
+ * @param {Uint8Array} bytes
+ */
+export function spi_push_miso(peripheral, bytes) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    wasm.spi_push_miso(ptr0, len0, ptr1, len1);
+}
+
+/**
+ * Drain all SPI tap events for a peripheral since the last call.
+ * @param {string} peripheral
+ * @returns {Uint32Array}
+ */
+export function spi_take_events(peripheral) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.spi_take_events(ptr0, len0);
+    var v2 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v2;
+}
+
+/**
+ * Register a protocol-agnostic tap on an SPI peripheral. Must be called
+ * before init(). `cs` optionally names the GPIO pin used as chip select
+ * ("PA4"); when given, CS edges are reported in the event stream.
+ * @param {string} peripheral
+ * @param {string | null} [cs]
+ */
+export function spi_tap(peripheral, cs) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    var ptr1 = isLikeNone(cs) ? 0 : passStringToWasm0(cs, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    var len1 = WASM_VECTOR_LEN;
+    wasm.spi_tap(ptr0, len0, ptr1, len1);
 }
 
 export function tick() {

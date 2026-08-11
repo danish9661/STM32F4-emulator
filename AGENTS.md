@@ -924,3 +924,72 @@ not the createEmulator path.
   `node site/test_ltdc.mjs` + `node tools/make_firmware.mjs` (24
   firmwares, includes audio_test + ltdc_test) + `?fw=audio_test` /
   `?fw=ltdc_test` dropdown entries.
+
+---
+
+## 13. Protocol taps (SPI/I2C) + DCMI frame feed (2026-08-11)
+
+Protocol-agnostic chip-side taps: the JS driver watches byte traffic on a
+peripheral and can answer it, without any device protocol knowledge in the
+Rust model. All register-before-`init()`.
+
+### Exports (both `pkg` Node build and `site/vendor` browser build)
+
+| Export | Purpose |
+|---|---|
+| `spi_tap(peripheral, cs?)` | Register a tap on an SPI peripheral (e.g. `'SPI1'`, `'PA4'`). While the CS pin is LOW (real GPIO ODR gating via `register_cs_callbacks` + `sel_state`), every byte the master writes to DR is queued as an event. |
+| `spi_push_miso(peripheral, bytes)` | Queue bytes the tapped device answers on master DR reads (0xFF when empty). |
+| `spi_take_events(peripheral)` | Drain the event queue (u32 per event). Byte events: `v & 0xFF`. CS events: bit31 set, bit30 = 1 HIGH / 0 LOW. Events are pushed per byte and per CS edge (edge-triggered, change-only). |
+| `i2c_register_slave(peripheral, address)` | Register a tap slave (e.g. `'I2C1'`, `0x3C`). Pushed into `ExtDevices.i2c_taps`, picked up by `find_i2c_devices` like an eeprom. |
+| `i2c_take_tx(peripheral)` | Drain all bytes the master wrote to the tapped slave since the last call. |
+| `i2c_push_rx(peripheral, bytes)` | Queue bytes answered on master reads (in order; 0xFF when empty). |
+| `dcmi_feed_frame(w, h, pixels)` | Feed a complete frame (YUV/RGB raw bytes) into the DCMI; `consumes_js_fed_frame_with_line_and_frame_flags` cargo test covers it. |
+
+### I2C bus semantics you MUST respect in a smoke/driver
+The model mirrors real F407 register semantics — a raw DR poke does NOT
+route bytes. Correct master flow (verified end-to-end):
+`CR1 START` (bit 8) → `DR = (addr<<1)|rw` → read SR1 (0x14, latches ADDR)
+→ read SR2 (0x18, AddrSent→Active) → DR data writes now route to the tap.
+The AddrSent→Active transition lives ONLY in the SR2 read path
+(i2c.rs:107-118); there is no DR-write arm for AddrSent. SR1 is 0x14,
+SR2 is 0x18 (not 0x08/0x0C — those are OAR1/OAR2).
+
+### SPI CS gating
+Bytes only route while CS is asserted (pin low). No CS pin (`cs` omitted)
+means always selected. CS edge events fire on ODR change only (the
+callback tracks `prev`), so the initial CS state does not spam the queue.
+
+### wasm-bindgen glue change (Node build) — gotcha
+The current wasm-bindgen emits a **synchronous** nodejs glue: `require()`
+instantiates the wasm immediately (reads `_bg.wasm` from `__dirname`,
+calls `__wbindgen_start()`); there is NO `default` export anymore (an
+`init()` exists but is not needed). `site/emulator.js` now guards with
+`typeof bindings.default === 'function'` and skips init when absent.
+The browser build (`site/vendor`) still exports `__wbg_init as default`
+(ESM). cli.mjs never called `default` so it is unaffected.
+
+### wasm-pack out-dir clean — gotcha
+`wasm-pack build --release --target web --out-dir ../site/vendor`
+DELETES the out-dir contents, including the manually-placed
+`stm32f407.svd` + `unicorn_arm.js`/`unicorn_arm.cjs` that
+`site/index.html`/`app.js` fetch at runtime, and writes a `.gitignore`
+containing `*` (which would silently untrack vendor assets). After any
+vendor rebuild: restore the three files from `pkg/unicorn_arm.{js,cjs}`
+and `monox/stm32f407.svd`, then `rm site/vendor/.gitignore`.
+
+### Removed ext_devices
+`display.rs`, `lcd.rs`, `touchscreen.rs`, `usart_probe.rs` were deleted
+(unreferenced; superseded by the tap approach). `ext_devices/mod.rs` now
+carries `spi_taps`/`i2c_taps` vecs; `find_spi_devices`/`find_i2c_devices`
+append them to the device list so CS/addr routing is shared with the
+flash/eeprom devices.
+
+### Verification (2026-08-11)
+- `cargo test --release`: 16/16 (incl. `firmware_flow_via_gpio_cs`,
+  `consumes_js_fed_frame_with_line_and_frame_flags`).
+- Node smoke (pkg): SPI tap bytes `x12,x34` + CSL event + MISO readback
+  `0xAB`; I2C TX `0xde,0xad`, I2C RX `0xbe 0xef` in order; DCMI feed no
+  throw. Script pattern in `/tmp/opencode/tap_verify5.cjs`.
+- Site suite 11/11 exit 0: flow, blinky, audio, ltdc, can, dma
+  (comprehensive_test, `FAIL: 00000000` = known 0-count artifact), eth_irq,
+  exti, flash, rx_interrupt, spi_flash.

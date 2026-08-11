@@ -58,8 +58,10 @@ export async function createEmulator(opts) {
     };
 
     const Module = await unicorn();
-    if (wasmInit) await bindings.default({ module_or_path: wasmInit });
-    else await bindings.default();
+    if (typeof bindings.default === 'function') {
+        if (wasmInit) await bindings.default({ module_or_path: wasmInit });
+        else await bindings.default();
+    }
     for (const cfg of (ext_devices.spi_flash || [])) {
         add_spi_flash(cfg.peripheral, cfg.jedec_id, cfg.data, cfg.cs ?? null);
     }

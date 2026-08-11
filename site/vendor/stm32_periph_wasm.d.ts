@@ -34,6 +34,17 @@ export function audio_source_remaining(): number;
  */
 export function audio_take_capture(): Uint16Array;
 
+/**
+ * Forget any fed frame (stop the camera).
+ */
+export function dcmi_clear(): void;
+
+/**
+ * Provide the next camera frame to the DCMI controller (8-bit pixels,
+ * row-major, width x height). The next CAPTURE start consumes it.
+ */
+export function dcmi_feed_frame(w: number, h: number, pixels: Uint8Array): void;
+
 export function dma_get_pending(index: number): Uint32Array;
 
 export function dma_get_pending_count(): number;
@@ -143,6 +154,24 @@ export function gpio_set_input(port: number, pin: number, value: boolean): void;
 export function has_pending_interrupt(): boolean;
 
 /**
+ * Queue bytes the tapped I2C slave answers on master reads.
+ */
+export function i2c_push_rx(peripheral: string, bytes: Uint8Array): void;
+
+/**
+ * Register a protocol-agnostic I2C slave on a peripheral. Must be called
+ * before init(). The address is ACKed like any other registered slave;
+ * master writes queue for JS (`i2c_take_tx`) and JS-pushed bytes are
+ * returned on master reads (`i2c_push_rx`).
+ */
+export function i2c_register_slave(peripheral: string, address: number): void;
+
+/**
+ * Drain all bytes the master wrote to a tapped I2C slave since last call.
+ */
+export function i2c_take_tx(peripheral: string): Uint8Array;
+
+/**
  * Initialize the emulator with hardcoded peripheral map.
  * Must be called after adding all ext devices (add_spi_flash, add_i2c_eeprom).
  */
@@ -175,6 +204,23 @@ export function periph_write(addr: number, width: number, value: number): void;
  */
 export function spi_flash_debug(peripheral: string): Uint32Array;
 
+/**
+ * Push bytes the JS device answers on the MISO line (read transactions).
+ */
+export function spi_push_miso(peripheral: string, bytes: Uint8Array): void;
+
+/**
+ * Drain all SPI tap events for a peripheral since the last call.
+ */
+export function spi_take_events(peripheral: string): Uint32Array;
+
+/**
+ * Register a protocol-agnostic tap on an SPI peripheral. Must be called
+ * before init(). `cs` optionally names the GPIO pin used as chip select
+ * ("PA4"); when given, CS edges are reported in the event stream.
+ */
+export function spi_tap(peripheral: string, cs?: string | null): void;
+
 export function tick(): void;
 
 /**
@@ -201,6 +247,8 @@ export interface InitOutput {
     readonly audio_load_wav: (a: number, b: number) => [number, number];
     readonly audio_source_remaining: () => number;
     readonly audio_take_capture: () => [number, number];
+    readonly dcmi_clear: () => void;
+    readonly dcmi_feed_frame: (a: number, b: number, c: number, d: number) => void;
     readonly dma_get_pending: (a: number) => [number, number];
     readonly dma_get_pending_count: () => number;
     readonly dma_periph_read: (a: number, b: number, c: number, d: number) => [number, number];
@@ -225,6 +273,9 @@ export interface InitOutput {
     readonly gpio_read_output: (a: number, b: number) => number;
     readonly gpio_set_input: (a: number, b: number, c: number) => void;
     readonly has_pending_interrupt: () => number;
+    readonly i2c_push_rx: (a: number, b: number, c: number, d: number) => void;
+    readonly i2c_register_slave: (a: number, b: number, c: number) => void;
+    readonly i2c_take_tx: (a: number, b: number) => [number, number];
     readonly init: () => void;
     readonly init_svd: (a: number, b: number) => void;
     readonly is_watchdog_reset_requested: () => number;
@@ -233,6 +284,9 @@ export interface InitOutput {
     readonly periph_read: (a: number, b: number) => number;
     readonly periph_write: (a: number, b: number, c: number) => void;
     readonly spi_flash_debug: (a: number, b: number) => [number, number];
+    readonly spi_push_miso: (a: number, b: number, c: number, d: number) => void;
+    readonly spi_take_events: (a: number, b: number) => [number, number];
+    readonly spi_tap: (a: number, b: number, c: number, d: number) => void;
     readonly tick: () => void;
     readonly tick_n: (a: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;

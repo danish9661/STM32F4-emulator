@@ -1,16 +1,12 @@
 pub mod spi_flash;
 pub mod i2c_eeprom;
-pub mod usart_probe;
-pub mod lcd;
-pub mod touchscreen;
-pub mod display;
+pub mod spi_tap;
+pub mod i2c_tap;
 
 pub use spi_flash::SpiFlash;
 pub use i2c_eeprom::I2cEeprom;
-pub use usart_probe::UsartProbe;
-pub use lcd::Lcd;
-pub use touchscreen::Touchscreen;
-pub use display::Display;
+pub use spi_tap::SpiTap;
+pub use i2c_tap::I2cTap;
 
 use std::{rc::Rc, cell::RefCell};
 
@@ -31,10 +27,14 @@ pub struct I2cDeviceEntry {
 pub struct ExtDevices {
     pub spi_flashes: Vec<Rc<RefCell<SpiFlash>>>,
     pub i2c_eeproms: Vec<Rc<RefCell<I2cEeprom>>>,
-    pub usart_probes: Vec<Rc<RefCell<UsartProbe>>>,
-    pub lcds: Vec<Rc<RefCell<Lcd>>>,
-    pub touchscreens: Vec<Rc<RefCell<Touchscreen>>>,
-    pub displays: Vec<Rc<RefCell<Display>>>,
+    /// Protocol-agnostic SPI bus taps: every byte shifted while the device
+    /// is CS-selected is queued for the JS hardware layer, and bytes pushed
+    /// from JS are returned on the MISO line. Chip-side plumbing only — no
+    /// device protocol knowledge lives here.
+    pub spi_taps: Vec<Rc<RefCell<SpiTap>>>,
+    /// Protocol-agnostic I2C slaves: an address acknowledged on the bus
+    /// routes its bytes to the JS hardware layer. Chip-side plumbing only.
+    pub i2c_taps: Vec<Rc<RefCell<I2cTap>>>,
 }
 
 impl ExtDevices {
@@ -49,30 +49,12 @@ impl ExtDevices {
                 });
             }
         }
-        for d in &self.usart_probes {
-            if d.borrow().config.peripheral == peri_name {
-                result.push(SpiDeviceEntry {
-                    cs: None,
-                    device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
-                    name: format!("{} usart-probe", peri_name),
-                });
-            }
-        }
-        for d in &self.lcds {
+        for d in &self.spi_taps {
             if d.borrow().config.peripheral == peri_name {
                 result.push(SpiDeviceEntry {
                     cs: d.borrow().config.cs.as_ref().map(|s| parse_pin(s)),
                     device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
-                    name: format!("{} lcd", peri_name),
-                });
-            }
-        }
-        for d in &self.touchscreens {
-            if d.borrow().config.peripheral == peri_name {
-                result.push(SpiDeviceEntry {
-                    cs: d.borrow().config.cs.as_ref().map(|s| parse_pin(s)),
-                    device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
-                    name: format!("{} touchscreen", peri_name),
+                    name: format!("{} spi-tap", peri_name),
                 });
             }
         }
@@ -85,38 +67,31 @@ impl ExtDevices {
             .next()
             .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>)
         .or_else(||
-        self.usart_probes.iter()
-            .filter(|d| d.borrow().config.peripheral == peri_name)
-            .next()
-            .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>))
-        .or_else(||
-        self.lcds.iter()
-            .filter(|d| d.borrow().config.peripheral == peri_name)
-            .next()
-            .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>))
-        .or_else(||
-        self.touchscreens.iter()
+        self.spi_taps.iter()
             .filter(|d| d.borrow().config.peripheral == peri_name)
             .next()
             .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>))
     }
 
     pub fn find_i2c_devices(&self, peri_name: &str) -> Vec<I2cDeviceEntry> {
-        self.i2c_eeproms.iter()
+        let mut out: Vec<I2cDeviceEntry> = self.i2c_eeproms.iter()
             .filter(|d| d.borrow().config.peripheral == peri_name)
             .map(|d| I2cDeviceEntry {
                 address: d.borrow().config.address,
                 device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
                 name: format!("{} i2c-eeprom", peri_name),
             })
-            .collect()
-    }
-
-    pub fn find_mem_device(&self, peri_name: &str) -> Option<Rc<RefCell<dyn ExtDevice<u32, u32>>>> {
-        self.displays.iter()
-            .filter(|d| d.borrow().config.peripheral == peri_name)
-            .next()
-            .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<u32, u32>>>)
+            .collect();
+        for d in &self.i2c_taps {
+            if d.borrow().config.peripheral == peri_name {
+                out.push(I2cDeviceEntry {
+                    address: d.borrow().config.address,
+                    device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
+                    name: format!("{} i2c-tap", peri_name),
+                });
+            }
+        }
+        out
     }
 }
 
@@ -129,15 +104,17 @@ pub trait ExtDevice<A, T> {
     fn cs_changed(&mut self, _sys: &crate::system::System, _asserted: bool) {}
 }
 
+pub fn parse_pin(s: &str) -> (u8, u8) {
+    let b = s.as_bytes();
+    if b.len() >= 3 {
+        let port = (b[1] as char).to_ascii_uppercase() as u8 - b'A';
+        let pin: u8 = s[2..].trim_start_matches('0').parse().unwrap_or(0);
+        (port, pin)
+    } else {
+        (0, 0)
+    }
+}
+
 // SAFETY: WASM is single-threaded; Rc/RefCell are safe
 unsafe impl Send for ExtDevices {}
 unsafe impl Sync for ExtDevices {}
-
-fn parse_pin(s: &str) -> (u8, u8) {
-    let re = regex::Regex::new(r"^P?([A-Za-z])(\d+)$").unwrap();
-    let caps = re.captures(s).expect("Invalid pin format");
-    let port = caps.get(1).unwrap().as_str().to_uppercase().chars().next().unwrap();
-    let port = port as u8 - b'A';
-    let pin: u8 = caps.get(2).unwrap().as_str().parse().unwrap();
-    (port, pin)
-}

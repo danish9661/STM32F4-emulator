@@ -1,34 +1,22 @@
-use std::{rc::Rc, cell::RefCell};
-use crate::ext_devices::{ExtDevices, ExtDevice};
+use crate::ext_devices::ExtDevices;
 use crate::system::System;
 use super::Peripheral;
 
 pub struct Bank {
     pub name: String,
-    ext_device: Option<Rc<RefCell<dyn ExtDevice<u32, u32>>>>,
     bcr: u32,
     btr: u32,
 }
 
 impl Bank {
-    pub fn new(bank: usize, ext_devices: &ExtDevices) -> Self {
+    pub fn new(bank: usize, _ext_devices: &ExtDevices) -> Self {
         let name = format!("FSMC.BANK{}", bank + 1);
-        let ext_device = ext_devices.find_mem_device(&name);
-        let name = ext_device.as_ref()
-            .map(|d| d.borrow_mut().connect_peripheral(&name))
-            .unwrap_or(name);
-        Self { name, ext_device, bcr: 0, btr: 0 }
+        Self { name, bcr: 0, btr: 0 }
     }
 
-    fn read_data(&mut self, sys: &System, offset: u32) -> u32 {
-        self.ext_device.as_ref().map(|d| d.borrow_mut().read(sys, offset)).unwrap_or(0)
-    }
+    fn read_data(&mut self, _sys: &System, _offset: u32) -> u32 { 0 }
 
-    fn write_data(&mut self, sys: &System, offset: u32, value: u32) {
-        if let Some(d) = self.ext_device.as_ref() {
-            d.borrow_mut().write(sys, offset, value);
-        }
-    }
+    fn write_data(&mut self, _sys: &System, _offset: u32, _value: u32) {}
 }
 
 pub struct Fsmc {

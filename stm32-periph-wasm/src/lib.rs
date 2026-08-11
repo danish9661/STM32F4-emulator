@@ -329,3 +329,82 @@ pub fn add_software_spi(name: &str, cs: Option<String>, clk: &str, miso: &str, m
     system::get_software_spi_configs().lock().unwrap()
         .push((name.to_string(), cs, clk.to_string(), miso.to_string(), mosi.to_string()));
 }
+
+// ── SPI bus taps (JS hardware layer) ───────────────────────────────────────
+// The wasm models the chip only: the SPI controller shifts bytes on the
+// bus, and a tap makes every byte/CS event visible to the JS hardware
+// layer, which implements the actual device protocol (TFT, sensor, ...).
+// Byte/CS event word: bit31 = CS edge, bit30 = asserted, bits7..0 = byte.
+
+/// Register a protocol-agnostic tap on an SPI peripheral. Must be called
+/// before init(). `cs` optionally names the GPIO pin used as chip select
+/// ("PA4"); when given, CS edges are reported in the event stream.
+#[wasm_bindgen]
+pub fn spi_tap(peripheral: &str, cs: Option<String>) {
+    use crate::ext_devices::spi_tap::{SpiTap, SpiTapConfig};
+    let config = SpiTapConfig {
+        peripheral: peripheral.to_string(),
+        cs,
+    };
+    system::get_ext_devices().lock().unwrap().spi_taps
+        .push(std::rc::Rc::new(std::cell::RefCell::new(SpiTap::new(config))));
+}
+
+/// Drain all SPI tap events for a peripheral since the last call.
+#[wasm_bindgen]
+pub fn spi_take_events(peripheral: &str) -> Vec<u32> {
+    system::spi_tap_take_events(peripheral)
+}
+
+/// Push bytes the JS device answers on the MISO line (read transactions).
+#[wasm_bindgen]
+pub fn spi_push_miso(peripheral: &str, bytes: &[u8]) {
+    system::spi_tap_miso_push(peripheral, bytes);
+}
+
+// ── I2C bus taps (JS hardware layer) ───────────────────────────────────────
+
+/// Register a protocol-agnostic I2C slave on a peripheral. Must be called
+/// before init(). The address is ACKed like any other registered slave;
+/// master writes queue for JS (`i2c_take_tx`) and JS-pushed bytes are
+/// returned on master reads (`i2c_push_rx`).
+#[wasm_bindgen]
+pub fn i2c_register_slave(peripheral: &str, address: u8) {
+    use crate::ext_devices::i2c_tap::{I2cTap, I2cTapConfig};
+    let config = I2cTapConfig {
+        peripheral: peripheral.to_string(),
+        address,
+    };
+    system::get_ext_devices().lock().unwrap().i2c_taps
+        .push(std::rc::Rc::new(std::cell::RefCell::new(I2cTap::new(config))));
+}
+
+/// Drain all bytes the master wrote to a tapped I2C slave since last call.
+#[wasm_bindgen]
+pub fn i2c_take_tx(peripheral: &str) -> Vec<u8> {
+    system::i2c_tap_take_tx(peripheral)
+}
+
+/// Queue bytes the tapped I2C slave answers on master reads.
+#[wasm_bindgen]
+pub fn i2c_push_rx(peripheral: &str, bytes: &[u8]) {
+    system::i2c_tap_rx_push(peripheral, bytes);
+}
+
+// ── DCMI frame source (JS camera sensor) ───────────────────────────────────
+// The camera sensor is external hardware (JS). This feeds one captured
+// frame (8-bit pixels, row-major) into the on-chip DCMI controller, which
+// consumes it with real LINE/FRAME/OVR semantics.
+
+/// Provide the next camera frame to the DCMI controller (8-bit pixels,
+/// row-major, width x height). The next CAPTURE start consumes it.
+#[wasm_bindgen]
+pub fn dcmi_feed_frame(w: u32, h: u32, pixels: &[u8]) {
+    system::dcmi_feed_frame(w, h, pixels);
+}
+
+/// Forget any fed frame (stop the camera).
+#[wasm_bindgen]
+pub fn dcmi_clear() {
+    system::dcmi_clear();
+}
