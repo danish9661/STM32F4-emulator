@@ -15,15 +15,17 @@ A test prints `PASS` (exit 0) or `FAIL` (exit 1) at the end.
 # one test
 node site/test_oled.mjs
 
-# all 15
+# all 16
 for t in site/test_*.mjs; do echo "-- $t"; node $t >/dev/null && echo PASS || echo FAIL; done
 
 # Rust unit tests of the peripheral model itself
 cd stm32-periph-wasm && cargo test --release
 ```
 
-Browser smoke (all four device firmwares on the console page, headless
-Chrome on port 9223, site on 8123): `node /tmp/opencode/devices_smoke.mjs`
+Browser smoke (all five device firmwares on the console page, headless
+Chrome on port 9223, site on 8123; restarts Chrome between boots to dodge
+mem_map pressure, see AGENTS.md §11):
+`node /tmp/opencode/devices_smoke.mjs`
 
 ---
 
@@ -283,6 +285,33 @@ TIM2 registers and reports the freq/duty changes.
 
 ---
 
+### test_rtc.mjs — DS3231 RTC over I2C (rtc_test)
+Firmware writes pointer 0x00 + 7 BCD bytes (sec 30/min 45/hr 10/dow 3/
+day 15/mon 7/yr 26) in one I2C transaction, then reads all 7 back with a
+pointer-then-streaming-read transaction (register pointer persists across
+transactions), verifies them, and reads the temperature pair 0x11/0x12.
+The model's `I2cRegFile` (pointer-addressed, auto-increment, `% size`
+clamp) backs the device; the JS side decodes the BCD registers live into
+`emu.rtc.time`/`temp`.
+- Exercises: I2C1 master flow (START → addr → SR1/SR2 latch → TXE/RXNE),
+  register-file tap, BCD decode, signed 0.25 °C temp.
+- Expected UART:
+  ```
+  RTC set done
+  RTC read done
+  RTC time=10:45:30 DOW=3 15/07/26
+  RTC verify OK
+  RTC temp=27.50
+  RTC test done
+  ```
+- Pass: those markers + `emu.rtc.time` BCD-decodes to
+  `{sec:30,min:45,hour:10,dow:3,day:15,mon:7,year:26}` and `temp === 27.5`.
+- Register-file seed: BCD time 0x00-0x06 (10:45:30 dow3 15/07/26), temp
+  MSB/LSB 0x11/0x12 = 0x1B/0x80 (27.50 C). The guest overwrites time; the
+  temp regs stay at the seed (read-only on real silicon).
+
+---
+
 ## Expected PASS summary
 
 | Test | Firmware | Peripherals | Key output markers |
@@ -302,10 +331,11 @@ TIM2 registers and reports the freq/duty changes.
 | test_audio_play | audio_play_test | I2S1 | `I2S ready`, samples>2048 |
 | test_can | can_test | CAN1/CAN2 | `CAN arbitration OK`, `CAN loopback OK` |
 | test_buzzer | buzzer_test | TIM2/GPIO | `BUZZ 262 Hz`, `BUZZ 523 Hz`, `Buzzer done` |
+| test_rtc | rtc_test | I2C1/regfile | `RTC verify OK`, `RTC time=10:45:30 DOW=3 15/07/26`, temp=27.5 |
 
-Plus the Rust unit suite: `cargo test --release` (16 tests covering CAN
+Plus the Rust unit suite: `cargo test --release` (19 tests covering CAN
 arbitration, filters, FIFOs, loopback, SPI taps/CS, I2C taps, DCMI frames,
-WAV parsing, LTDC scanout — 16/16 green).
+WAV parsing, LTDC scanout, register files — 19/19 green).
 
 ## Gotchas
 
@@ -313,7 +343,7 @@ WAV parsing, LTDC scanout — 16/16 green).
   known artifact, not a failure (test_dma checks only the `PASS DMA2` lines).
 - Tests are step-count driven; they stop early on their success marker, so a
   PASS usually takes only a few seconds.
-- The site tests are fresh-process runs; the browser smoke boots all four
-  device firmwares by navigation and can hit mem_map errors on a
-  memory-starved box (see AGENTS.md §11 Gotchas) — restart Chrome with a
-  fresh `--user-data-dir` if boots start failing.
+- The site tests are fresh-process runs; the browser smoke boots all five
+  device firmwares by navigation (restarting Chrome between boots) and can
+  hit mem_map errors on a memory-starved box (see AGENTS.md §11 Gotchas) —
+  restart Chrome with a fresh `--user-data-dir` if boots start failing.

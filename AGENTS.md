@@ -349,6 +349,14 @@ the hook mem-write pattern.
 
 ## 8. NEXT PHASE — what is left to do
 
+> **SUPERSEDED (2026-08-12):** this Windows-era plan (webserver.ino +
+> `test_webserver_net.mjs`) is historical. The Linux port (§10) achieved the
+> same goal through the gateway path: `cli.mjs` + `openhw-gw` (real gVisor
+> stack) runs `eth_http` through DHCP → TCP → HTTP end-to-end, verified by
+> `scripts/verify_ethernet.sh` and 100M-instruction soaks (§10). The
+> `webserver/` dir and `test_webserver_net.mjs` do not exist in this repo.
+> The text below is kept for context only.
+
 ### Goal
 Get the webserver firmware to complete: DHCP Discover -> Offer -> Request ->
 Ack -> TCP handshake -> HTTP GET -> 3-chunk HTTP response emitted over UART/TX,
@@ -1007,9 +1015,11 @@ flash/eeprom devices.
 - Node smoke (pkg): SPI tap bytes `x12,x34` + CSL event + MISO readback
   `0xAB`; I2C TX `0xde,0xad`, I2C RX `0xbe 0xef` in order; DCMI feed no
   throw. Script pattern in `/tmp/opencode/tap_verify5.cjs`.
-- Site suite 11/11 exit 0: flow, blinky, audio, ltdc, can, dma
-  (comprehensive_test, `FAIL: 00000000` = known 0-count artifact), eth_irq,
-  exti, flash, rx_interrupt, spi_flash.
+- Site suite 16/16 exit 0 (current, §15): flow, blinky, audio, ltdc, can,
+  dma (comprehensive_test, `FAIL: 00000000` = known 0-count artifact),
+  eth_irq, exti, flash, rx_interrupt, spi_flash, oled, tft, buzzer,
+  audio_play, rtc. (At the time of §13 it was 11/11 — the four device
+  tests + rtc came later.)
 
 ---
 
@@ -1096,12 +1106,14 @@ renderers are frame-cache-keyed (no repaint when nothing changed).
   128*8 on page 7, empty pages 1/2/4/6), `site/test_tft.mjs` (quadrant
   colors + done markers), `site/test_buzzer.mjs` (294 Hz / 50% / 2 changes),
   `site/test_audio_play.mjs` (samples drain non-zero).
-- Browser smoke (`/tmp/opencode/devices_smoke.mjs`): boots all four via
-  `?fw=` navigation on headless Chrome (port 9223, site on 8123), asserts
-  OLED lit=1452 + bar=1024, TFT quadrant pixels
+- Browser smoke (`/tmp/opencode/devices_smoke.mjs`): boots all five
+  device presets via `?fw=` navigation on headless Chrome (port 9223, site
+  on 8123), asserting OLED lit=1452 + bar=1024, TFT quadrant pixels
   `#f80000,#00fc00,#0000f8,#f8fcf8` (RGB565: red 0xF800 → #f80000, green
   0x07E0 → #00fc00, blue 0x001F → #0000f8, white → #f8fcf8), buzzer
-  "294 Hz, duty 50%", speaker "playing".
+  "294 Hz, duty 50%", speaker "playing", RTC `10:45:30 ... temp=27.50 C`.
+  NOTE: it restarts Chrome between every boot — the 1.75GB periph
+  `mem_map` fails with UC_ERR_NOMEM once wasm heaps accumulate (see §11).
 
 ### Gotchas
 - **TFT framebuffer byte order**: `processTft` stores RGB565 **big-endian**
