@@ -1189,3 +1189,28 @@ racing a pure-JS parser — so it needed a **device-side tap in Rust**.
   passing only `regfile` in a test yields `emu.rtc === null` (silently).
 - BCD: `bcd2n`/`bin2bcd` in JS/firmware; the DS3231 dow register is raw
   (not BCD) — stored as 3 = 0x03, BCD decode yields 3 either way.
+
+### Web demo UX pass (2026-08-12)
+- **UART RX terminal input fixed**: the input box strips CR/LF (HTML spec),
+  so newline-terminated RX firmwares could not be driven from the UI. The
+  keydown handler now appends the terminator itself: Enter → sends the line
+  + `\r` (0x0D), Shift+Enter → `\n` (0x0A), empty Enter → bare `\r`.
+  Verified in-browser: rx_interrupt_test gets "Hello\r" and prints
+  `CRC=F1AFE56C`. Button renamed "Send RX" → "Send".
+- **Gateway status counters**: the status label is now refreshed on every
+  frame (`refreshGwLabel` in onTx/onmessage) — it previously only updated at
+  connect/disconnect, so a run showed "0 TX / 0 RX" forever despite traffic.
+  Counters reset per boot. **Gateway RX frames now appear in the packet
+  viewer** (`addFrame('rx', buf)` in onmessage — netsim replies already did).
+- **Save log button**: downloads `uart-<fw>.txt` (Blob of the terminal
+  buffer).
+- **can_test preset added** to the dropdown (firmware bundle is now 30
+  firmwares; `tools/make_firmware.mjs` gained the can_test entry).
+- Browser smoke for all of it: `/tmp/opencode/webux_smoke.mjs` (can_test
+  done-marker, rx_interrupt CRC via the UI input box, save button);
+  `/tmp/opencode/gw_web_smoke.mjs` (boots eth_http in the page with the real
+  gateway: assert TCP connected + HTTP body + !CONN + live TX/RX counts +
+  gateway RX frames in the viewer). Gateway smoke needs openhw-gw on 5099
+  (relaunch with `setsid nohup ./openhw-gw &` — `pkill -f openhw-gw`
+  self-matches the shell, use the full path pattern or kill by pid) and the
+  local HTTP server on 8092 (`node /tmp/opencode/http_server.js`).

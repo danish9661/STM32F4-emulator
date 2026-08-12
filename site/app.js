@@ -120,7 +120,7 @@ const describeFrame = (dir, pkt) => {
 };
 
 // ── gateway (real network stack, optional) ─────────────────────────────────
-const gw = { ws: null, connected: false };
+const gw = { ws: null, connected: false, tx: 0, rx: 0 };
 const setGwStatus = (connected, text) => {
     gw.connected = connected;
     $('gwDot').className = 'dot ' + (connected ? 'run' : 'stop');
@@ -128,13 +128,16 @@ const setGwStatus = (connected, text) => {
     $('btnGw').textContent = connected ? 'Disconnect' : 'Connect';
 };
 
+const gwLabel = () => `${gw.connected ? 'connected — ' + gw.tx + ' TX / ' + gw.rx + ' RX frames to the real stack' : 'offline — using the scripted network (netsim)'}`;
+const refreshGwLabel = () => { if (gw.connected) $('gwStatus').textContent = gwLabel(); };
+
 const connectGateway = () => {
     const url = $('gwUrl').value.trim() || 'ws://127.0.0.1:5099/api/network-gateway';
     if (!/^wss?:\/\//.test(url)) return setGwStatus(false, 'bad URL — expected ws:// or wss://');
     if (gw.ws) {
         try { gw.ws.close(); } catch (e) {}
         gw.ws = null;
-        setGwStatus(false, 'offline — using the scripted network (netsim)');
+        setGwStatus(false, gwLabel());
         return;
     }
     let ws;
@@ -142,20 +145,23 @@ const connectGateway = () => {
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => {
         gw.ws = ws;
-        setGwStatus(true, 'connected — Ethernet frames go to the real stack');
+        setGwStatus(true, gwLabel());
         appendUart(`── gateway connected (${url}) ──\r\n`);
     };
     ws.onmessage = (ev) => {
         if (typeof ev.data === 'string') return; // control message (e.g. RESET)
         const buf = new Uint8Array(ev.data);
+        gw.rx++;
+        refreshGwLabel();
+        addFrame('rx', buf);
         if (emu) emu.injectFrame(buf);
     };
     ws.onclose = () => {
         if (gw.ws !== ws) return;
         gw.ws = null;
-        setGwStatus(false, 'disconnected — using the scripted network (netsim)');
+        setGwStatus(false, gwLabel());
     };
-    ws.onerror = () => setGwStatus(false, 'connection error — using the scripted network (netsim)');
+    ws.onerror = () => setGwStatus(false, gwLabel().replace('connected', 'connection error'));
 };
 
 // ── firmware loading ───────────────────────────────────────────────────────
@@ -240,6 +246,8 @@ const boot = async () => {
     if (id !== session) return;
 
     netsim = gw.connected ? null : createNetSim();
+    gw.tx = 0; gw.rx = 0;
+    if (gw.connected) setGwStatus(true, gwLabel());
     emu = await createEmulator({
         firmware: fw,
         bindings,
@@ -254,6 +262,8 @@ const boot = async () => {
         onTx: (pkt) => {
             addFrame('tx', pkt);
             if (gw.connected && gw.ws) {
+                gw.tx++;
+                refreshGwLabel();
                 try { gw.ws.send(pkt); } catch (e) {}
             } else if (netsim) {
                 for (const reply of netsim.onTx(pkt)) {
@@ -324,19 +334,30 @@ $('btnReset').addEventListener('click', () => {
 $('btnClear').addEventListener('click', () => { uartEl.textContent = uartBuf = ''; });
 $('btnGw').addEventListener('click', connectGateway);
 
-const sendRx = () => {
+const sendRx = (term) => {
     const input = $('rxInput');
     const text = input.value;
-    if (!text || !emu) return;
-    appendUart('> ' + text + '\r\n');
-    const bytes = new Uint8Array(text.length);
+    const bytes = new Uint8Array(text.length + (term ? 1 : 0));
     for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xFF;
+    if (term) bytes[text.length] = term;
+    if (!bytes.length || !emu) return;
+    appendUart('> ' + text + (term === 0x0D ? '\r' : term === 0x0A ? '\n' : '') + '\r\n');
     emu.sendUart(bytes);
     input.value = '';
 };
-$('btnSend').addEventListener('click', sendRx);
+$('btnSend').addEventListener('click', () => sendRx(0x0D));
 $('rxInput').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') sendRx();
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    sendRx(e.shiftKey ? 0x0A : 0x0D);
+});
+$('btnSaveLog').addEventListener('click', () => {
+    if (!uartBuf) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([uartBuf], { type: 'text/plain' }));
+    a.download = 'uart-' + (image ? image.name : 'log') + '.txt';
+    a.click();
+    URL.revokeObjectURL(a.href);
 });
 window.addEventListener('error', (e) => setStatus('error: ' + e.message, 'err'));
 window.addEventListener('unhandledrejection', (e) => setStatus('boot error: ' + String(e.reason?.message || e.reason).replace(/\s+/g, ' ').slice(0, 300), 'err'));

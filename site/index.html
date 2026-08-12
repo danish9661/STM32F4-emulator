@@ -112,13 +112,14 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
       <button id="btnStop">Stop</button>
       <button id="btnReset">Reset</button>
       <button id="btnClear">Clear log</button>
+      <button id="btnSaveLog">Save log</button>
       <label style="color:var(--dim);font-size:12px;margin-left:auto;display:flex;align-items:center;gap:6px;">
         <input type="checkbox" id="chkAuto" checked> autoscroll
       </label>
     </div>
     <div class="controls" style="border-top:none;padding-top:0;">
-      <input type="text" id="rxInput" placeholder="UART RX — type bytes to send to the firmware (Enter to send)" style="flex:1;background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font:inherit;font-size:12px;">
-      <button id="btnSend">Send RX</button>
+      <input type="text" id="rxInput" placeholder="UART RX — type bytes to send to the firmware (Enter=CR, Shift+Enter=LF)" style="flex:1;background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font:inherit;font-size:12px;">
+      <button id="btnSend">Send</button>
     </div>
   </section>
   <aside>
@@ -154,6 +155,7 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
             <option value="buzzer_test">buzzer_test — TIM2 PWM melody (live frequency in the buzzer panel)</option>
             <option value="audio_play_test">audio_play_test — I2S sine playback (speaker panel plays the samples)</option>
             <option value="rtc_test">rtc_test — DS3231 RTC time/temp over I2C1 (live clock in the RTC panel)</option>
+            <option value="can_test">can_test — CAN1/CAN2 bus loopback + arbitration (2-node bus, no device panel)</option>
             <option value="test_firmware">test_firmware — TIM2/ADC dump</option>
           </optgroup>
           <optgroup label="Crypto">
