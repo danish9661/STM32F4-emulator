@@ -162,6 +162,7 @@ void DOOM_SubmitAudio(void)
     const uint32_t scale = active
         ? ((32768u << 8) / (16129u * (uint32_t)active))
         : 0;
+    int16_t frame[FRAME_SAMPLES];
     for (s = 0; s < FRAME_SAMPLES; s++)
     {
         int total = 0;
@@ -181,8 +182,12 @@ void DOOM_SubmitAudio(void)
         int mix16 = (int)((total * (int64_t)scale) >> 8);
         if (mix16 > 32767) mix16 = 32767;
         else if (mix16 < -32768) mix16 = -32768;
-        while (!(SPI1_SR & SPI1_SR_TXE))
-            ;
-        SPI1_DR = (uint32_t)(uint16_t)(mix16 & 0xFFFF);
+        frame[s] = (int16_t)mix16;
     }
+    // Model's TXE is always set once I2S is on — poll once per frame
+    // instead of per sample (saves ~315 mem-hook calls per frame).
+    while (!(SPI1_SR & SPI1_SR_TXE))
+        ;
+    for (s = 0; s < FRAME_SAMPLES; s++)
+        SPI1_DR = (uint32_t)(uint16_t)frame[s];
 }

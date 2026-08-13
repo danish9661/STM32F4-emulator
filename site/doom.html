@@ -18,7 +18,8 @@
   #status.error { color: #f66; }
   #stats { color: #8c8; font-size: 12px; white-space: nowrap; }
   #keys { color: #aaf; font-size: 12px; white-space: nowrap; flex: 1; text-align: right; }
-  .btns { display: flex; gap: 6px; }
+  .btns { display: flex; gap: 6px; align-items: center; }
+  #detailLbl { font-size: 12px; color: #aaa; user-select: none; white-space: nowrap; }
   button { background: #222; color: #ccc; border: 1px solid #444; padding: 3px 10px;
            cursor: pointer; font: 12px monospace; }
   button:hover { background: #333; }
@@ -39,6 +40,7 @@
   <div id="stats">MIPS: — · FPS: —</div>
   <div id="keys"></div>
   <div class="btns">
+    <label id="detailLbl" title="Low detail: renders half columns (classic low-res mode), ~30-40% fewer instructions per frame"><input type="checkbox" id="detail"> Low detail</label>
     <button id="btnReset">Reset</button>
     <button id="btnPause">Pause</button>
     <button id="btnFull">Fullscreen</button>
@@ -58,7 +60,7 @@
 </div>
 <pre id="uart"></pre>
 
-<script src="vendor/unicorn_arm.js?v=16"></script>
-<script type="module" src="doom.js?v=16"></script>
+<script src="vendor/unicorn_arm.js?v=18"></script>
+<script type="module" src="doom.js?v=18"></script>
 </body>
 </html>

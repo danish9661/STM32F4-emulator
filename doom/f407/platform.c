@@ -120,10 +120,6 @@ void _exit(int code) { for (;;) ; }
 
 // ── DG_* platform callbacks ─────────────────────────────────────────────────
 
-// Monotonic ms clock, advanced only by DG_SleepMs so I_GetTime is stable
-// within a single doomgeneric_Tick call.
-static volatile uint32_t s_msClock = 0;
-
 void DG_Init()
 {
     // Expose the engine's framebuffer pointer (SCREENWIDTH*SCREENHEIGHT
@@ -144,17 +140,23 @@ void DG_DrawFrame()
 
 void DG_SleepMs(uint32_t ms)
 {
-    s_msClock += ms;
-    g_abi.clockMs = s_msClock;
-    // NOTE: no busy-wait here.  On real hardware this loop paces the game
-    // to 35 tics/s; under the instruction-count driven emulator it instead
-    // wasted ~360k instructions per frame (~80% of every frame's cost).  The
-    // JS driver now paces by wall clock against g_abi.clockMs/frameCount.
+    // No busy-wait.  Advance the ABI clock RELATIVELY (monotonic, never
+    // backwards) so I_GetTime-based waits (the melt wipe's "while (tics<=0)"
+    // loop) resolve immediately even in harnesses with no driver clock
+    // writer; the JS driver's absolute wall-clock writes per emu.step() stay
+    // authoritative and this never flaps them (an absolute write here would
+    // race the driver and send the wait loop's tics negative).
+    g_abi.clockMs += ms;
 }
 
 uint32_t DG_GetTicksMs()
 {
-    return s_msClock;
+    // Read the ABI clockMs slot: the JS driver writes the page wall clock
+    // before every emu.step(), so I_GetTime keeps advancing even while the
+    // guest is inside a single doomgeneric_Tick (the level-start melt wipe
+    // spins in "while (tics<=0)" until time advances — with a guest-internal
+    // clock it wedges forever).
+    return g_abi.clockMs;
 }
 
 int DG_GetKey(int *pressed, unsigned char *key)

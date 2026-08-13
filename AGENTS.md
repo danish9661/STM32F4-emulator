@@ -1338,6 +1338,36 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   CUMULATIVE session-wide** (module counter in emulator.js HOOK_CODE) —
   assign `instTotal = res.instCount`, NEVER `+=` (summing yields fake
   MIPS 33419/41568 readings).
+- **Melt-wipe stall fix (2026-08-13) — the smoke's "menu never opens / W key
+  did not move the player" root cause**: the level/title transitions run the
+  melt wipe, and its driver loop (d_main.c D_Display, ~line 318) is
+  `do { do { nowtime = I_GetTime(); tics = nowtime - wipestart; I_Sleep(1); }
+  while (tics <= 0); wipestart = nowtime; done = wipe_ScreenWipe(wipe_Melt,
+  ..., tics); } while (!done);` — it can advance only ONE melt iteration per
+  clock advance, and the melt needs ~40 iterations (~15 count-up + 25 scroll
+  dy=8 rows at height 200). The page wrote the wall clock to the ABI CLOCKMS
+  slot **once per rAF**, and headless Chrome rAF throttles to ~2 Hz, so each
+  transition froze the guest for **~20 s** (diag4 caught PC spinning in
+  `wipe_doMelt`'s inner column loop 0x0800373A-0x08003756 with FRAMECOUNT
+  frozen at 32 while CLOCKMS advanced). Worse, the old guest-side
+  `DG_SleepMs` did an **absolute** `g_abi.clockMs = s_msClock` write that
+  raced the page's absolute write — the clock flapped between tiny guest
+  values (5, 16, 47…) and page values (~3000+), so `tics` went negative and
+  the wait loop could spin past its budget. Fix, both sides:
+  1. **site/doom.js**: `emu.write32(CLOCKMS, performance.now())` now runs
+     before **every** `emu.step()` in the pacing loop (was: once per rAF).
+  2. **doom/f407/platform.c**: `DG_SleepMs` now advances the ABI clock
+     **relatively** (`g_abi.clockMs += ms`) instead of an absolute write —
+     monotonic, never flaps the driver's value, and still self-advances the
+     clock in the Node harness (which has no page writer). With both, the
+     wipe's wait loop resolves in one iteration and each melt runs `tics`
+     iterations per call — a transition melt completes in ~1-2 steps.
+  Verified: browser smoke PASS (W-move 442.8 units / turn 126.9° / audio
+  42525 samples / 24.0 MIPS / 27 FPS), `node site/test_doom.mjs` PASS (74
+  fb changes, audio peak 1). Diagnosis path: /tmp/opencode/doom_diag4.mjs
+  (PC probe via `e.uc.reg_read_i32(11)` — **ARM_REG_PC=11, NOT 15** (15 is
+  D1); reg_read_i32(15) silently returns 0).
+
 - **Fast path (2026-08-13)**: emulator.js gained `minimalPolls: true` +
   `blockCounting: true` (createEmulator opts, doom.js + test_doom pass both).
   `minimalPolls` skips the per-instruction tick_n/watchdog/flash/dma/eth wasm

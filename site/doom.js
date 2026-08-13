@@ -21,6 +21,20 @@ const img = ctx.createImageData(320, 200);
 const FRAME_MS = 1000 / 35;      // one game frame (tic) per 28.57ms realtime
 const STEP_BUDGET = 12;          // max steps per rAF
 const MS_BUDGET = 16;            // max wall time per rAF
+const STEP_INST = 300000;        // instructions per emu.step() (fewer, bigger steps)
+
+// Low-detail render (guest global detailLevel @ 0xC0016814, 0=high 1=low):
+// the engine renders every other column -> ~30-40% fewer guest instructions
+// per frame.  Default ON for speed; toggled from the topbar (persisted).
+const DETAIL_LEVEL = 0xC0016814;
+let lowDetail = localStorage.getItem('doomDetail') !== '0';
+const detailToggle = $('detail');
+detailToggle.checked = lowDetail;
+detailToggle.addEventListener('change', () => {
+    lowDetail = detailToggle.checked;
+    localStorage.setItem('doomDetail', lowDetail ? '1' : '0');
+    if (emu) emu.write32(DETAIL_LEVEL, lowDetail ? 1 : 0);
+});
 
 // Doom keycodes (engine/doomkeys.h; TranslateKey is identity)
 const KEY = {
@@ -49,6 +63,7 @@ const KEYRD = ABI + 0x04n;         // u32 read index (guest)
 const RING = ABI + 0x08n;          // 256-byte ring, 2 bytes/event
 const DGSB = ABI + 0x510n;         // u32 DG_ScreenBuffer
 const FRAMECOUNT = ABI + 0x514n;   // u32 rendered-frame counter (guest)
+const CLOCKMS = ABI + 0x518n;      // u32 ms clock (guest reads via DG_GetTicksMs)
 const PALETTE = ABI + 0x110n;      // 1024 B BGRA
 
 let emu = null, uc = null;
@@ -57,7 +72,7 @@ const held = new Set();            // doom keycodes currently held down
 const sentPos = new Map();         // code -> ring byte position of its keydown
 const upPending = new Map();       // code -> D ring position; U waits until the guest consumed the D
 let fbAddr = 0n;
-let fbHash = 0, framesShown = 0;
+let framesShown = 0;
 let uartBuf = '';
 let paused = false;
 let booted = false;
@@ -67,13 +82,15 @@ let activeMs = 0;                    // wall time spent inside emu.step() (MIPS 
 let paceWall = 0, paceFrames = -1;  // realtime pacing anchor (wall ms, frame#)
 
 // ── audio: drain the model's I2S1 capture FIFO into WebAudio at 11025 Hz ──
-// Samples accumulate in a rolling buffer; one BufferSource is scheduled per
-// AUDIO_CHUNK samples (~0.74 s) so hundreds of tiny per-frame sources don't
-// glitch/crackle.  If playback starves (chunks late), the schedule restarts
-// at currentTime instead of building up latency.
+// Samples accumulate; one BufferSource per AUDIO_CHUNK (~0.19 s — smaller
+// chunks = lower latency; 8192-sample chunks delayed sound ~0.7 s).  The
+// source plays at playbackRate = production rate / 11025 so on slow machines
+// the audio slows down (matching the slow game) instead of chopping/restarting.
 let audioCtx = null, audioNextTime = 0, audioBuf = new Float32Array(0);
+let audioProd = 0, audioProdWall = 0;   // production-rate estimator
+let audioRate = 1;
 window.__audioTotal = 0;            // samples played (smoke assertions)
-const AUDIO_CHUNK = 8192;
+const AUDIO_CHUNK = 2048;
 
 function initAudio() {
     if (audioCtx) return;
@@ -82,20 +99,28 @@ function initAudio() {
 
 function playAudio() {
     if (!audioCtx || audioBuf.length < AUDIO_CHUNK) return;
-    if (audioNextTime - audioCtx.currentTime > 0.5) audioNextTime = audioCtx.currentTime;
+    const now = audioCtx.currentTime;
+    if (audioNextTime - now > 0.5) audioNextTime = now;
     const buf = audioCtx.createBuffer(1, audioBuf.length, 11025);
     buf.getChannelData(0).set(audioBuf);
     const src = audioCtx.createBufferSource();
     src.buffer = buf;
+    src.playbackRate.value = audioRate;
     src.connect(audioCtx.destination);
     src.start(audioNextTime);
-    audioNextTime += buf.duration;
+    audioNextTime += buf.duration / audioRate;
     audioBuf = new Float32Array(0);
 }
 
 function drainAudio() {
     const s = emu.takeSpeakerSamples();
     if (!s || !s.length) return;
+    const wall = performance.now();
+    if (audioProdWall) {
+        audioRate = Math.min(1, Math.max(0.2, (audioProd / Math.max(1, wall - audioProdWall)) / (11025 / 1000)));
+    }
+    audioProdWall = wall;
+    audioProd = s.length;
     const next = new Float32Array(audioBuf.length + s.length);
     next.set(audioBuf, 0);
     next.set(s, audioBuf.length);
@@ -252,8 +277,10 @@ async function boot() {
             ],
             extra_mem: [{ addr: 0xB8000000, data: new Uint8Array(wad) }],
             minimalPolls: true, blockCounting: true,
+            maxBatch: STEP_INST,
             ext_devices: { speaker: true },   // enable the I2S capture drain
         });
+        emu.write32(DETAIL_LEVEL, lowDetail ? 1 : 0);
         uc = emu.uc;
         window.__emu = emu;
         fbAddr = 0n;
@@ -276,7 +303,10 @@ function fnv1a(data) {
     return h >>> 0;
 }
 
-// renders one game frame; returns true if the framebuffer changed
+// renders one game frame; returns true if the framebuffer changed.
+// hash-only gating: the guest frame counter can stall (e.g. the level-start
+// melt wipe spins on I_GetTime), so it must never gate the repaint.
+let lastHash = -1;
 function renderFb() {
     if (!emu) return false;
     const dgsb = emu.read32(DGSB);
@@ -289,8 +319,8 @@ function renderFb() {
         return false;
     }
     const h = fnv1a(fb);
-    if (h === fbHash) return false;
-    fbHash = h;
+    if (h === lastHash) return false;
+    lastHash = h;
     const pal = new Uint8Array(uc.mem_read(PALETTE, 256 * 4));
     const d = img.data;
     for (let i = 0; i < 64000; i++) {
@@ -324,6 +354,12 @@ async function loop() {
             let target = Infinity;
             if (paceFrames >= 0) target = paceFrames + Math.floor((performance.now() - paceWall) / FRAME_MS);
             while (steps < STEP_BUDGET && performance.now() - t0 < MS_BUDGET && frames < target) {
+                // drive the guest clock BEFORE every step: DG_GetTicksMs reads
+                // g_abi.clockMs, so I_GetTime advances even inside a single
+                // doomgeneric_Tick (the melt wipe spins on I_GetTime).  A
+                // once-per-rAF write stalls the wipe ~1 melt-iteration per rAF
+                // (≈20s+ per transition at throttled headless rAF rates).
+                emu.write32(CLOCKMS, Math.floor(performance.now()) & 0xffffffff);
                 const res = emu.step();
                 instTotal = res.instCount;   // cumulative counter
                 steps++;
