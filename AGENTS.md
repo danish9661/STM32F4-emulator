@@ -1326,10 +1326,12 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
 - **Canvas fills the viewport via `fitCanvas()` (JS)**: CSS-only sizing
   failed twice (`width:min(100vw,calc(100vh*1.6))` resolved to ~931px in
   a 980px viewport; `max-width/max-height:100%` caps but never grows, so
-  the canvas stayed at intrinsic 640×400). fitCanvas reads `#screenWrap`
-  rect and sets explicit px `canvas.style.width/height` keeping 16:10
-  (`w = min(areaW-2, (areaH-2)*1.6)`); called at boot start, after
-  `createEmulator`, and on window resize. Headless quirk: dpr=1.25.
+  the canvas stayed at intrinsic 640×400). fitCanvas now **stretches the
+  canvas edge-to-edge** to the `#screenWrap` rect (explicit px
+  `canvas.style.width/height` — the user asked for full-fill, accepting
+  the aspect distortion instead of centered 16:10 bars); called at boot
+  start, after `createEmulator`, and on window resize. Headless quirk:
+  dpr=1.25.
 - CDP smoke: `/tmp/opencode/doom_smoke2.mjs` — boots in headless Chrome
   (fresh `--user-data-dir` per run; cache-bust via `?v=N` — the doom.js
   module is cached), dispatches the menu sequence via synthetic

@@ -138,9 +138,8 @@ function appendUart(chunk) {
 
 function fitCanvas() {
     const wrap = $('screenWrap').getBoundingClientRect();
-    const w = Math.max(2, Math.min(wrap.width - 4, (wrap.height - 4) * 1.6));
-    canvas.style.width = Math.floor(w) + 'px';
-    canvas.style.height = 'auto';
+    canvas.style.width = Math.max(2, Math.floor(wrap.width)) + 'px';
+    canvas.style.height = Math.max(2, Math.floor(wrap.height)) + 'px';
 }
 window.addEventListener('resize', fitCanvas);
 
