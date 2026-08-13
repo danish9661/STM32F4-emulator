@@ -1331,13 +1331,14 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   lock. Links from index.html footer.
 - **Browser pacing (2026-08-13)**: 1 `emu.step()` per rAF was ~13 tics/s
   (each game frame ≈ 450k inst: tick ≈90k + DG_SleepMs(15) ≈360k). doom.js
-  runs up to `STEP_BUDGET = 6` steps per rAF within `MS_BUDGET = 16` ms
-  wall → measured **~24 MIPS / ~16 FPS** in headless Chrome (blockCounting
-  mode, smoke run: 151M inst, 110.7° turn in a 4s W+ArrowLeft hold).
-  `emu.step()` returns `{pc, stopped, instCount}` where **instCount is
-  CUMULATIVE session-wide** (module counter in emulator.js HOOK_CODE) —
-  assign `instTotal = res.instCount`, NEVER `+=` (summing yields fake
-  MIPS 33419/41568 readings).
+  runs up to `STEP_BUDGET = 12` steps per rAF within `MS_BUDGET = 16` ms
+  wall, paced by the realtime lock (§ Realtime lock below — guest clock
+  derived from FRAMECOUNT, 60000-inst steps) → measured **~24 MIPS / ~24 FPS**
+  in headless Chrome (blockCounting mode, smoke run: 216M inst, 135.4° turn
+  in a 4s W+ArrowLeft hold).  `emu.step()` returns `{pc, stopped,
+  instCount}` where **instCount is CUMULATIVE session-wide** (module counter
+  in emulator.js HOOK_CODE) — assign `instTotal = res.instCount`, NEVER `+=`
+  (summing yields fake MIPS 33419/41568 readings).
 - **Melt-wipe stall fix (2026-08-13) — the smoke's "menu never opens / W key
   did not move the player" root cause**: the level/title transitions run the
   melt wipe, and its driver loop (d_main.c D_Display, ~line 318) is
@@ -1445,18 +1446,64 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   I2S1 init in `I_InitSound`: RCC_APB2ENR bit 12, CR1=0, I2SPR=(2)|(1<<8),
   I2SCFGR=(1<<11)|(1<<10)|(1<<9)|(1<<0); per-sample `while(!(SR & TXE))` +
   DR write (audio_play_test pattern).
-- **Playback (doom.js)**: `ext_devices: { speaker: true }` (the emulator's
-  speaker drain is opt-in, `takeSpeakerSamples()` else returns empty);
-  `AudioContext` created lazily on first keydown (autoplay policy); samples
-  accumulate into a rolling Float32 buffer and ONE `BufferSource` is
-  scheduled per **1024 samples (~0.09 s)** at 11025 Hz — scheduling per-frame
-  315-sample sources glitches/crackles (~340 sources/s). **Latency bound:
-  `MAX_AHEAD = 0.25 s` — when `audioNextTime - currentTime` exceeds it
-  (production ran ahead: boot catch-up, bursts) the backlog is DROPPED and
-  the queue restarts, so delay never accumulates past ~0.35 s** (the old
-  `> 0.5` restart kept the queued sources, and the `audioRate` cap at 1.0
-  meant surplus production became permanent latency). Counter
-  `window.__audioTotal` for smoke assertions.
+- **Playback (doom.js, AudioWorklet since 2026-08-13)**: `ext_devices:
+  { speaker: true }` (the emulator's speaker drain is opt-in,
+  `takeSpeakerSamples()` else returns empty); `AudioContext` created lazily
+  on first keydown (autoplay policy, async `initAudio` awaits
+  `addModule('audio-worklet.js?v=19')`). `drainAudio` posts each drain as a
+  **transferred Float32Array** to the worklet node (`port.postMessage(s,
+  [s.buffer])` — `takeSpeakerSamples` returns a fresh array, safe to
+  transfer). The worklet (`site/audio-worklet.js`, `DoomAudio`) resamples
+  11025 Hz → context rate (linear interp) on the audio thread — no
+  BufferSource scheduling jitter, no crackles; bounded queue MAX_QUEUE=4096
+  (~0.37 s) DROPS OLDEST samples when production runs ahead (the one-time
+  boot catch-up), so latency never exceeds ~0.4 s; underrun (slow machine)
+  emits silence and resets `pos=0` so the next samples play immediately.
+  Counter `window.__audioTotal` for smoke assertions. Historical (pre-
+  worklet): BufferSource per 1024 samples with `playbackRate` adaption +
+  `MAX_AHEAD` drop guard — replaced because chunk scheduling glitched at
+  high rates and adaptive rate desynced production.
+- **Realtime lock (2026-08-13)**: the guest clock is DERIVED FROM ITS OWN
+  FRAMECOUNT — `emu.write32(CLOCKMS, floor(bootClock + frames * FRAME_MS))`
+  before EVERY `emu.step()` (`bootClock` = wall time at boot, `FRAMECOUNT`
+  read each step). Guest time can never run ahead of the guest's own
+  execution, so the melt wipe (and every `I_GetTime`-based wait) resolves
+  in one step and audio production stays locked to wall 11025 samples/s.
+  Pacing: `paceFrames=0/paceWall=bootClock` anchored AT BOOT (was: anchored
+  at first rendered frame with `target=Infinity` — that let boot run ahead
+  and created a one-time catch-up burst); `target = paceFrames + floor(now
+  - paceWall)/FRAME_MS` per rAF; `STEP_INST` reduced 300000 → 60000
+  (~0.66 frames/step) so pacing overshoot ≤1 frame. DOOM needs only ~5
+  MIPS for 35 fps, so the smaller steps cost nothing measurable (smoke
+   measured 24.0 MIPS). The realtime lock + worklet combined make browser
+   audio play in lockstep with the game (rv32emu-demo parity).
+- **Background-tab audio pump (2026-08-13, the "running in background, sound
+  is broken" fix)**: rAF stops entirely in a hidden tab, so the realtime lock
+  starves production and the worklet queue underruns in ~0.37 s. doom.js adds
+  `pumpAudio()`: `setInterval(pumpAudio, 40)` + worklet hunger messages
+  (`postMessage('need')` when `q.length < MAX_QUEUE`, throttled 0.02 s)
+  drive 12-step bursts of `emu.step(20000)` while `performance.now() -
+  lastRAF > 200` (rAF alive = the loop drives; the pump never double-drives).
+  The clock write is **monotonic** (`clockMs = Math.max(clockMs, bootClock +
+  frames*FRAME_MS)`) — never write a lower value, or the melt wipe's
+  `while (tics<=0)` wait (and the engine's tic pacing) sees negative deltas
+  and spins: the melt's wait loop is a thin loop whose sustained spin is the
+  §7-class TCI wedge. **Chrome TCI wedge finding (headless Chrome only,
+  never Node 22.22): a melt-wipe crossing stepped GAP-FREE (back-to-back
+  `emu.step` calls, no rAF/interval gaps) wedges the Unicorn WASM instance
+  permanently; the SAME stepping at the rAF cadence (12-step bursts ~40 ms
+  apart) is clean over 200M+ inst. So the pump uses 20k-inst steps (the §7
+  safe budget) in 12-step bursts paced by a 40 ms interval — the rAF
+  cadence. Verified: hidden-tab test freezes rAF 4 s → audio keeps flowing
+  (+15750 samples ≈ 54 % of the visible rate) → rAF restored → full rate;
+  PASS. Debug handles: `window.__pump`, `window.__audioNode`,
+  `window.__audioPumpTimer`, `window.__noDrain`, `window.__noUart`,
+  `window.__audioTotal`. ABI gotcha: FRAMECOUNT/CLOCKMS are at **0x20002514 /
+  0x20002518** (ABI base 0x20002000 + 0x514/0x518) — reading 0x20000514
+  returns a dead SRAM location (frames always 0 → clock pinned → guest
+  time-waits never resolve). Known limits: Chrome throttles hidden-tab
+  intervals to ~1 s for audible tabs, so fully-hidden production drops to
+  ~1 burst/s — partial background audio is browser-enforced.
 - **WASD works now**: the engine's default bindings (m_controls.c) are
   arrow-only (key_up=0xAD, key_down=0xAF, key_left=0xAC, key_right=0xAE,
   strafe 0xA0/0xA1, use 0xA2, fire 0xA3); `DOM_TO_DOOM` in doom.js maps

@@ -21,7 +21,9 @@ const img = ctx.createImageData(320, 200);
 const FRAME_MS = 1000 / 35;      // one game frame (tic) per 28.57ms realtime
 const STEP_BUDGET = 12;          // max steps per rAF
 const MS_BUDGET = 16;            // max wall time per rAF
-const STEP_INST = 300000;        // instructions per emu.step() (fewer, bigger steps)
+const STEP_INST = 60000;         // instructions per emu.step() (~0.66 frames;
+                                 // small steps = <1-frame pacing overshoot +
+                                 // tight clock updates for time-based waits)
 
 // Low-detail render (guest global detailLevel @ 0xC0016814, 0=high 1=low):
 // the engine renders every other column -> ~30-40% fewer guest instructions
@@ -76,68 +78,100 @@ let framesShown = 0;
 let uartBuf = '';
 let paused = false;
 let booted = false;
+window.__pump = () => pumpAudio(); // debug handle for hidden-tab tests
+window.__audioNode = null; // set by initAudio for tests
 let instTotal = 0;
+let lastRAF = 0;                     // last rAF timestamp — when stale (>200ms)
+                                     // rAF is dead (hidden tab) and the
+                                     // worklet hunger pump takes over driving
 let statLast = performance.now(), statInst = 0;
 let activeMs = 0;                    // wall time spent inside emu.step() (MIPS meter)
 let paceWall = 0, paceFrames = -1;  // realtime pacing anchor (wall ms, frame#)
+let bootClock = 0;
+let clockMs = 0;                    // monotonic guest clock: never written
+                                    // below the previous value (the melt wipe
+                                    // waits on tics = now - start and would
+                                    // spin forever on a backwards clock)                  // wall time at boot; guest clock is derived
+                                    // from FRAMECOUNT so guest time NEVER runs
+                                    // ahead of its own execution (realtime lock)
 
-// ── audio: drain the model's I2S1 capture FIFO into WebAudio at 11025 Hz ──
-// Samples accumulate; one BufferSource per AUDIO_CHUNK (~0.09 s — smaller
-// chunks = lower latency; 8192-sample chunks delayed sound ~0.7 s).  The
-// source plays at playbackRate = production rate / 11025 so on slow machines
-// the audio slows down (matching the slow game) instead of chopping/restarting.
-// MAX_AHEAD bounds the scheduled queue: when production runs ahead of
-// realtime (boot catch-up, burst), the backlog is dropped instead of
-// accumulating, keeping latency at MAX_AHEAD + one chunk.
-let audioCtx = null, audioNextTime = 0, audioBuf = new Float32Array(0);
-let audioProd = 0, audioProdWall = 0;   // production-rate estimator
-let audioRate = 1;
-window.__audioTotal = 0;            // samples played (smoke assertions)
-const AUDIO_CHUNK = 1024;
-const MAX_AHEAD = 0.25;             // s of scheduled audio allowed
+// ── audio: drain the model's I2S1 capture FIFO into an AudioWorklet ──
+// The worklet (audio-worklet.js) resamples 11025 Hz -> context rate and
+// plays continuously on the audio thread — no BufferSource scheduling
+// jitter, latency bounded by its MAX_QUEUE drop guard.  The guest is
+// realtime-locked (CLOCKMS = bootClock + frames*FRAME_MS), so production is
+// ~11025 samples/s wall; the worklet only underruns on slow machines.
+let audioCtx = null, audioNode = null;
+window.__audioTotal = 0;            // samples drained (smoke assertions)
 
-function initAudio() {
+async function initAudio() {
     if (audioCtx) return;
-    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { /* no audio */ }
+    try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        await audioCtx.audioWorklet.addModule('audio-worklet.js?v=19');
+        audioNode = new AudioWorkletNode(audioCtx, 'doom-audio');
+        window.__audioNode = audioNode;
+        audioNode.connect(audioCtx.destination);
+        // audio-driven stepping (fallback): when the worklet queue runs low
+        // it posts 'need' — pump emulation steps to refill.  Only engages
+        // when rAF is dead (hidden tab / throttled to <5 Hz) — while visible
+        // the rAF loop is the sole driver (no double-driving, no CPU waste).
+        audioNode.port.onmessage = (e) => {
+            if (e.data === 'need') pumpAudio();
+        };
+        // self-timed safety net: pump on a timer too, so production never
+        // depends on the worklet's message cadence (headless/weird audio
+        // clocks deliver 'need' sparsely).  Chrome throttles hidden-tab
+        // intervals to ~1 s for audible tabs — each pump then runs the full
+        // 1 s of target delta (~35 frames, well under the 200-step cap).
+        if (!window.__audioPumpTimer) {
+            // 40ms cadence = the rAF loop's proven-safe stepping pattern
+            // (12-step bursts, ~40ms apart — 200M+ inst clean in the smoke;
+            // sustained gap-free stepping through a melt wipe wedges Chrome's
+            // TCI, see AGENTS §7/§16).  Hidden-tab intervals are throttled
+            // further by Chrome (~1s for audible tabs) — production then
+            // drops to ~1 burst/s, which the worklet queue (0.37s) cannot
+            // cover: fully-hidden tabs get partial audio, by browser design.
+            window.__audioPumpTimer = setInterval(pumpAudio, 40);
+        }
+    } catch (e) {
+        audioCtx = null;
+        audioNode = null;
+    }
 }
 
-function playAudio() {
-    if (!audioCtx || audioBuf.length < AUDIO_CHUNK) return;
-    const now = audioCtx.currentTime;
-    if (audioNextTime - now > MAX_AHEAD) {
-        // Production ran ahead of realtime (boot catch-up, burst): drop the
-        // backlog and restart the queue so latency never grows past
-        // MAX_AHEAD + one chunk instead of accumulating forever.
-        audioNextTime = now;
-        audioBuf = new Float32Array(0);
-        return;
+function pumpAudio() {
+    if (!booted || paused || !emu) return;
+    const now = performance.now();
+    if (now - lastRAF <= 200) return;   // rAF alive — it drives
+    let frames = emu.read32(FRAMECOUNT);
+    const target = paceFrames + Math.floor((now - paceWall) / FRAME_MS);
+    let steps = 0;
+    // 20k-inst step cap: the §7 TCI wedge is batch-size + env dependent (it
+    // only reproduces in Chrome, never Node — see AGENTS §7); 20k is the
+    // proven-safe budget there.  The rAF loop (visible tab) keeps 60k —
+    // verified clean over 200M+ instructions; the pump path (rAF dead =
+    // hidden/throttled) is the risky one, so it gets the conservative cap.
+    // 12-step burst (melt-crossing spins wedge Chrome's TCI when stepped
+    // gap-free; the 40ms interval cadence is the proven-safe rAF pattern).
+    while (steps < 12 && frames < target) {
+        clockMs = Math.max(clockMs, Math.floor(bootClock + frames * FRAME_MS) & 0xffffffff);
+        emu.write32(CLOCKMS, clockMs);
+        const res = emu.step(20000);
+        instTotal = res.instCount;   // cumulative counter
+        steps++;
+        frames = emu.read32(FRAMECOUNT);
     }
-    const buf = audioCtx.createBuffer(1, audioBuf.length, 11025);
-    buf.getChannelData(0).set(audioBuf);
-    const src = audioCtx.createBufferSource();
-    src.buffer = buf;
-    src.playbackRate.value = audioRate;
-    src.connect(audioCtx.destination);
-    src.start(audioNextTime);
-    audioNextTime += buf.duration / audioRate;
-    audioBuf = new Float32Array(0);
+    if (!window.__noUart) appendUart(emu.drainUart());
+    drainAudio();
 }
 
 function drainAudio() {
     const s = emu.takeSpeakerSamples();
     if (!s || !s.length) return;
-    const wall = performance.now();
-    if (audioProdWall) {
-        audioRate = Math.min(1, Math.max(0.2, (audioProd / Math.max(1, wall - audioProdWall)) / (11025 / 1000)));
-    }
-    audioProdWall = wall;
-    audioProd = s.length;
-    const next = new Float32Array(audioBuf.length + s.length);
-    next.set(audioBuf, 0);
-    next.set(s, audioBuf.length);
-    audioBuf = next;
     window.__audioTotal += s.length;
-    playAudio();
+    if (window.__noDrain) return;
+    if (audioNode) audioNode.port.postMessage(s, [s.buffer]);
 }
 
 function setStatus(s, cls) {
@@ -293,6 +327,10 @@ async function boot() {
         });
         emu.write32(DETAIL_LEVEL, lowDetail ? 1 : 0);
         uc = emu.uc;
+        bootClock = performance.now();
+        clockMs = 0;
+        paceFrames = 0;               // realtime lock from boot: the guest may
+        paceWall = bootClock;         // never produce frames ahead of wall time
         window.__emu = emu;
         fbAddr = 0n;
         fitCanvas();
@@ -347,6 +385,7 @@ function renderFb() {
 
 async function loop() {
     if (!booted || !emu) return;
+    lastRAF = performance.now();
     if (!paused) {
         try {
             flushUpPending();        // keyups land on the NEXT rAF, after the guest consumed the down
@@ -354,23 +393,27 @@ async function loop() {
             const stepT0 = performance.now();
             let steps = 0;
             let frames = emu.read32(FRAMECOUNT);
-            // anchor pacing at the FIRST rendered frame (before that, boot runs
-            // at full speed); re-anchor after a pause
-            if (frames > 0 && paceFrames < 0) {
+            if (paceFrames < 0) {
+                // re-anchor after a pause so no catch-up burst
                 paceFrames = frames;
                 paceWall = performance.now();
             }
-            // realtime pacing: run until the guest's frame counter catches the
-            // wall clock at 35 fps (28.57ms per frame)
-            let target = Infinity;
-            if (paceFrames >= 0) target = paceFrames + Math.floor((performance.now() - paceWall) / FRAME_MS);
+            // realtime lock: paceFrames/paceWall anchor at boot (0, bootClock).
+            // The guest may never produce frames faster than wall time; the
+            // target counts 35 frames per second.  In a HIDDEN tab rAF stops
+            // firing (Chrome pauses it entirely), so pacing would starve the
+            // guest and the audio worklet would underrun: run flat-out and let
+            // the worklet's bounded queue (drop-oldest) keep audio continuous.
+            let target = document.hidden ? Infinity : paceFrames + Math.floor((performance.now() - paceWall) / FRAME_MS);
             while (steps < STEP_BUDGET && performance.now() - t0 < MS_BUDGET && frames < target) {
                 // drive the guest clock BEFORE every step: DG_GetTicksMs reads
                 // g_abi.clockMs, so I_GetTime advances even inside a single
-                // doomgeneric_Tick (the melt wipe spins on I_GetTime).  A
-                // once-per-rAF write stalls the wipe ~1 melt-iteration per rAF
-                // (≈20s+ per transition at throttled headless rAF rates).
-                emu.write32(CLOCKMS, Math.floor(performance.now()) & 0xffffffff);
+                // doomgeneric_Tick (the melt wipe spins on I_GetTime).  The
+                // clock is DERIVED FROM FRAMECOUNT (not wall time), so guest
+                // time can never run ahead of the guest's own execution —
+                // audio production stays locked to wall 11025 samples/s.
+                clockMs = Math.max(clockMs, Math.floor(bootClock + frames * FRAME_MS) & 0xffffffff);
+                emu.write32(CLOCKMS, clockMs);
                 const res = emu.step();
                 instTotal = res.instCount;   // cumulative counter
                 steps++;
