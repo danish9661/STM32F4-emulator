@@ -40,6 +40,8 @@ const firmwares = [
     ['audio_play_test', 'audio_play_test/audio_play_test.bin', 'audio_play_test.bin'],
     ['rtc_test', 'rtc_test/rtc_test.bin', 'rtc_test.bin'],
     ['can_test', 'can_test/can_test.bin', 'can_test.bin'],
+    // doom (doomgeneric F407 port; needs doom1.wad served alongside)
+    ['doom', 'doom/doom.bin', 'doom.bin'],
 ];
 
 const lines = [

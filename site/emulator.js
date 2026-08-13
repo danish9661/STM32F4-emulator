@@ -22,6 +22,9 @@ export async function createEmulator(opts) {
         onTx = null,          // (frame: Uint8Array, meta) called per TX capture
         eth = {},             // firmware-specific SRAM addresses (defaults above)
         ext_devices = {},
+        extra_ram = [],       // [{addr, size}] plain RAM regions mapped before
+                              // extra_mem preload (e.g. FSMC SDRAM, WAD ROM at
+                              // 0xB8000000 for the doom firmware)
         extra_mem = [],       // [{addr, data}] preloaded into mapped memory (ELF RAM segments)
         uart_addr = 0x40011000, // USART base for uart_rx_byte injection (UART4 = 0x40004C00)
         // Run guest IRQ handlers (USART RXNE etc.) between batches. OFF by
@@ -122,6 +125,15 @@ export async function createEmulator(opts) {
     mmap(vector_table & ~0x1FFFF, flash_size, Module.PROT_ALL, 'flash');
     uc.mem_write(BigInt(vector_table), firmware);
     mmap(0x20000000, ram_size, Module.PROT_ALL, 'ram');
+    // NOTE: this Unicorn WASM build's mem_write transports data via a
+    // stackAlloc copy; subsequent mem_map mallocs can reuse stack-touched
+    // heap pages, so "fresh" guest RAM can be seeded with leftovers from the
+    // firmware transfer (the 288KB doom.bin is big enough to trigger it).
+    // Zero SRAM after mapping so the guest never reads phantom pre-boot data.
+    uc.mem_write(BigInt(0x20000000), new Uint8Array(ram_size));
+    for (const r of extra_ram) {
+        mmap(r.addr, r.size, Module.PROT_ALL, 'extra_ram');
+    }
     for (const seg of extra_mem) {
         uc.mem_write(BigInt(seg.addr), seg.data);
     }

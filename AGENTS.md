@@ -1226,3 +1226,96 @@ racing a pure-JS parser — so it needed a **device-side tap in Rust**.
   (relaunch with `setsid nohup ./openhw-gw &` — `pkill -f openhw-gw`
   self-matches the shell, use the full path pattern or kill by pid) and the
   local HTTP server on 8092 (`node /tmp/opencode/http_server.js`).
+
+---
+
+## 16. DOOM (doomgeneric F407 port) — 2026-08-13
+
+A full DOOM 1 shareware (doom1.wad) runs on the emulated STM32F407: boot →
+title/attract → menu → New Game → episode → skill → E1M1 gameplay with the
+320×200 CMAP256 framebuffer rendered through a guest-exported BGRA palette.
+Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
+
+### The port (`doom/`)
+- doomgeneric (github.com/ozkl/doomgeneric) with a `f407` platform target:
+  `main_f407.c` = `doomgeneric_Tick()` + `DG_SleepMs(15)` busy-wait loop.
+- Memory (link.ld): flash 0x08000000, SRAM: stack at top + `.abi` NOLOAD
+  section pinned at 0x20002000; `.data`/`.bss` at 0xC0000000 (16MB EXTRAM);
+  `__heap_start` after bss. Runtime layout: ZONE = 0xC0100000 (6MB),
+  heap = 0xC0700000 (9MB). WAD image is loaded by the JS driver at
+  0xB8000000 (8MB) via `extra_mem` — the firmware never reads the WAD from
+  flash; it sees a "file" through `doom_wad_name`/`doom_file_exists` shims
+  in platform.c that redirect to 0xB8000000 (lumps are accessed via
+  `W_AddFile` → fread on the memory image).
+
+### Guest↔driver ABI (doom/f407/doomplatform.h) at 0x20002000
+- `+0x00` u32 keyWr (JS writes), `+0x04` u32 keyRd (guest writes),
+  `+0x08` 256-byte ring, **2 bytes per event** (keycode byte, `0x80|pressed`
+  byte), indices in bytes mod 256.
+- `+0x110` palette 1024 B, **BGRA** u8 per entry (guest writes at boot),
+  `+0x510` u32 DG_ScreenBuffer address (guest writes in DG_Init).
+- Driver: `sendKey(code, pressed)` writes the 2 bytes then `write32(keyWr)`.
+  Read-back path: `emu.read32` (`uc.mem_read`).
+- **Key consumption pacing**: `I_GetEvent` (engine/i_input.c) breaks its
+  drain loop on the FIRST key-UP, so the guest consumes at most one
+  (down, up) pair per frame; frames run ~1 per 2.5 batches (the 15 ms
+  `DG_SleepMs` = 60k nops ≈ 360k inst dominates). Sent keys therefore need
+  pacing: held keys should be sent down-only (no UPs — they don't break the
+  drain), momentary keys as (D,U) pairs a few batches apart.
+- Keycodes are identity (`TranslateKey`); Enter=0x0D, Esc=0x1B,
+  arrows 0xAC/0xAE/0xAD/0xAF, strafe 0xA0/0xA1, use 0xA2, fire 0xA3,
+  F-keys 0x80..0x8B.
+
+### Boot / menu flow (verified in this port)
+- UART markers: `Z_Init` → `W_Init` → `adding doom1.wad` →
+  `D_CheckNetGame` ("startskill 2" prints unconditionally, NOT in-game) →
+  `HU_Init`/`ST_Init` → `I_InitGraphics` (last boot print). Boot ≈ 7-10M
+  instructions.
+- Title: attract loop TITLEPIC (pagetic=TICRATE*170 → demo1 → CREDIT …).
+- **Menu navigation with doom1.wad = retail: New Game goes to an EPISODE
+  select first** (EpiDef), then the skill menu. The skill menu selects by
+  CURSOR, not number keys: Enter(menu) → Enter(New Game) → Enter(episode 1)
+  → Down, Down (skill 3) → Enter(start). Full working sequence in
+  site/test_doom.mjs (change-gated on `menuactive` at 0xC00166F8).
+- In-game state: `gamestate` at 0xC00153AC == 0 (GS_LEVEL),
+  `menuactive` at 0xC00166F8 == 0. Debug symbols (nm): gamestate c00153ac,
+  menuactive c00166f8, pagetic c001439c, demosequence c00143bc,
+  advancedemo c0014390, currentMenu c0016820, itemOn c0016824, MainDef
+  c000bbd0, EpiDef c000bcbc, NewDef c000bca4, gameaction c001588c,
+  gametic c000f350.
+
+### Two firmware-side bugs fixed in this port (both REBUILD `make -C doom`)
+1. **Garbage "fresh" SRAM**: this Unicorn WASM build's `mem_write` copies
+   data through a stackAlloc buffer; a later `mem_map` can reuse those
+   stack-touched heap pages, so newly-mapped guest RAM was seeded with
+   firmware-transfer leftovers (doom.bin's 288 KB triggers it). **Fix in
+   site/emulator.js: zero SRAM right after the RAM mem_map** (applies to
+   every firmware, not just doom).
+2. **SHA-1 TCI wedge**: the engine's `W_Checksum` SHA-1 `Transform`
+   (engine/sha1.c) aborts the TCI interpreter (`tcg_qemu_tb_exec_arm`,
+   tci.c:1272). Patched `W_Checksum` (engine/w_checksum.c) to
+   `memset(digest, 0, …)` — only used for net-game connect, harmless.
+3. **_sbrk / zone overlap crash**: `_sbrk` used `__heap_start`
+   (0xC0100000) which equals DOOM_ZONE_ADDR — malloc'd framebuffer
+   overlapped the zone, corrupting Z_* headers and `lumphash` chains
+   (crash in `W_CheckNumForName` → strncasecmp). platform.c `_sbrk` now
+   starts at DOOM_HEAP_ADDR (0xC0700000).
+
+### Verification
+- `node site/test_doom.mjs` — boots, drives the full menu, holds W + turns,
+  asserts: boot markers, palette populated, fb at 0xC0700008, changes ≥ 20,
+  `menuActive === 0`, `phase === 'play'`, keyRd > 0. 80M-inst cap, 200k
+  batches, ~45 s wall, exit 0.
+- `site/doom.html` + `site/doom.js` — browser demo (serve site/, open
+  /doom.html): canvas 640×400 (2× 320×200, BGRA→RGBA per frame), WASD +
+  arrows + Ctrl/Space/Shift + F-keys, held keys re-asserted down-only each
+  rAF step, click = fire with pointer lock. Links from index.html footer.
+- CDP smoke: `/tmp/opencode/doom_smoke.mjs` — boots in headless Chrome,
+  dispatches the menu sequence via synthetic KeyboardEvents, asserts
+  gamestate=0/menu closed and ≥5000 non-black canvas pixels (measured
+  59042). Uses fresh `--user-data-dir=/tmp/opencode/chrome-doom` + a
+  python http.server on 8123.
+- `doom1.wad` (shareware, 4.2 MB) is copied into `site/` for the browser
+  page; the node harness reads `/tmp/opencode/wad/doom1.wad`.
+- `tools/make_firmware.mjs` has the `doom` entry; `site/firmware.js`
+  regenerated (31 firmwares, doom.bin 277 KB).

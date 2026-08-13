@@ -1,0 +1,43 @@
+// Emulator-visible ABI shared between the F407 platform glue and the JS driver
+// (site/emulator.js / site/doom.js). Fixed addresses, see AGENTS.md §16.
+#ifndef DOOM_PLATFORM_H
+#define DOOM_PLATFORM_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+// WAD image (doom1.wad, 4,196,020 bytes) preloaded by the JS driver via the
+// extra_ram option.  Read-only from the guest's point of view.
+#define DOOM_FB_ADDR   0xB8000000u
+#define DOOM_FB_SIZE   4196020u
+
+// Zone + newlib heap live in the emulated external SDRAM at 0xC0000000.
+// The engine's .data/.bss occupy the first ~0x50000 bytes there, so the
+// zone starts at 0xC0100000 (see link.ld).
+#define DOOM_ZONE_ADDR 0xC0100000u
+#define DOOM_ZONE_SIZE (6u * 1024 * 1024)
+#define DOOM_HEAP_ADDR (DOOM_ZONE_ADDR + DOOM_ZONE_SIZE)
+#define DOOM_HEAP_SIZE (9u * 1024 * 1024)
+
+// Guest-visible SRAM ABI region (fixed addresses; see link.ld .abi @
+// 0x20002000, low SRAM so the top-of-RAM stack has ~112K of headroom):
+//   0x20002000  struct doom_abi_t (see platform.c):
+//     0x00  u32 key write index  (written by JS)
+//     0x04  u32 key read index   (written by guest)
+//     0x08  key ring, 256 bytes, 2 bytes per event (keycode, 0x80|pressed)
+//     0x110 palette, 1024 bytes, 256 * (b,g,r,a) u8  (written by guest)
+//     0x510 u32 DG_ScreenBuffer value (written by guest at DG_Init)
+#define DOOM_ABI_ADDR     0x20002000u
+#define KEYQ_SIZE         256u
+#define KEYQ_INDEX_ADDR   (DOOM_ABI_ADDR + 0x00u)
+#define KEYQ_RD_ADDR      (DOOM_ABI_ADDR + 0x04u)
+#define KEYQ_RING_ADDR    (DOOM_ABI_ADDR + 0x08u)
+#define PALETTE_ADDR      (DOOM_ABI_ADDR + 0x110u)
+#define PALETTE_SIZE      1024u
+#define DGSB_ADDR         (DOOM_ABI_ADDR + 0x510u)
+
+// wad lookup + file-exists shim (platform.c)
+const char *doom_wad_name(const char *path);
+int doom_file_exists(const char *filename);
+
+#endif
