@@ -1256,12 +1256,21 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   `+0x510` u32 DG_ScreenBuffer address (guest writes in DG_Init).
 - Driver: `sendKey(code, pressed)` writes the 2 bytes then `write32(keyWr)`.
   Read-back path: `emu.read32` (`uc.mem_read`).
-- **Key consumption pacing**: `I_GetEvent` (engine/i_input.c) breaks its
-  drain loop on the FIRST key-UP, so the guest consumes at most one
-  (down, up) pair per frame; frames run ~1 per 2.5 batches (the 15 ms
-  `DG_SleepMs` = 60k nops ≈ 360k inst dominates). Sent keys therefore need
-  pacing: held keys should be sent down-only (no UPs — they don't break the
-  drain), momentary keys as (D,U) pairs a few batches apart.
+- **Key consumption pacing (input model, rewritten 2026-08-13)**: `I_GetEvent`
+  (engine/i_input.c) breaks its drain loop on the FIRST key-UP, so the guest
+  consumes at most one (down, up) pair per drain (~1 per 2 frames — the 15 ms
+  `DG_SleepMs` = 60k nops ≈ 360k inst dominates). doom.js therefore gates the
+  keyUP on **guest consumption**: `sendKey` returns the ring byte position of
+  the DOWN; a `sentPos` Map (code->D position) + `upPending` Map remember
+  released keys; every rAF `flushUpPending()` writes the UP only when the
+  guest's ring cursor `keyRd` has advanced past that D (reads `KEYRD =
+  ABI+0x04`). Consequences: (1) each tap delivers exactly one (D,U) pair the
+  guest can drain atomically; (2) a held key's UP is deferred until the guest
+  consumed the D, so holds turn continuously; (3) NO per-rAF re-assert of held
+  keys — the old re-assert loop spammed ~7 downs per tap (menu cursor
+  jumped several items per tap, and a held Enter auto-started games). The
+  ring therefore always contains strictly ordered D...U pairs, and with
+  `keyRd` gating, an UP can never be written before its DOWN.
 - Keycodes are identity (`TranslateKey`); Enter=0x0D, Esc=0x1B,
   arrows 0xAC/0xAE/0xAD/0xAF, strafe 0xA0/0xA1, use 0xA2, fire 0xA3,
   F-keys 0x80..0x8B.
@@ -1275,10 +1284,19 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
 - **Menu navigation with doom1.wad = retail: New Game goes to an EPISODE
   select first** (EpiDef), then the skill menu. The skill menu selects by
   CURSOR, not number keys: Enter(menu) → Enter(New Game) → Enter(episode 1)
-  → Down, Down (skill 3) → Enter(start). Full working sequence in
-  site/test_doom.mjs (change-gated on `menuactive` at 0xC00166F8).
+  → Down, Down (skill 3) → Enter(start). NOTE: the skill menu **opens at
+  item 2** (`NewDef.lastOn = hurtme`, m_menu.c:323) — one ArrowDown lands on
+  skill 3. Full working sequence in site/test_doom.mjs (change-gated on
+  `menuactive` at 0xC00166F8).
 - In-game state: `gamestate` at 0xC00153AC == 0 (GS_LEVEL),
-  `menuactive` at 0xC00166F8 == 0. Debug symbols (nm): gamestate c00153ac,
+  `menuactive` at 0xC00166F8 == 0. **In-game turning is verified by reading
+  `players[0].mo->angle`: mo = read32(0xC00153B4), angle = read32(mo+32) —
+  the Strife-fork mobj_t has extra `snext`/`sprev` fields so `angle` is at
+  offset 32, NOT 24** (p_mobj.h:201; thinker 12 + x,y,z 12 + snext 4 +
+  sprev 4). Dumping `mo` via a double-deref (`read32(read32(0xC00153B4))`)
+  lands on `thinkercap` (0xC0018488), a linked-list sentinel — always read
+  the mobj AT the players[0].mo value.
+  Debug symbols (nm): gamestate c00153ac,
   menuactive c00166f8, pagetic c001439c, demosequence c00143bc,
   advancedemo c0014390, currentMenu c0016820, itemOn c0016824, MainDef
   c000bbd0, EpiDef c000bcbc, NewDef c000bca4, gameaction c001588c,
@@ -1308,15 +1326,17 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   batches, ~45 s wall, exit 0.
 - `site/doom.html` + `site/doom.js` — browser demo (serve site/, open
   /doom.html): canvas 640×400 (2× 320×200, BGRA→RGBA per frame), WASD +
-  arrows + Ctrl/Space/Shift + F-keys, held keys re-asserted down-only each
-  rAF step, click = fire with pointer lock. Links from index.html footer.
+  arrows + Ctrl/Space/Shift + F-keys, **held keys are held (D once, U gated
+  on guest consumption — no re-assert spam)**, click = fire with pointer
+  lock. Links from index.html footer.
 - **Browser pacing (2026-08-13)**: 1 `emu.step()` per rAF was ~13 tics/s
   (each game frame ≈ 450k inst: tick ≈90k + DG_SleepMs(15) ≈360k). doom.js
-  now runs up to `STEP_BUDGET = 6` steps per rAF within `MS_BUDGET = 16` ms
-  wall → near-realtime (~16.5 MIPS in headless Chrome). `emu.step()`
-  returns `{pc, stopped, instCount}` where **instCount is CUMULATIVE
-  session-wide** (module counter in emulator.js HOOK_CODE) — assign
-  `instTotal = res.instCount`, NEVER `+=` (summing yields fake
+  runs up to `STEP_BUDGET = 6` steps per rAF within `MS_BUDGET = 16` ms
+  wall → measured **~24 MIPS / ~16 FPS** in headless Chrome (blockCounting
+  mode, smoke run: 151M inst, 110.7° turn in a 4s W+ArrowLeft hold).
+  `emu.step()` returns `{pc, stopped, instCount}` where **instCount is
+  CUMULATIVE session-wide** (module counter in emulator.js HOOK_CODE) —
+  assign `instTotal = res.instCount`, NEVER `+=` (summing yields fake
   MIPS 33419/41568 readings).
 - **Fast path (2026-08-13)**: emulator.js gained `minimalPolls: true` +
   `blockCounting: true` (createEmulator opts, doom.js + test_doom pass both).
@@ -1346,11 +1366,16 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   dpr=1.25.
 - CDP smoke: `/tmp/opencode/doom_smoke2.mjs` — boots in headless Chrome
   (fresh `--user-data-dir` per run; cache-bust via `?v=N` — the doom.js
-  module is cached), dispatches the menu sequence via synthetic
-  KeyboardEvents, asserts gamestate=0/menu closed, canvas fills the
-  viewport (w ≥ 600, aspect ≈1.6), stats `/MIPS: \d/` with FPS ≥ 5 during
-  W+turn, and ≥5000 non-black canvas pixels (measured 63080). Uses a
-  python http.server on 8123.
+  module is cached), drives the menu with **REAL CDP `Input.dispatchKeyEvent`
+  keys** (synthetic `window.dispatchEvent` KeyboardEvents do NOT reach
+  doom.js listeners — the old smoke was a false positive), waiting on each
+  intermediate menu (`currentMenu` == EpiDef/NewDef pointers at 0xC0016820),
+  asserts the skill menu opens at item 2 (NewDef.lastOn=hurtme), in-game
+  (gamestate=0/menu closed), **player angle at mo+32 actually rotates
+  ≥ 10° during a 4s W+ArrowLeft hold (measured 110.7°)**, canvas fills the
+  viewport (w ≥ 600), stats `/MIPS: \d/` with FPS ≥ 5 during W+turn
+  (measured 24.4 MIPS / 16 FPS), and ≥5000 non-black canvas pixels
+  (measured 63719). Uses a python http.server on 8123.
 - `doom1.wad` (shareware, 4.2 MB) is copied into `site/` for the browser
   page; the node harness reads `/tmp/opencode/wad/doom1.wad`.
 - `tools/make_firmware.mjs` has the `doom` entry; `site/firmware.js`

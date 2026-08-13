@@ -43,6 +43,7 @@ const DOM_TO_DOOM = {
 
 const ABI = 0x20002000n;
 const KEYWR = ABI;                 // u32 write index (JS)
+const KEYRD = ABI + 0x04n;         // u32 read index (guest)
 const RING = ABI + 0x08n;          // 256-byte ring, 2 bytes/event
 const DGSB = ABI + 0x510n;         // u32 DG_ScreenBuffer
 const FRAMECOUNT = ABI + 0x514n;   // u32 rendered-frame counter (guest)
@@ -51,6 +52,8 @@ const PALETTE = ABI + 0x110n;      // 1024 B BGRA
 let emu = null, uc = null;
 let keyWr = 0;
 const held = new Set();            // doom keycodes currently held down
+const sentPos = new Map();         // code -> ring byte position of its keydown
+const upPending = new Map();       // code -> D ring position; U waits until the guest consumed the D
 let fbAddr = 0n;
 let fbHash = 0, framesShown = 0;
 let uartBuf = '';
@@ -68,12 +71,13 @@ function setStatus(s, cls) {
 }
 
 function sendKey(code, pressed) {
-    if (!uc) return;
+    if (!uc) return 0;
     const off = keyWr % 256;
     uc.mem_write(RING + BigInt(off), Uint8Array.of(code));
     uc.mem_write(RING + BigInt((off + 1) % 256), Uint8Array.of(pressed ? 0x80 : 0));
     keyWr = (keyWr + 2) % 256;
     emu.write32(KEYWR, keyWr);
+    return off;
 }
 
 // momentary press (down + up pair)
@@ -88,12 +92,34 @@ function updateKeysLabel() {
     $('keys').textContent = names.length ? 'held: ' + names.join(' ') : '';
 }
 
+// The guest's I_GetEvent drains the key ring and BREAKS on the first keyup
+// (engine/i_input.c), and the ring is only drained in bursts (once per guest
+// tic-batch, when NetUpdate's wall-clock delta allows a new ticcmd). If a
+// (D,U) pair sits in the ring when a drain runs, gamekeydown[] is set and
+// cleared within one tic — in-game turn/move keys would never register
+// (menus are unaffected since they act on single events). So a keyup is held
+// back until the guest's ring read cursor (keyRd) proves it consumed the
+// keydown AND the user has actually released the key; the U then lands in a
+// LATER drain. Held keys need no re-assert: the engine's gamekeydown[]
+// persists from the single keydown until the U.
+function flushUpPending() {
+    if (!upPending.size) return;
+    const keyRd = emu.read32(KEYRD);
+    for (const [code, dPos] of upPending) {
+        if (held.has(code)) continue;        // still held: keep gamekeydown[] true
+        if (keyRd !== dPos) {                // guest cursor moved past our keydown
+            sendKey(code, false);
+            upPending.delete(code);
+        }
+    }
+}
+
 document.addEventListener('keydown', (e) => {
     const code = DOM_TO_DOOM[e.key];
     if (code === undefined) return;
     e.preventDefault();
     if (!held.has(code)) {
-        sendKey(code, true);
+        sentPos.set(code, sendKey(code, true));
         held.add(code);
         updateKeysLabel();
     }
@@ -103,7 +129,9 @@ document.addEventListener('keyup', (e) => {
     if (code === undefined) return;
     e.preventDefault();
     if (held.delete(code)) {
-        sendKey(code, false);
+        const dPos = sentPos.get(code);
+        sentPos.delete(code);
+        upPending.set(code, dPos);
         updateKeysLabel();
     }
 });
@@ -112,13 +140,15 @@ canvas.addEventListener('mousedown', () => {
         canvas.requestPointerLock();
         return;
     }
-    sendKey(KEY.FIRE, true);
+    sentPos.set(KEY.FIRE, sendKey(KEY.FIRE, true));
     held.add(KEY.FIRE);
     updateKeysLabel();
 });
 document.addEventListener('mouseup', () => {
     if (held.delete(KEY.FIRE)) {
-        sendKey(KEY.FIRE, false);
+        const dPos = sentPos.get(KEY.FIRE);
+        sentPos.delete(KEY.FIRE);
+        upPending.set(KEY.FIRE, dPos);
         updateKeysLabel();
     }
 });
@@ -234,6 +264,7 @@ async function loop() {
     if (!booted || !emu) return;
     if (!paused) {
         try {
+            flushUpPending();        // keyups land on the NEXT rAF, after the guest consumed the down
             const t0 = performance.now();
             const stepT0 = performance.now();
             let steps = 0;
@@ -260,9 +291,6 @@ async function loop() {
             return;
         }
         appendUart(emu.drainUart());
-        // re-assert held keys every rAF (held keys are down-only so they
-        // don't break the guest's key-UP drain)
-        for (const k of held) sendKey(k, true);
         if (renderFb()) framesShown++;
 
         const now = performance.now();
