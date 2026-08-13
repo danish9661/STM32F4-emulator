@@ -59,6 +59,8 @@ let uartText = '';
 let fbAddr = 0n;
 let prevHash = -1, changes = 0;
 let phase = 'boot';      // boot -> title -> wait1/2/3 (change-gated keys) -> play
+let saveTapped = false;  // F6 quick-save menu opened once mid-game
+let saveSlotKey = false, saveNameKey = false;
 let gate = 0;            // change-count snapshot between key sends
 let maxSteps = 0;
 let crashed = false;
@@ -121,12 +123,26 @@ try {
                 console.log('[keys] in game (W + turn)');
             }
         } else if (phase === 'play') {
-            sendKey(KEY_W, true);               // held forward
-            if (i % 10 === 0) {                  // and turn occasionally
-                sendKey(0xAC, true); sendKey(0xAC, false);   // KEY_LEFTARROW
+            if (i % 25 === 0) sendKey(KEY_W, true);          // re-assert held W (sparse:
+            if (i % 40 === 0) {                              // the guest drains ~1 pair
+                sendKey(0xAC, true); sendKey(0xAC, false);   // per frame; spamming over-
+                sendKey(0xA3, true); sendKey(0xA3, false);   // flows the 256B ring)
             }
-            if (i % 5 === 0) {                   // and fire: guarantees loud audio
-                sendKey(0xA3, true); sendKey(0xA3, false);   // KEY_FIRE
+            if (i >= 200 && !saveTapped) {        // quick-save (F6): menu -> Enter
+                saveTapped = true;                // -> name char -> Enter
+                sendKey(0xC0, true); sendKey(0xC0, false);
+                console.log('[keys] F6 quick-save');
+            }
+            if (saveTapped && !saveSlotKey && read32(0xC00166F8) === 1) {
+                saveSlotKey = true;
+                sendKey(0x0D, true); sendKey(0x0D, false);   // Enter: select slot 0
+                console.log('[keys] slot 0 (Enter)');
+            }
+            if (saveSlotKey && !saveNameKey) {
+                saveNameKey = true;
+                sendKey(0x61, true); sendKey(0x61, false);   // name 'a' (-> 'A')
+                sendKey(0x0D, true); sendKey(0x0D, false);   // Enter -> M_DoSave(0)
+                console.log('[keys] name+enter');
             }
         }
 
@@ -150,12 +166,14 @@ console.log();
 console.log('uart tail:', all.replace(/\r/g, '').split('\n').filter(Boolean).slice(-8).join(' | '));
 console.log(`fbAddr=0x${fbAddr.toString(16)} frame_changes=${changes} keyRd=${keyRd} inst=${maxSteps} crashed=${crashed} phase=${phase} menuActive=${read32(0xC00166F8)} gamestate=${read32(0xC00153AC)}`);
 console.log(`audio: ${audioSamples} samples drained, peak amplitude ${audioPeak.toFixed(0)}`);
+console.log(`save: flag=${read32(0x2000251C)} size=${read32(0x20002520)} ready=${read32(0x20002524)} slot=${read32(0x20002528)} map=${read32(0x2000252C)} sendsave=${read32(0xC0015848)} sse=${read32(0xC00166FC)} saveSlot=${read32(0xC0016700)} qss=${read32(0xC0016818)}`);
 
 const pass =
     !crashed &&
     all.includes('Z_Init') &&
     all.includes('adding doom1.wad') &&
     all.includes('I_InitGraphics') &&
+    all.includes('SAVE ok slot=0') &&   // F2 quick-save committed via the ABI
     fbAddr !== 0n &&
     changes >= 20 &&
     keyRd > 0 &&          // guest consumed at least one injected event

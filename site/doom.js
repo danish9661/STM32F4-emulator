@@ -43,8 +43,8 @@ const KEY = {
     ESC: 0x1B, ENTER: 0x0D,
     LEFTARROW: 0xAC, RIGHTARROW: 0xAE, UPARROW: 0xAD, DOWNARROW: 0xAF,
     STRAFE_L: 0xA0, STRAFE_R: 0xA1, USE: 0xA2, FIRE: 0xA3,
-    F1: 0x80, F2: 0x81, F3: 0x82, F6: 0x85, F9: 0x88,
-    F10: 0x89, F11: 0x8A, F12: 0x8B,
+    F1: 0xBB, F2: 0xBC, F3: 0xBD, F6: 0xC0, F9: 0xC3,
+    F10: 0xC4, F11: 0xC5, F12: 0xC6,
 };
 const DOM_TO_DOOM = {
     'Enter': KEY.ENTER, 'Escape': KEY.ESC,
@@ -67,6 +67,14 @@ const DGSB = ABI + 0x510n;         // u32 DG_ScreenBuffer
 const FRAMECOUNT = ABI + 0x514n;   // u32 rendered-frame counter (guest)
 const CLOCKMS = ABI + 0x518n;      // u32 ms clock (guest reads via DG_GetTicksMs)
 const PALETTE = ABI + 0x110n;      // 1024 B BGRA
+const SAVEFLAG = ABI + 0x51Cn;     // u32 guest->driver: 1=save written, 2=load req
+const SAVESIZE = ABI + 0x520n;     // u32 blob bytes
+const SAVEREADY = ABI + 0x524n;    // u32 driver->guest: requested slot restored
+const SAVESLOT = ABI + 0x528n;     // u32 guest->driver: slot index
+const SAVEMAP = ABI + 0x52Cn;      // u32 driver->guest: bit N = slot N saved
+const SAVEADDR = 0xC0080000n;      // EXTRAM save area (2 slots x 256 KB)
+const SAVESLOTSIZE = 0x40000n;
+const SAVE_SLOTS = 2;
 
 let emu = null, uc = null;
 let keyWr = 0;
@@ -82,6 +90,9 @@ window.__pump = () => pumpAudio(); // debug handle for hidden-tab tests
 window.__audioNode = null; // set by initAudio for tests
 let instTotal = 0;
 let lastRAF = 0;                     // last rAF timestamp — when stale (>200ms)
+let lastPump = 0;                    // last pump burst — rAF must not start
+                                     // back-to-back (gap-free melt-crossing
+                                     // stepping wedges the TCI interpreter)
                                      // rAF is dead (hidden tab) and the
                                      // worklet hunger pump takes over driving
 let statLast = performance.now(), statInst = 0;
@@ -162,8 +173,10 @@ function pumpAudio() {
         steps++;
         frames = emu.read32(FRAMECOUNT);
     }
+    lastPump = performance.now();
     if (!window.__noUart) appendUart(emu.drainUart());
     drainAudio();
+    processSaves();
 }
 
 function drainAudio() {
@@ -172,6 +185,46 @@ function drainAudio() {
     window.__audioTotal += s.length;
     if (window.__noDrain) return;
     if (audioNode) audioNode.port.postMessage(s, [s.buffer]);
+}
+
+// ── savegames: mirror the guest's save ABI to localStorage ──
+// The guest stages "doomsavN.dsg" blobs in EXTRAM (SAVEADDR) and flags us
+// (SAVEFLAG=1 + SAVESLOT + SAVESIZE) when the engine rename-commits a save.
+// Loads set SAVEFLAG=2 + SAVESLOT and busy-wait on SAVEREADY until we restore
+// the blob (or clear SAVESIZE when the slot is empty).  saveMap (bit N) tells
+// the load menu which slots exist.  Polled from the rAF loop and the audio
+// pump, so saves/loads resolve within one step burst.
+function processSaves() {
+    if (!emu) return;
+    const flag = emu.read32(SAVEFLAG);
+    if (flag === 1) {
+        const slot = emu.read32(SAVESLOT);
+        const size = emu.read32(SAVESIZE);
+        if (slot >= 0 && slot < SAVE_SLOTS && size > 0) {
+            const b = new Uint8Array(uc.mem_read(SAVEADDR + BigInt(slot * Number(SAVESLOTSIZE)), size));
+            let s = '';
+            for (let i = 0; i < b.length; i += 0x8000) {
+                s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+            }
+            try { localStorage.setItem('doom-save-' + slot, btoa(s)); } catch (e) { /* quota */ }
+            emu.write32(SAVEMAP, emu.read32(SAVEMAP) | (1 << slot));
+        }
+        emu.write32(SAVEFLAG, 0);
+    } else if (flag === 2) {
+        const slot = emu.read32(SAVESLOT);
+        const raw = (slot >= 0 && slot < SAVE_SLOTS) ? localStorage.getItem('doom-save-' + slot) : null;
+        if (raw) {
+            const bin = atob(raw);
+            const b = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
+            uc.mem_write(SAVEADDR + BigInt(slot * Number(SAVESLOTSIZE)), b);
+            emu.write32(SAVESIZE, b.length);
+        } else {
+            emu.write32(SAVESIZE, 0);
+        }
+        emu.write32(SAVEREADY, 1);
+        emu.write32(SAVEFLAG, 0);
+    }
 }
 
 function setStatus(s, cls) {
@@ -225,7 +278,10 @@ function flushUpPending() {
 }
 
 document.addEventListener('keydown', (e) => {
-    const code = DOM_TO_DOOM[e.key];
+    let code = DOM_TO_DOOM[e.key];
+    if (code === undefined && e.key.length === 1 && e.key >= 'a' && e.key <= 'z') {
+        code = e.key.charCodeAt(0);    // raw ASCII letters reach the menu
+    }                                  // string-entry + 'y' confirm prompts
     if (code === undefined) return;
     e.preventDefault();
     initAudio();                       // user gesture: unlock WebAudio
@@ -236,7 +292,10 @@ document.addEventListener('keydown', (e) => {
     }
 });
 document.addEventListener('keyup', (e) => {
-    const code = DOM_TO_DOOM[e.key];
+    let code = DOM_TO_DOOM[e.key];
+    if (code === undefined && e.key.length === 1 && e.key >= 'a' && e.key <= 'z') {
+        code = e.key.charCodeAt(0);
+    }
     if (code === undefined) return;
     e.preventDefault();
     if (held.delete(code)) {
@@ -333,6 +392,13 @@ async function boot() {
         paceWall = bootClock;         // never produce frames ahead of wall time
         window.__emu = emu;
         fbAddr = 0n;
+        // restore the save slot map (which slots have a saved game) so the
+        // load menu shows exactly the localStorage-backed slots
+        let saveMap = 0;
+        for (let i = 0; i < SAVE_SLOTS; i++) {
+            if (localStorage.getItem('doom-save-' + i)) saveMap |= 1 << i;
+        }
+        emu.write32(SAVEMAP, saveMap);
         fitCanvas();
         booted = true;
         setStatus('running — DOOM booting (WAD at 0xB8000000)');
@@ -405,6 +471,7 @@ async function loop() {
             // guest and the audio worklet would underrun: run flat-out and let
             // the worklet's bounded queue (drop-oldest) keep audio continuous.
             let target = document.hidden ? Infinity : paceFrames + Math.floor((performance.now() - paceWall) / FRAME_MS);
+            if (performance.now() - lastPump >= 60) {   // gap from the pump's burst
             while (steps < STEP_BUDGET && performance.now() - t0 < MS_BUDGET && frames < target) {
                 // drive the guest clock BEFORE every step: DG_GetTicksMs reads
                 // g_abi.clockMs, so I_GetTime advances even inside a single
@@ -419,6 +486,7 @@ async function loop() {
                 steps++;
                 frames = emu.read32(FRAMECOUNT);
             }
+            }   // end pump-gap guard
             activeMs += performance.now() - stepT0;
         } catch (e) {
             setStatus('emulator error: ' + e.message, 'error');
@@ -426,6 +494,7 @@ async function loop() {
         }
         appendUart(emu.drainUart());
         drainAudio();
+        processSaves();          // save/load handshake (respond within a step burst)
         if (renderFb()) framesShown++;
 
         const now = performance.now();

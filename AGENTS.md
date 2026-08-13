@@ -1272,8 +1272,77 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   ring therefore always contains strictly ordered D...U pairs, and with
   `keyRd` gating, an UP can never be written before its DOWN.
 - Keycodes are identity (`TranslateKey`); Enter=0x0D, Esc=0x1B,
-  arrows 0xAC/0xAE/0xAD/0xAF, strafe 0xA0/0xA1, use 0xA2, fire 0xA3,
-  F-keys 0x80..0x8B.
+  arrows 0xAC/0xAE/0xAD/0xAF, strafe 0xA0/0xA1, use 0xA2, fire 0xA3.
+  **F-keys are `KEY_F1..F12 = 0x80+0x3B..0x80+0x46 = 0xBB..0xC6`** (engine
+  doomkeys.h; the old 0x80..0x8B mapping was wrong — browser F2/F3/F6/F9
+  did nothing). doom.js: F1=0xBB, F2=0xBC, F3=0xBD, F6=0xC0, F9=0xC3,
+  F10=0xC4, F11=0xC5, F12=0xC6. Menu keys: save=F2, quick-save=F6,
+  load=F3, quick-load=F9, confirm='y' (0x79), forward=Enter, activate=Esc.
+  doom.js keydown/keyup pass **raw ASCII `a`..`z`** (0x61..0x7A) through
+  when the key is not in DOM_TO_DOOM — required for the save-menu name
+  entry ('a' is strafe!) and the 'y' confirm prompts.
+
+### Save/load (2026-08-14) — EXTRAM staging + localStorage mirror
+- **Save area**: `DOOM_SAVE_ADDR 0xC0080000` (EXTRAM), 2 slots ×
+  `0x40000` (256 KB — matches vanilla `SAVEGAMESIZE` cap checked by
+  `ftell` in G_DoSaveGame; slot size == cap so a buffer-overrun save
+  can't overflow into the zone at 0xC0100000; the 0xC0080000→0xC0100000
+  gap is exactly 512 KB).
+- **Firmware shims** (doom/f407/platform.c): savegame files are
+  `*/.savegame/doomsavN.dsg` (N = slot digit) → `_open` routes fd 0x7f00
+  reads/writes to the EXTRAM area. Commit = newlib `rename` (disassembled
+  `_rename_r` @0x0801c330 = `_link_r` + `_unlink_r`) → `_link(old,new)`
+  when the OLD name parses as a savegame: sets `saveFlag=1`, `saveSlot`,
+  `saveSize`, and prints `SAVE ok slot=%d bytes=%d` (rename's return is
+  UNCHECKED by the engine — the flag IS the success signal). Load
+  (`_open` read path): returns -1 immediately if the driver's `saveMap`
+  bit for the slot is clear (M_ReadSaveStrings fopen()s ALL 6 slots at
+  boot-menu time — no saveMap → NULL → EMPTYSTRING), else sets
+  `saveFlag=2`+`saveSlot` and busy-waits on `saveReady`, then prints
+  `LOAD ok slot=%d bytes=%d`.
+- **ABI additions** (after clockMs @+0x518): saveFlag +0x51C (1=save
+  written, 2=load request), saveSize +0x520, saveReady +0x524
+  (driver→guest), saveSlot +0x528, saveMap +0x52C (bit N = slot N has a
+  save). `DOOM_SAVE_FD 0x7f00`; `is_savegame_name` (".dsg"),
+  `save_slot_of` (parses "doomsav"+digit; temp.dsg/recovery.dsg → slot 0).
+- **`_write` gotcha**: the save stream is written through the SAME
+  `_write`; the fd==DOOM_SAVE_FD branch must come FIRST — a missing
+  branch routes the 25 KB save archive to the UART (looks like raw
+  mobj/level data garbage on the terminal). `_read`/`_write`/`_lseek`/
+  `_close`/`_link`/`_unlink` all honor the fd branch.
+- **doom.js** `processSaves()` (runs every step + in the pump): flag=1 →
+  read EXTRAM blob, chunked `btoa` into `localStorage['doom-save-N']`,
+  OR `saveMap` bit, clear flag; flag=2 → `atob` → mem_write, set
+  saveSize or 0, `saveReady=1`. boot() restores saveMap from
+  localStorage. (Node harness has no processSaves — it asserts the ABI.)
+- **Node harness flow** (site/test_doom.mjs): F6 (0xC0) at i≥200 →
+  Enter when menuactive → 'a' (0x61) + Enter → asserts `SAVE ok slot=0`
+  in uart + flag=1. Pass condition: `SAVE ok slot=0` present.
+- **Key-ring overflow (harness bug)**: the guest consumes ~1 (D,U) pair
+  per game frame; spamming W(D) every 200k-inst iteration (plus arrow/
+  fire taps) wraps the 256-byte ring mod 256 and clobbers unconsumed
+  events — the F6 was consumed but the queued Enter/'a'/Enter were
+  overwritten (keyRd froze, menu=1 cm=SaveDef, sse=0, qss=-2 forever).
+  Fix: hold W = re-assert D every 25 iters, arrow+fire taps every 40.
+  Browser doom.js is unaffected (held keys = one D, U on release).
+- **Nightmare confirm**: the skill menu opens at item 2; two ArrowDowns
+  land on item 4 (NIGHTMARE) → the game pops a "ARE YOU SURE?" prompt
+  needing 'y' (0x79) — the save smoke handles it (waits for
+  messageToPrint @0xC001682C != 0 → taps 'y'). One ArrowDown = skill 3,
+  no prompt.
+- **Attract note (smoke2)**: demo1 playback runs with gamestate=0
+  (GS_LEVEL) and demoseq @0xC00143BC ≥ 1 — `gamestate==3` only appears
+  during the ~170s title pic, so smoke waits on `gs==3 || demoseq>=1`.
+- **Hidden-tab test is env-flaky** (~50%): a TCI wedge can strike
+  anywhere in the first seconds of E1M1 play (main thread blocks 10s+;
+  Runtime.evaluate never returns). Reproduced with the OLD firmware +
+  new doom.js and vice versa — NOT a code regression, it is the §7-class
+  Chrome-only TCI issue (batch/region sensitive; the firmware layout
+  shift from any rebuild moves the trigger). doom.js has a `lastPump`
+  guard so the rAF loop never steps back-to-back with the pump's burst
+  (gap-free melt-crossing is the documented wedge trigger). If a smoke
+  fails with `evaljs timeout`, kill all chrome (`pkill -9 chrome`) —
+  stale instances hold CDP 9334 and the smoke drives a wedged page.
 
 ### Boot / menu flow (verified in this port)
 - UART markers: `Z_Init` → `W_Init` → `adding doom1.wad` →

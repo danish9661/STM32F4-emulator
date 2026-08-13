@@ -40,6 +40,23 @@
 #define DGSB_ADDR         (DOOM_ABI_ADDR + 0x510u)
 #define FRAMECOUNT_ADDR   (DOOM_ABI_ADDR + 0x514u)
 #define CLOCKMS_ADDR      (DOOM_ABI_ADDR + 0x518u)
+// Savegame virtual files (no filesystem): 2 slots of 256 KB in the free
+// EXTRAM gap between .bss (ends ~0xC004C000) and the zone (0xC0100000).
+// The guest writes "doomsavN.dsg" blobs (engine temp-write + rename-commit);
+// the JS driver mirrors them to localStorage via the flags below.
+//     0x51C u32 saveFlag  (guest→driver) 1 = save written, 2 = load request
+//     0x520 u32 saveSize  (guest→driver on save; driver→guest on load)
+//     0x524 u32 saveReady (driver→guest) 1 = requested slot restored
+//     0x528 u32 saveSlot  (guest→driver) slot index for flag operations
+//     0x52C u32 saveMap   (driver→guest) bit N = slot N has a saved game
+#define DOOM_SAVE_ADDR       0xC0080000u
+#define DOOM_SAVE_SLOT_SIZE  0x40000u    // 256 KB (vanilla SAVEGAMESIZE cap)
+#define DOOM_SAVE_SLOTS      2
+#define SAVEFLAG_ADDR  (DOOM_ABI_ADDR + 0x51Cu)
+#define SAVESIZE_ADDR  (DOOM_ABI_ADDR + 0x520u)
+#define SAVEREADY_ADDR (DOOM_ABI_ADDR + 0x524u)
+#define SAVESLOT_ADDR  (DOOM_ABI_ADDR + 0x528u)
+#define SAVEMAP_ADDR   (DOOM_ABI_ADDR + 0x52Cu)
 
 // wad lookup + file-exists shim (platform.c)
 const char *doom_wad_name(const char *path);
