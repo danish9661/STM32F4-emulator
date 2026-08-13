@@ -5,16 +5,21 @@
 <title>DOOM on the STM32F407 emulator</title>
 <style>
   :root { color-scheme: dark; }
-  body { background: #111; color: #ccc; font: 14px/1.4 monospace; margin: 0; padding: 16px; }
-  h1 { font-size: 18px; color: #f90; margin: 0 0 8px; }
-  #status { color: #8c8; margin-bottom: 8px; }
+  html, body { height: 100%; }
+  body { background: #000; color: #ccc; font: 14px/1.4 monospace; margin: 0; padding: 8px 16px;
+         display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box; }
+  h1 { font-size: 18px; color: #f90; margin: 0 0 4px; }
+  #status { color: #8c8; margin-bottom: 4px; }
   #status.error { color: #f66; }
+  #screenWrap { flex: 1; min-height: 0; display: flex; justify-content: center; align-items: center;
+                background: #000; }
   canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000;
-           border: 2px solid #333; width: 640px; height: 400px; }
-  #help { color: #888; margin: 8px 0 0; font-size: 12px; white-space: pre-line; }
-  #keys { margin-top: 8px; color: #aaf; }
-  pre#uart { height: 140px; overflow-y: auto; background: #000; border: 1px solid #333;
-             padding: 6px; margin-top: 8px; white-space: pre-wrap; }
+           border: 1px solid #333; max-width: 100%; max-height: 100%; width: auto; height: auto; }
+  #stats { color: #8c8; font-size: 13px; margin-top: 4px; }
+  #help { color: #888; margin: 4px 0 0; font-size: 12px; white-space: pre-line; }
+  #keys { margin-top: 4px; color: #aaf; min-height: 18px; }
+  pre#uart { height: 90px; overflow-y: auto; background: #000; border: 1px solid #333;
+             padding: 4px; margin-top: 4px; white-space: pre-wrap; }
   button { background: #222; color: #ccc; border: 1px solid #444; padding: 4px 12px;
            cursor: pointer; }
   button:hover { background: #333; }
@@ -23,16 +28,18 @@
 <body>
 <h1>DOOM — doomgeneric on the emulated STM32F407</h1>
 <div id="status">booting…</div>
-<canvas id="screen" width="640" height="400"></canvas>
+<div id="screenWrap"><canvas id="screen" width="640" height="400"></canvas></div>
+<div id="stats">MIPS: — · FPS: —</div>
 <div id="keys"></div>
-<pre id="help">Controls:  WASD move/turn · Arrow keys turn  · Ctrl / Space fire
-           Shift strafe · Enter / Esc menu  · Mouse click fire (pointer lock)
+<pre id="help">Controls:  WASD move/turn · Arrow keys turn · Ctrl / Space fire
+           Shift strafe · Enter / Esc menu · Mouse click fire (pointer lock)
            F1 help · F2 save · F3 load · F6 quicksave · F9 quickload
            F10 end game · F11 quit · F12 screenshot
 </pre>
 <div>
   <button id="btnReset">Reset</button>
   <button id="btnPause">Pause</button>
+  <button id="btnFull">Fullscreen</button>
   <button id="btnClear">Clear log</button>
 </div>
 <pre id="uart"></pre>

@@ -12,6 +12,13 @@ const canvas = $('screen');
 const ctx = canvas.getContext('2d');
 const img = ctx.createImageData(320, 200);
 
+// Pacing: the guest's DG_SleepMs(15) busy-waits ~360k instructions per game
+// frame, so a single step() (100k inst) yields only ~0.2 frames.  Run a few
+// steps per rAF within a wall-time budget to approach the emulator's real
+// throughput (~15 MIPS => ~realtime Doom).
+const STEP_BUDGET = 6;      // max steps per rAF
+const MS_BUDGET = 16;       // max wall time per rAF
+
 // Doom keycodes (engine/doomkeys.h; TranslateKey is identity)
 const KEY = {
     ESC: 0x1B, ENTER: 0x0D,
@@ -41,9 +48,12 @@ let emu = null, uc = null;
 let keyWr = 0;
 const held = new Set();            // doom keycodes currently held down
 let fbAddr = 0n;
+let fbHash = 0, framesShown = 0;
 let uartBuf = '';
 let paused = false;
 let booted = false;
+let instTotal = 0;
+let statLast = performance.now(), statInst = 0;
 
 function setStatus(s, cls) {
     const el = $('status');
@@ -112,6 +122,10 @@ $('btnPause').addEventListener('click', () => {
     $('btnPause').textContent = paused ? 'Resume' : 'Pause';
 });
 $('btnReset').addEventListener('click', boot);
+$('btnFull').addEventListener('click', () => {
+    const el = document.fullscreenElement ? document : $('screenWrap');
+    (document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen()).catch(() => {});
+});
 $('btnClear').addEventListener('click', () => { $('uart').textContent = uartBuf = ''; });
 
 function appendUart(chunk) {
@@ -122,8 +136,17 @@ function appendUart(chunk) {
     el.scrollTop = el.scrollHeight;
 }
 
+function fitCanvas() {
+    const wrap = $('screenWrap').getBoundingClientRect();
+    const w = Math.max(2, Math.min(wrap.width - 4, (wrap.height - 4) * 1.6));
+    canvas.style.width = Math.floor(w) + 'px';
+    canvas.style.height = 'auto';
+}
+window.addEventListener('resize', fitCanvas);
+
 async function boot() {
     setStatus('booting…');
+    fitCanvas();                 // layout first; re-fit when the emulator is up
     paused = false;
     $('btnPause').textContent = 'Pause';
     held.clear();
@@ -154,6 +177,7 @@ async function boot() {
         uc = emu.uc;
         window.__emu = emu;
         fbAddr = 0n;
+        fitCanvas();
         booted = true;
         setStatus('running — DOOM booting (WAD at 0xB8000000)');
         requestAnimationFrame(loop);
@@ -163,17 +187,30 @@ async function boot() {
     }
 }
 
+function fnv1a(data) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < data.length; i++) {
+        h ^= data[i];
+        h = Math.imul(h, 0x01000193);
+    }
+    return h >>> 0;
+}
+
+// renders one game frame; returns true if the framebuffer changed
 function renderFb() {
-    if (!emu) return;
+    if (!emu) return false;
     const dgsb = emu.read32(DGSB);
     if (dgsb !== 0 && dgsb !== Number(fbAddr)) fbAddr = BigInt(dgsb >>> 0);
-    if (fbAddr === 0n) return;
+    if (fbAddr === 0n) return false;
     let fb;
     try {
         fb = new Uint8Array(uc.mem_read(fbAddr, 320 * 200));
     } catch (e) {
-        return;
+        return false;
     }
+    const h = fnv1a(fb);
+    if (h === fbHash) return false;
+    fbHash = h;
     const pal = new Uint8Array(uc.mem_read(PALETTE, 256 * 4));
     const d = img.data;
     for (let i = 0; i < 64000; i++) {
@@ -184,22 +221,39 @@ function renderFb() {
         d[i * 4 + 3] = 255;
     }
     ctx.putImageData(img, 0, 0);
+    return true;
 }
 
 async function loop() {
     if (!booted || !emu) return;
     if (!paused) {
         try {
-            emu.step();
+            const t0 = performance.now();
+            let steps = 0;
+            while (steps < STEP_BUDGET && performance.now() - t0 < MS_BUDGET) {
+                const res = emu.step();
+                instTotal = res.instCount;   // cumulative counter
+                steps++;
+            }
         } catch (e) {
             setStatus('emulator error: ' + e.message, 'error');
             return;
         }
         appendUart(emu.drainUart());
-        // re-assert held keys every few steps (held keys are down-only so
-        // they don't break the guest's key-UP drain)
+        // re-assert held keys every rAF (held keys are down-only so they
+        // don't break the guest's key-UP drain)
         for (const k of held) sendKey(k, true);
-        renderFb();
+        if (renderFb()) framesShown++;
+
+        const now = performance.now();
+        if (now - statLast >= 500) {
+            const dt = (now - statLast) / 1000;
+            const mips = (instTotal - statInst) / dt / 1e6;
+            $('stats').textContent =
+                `MIPS: ${mips.toFixed(1)} · FPS: ${(framesShown / dt).toFixed(0)} · ${(instTotal / 1e6).toFixed(1)}M inst`;
+            statLast = now; statInst = instTotal;
+            framesShown = 0;
+        }
     }
     requestAnimationFrame(loop);
 }

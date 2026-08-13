@@ -1310,10 +1310,32 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   /doom.html): canvas 640×400 (2× 320×200, BGRA→RGBA per frame), WASD +
   arrows + Ctrl/Space/Shift + F-keys, held keys re-asserted down-only each
   rAF step, click = fire with pointer lock. Links from index.html footer.
-- CDP smoke: `/tmp/opencode/doom_smoke.mjs` — boots in headless Chrome,
-  dispatches the menu sequence via synthetic KeyboardEvents, asserts
-  gamestate=0/menu closed and ≥5000 non-black canvas pixels (measured
-  59042). Uses fresh `--user-data-dir=/tmp/opencode/chrome-doom` + a
+- **Browser pacing (2026-08-13)**: 1 `emu.step()` per rAF was ~13 tics/s
+  (each game frame ≈ 450k inst: tick ≈90k + DG_SleepMs(15) ≈360k). doom.js
+  now runs up to `STEP_BUDGET = 6` steps per rAF within `MS_BUDGET = 16` ms
+  wall → near-realtime (~16.5 MIPS in headless Chrome). `emu.step()`
+  returns `{pc, stopped, instCount}` where **instCount is CUMULATIVE
+  session-wide** (module counter in emulator.js HOOK_CODE) — assign
+  `instTotal = res.instCount`, NEVER `+=` (summing yields fake
+  MIPS 33419/41568 readings).
+- **Stats meter**: `#stats` line shows `MIPS: x.x · FPS: n · x.xM inst`,
+  updated every 500 ms. FPS counts **framebuffer changes/sec** (fnv1a of
+  the 64KB fb, change-gated re-render) — reads ~0 on static views (title,
+  menus, pushing into the spawn wall) by design, real numbers when the
+  view moves. Smoke asserts FPS ≥ 5 while holding W + ArrowLeft.
+- **Canvas fills the viewport via `fitCanvas()` (JS)**: CSS-only sizing
+  failed twice (`width:min(100vw,calc(100vh*1.6))` resolved to ~931px in
+  a 980px viewport; `max-width/max-height:100%` caps but never grows, so
+  the canvas stayed at intrinsic 640×400). fitCanvas reads `#screenWrap`
+  rect and sets explicit px `canvas.style.width/height` keeping 16:10
+  (`w = min(areaW-2, (areaH-2)*1.6)`); called at boot start, after
+  `createEmulator`, and on window resize. Headless quirk: dpr=1.25.
+- CDP smoke: `/tmp/opencode/doom_smoke2.mjs` — boots in headless Chrome
+  (fresh `--user-data-dir` per run; cache-bust via `?v=N` — the doom.js
+  module is cached), dispatches the menu sequence via synthetic
+  KeyboardEvents, asserts gamestate=0/menu closed, canvas fills the
+  viewport (w ≥ 600, aspect ≈1.6), stats `/MIPS: \d/` with FPS ≥ 5 during
+  W+turn, and ≥5000 non-black canvas pixels (measured 63080). Uses a
   python http.server on 8123.
 - `doom1.wad` (shareware, 4.2 MB) is copied into `site/` for the browser
   page; the node harness reads `/tmp/opencode/wad/doom1.wad`.
