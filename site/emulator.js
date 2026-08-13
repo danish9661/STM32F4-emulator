@@ -140,6 +140,9 @@ export async function createEmulator(opts) {
     uc.mem_write(BigInt(0x20000000), new Uint8Array(ram_size));
     for (const r of extra_ram) {
         mmap(r.addr, r.size, Module.PROT_ALL, 'extra_ram');
+        // same leftover-seeding hazard as SRAM: extra_ram can host .data/.bss
+        // (doom's 0xC0000000) — zero it too so bss globals start clean.
+        uc.mem_write(BigInt(r.addr), new Uint8Array(r.size));
     }
     for (const seg of extra_mem) {
         uc.mem_write(BigInt(seg.addr), seg.data);

@@ -1394,3 +1394,53 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   page; the node harness reads `/tmp/opencode/wad/doom1.wad`.
 - `tools/make_firmware.mjs` has the `doom` entry; `site/firmware.js`
   regenerated (31 firmwares, doom.bin 277 KB).
+
+### Audio (I2S mixer) + WASD (2026-08-13, doom.bin now ~284 KB)
+- **Sound path**: `doom/f407/i_sound_f407.c` (was fully stubbed) now has an
+  8-channel 8-bit→16-bit mixer. Sfx lumps are resolved lazily via the
+  canonical `I_GetSfxLumpNum` (`"ds"+name` → `W_GetNumForName`; the engine
+  calls it when `lumpnum < 0` — returning `sfx->lumpnum` as the stub did
+  leaves it -1 forever and `W_LumpLength(-1)` aborts). Samples cached in
+  `sfxinfo->driver_data` (points past the 8-byte header). Sound lump format
+  verified empirically from doom1.wad: `[u16 3][u16 11025][u16 length][u16 0]`
+  then `length` 8-bit unsigned samples (NO ascii name header).
+- **Mixer** (`DOOM_SubmitAudio()`, declared in doomplatform.h, called from
+  `DG_DrawFrame` — one 315-sample frame = 11025/35): sums `sample*vol` per
+  active channel and normalizes `* 32768 / (16129 * active)` so full scale
+  needs ALL channels at max — naive `sample*vol*2` + ±30000 clamp hard-
+  clipped every loud sample (user reported "crackling"). I2S1 init in
+  `I_InitSound`: RCC_APB2ENR bit 12, CR1=0, I2SPR=(2)|(1<<8),
+  I2SCFGR=(1<<11)|(1<<10)|(1<<9)|(1<<0); per-sample `while(!(SR & TXE))` +
+  DR write (audio_play_test pattern).
+- **Playback (doom.js)**: `ext_devices: { speaker: true }` (the emulator's
+  speaker drain is opt-in, `takeSpeakerSamples()` else returns empty);
+  `AudioContext` created lazily on first keydown (autoplay policy); samples
+  accumulate into a rolling Float32 buffer and ONE `BufferSource` is
+  scheduled per 8192 samples (~0.74 s) at 11025 Hz — scheduling per-frame
+  315-sample sources glitches/crackles (~340 sources/s). Starve guard:
+  if `audioNextTime - currentTime > 0.5` the schedule restarts. Counter
+  `window.__audioTotal` for smoke assertions.
+- **WASD works now**: the engine's default bindings (m_controls.c) are
+  arrow-only (key_up=0xAD, key_down=0xAF, key_left=0xAC, key_right=0xAE,
+  strafe 0xA0/0xA1, use 0xA2, fire 0xA3); `DOM_TO_DOOM` in doom.js maps
+  'w'/'s'/'a'/'d' → those arrow codes (menus get WASD navigation for free).
+  No firmware rebuild needed for this.
+- **extra_ram zeroing** (emulator.js): the §11/§16 "zero SRAM" fix only
+  covered 0x20000000 — DOOM's .data/.bss live in the 16MB extra_ram at
+  0xC0000000, which was seeded with firmware-transfer leftovers (browser
+  showed garbage `currentMenu`/`itemOn` — menu flow broke; Node harness
+  passed by luck of the leftover pattern). Each extra_ram region is now
+  zeroed right after mmap, same as SRAM.
+- **mobj x/y offsets**: mobj_t (Strife-fork) = thinker(12) + x,y,z (x@+12,
+  y@+16, z@+20) + snext/sprev (24/28) + angle@+32. Reading mo+4/mo+8 reads
+  the thinker's function pointer (0xC017xxxx — looks like a huge negative
+  fixed-point x).
+- **Smoke** (/tmp/opencode/doom_smoke2.mjs, v=16) now also asserts: index.html
+  header DOOM button + footer link, WASD forward motion ≥ 5 units, audio
+  samples played (fire with Ctrl first — menu blips alone are ~±150 at vol 64).
+  Measured run: 83.1 u forward, 93.2° turn, 45675 samples, 22.6 MIPS / 15 FPS.
+- `node site/test_doom.mjs` asserts audio: drains `takeSpeakerSamples()`
+  incrementally (the ring only keeps the last 64 chunks — a single end-of-run
+  drain misses the gunshots) and requires peak amplitude > 0.005. The Node
+  harness sends raw 0x77 for W (unbound in-engine) — only the browser
+  translates; the harness tests the engine path with arrow taps instead.

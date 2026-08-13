@@ -138,6 +138,8 @@ void DG_DrawFrame()
     // (the driver paces the loop to realtime 35 tics/s using this counter).
     memcpy((void*)g_abi.palette, (const void*)colors, PALETTE_SIZE);
     g_abi.frameCount++;
+    // One frame's worth of audio (11025/35 samples) -> I2S1 capture FIFO.
+    DOOM_SubmitAudio();
 }
 
 void DG_SleepMs(uint32_t ms)

@@ -34,7 +34,9 @@ const DOM_TO_DOOM = {
     'Enter': KEY.ENTER, 'Escape': KEY.ESC,
     'ArrowLeft': KEY.LEFTARROW, 'ArrowRight': KEY.RIGHTARROW,
     'ArrowUp': KEY.UPARROW, 'ArrowDown': KEY.DOWNARROW,
-    'w': 0x77, 'a': 0x61, 's': 0x73, 'd': 0x64,
+    // WASD -> movement keys: the engine's default bindings (m_controls.c)
+    // are arrow-only, so translate here instead of rebinding in the guest.
+    'w': KEY.UPARROW, 's': KEY.DOWNARROW, 'a': KEY.LEFTARROW, 'd': KEY.RIGHTARROW,
     'ShiftLeft': KEY.STRAFE_L, 'ShiftRight': KEY.STRAFE_R,
     ' ': KEY.USE, 'ControlLeft': KEY.FIRE, 'ControlRight': KEY.FIRE,
     'F1': KEY.F1, 'F2': KEY.F2, 'F3': KEY.F3, 'F6': KEY.F6,
@@ -63,6 +65,44 @@ let instTotal = 0;
 let statLast = performance.now(), statInst = 0;
 let activeMs = 0;                    // wall time spent inside emu.step() (MIPS meter)
 let paceWall = 0, paceFrames = -1;  // realtime pacing anchor (wall ms, frame#)
+
+// ── audio: drain the model's I2S1 capture FIFO into WebAudio at 11025 Hz ──
+// Samples accumulate in a rolling buffer; one BufferSource is scheduled per
+// AUDIO_CHUNK samples (~0.74 s) so hundreds of tiny per-frame sources don't
+// glitch/crackle.  If playback starves (chunks late), the schedule restarts
+// at currentTime instead of building up latency.
+let audioCtx = null, audioNextTime = 0, audioBuf = new Float32Array(0);
+window.__audioTotal = 0;            // samples played (smoke assertions)
+const AUDIO_CHUNK = 8192;
+
+function initAudio() {
+    if (audioCtx) return;
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { /* no audio */ }
+}
+
+function playAudio() {
+    if (!audioCtx || audioBuf.length < AUDIO_CHUNK) return;
+    if (audioNextTime - audioCtx.currentTime > 0.5) audioNextTime = audioCtx.currentTime;
+    const buf = audioCtx.createBuffer(1, audioBuf.length, 11025);
+    buf.getChannelData(0).set(audioBuf);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioCtx.destination);
+    src.start(audioNextTime);
+    audioNextTime += buf.duration;
+    audioBuf = new Float32Array(0);
+}
+
+function drainAudio() {
+    const s = emu.takeSpeakerSamples();
+    if (!s || !s.length) return;
+    const next = new Float32Array(audioBuf.length + s.length);
+    next.set(audioBuf, 0);
+    next.set(s, audioBuf.length);
+    audioBuf = next;
+    window.__audioTotal += s.length;
+    playAudio();
+}
 
 function setStatus(s, cls) {
     const el = $('status');
@@ -118,6 +158,7 @@ document.addEventListener('keydown', (e) => {
     const code = DOM_TO_DOOM[e.key];
     if (code === undefined) return;
     e.preventDefault();
+    initAudio();                       // user gesture: unlock WebAudio
     if (!held.has(code)) {
         sentPos.set(code, sendKey(code, true));
         held.add(code);
@@ -211,6 +252,7 @@ async function boot() {
             ],
             extra_mem: [{ addr: 0xB8000000, data: new Uint8Array(wad) }],
             minimalPolls: true, blockCounting: true,
+            ext_devices: { speaker: true },   // enable the I2S capture drain
         });
         uc = emu.uc;
         window.__emu = emu;
@@ -293,6 +335,7 @@ async function loop() {
             return;
         }
         appendUart(emu.drainUart());
+        drainAudio();
         if (renderFb()) framesShown++;
 
         const now = performance.now();

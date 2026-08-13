@@ -45,4 +45,8 @@
 const char *doom_wad_name(const char *path);
 int doom_file_exists(const char *filename);
 
+// frame audio mixer (i_sound_f407.c): mixes one frame (11025/35 samples) of
+// active sfx channels into the I2S1 TX FIFO; called from DG_DrawFrame.
+void DOOM_SubmitAudio(void);
+
 #endif

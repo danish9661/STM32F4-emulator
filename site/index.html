@@ -31,6 +31,11 @@ header {
   position: sticky; top: 0; z-index: 5;
 }
 header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+a.doomLink {
+  font-size: 12px; font-weight: 600; color: #000; text-decoration: none;
+  background: var(--green); padding: 4px 10px; border-radius: 4px;
+}
+a.doomLink:hover { filter: brightness(1.2); }
 #status { font-size: 12px; color: var(--dim); margin-left: auto; white-space: nowrap; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--dim); margin-right: 6px; vertical-align: middle; }
 .dot.run { background: var(--green); box-shadow: 0 0 6px var(--green); }
@@ -101,6 +106,7 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
 <body>
 <header>
   <h1>STM32F407 in the Browser</h1>
+  <a class="doomLink" href="doom.html">▶ Play DOOM</a>
   <span id="status"><span class="dot" id="dot"></span><span id="statusText">booting…</span></span>
 </header>
 <main>

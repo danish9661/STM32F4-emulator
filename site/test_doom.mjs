@@ -38,6 +38,7 @@ const emu = await createEmulator({
     ],
     extra_mem: [{ addr: 0xB8000000, data: wad }],
     minimalPolls: true, blockCounting: true,
+    ext_devices: { speaker: true },   // I2S capture drain (audio test)
 });
 
 const uc = emu.uc;
@@ -61,6 +62,7 @@ let phase = 'boot';      // boot -> title -> wait1/2/3 (change-gated keys) -> pl
 let gate = 0;            // change-count snapshot between key sends
 let maxSteps = 0;
 let crashed = false;
+let audioPeak = 0, audioSamples = 0;   // drained incrementally (ring windows)
 
 try {
     for (let i = 0; i < 400; i++) {
@@ -70,6 +72,10 @@ try {
         uartText += chunk;
         maxSteps += 200000;
         if (maxSteps > 80000000) break;
+
+        const a = emu.takeSpeakerSamples();
+        audioSamples += a.length;
+        for (let j = 0; j < a.length; j++) { const v = Math.abs(a[j]); if (v > audioPeak) audioPeak = v; }
 
         const sb = read32(DGSB);
         if (sb && BigInt(sb) !== fbAddr) { fbAddr = BigInt(sb); console.log(`[fb] DG_ScreenBuffer = 0x${sb.toString(16)}`); }
@@ -119,6 +125,9 @@ try {
             if (i % 10 === 0) {                  // and turn occasionally
                 sendKey(0xAC, true); sendKey(0xAC, false);   // KEY_LEFTARROW
             }
+            if (i % 5 === 0) {                   // and fire: guarantees loud audio
+                sendKey(0xA3, true); sendKey(0xA3, false);   // KEY_FIRE
+            }
         }
 
         if (i % 50 === 0 && phase !== 'boot') {
@@ -134,9 +143,13 @@ const all = uart.join('');
 const keyRd = read32(KEYRD);
 const pal = fbAddr ? memRead(PALETTE, 256 * 4) : null;
 const palOk = pal && pal[3] + pal[4] + pal[5] + pal[7] > 0;   // non-zero entries exist
+const audio = emu.takeSpeakerSamples();   // final drain
+audioSamples += audio.length;
+for (let i = 0; i < audio.length; i++) { const v = Math.abs(audio[i]); if (v > audioPeak) audioPeak = v; }
 console.log();
 console.log('uart tail:', all.replace(/\r/g, '').split('\n').filter(Boolean).slice(-8).join(' | '));
 console.log(`fbAddr=0x${fbAddr.toString(16)} frame_changes=${changes} keyRd=${keyRd} inst=${maxSteps} crashed=${crashed} phase=${phase} menuActive=${read32(0xC00166F8)} gamestate=${read32(0xC00153AC)}`);
+console.log(`audio: ${audioSamples} samples drained, peak amplitude ${audioPeak.toFixed(0)}`);
 
 const pass =
     !crashed &&
@@ -147,6 +160,8 @@ const pass =
     changes >= 20 &&
     keyRd > 0 &&          // guest consumed at least one injected event
     palOk &&              // guest exported the palette
+    audioSamples > 0 &&   // I2S mixer is streaming audio frames
+    audioPeak > 0.005 &&  // and the weapon/menu sounds actually produced signal
     read32(0xC00166F8) === 0 &&   // menu closed = game actually started
     phase === 'play';
 console.log(pass ? 'PASS' : 'FAIL');
