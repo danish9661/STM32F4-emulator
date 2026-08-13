@@ -82,15 +82,19 @@ let activeMs = 0;                    // wall time spent inside emu.step() (MIPS 
 let paceWall = 0, paceFrames = -1;  // realtime pacing anchor (wall ms, frame#)
 
 // ── audio: drain the model's I2S1 capture FIFO into WebAudio at 11025 Hz ──
-// Samples accumulate; one BufferSource per AUDIO_CHUNK (~0.19 s — smaller
+// Samples accumulate; one BufferSource per AUDIO_CHUNK (~0.09 s — smaller
 // chunks = lower latency; 8192-sample chunks delayed sound ~0.7 s).  The
 // source plays at playbackRate = production rate / 11025 so on slow machines
 // the audio slows down (matching the slow game) instead of chopping/restarting.
+// MAX_AHEAD bounds the scheduled queue: when production runs ahead of
+// realtime (boot catch-up, burst), the backlog is dropped instead of
+// accumulating, keeping latency at MAX_AHEAD + one chunk.
 let audioCtx = null, audioNextTime = 0, audioBuf = new Float32Array(0);
 let audioProd = 0, audioProdWall = 0;   // production-rate estimator
 let audioRate = 1;
 window.__audioTotal = 0;            // samples played (smoke assertions)
-const AUDIO_CHUNK = 2048;
+const AUDIO_CHUNK = 1024;
+const MAX_AHEAD = 0.25;             // s of scheduled audio allowed
 
 function initAudio() {
     if (audioCtx) return;
@@ -100,7 +104,14 @@ function initAudio() {
 function playAudio() {
     if (!audioCtx || audioBuf.length < AUDIO_CHUNK) return;
     const now = audioCtx.currentTime;
-    if (audioNextTime - now > 0.5) audioNextTime = now;
+    if (audioNextTime - now > MAX_AHEAD) {
+        // Production ran ahead of realtime (boot catch-up, burst): drop the
+        // backlog and restart the queue so latency never grows past
+        // MAX_AHEAD + one chunk instead of accumulating forever.
+        audioNextTime = now;
+        audioBuf = new Float32Array(0);
+        return;
+    }
     const buf = audioCtx.createBuffer(1, audioBuf.length, 11025);
     buf.getChannelData(0).set(audioBuf);
     const src = audioCtx.createBufferSource();

@@ -153,14 +153,17 @@ boolean I_MusicIsPlaying(void) { return false; }
 void DOOM_SubmitAudio(void)
 {
     int s, i;
-    // Per-frame normalization: each channel contributes sample*vol (max
-    // 127*127 = 16129); scale the summed mix so full-scale needs ALL active
-    // channels at max vol.  Hard-clipping at ±32767 is then rare.
+    // Per-frame normalization: each channel contributes sample*vol.  Max
+    // |sample-128| is 127 and the engine volume range is 0..15, so the worst
+    // case per channel is 127*15 = 1905 (NOT 127*127=16129 — that would
+    // leave even an all-channels-maxed mix at ~12% of full scale, i.e.
+    // permanently weak/muffled audio).  Scale the summed mix so full-scale
+    // needs every ACTIVE channel at max vol.
     int active = 0;
     for (i = 0; i < SFX_CHANNELS; i++)
         if (chans[i].active) active++;
     const uint32_t scale = active
-        ? ((32768u << 8) / (16129u * (uint32_t)active))
+        ? ((32768u << 8) / (1905u * (uint32_t)active))
         : 0;
     int16_t frame[FRAME_SAMPLES];
     for (s = 0; s < FRAME_SAMPLES; s++)

@@ -1436,19 +1436,26 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   then `length` 8-bit unsigned samples (NO ascii name header).
 - **Mixer** (`DOOM_SubmitAudio()`, declared in doomplatform.h, called from
   `DG_DrawFrame` — one 315-sample frame = 11025/35): sums `sample*vol` per
-  active channel and normalizes `* 32768 / (16129 * active)` so full scale
-  needs ALL channels at max — naive `sample*vol*2` + ±30000 clamp hard-
-  clipped every loud sample (user reported "crackling"). I2S1 init in
-  `I_InitSound`: RCC_APB2ENR bit 12, CR1=0, I2SPR=(2)|(1<<8),
+  active channel and normalizes `* 32768 / (1905 * active)` so full scale
+  needs every ACTIVE channel at max vol — **1905 = 127×15 (max |sample-128|
+  × max engine vol 0..15); the old `16129 = 127×127` constant assumed vol
+  127 and left even an all-channels-maxed mix at ~12% of full scale
+  (permanently weak/muffled audio, user reported)**. Naive `sample*vol*2` +
+  ±30000 clamp hard-clipped every loud sample (earlier "crackling" report).
+  I2S1 init in `I_InitSound`: RCC_APB2ENR bit 12, CR1=0, I2SPR=(2)|(1<<8),
   I2SCFGR=(1<<11)|(1<<10)|(1<<9)|(1<<0); per-sample `while(!(SR & TXE))` +
   DR write (audio_play_test pattern).
 - **Playback (doom.js)**: `ext_devices: { speaker: true }` (the emulator's
   speaker drain is opt-in, `takeSpeakerSamples()` else returns empty);
   `AudioContext` created lazily on first keydown (autoplay policy); samples
   accumulate into a rolling Float32 buffer and ONE `BufferSource` is
-  scheduled per 8192 samples (~0.74 s) at 11025 Hz — scheduling per-frame
-  315-sample sources glitches/crackles (~340 sources/s). Starve guard:
-  if `audioNextTime - currentTime > 0.5` the schedule restarts. Counter
+  scheduled per **1024 samples (~0.09 s)** at 11025 Hz — scheduling per-frame
+  315-sample sources glitches/crackles (~340 sources/s). **Latency bound:
+  `MAX_AHEAD = 0.25 s` — when `audioNextTime - currentTime` exceeds it
+  (production ran ahead: boot catch-up, bursts) the backlog is DROPPED and
+  the queue restarts, so delay never accumulates past ~0.35 s** (the old
+  `> 0.5` restart kept the queued sources, and the `audioRate` cap at 1.0
+  meant surplus production became permanent latency). Counter
   `window.__audioTotal` for smoke assertions.
 - **WASD works now**: the engine's default bindings (m_controls.c) are
   arrow-only (key_up=0xAD, key_down=0xAF, key_left=0xAC, key_right=0xAE,
