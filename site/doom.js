@@ -173,9 +173,11 @@ function appendUart(chunk) {
 }
 
 function fitCanvas() {
+    // contain-fit: largest 16:10 box inside the wrap, centered by flex
     const wrap = $('screenWrap').getBoundingClientRect();
-    canvas.style.width = Math.max(2, Math.floor(wrap.width)) + 'px';
-    canvas.style.height = Math.max(2, Math.floor(wrap.height)) + 'px';
+    const scale = Math.min(wrap.width / 640, wrap.height / 400);
+    canvas.style.width = Math.max(2, Math.floor(640 * scale)) + 'px';
+    canvas.style.height = Math.max(2, Math.floor(400 * scale)) + 'px';
 }
 window.addEventListener('resize', fitCanvas);
 
