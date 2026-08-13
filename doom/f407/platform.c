@@ -27,6 +27,8 @@ typedef struct {
     volatile uint8_t  pad[8];
     volatile uint8_t  palette[PALETTE_SIZE];
     volatile uint32_t screenBuffer;   // DG_ScreenBuffer value (DG_Init)
+    volatile uint32_t frameCount;     // DG_DrawFrame calls (1 per rendered frame)
+    volatile uint32_t clockMs;        // guest ms clock (advanced by DG_SleepMs)
 } doom_abi_t;
 
 __attribute__((section(".abi"), aligned(16)))
@@ -132,17 +134,20 @@ void DG_Init()
 void DG_DrawFrame()
 {
     // Export the current CMAP256 palette to the fixed ABI address so the JS
-    // driver can map framebuffer indices -> RGB each frame.
+    // driver can map framebuffer indices -> RGB each frame, and count frames
+    // (the driver paces the loop to realtime 35 tics/s using this counter).
     memcpy((void*)g_abi.palette, (const void*)colors, PALETTE_SIZE);
+    g_abi.frameCount++;
 }
 
 void DG_SleepMs(uint32_t ms)
 {
     s_msClock += ms;
-    // Light busy-wait so the emulated execution spends some instructions
-    // (the emulator is instruction-count driven; this paces the game loop).
-    volatile uint32_t n = ms * 4000;
-    while (n--) ;
+    g_abi.clockMs = s_msClock;
+    // NOTE: no busy-wait here.  On real hardware this loop paces the game
+    // to 35 tics/s; under the instruction-count driven emulator it instead
+    // wasted ~360k instructions per frame (~80% of every frame's cost).  The
+    // JS driver now paces by wall clock against g_abi.clockMs/frameCount.
 }
 
 uint32_t DG_GetTicksMs()

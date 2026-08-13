@@ -12,12 +12,15 @@ const canvas = $('screen');
 const ctx = canvas.getContext('2d');
 const img = ctx.createImageData(320, 200);
 
-// Pacing: the guest's DG_SleepMs(15) busy-waits ~360k instructions per game
-// frame, so a single step() (100k inst) yields only ~0.2 frames.  Run a few
-// steps per rAF within a wall-time budget to approach the emulator's real
-// throughput (~15 MIPS => ~realtime Doom).
-const STEP_BUDGET = 6;      // max steps per rAF
-const MS_BUDGET = 16;       // max wall time per rAF
+// Pacing: the guest's DG_SleepMs(15) is now a no-op (no busy-wait — that
+// used to waste ~360k instructions per frame).  The guest advances its own
+// frame counter (ABI +0x514) once per rendered frame at 35 tics/s of game
+// time, so the driver paces by wall clock: run steps until the guest's frame
+// count catches up to realtime 35 fps.  Any machine above ~3.5 MIPS holds
+// exactly 35 fps; slower machines degrade gracefully (as fast as they can).
+const FRAME_MS = 1000 / 35;      // one game frame (tic) per 28.57ms realtime
+const STEP_BUDGET = 12;          // max steps per rAF
+const MS_BUDGET = 16;            // max wall time per rAF
 
 // Doom keycodes (engine/doomkeys.h; TranslateKey is identity)
 const KEY = {
@@ -42,6 +45,7 @@ const ABI = 0x20002000n;
 const KEYWR = ABI;                 // u32 write index (JS)
 const RING = ABI + 0x08n;          // 256-byte ring, 2 bytes/event
 const DGSB = ABI + 0x510n;         // u32 DG_ScreenBuffer
+const FRAMECOUNT = ABI + 0x514n;   // u32 rendered-frame counter (guest)
 const PALETTE = ABI + 0x110n;      // 1024 B BGRA
 
 let emu = null, uc = null;
@@ -54,6 +58,8 @@ let paused = false;
 let booted = false;
 let instTotal = 0;
 let statLast = performance.now(), statInst = 0;
+let activeMs = 0;                    // wall time spent inside emu.step() (MIPS meter)
+let paceWall = 0, paceFrames = -1;  // realtime pacing anchor (wall ms, frame#)
 
 function setStatus(s, cls) {
     const el = $('status');
@@ -172,6 +178,7 @@ async function boot() {
                 { addr: 0xB8000000, size: 8 * 1024 * 1024 },    // WAD image
             ],
             extra_mem: [{ addr: 0xB8000000, data: new Uint8Array(wad) }],
+            minimalPolls: true, blockCounting: true,
         });
         uc = emu.uc;
         window.__emu = emu;
@@ -228,12 +235,26 @@ async function loop() {
     if (!paused) {
         try {
             const t0 = performance.now();
+            const stepT0 = performance.now();
             let steps = 0;
-            while (steps < STEP_BUDGET && performance.now() - t0 < MS_BUDGET) {
+            let frames = emu.read32(FRAMECOUNT);
+            // anchor pacing at the FIRST rendered frame (before that, boot runs
+            // at full speed); re-anchor after a pause
+            if (frames > 0 && paceFrames < 0) {
+                paceFrames = frames;
+                paceWall = performance.now();
+            }
+            // realtime pacing: run until the guest's frame counter catches the
+            // wall clock at 35 fps (28.57ms per frame)
+            let target = Infinity;
+            if (paceFrames >= 0) target = paceFrames + Math.floor((performance.now() - paceWall) / FRAME_MS);
+            while (steps < STEP_BUDGET && performance.now() - t0 < MS_BUDGET && frames < target) {
                 const res = emu.step();
                 instTotal = res.instCount;   // cumulative counter
                 steps++;
+                frames = emu.read32(FRAMECOUNT);
             }
+            activeMs += performance.now() - stepT0;
         } catch (e) {
             setStatus('emulator error: ' + e.message, 'error');
             return;
@@ -247,12 +268,15 @@ async function loop() {
         const now = performance.now();
         if (now - statLast >= 500) {
             const dt = (now - statLast) / 1000;
-            const mips = (instTotal - statInst) / dt / 1e6;
+            const mips = activeMs > 0 ? (instTotal - statInst) / (activeMs / 1000) / 1e6 : 0;
             $('stats').textContent =
                 `MIPS: ${mips.toFixed(1)} · FPS: ${(framesShown / dt).toFixed(0)} · ${(instTotal / 1e6).toFixed(1)}M inst`;
             statLast = now; statInst = instTotal;
+            activeMs = 0;
             framesShown = 0;
         }
+    } else {
+        paceFrames = -1;   // re-anchor on resume so no catch-up burst
     }
     requestAnimationFrame(loop);
 }

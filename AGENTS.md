@@ -1318,6 +1318,18 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   session-wide** (module counter in emulator.js HOOK_CODE) — assign
   `instTotal = res.instCount`, NEVER `+=` (summing yields fake
   MIPS 33419/41568 readings).
+- **Fast path (2026-08-13)**: emulator.js gained `minimalPolls: true` +
+  `blockCounting: true` (createEmulator opts, doom.js + test_doom pass both).
+  `minimalPolls` skips the per-instruction tick_n/watchdog/flash/dma/eth wasm
+  calls entirely; `blockCounting` replaces HOOK_CODE with HOOK_BLOCK
+  (instCount += size/2 per block — exact for Thumb-2 2/4-byte widths, valid
+  ONLY with minimalPolls since it has no tick/poll logic). Measured on Node:
+  stock 7.6 MIPS → minimalPolls 8.6 → blockCounting 12.3 (+63%). The
+  instCount meter in block mode over-reports ~1.39× the emu_start budget
+  (the guest's straight-line 60k-nop delay loop is one giant TB that
+  overshoots the per-step count; the MIPS meter reads ~1.4× true). Do NOT
+  use blockCounting for ETH/DMA firmware (no rx-poll stop → recv-wait
+  wedges, the §7 class of stall).
 - **Stats meter**: `#stats` line shows `MIPS: x.x · FPS: n · x.xM inst`,
   updated every 500 ms. FPS counts **framebuffer changes/sec** (fnv1a of
   the 64KB fb, change-gated re-render) — reads ~0 on static views (title,

@@ -18,6 +18,13 @@ export async function createEmulator(opts) {
         vector_table = 0x08000000,
         tickEvery = 5000,     // tick_n batching cadence
         pollEvery = 1000,     // DMA/TX-poll check cadence
+        // Skip the per-instruction poll/tick wasm calls entirely (no ETH/DMA/
+        // timers/watchdog needed — the doom firmware).  InstCount++ alone keeps
+        // the instruction accounting; the guest's own clock paces the loop.
+        minimalPolls = false,
+        // doom fast path: HOOK_BLOCK instead of HOOK_CODE (size/2 inst per
+        // block). Only valid with minimalPolls (no tick/poll logic to run).
+        blockCounting = false,
         maxBatch = 100000,    // emu_start instruction budget per step()
         onTx = null,          // (frame: Uint8Array, meta) called per TX capture
         eth = {},             // firmware-specific SRAM addresses (defaults above)
@@ -232,6 +239,7 @@ export async function createEmulator(opts) {
             uc.emu_stop();
             return;
         }
+        if (minimalPolls) return;
         tickAcc++;
         if (tickAcc >= tickEvery) {
             tickAcc = 0;
@@ -252,7 +260,11 @@ export async function createEmulator(opts) {
             }
         }
     };
-    uc.hook_add(Module.HOOK_CODE, codeHook, null);
+    const blockHook = (handle, address, size, user_data) => {
+        instCount += Number(size) / 2; // Thumb-2: block size in bytes
+    };
+    if (blockCounting) uc.hook_add(Module.HOOK_BLOCK, blockHook, null);
+    else uc.hook_add(Module.HOOK_CODE, codeHook, null);
 
     // ── virtual peripheral devices (JS hardware layer) ────────────────────
     // Device protocols implemented in JS on top of the bus taps:

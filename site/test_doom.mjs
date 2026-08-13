@@ -37,6 +37,7 @@ const emu = await createEmulator({
         { addr: 0xB8000000, size: 8 * 1024 * 1024 },    // WAD image
     ],
     extra_mem: [{ addr: 0xB8000000, data: wad }],
+    minimalPolls: true, blockCounting: true,
 });
 
 const uc = emu.uc;

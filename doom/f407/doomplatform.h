@@ -27,6 +27,9 @@
 //     0x08  key ring, 256 bytes, 2 bytes per event (keycode, 0x80|pressed)
 //     0x110 palette, 1024 bytes, 256 * (b,g,r,a) u8  (written by guest)
 //     0x510 u32 DG_ScreenBuffer value (written by guest at DG_Init)
+//     0x514 u32 frame counter (written by guest per DG_DrawFrame; the JS
+//            driver paces the game to realtime 35 fps against this)
+//     0x518 u32 guest ms clock (written by guest per DG_SleepMs)
 #define DOOM_ABI_ADDR     0x20002000u
 #define KEYQ_SIZE         256u
 #define KEYQ_INDEX_ADDR   (DOOM_ABI_ADDR + 0x00u)
@@ -35,6 +38,8 @@
 #define PALETTE_ADDR      (DOOM_ABI_ADDR + 0x110u)
 #define PALETTE_SIZE      1024u
 #define DGSB_ADDR         (DOOM_ABI_ADDR + 0x510u)
+#define FRAMECOUNT_ADDR   (DOOM_ABI_ADDR + 0x514u)
+#define CLOCKMS_ADDR      (DOOM_ABI_ADDR + 0x518u)
 
 // wad lookup + file-exists shim (platform.c)
 const char *doom_wad_name(const char *path);
