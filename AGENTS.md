@@ -1358,17 +1358,26 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
 - **Canvas sizing via `fitCanvas()` (JS, contain-fit since 2026-08-13)**: the
   canvas is sized to the **largest 16:10 box inside `#screenWrap`**
   (`scale = min(wrap.w/640, wrap.h/400)`, inline px styles) and centered by
-  the wrap's flexbox — aspect is always exactly 1.6 (verified: 657×411 at
-  aspect 1.599 with equal side gaps in both a 1.42:1 and a 3.26:1 window),
-  with black bars only where the window isn't 16:10. History: CSS-only sizing
-  failed twice (`width:min(100vw,calc(100vh*1.6))` resolved to ~931px in a
-  980px viewport; `max-width/max-height:100%` + `width:auto` never grows past
+  the wrap's flexbox — aspect is always exactly 1.6 (verified: 1467×917 at
+  1920×1080 and 884×553 at 1000×900, equal side gaps in both), with black
+  bars only where the window isn't 16:10. History: CSS-only sizing failed
+  twice (`width:min(100vw,calc(100vh*1.6))` resolved to ~931px in a 980px
+  viewport; `max-width/max-height:100%` + `width:auto` never grows past
   intrinsic 640×400); the intermediate JS version stretched edge-to-edge
-  (distorted aspect + looked right-aligned against the black wrap). Called at
-  boot start, after `createEmulator`, and on window resize. Headless quirk:
-  dpr=1.25. The doom.html script tags are cache-busted (`?v=N`) — a stale
-  cached doom.js (pre-contain-fit) is a known cause of "wrong aspect / not
-  covering" reports after an update.
+  (distorted aspect + looked right-aligned against the black wrap). Called
+  at boot start, after `createEmulator`, and on window resize. Headless
+  quirk: dpr=1.25.
+- **Page layout (2026-08-13, game-first)**: doom.html is now a full-window
+  gaming layout: one compact `#topbar` (title + status + stats + held-keys +
+  buttons), `#screenWrap` with `flex:1` (the game fills ALL remaining
+  vertical space), an always-visible **`#guide`** controls strip below the
+  screen (Move W/S/A/D + arrows · Strafe Shift · Fire Ctrl · Use Space ·
+  Menu Enter/Esc · Save F2/F6 · Load F3/F9 · F1/F10/F11/F12), then a small
+  `#uart` terminal. The old tall header/help/button stack wasted ~half the
+  window. `<meta http-equiv="Cache-Control" content="no-cache…">` +
+  `?v=N` cache-bust on the script tags — a stale cached doom.html/doom.js
+  is a known cause of "wrong aspect / not covering / no guide" reports
+  after an update (hard-refresh Ctrl+Shift+R if the page looks old).
 - CDP smoke: `/tmp/opencode/doom_smoke2.mjs` — boots in headless Chrome
   (fresh `--user-data-dir` per run; cache-bust via `?v=N` — the doom.js
   module is cached), drives the menu with **REAL CDP `Input.dispatchKeyEvent`

@@ -2,49 +2,63 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>DOOM on the STM32F407 emulator</title>
 <style>
   :root { color-scheme: dark; }
   html, body { height: 100%; }
-  body { background: #000; color: #ccc; font: 14px/1.4 monospace; margin: 0; padding: 8px 16px;
+  body { background: #000; color: #ccc; font: 14px/1.4 monospace; margin: 0; padding: 0;
          display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box; }
-  h1 { font-size: 18px; color: #f90; margin: 0 0 4px; }
-  #status { color: #8c8; margin-bottom: 4px; }
+  #topbar { display: flex; align-items: center; gap: 14px; padding: 6px 12px;
+            border-bottom: 1px solid #222; flex: none; }
+  h1 { font-size: 15px; color: #f90; margin: 0; white-space: nowrap; }
+  #status { color: #8c8; white-space: nowrap; }
   #status.error { color: #f66; }
-  #screenWrap { flex: 1; min-height: 0; display: flex; justify-content: center; align-items: center;
-                background: #000; }
-  canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000;
-           border: 1px solid #333; max-width: 100%; max-height: 100%; width: auto; height: auto; }
-  #stats { color: #8c8; font-size: 13px; margin-top: 4px; }
-  #help { color: #888; margin: 4px 0 0; font-size: 12px; white-space: pre-line; }
-  #keys { margin-top: 4px; color: #aaf; min-height: 18px; }
-  pre#uart { height: 90px; overflow-y: auto; background: #000; border: 1px solid #333;
-             padding: 4px; margin-top: 4px; white-space: pre-wrap; }
-  button { background: #222; color: #ccc; border: 1px solid #444; padding: 4px 12px;
-           cursor: pointer; }
+  #stats { color: #8c8; font-size: 12px; white-space: nowrap; }
+  #keys { color: #aaf; font-size: 12px; white-space: nowrap; flex: 1; text-align: right; }
+  .btns { display: flex; gap: 6px; }
+  button { background: #222; color: #ccc; border: 1px solid #444; padding: 3px 10px;
+           cursor: pointer; font: 12px monospace; }
   button:hover { background: #333; }
+  #screenWrap { flex: 1; min-height: 0; display: flex; justify-content: center; align-items: center;
+                background: #000; position: relative; }
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000; }
+  #guide { flex: none; border-top: 1px solid #222; padding: 5px 12px; font-size: 12px;
+           color: #999; display: flex; flex-wrap: wrap; gap: 3px 22px; line-height: 1.5; }
+  #guide b { color: #eee; }
+  pre#uart { height: 66px; overflow-y: auto; background: #000; border-top: 1px solid #222;
+             padding: 4px 12px; margin: 0; white-space: pre-wrap; font-size: 12px; }
 </style>
 </head>
 <body>
-<h1>DOOM — doomgeneric on the emulated STM32F407</h1>
-<div id="status">booting…</div>
+<div id="topbar">
+  <h1>DOOM — STM32F407 emulator</h1>
+  <div id="status">booting…</div>
+  <div id="stats">MIPS: — · FPS: —</div>
+  <div id="keys"></div>
+  <div class="btns">
+    <button id="btnReset">Reset</button>
+    <button id="btnPause">Pause</button>
+    <button id="btnFull">Fullscreen</button>
+    <button id="btnClear">Clear log</button>
+  </div>
+</div>
 <div id="screenWrap"><canvas id="screen" width="640" height="400"></canvas></div>
-<div id="stats">MIPS: — · FPS: —</div>
-<div id="keys"></div>
-<pre id="help">Controls:  WASD move/turn · Arrow keys turn · Ctrl / Space fire
-           Shift strafe · Enter / Esc menu · Mouse click fire (pointer lock)
-           F1 help · F2 save · F3 load · F6 quicksave · F9 quickload
-           F10 end game · F11 quit · F12 screenshot
-</pre>
-<div>
-  <button id="btnReset">Reset</button>
-  <button id="btnPause">Pause</button>
-  <button id="btnFull">Fullscreen</button>
-  <button id="btnClear">Clear log</button>
+<div id="guide">
+  <span><b>Move</b>: W forward · S back · A / ← turn left · D / → turn right</span>
+  <span><b>Strafe</b>: Left Shift left · Right Shift right</span>
+  <span><b>Fire</b>: Ctrl (or mouse click)</span>
+  <span><b>Use</b>: Space (doors / switches)</span>
+  <span><b>Menu</b>: Enter open / select · Esc back</span>
+  <span><b>Save</b>: F2 · F6 quicksave</span>
+  <span><b>Load</b>: F3 · F9 quickload</span>
+  <span><b>Other</b>: F1 help · F10 end game · F11 quit · F12 screenshot</span>
 </div>
 <pre id="uart"></pre>
 
-<script src="vendor/unicorn_arm.js?v=13"></script>
-<script type="module" src="doom.js?v=13"></script>
+<script src="vendor/unicorn_arm.js?v=14"></script>
+<script type="module" src="doom.js?v=14"></script>
 </body>
 </html>
