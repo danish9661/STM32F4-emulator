@@ -20,7 +20,7 @@ The browser demo deploys to GitHub Pages:
 **https://danish9661.github.io/stm32F4-emulator/**
 
 A single console page that starts **idle** — nothing runs until you pick a
-firmware: a preset dropdown with 21 bundled binaries (network demos, a
+firmware: a preset dropdown with 31 bundled binaries (network demos, a
 bare-metal LED blinker, peripheral/crypto/UART/SPI test binaries), custom
 firmware upload (`.bin`, Intel `.hex`, `.elf` — with loadable RAM segments
 and symbols — plus `.map` for a symbol table), Run/Stop/Reset, a **gateway
@@ -32,6 +32,29 @@ for banks A–E, and key peripheral registers. Interrupt-driven firmware
 (`rx_interrupt_test`, `rx_crypto_test`) is serviced by an opt-in guest-IRQ
 pump; polling firmware (the ETH demos) never uses it. For automation, a
 preset can auto-boot via the URL: `?fw=eth_http`, `?fw=blinky`, `?fw=crypto_test`, …
+
+## DOOM (in the browser)
+
+**[`site/doom.html`](site/doom.html)** runs DOOM 1 shareware
+(doomgeneric, ported to the emulated F407) at ~24 MIPS / ~24 FPS in a
+headless-Chrome-verified browser page: 320×200 CMAP256 framebuffer,
+WASD + arrows + Ctrl/Space/Shift + F-keys, I2S audio out (mixer →
+AudioWorklet at 11025 Hz), and a realtime lock that paces the guest to
+wall time. **Save/load works**: the firmware stages savegames to an
+EXTRAM region (2 slots × 256 KB at 0xC0080000) and `doom.js` mirrors
+them to `localStorage['doom-save-N']`, so F6 (quick-save), F2 (save
+menu), F9 (quick-load, 'y' to confirm) and F3 (load menu) survive page
+reloads.
+
+- Controls: move W/S/A/D + arrows · strafe Shift · fire Ctrl · use
+  Space · menu Enter/Esc · save F2/F6 · load F3/F9 · F1/F10/F11/F12.
+- Boot → menu → gameplay verified end-to-end by
+  `node site/test_doom.mjs` (boot markers, menu navigation to E1M1,
+  palette + framebuffer, W-move + turn, audio, **save → `SAVE ok slot=0`
+  → load handshake**).
+- `site/doom1.wad` is the 4.2 MB shareware WAD; the firmware never reads
+  it from flash — the driver loads it into 8 MB of `extra_mem`
+  (0xB8000000).
 
 ## Quickstart
 
@@ -82,6 +105,7 @@ See `site/test_flow.mjs` and the exports in `index.mjs` for the full API
 | `eth_dhcp/` | Loops DHCP Discover/Offer/Request/Ack | `DHCP SUCCESS` |
 | `eth_test/` | Raw ETH TX/RX self-test | `ETH Test: done` |
 | `blinky/` | **No ethernet** — LED blinker on GPIOA PA5 + UART tick counter | `tick N LED=ON/OFF` |
+| `doom/` | **DOOM 1 shareware** (doomgeneric F407 port, browser page `site/doom.html`) | `node site/test_doom.mjs` (boot + menu + gameplay + save/load) |
 
 Plus 17 more test binaries (`crypto_test`, `hal_test`, `timer_test`,
 `periph_test`, `echo_test`, `blink_serial`, `rx_interrupt_test`,
@@ -127,18 +151,21 @@ firmware .bin ──► Unicorn WASM CPU ──► memory hooks
 ```
 ├── site/                    Single-page console + universal emulator factory
 │   ├── index.html, app.js   Console UI (UART, presets, loaders, gateway, GPIO)
+│   ├── doom.html, doom.js   DOOM page (gameplay + save/load via localStorage)
 │   ├── emulator.js          Import-free emulator factory (Node + browser)
 │   ├── netsim.js            Canned DHCP/TCP/HTTP network peer (fallback)
 │   ├── loaders.js           Intel HEX / ELF32 / linker-map parsers
 │   ├── test_flow.mjs        Node E2E flow test (npm test)
 │   ├── test_blinky.mjs      Node blinky GPIO test (npm test)
 │   ├── test_rx_interrupt.mjs Node UART-interrupt test (npm test)
+│   ├── test_doom.mjs        Node DOOM boot/menu/gameplay/save test
 │   └── vendor/              Browser WASM build, SVD, Unicorn
 ├── index.mjs, package.json  npm package entry (stm32f4-emulator)
 ├── .github/workflows/       CI (test suite) + GitHub Pages deploy
 ├── tools/make_firmware.mjs  Regenerates site/firmware.js from eth_*/.bin
 ├── stm32-periph-wasm/       Rust peripheral model (WASM build + pkg/)
 ├── eth_http/ eth_dhcp/ eth_test/   Sample network firmwares + configs
+├── doom/                    DOOM 1 port (doomgeneric f407 target + WAD path)
 ├── openhw-local-gateway/    Go gateway (gVisor network stack)
 ├── scripts/verify_ethernet.sh   Regression runner for all three firmwares
 ├── src/, monox/, saturn/    Native SDL emulator (upstream heritage)
@@ -168,6 +195,8 @@ rebuild — delete it so the vendor assets stay tracked/committed.
   (`site/test_blinky.mjs`) + interrupt-UART test (`site/test_rx_interrupt.mjs`),
   exit 0 = all PASS. The same suite runs in CI
   ([.github/workflows/ci.yml](.github/workflows/ci.yml)) on every push.
+- `node site/test_doom.mjs` — DOOM boot → menu → E1M1 gameplay + save/load
+  (see the DOOM section above).
 - `scripts/verify_ethernet.sh [max_inst]` — runs all three firmwares through
   the gateway, asserts the success markers and 0 `TCP fail`.
 - Soak-tested: 200M-instruction gateway runs with 1000+ consecutive TCP

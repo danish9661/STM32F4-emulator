@@ -27,15 +27,31 @@ document is the readable summary.
 
 ### Browser demo + npm package
 - Single-page console (site/): UART terminal with **bidirectional RX**,
-  21 firmware presets, custom `.bin`/`.hex`/`.elf`/`.map` upload, gateway
+  31 firmware presets, custom `.bin`/`.hex`/`.elf`/`.map` upload, gateway
   connection to real gVisor networking, live GPIO grid, peripheral register
   readout, packet viewer. Deployed to GitHub Pages.
+- **DOOM runs in the browser** (`site/doom.html`): the doomgeneric F407
+  port boots, plays the shareware WAD at ~24 MIPS/~24 FPS (realtime-locked
+  guest clock, I2S mixer → AudioWorklet), and **saves/loads games to
+  `localStorage`** (F2/F6 save, F3/F9 load — firmware stages savegames in
+  EXTRAM at 0xC0080000, 2 slots × 256 KB, mirrored by doom.js).
+  Verified: `node site/test_doom.mjs` (boot → menu → E1M1 → `SAVE ok
+  slot=0`) and a headless-Chrome CDP smoke (save → reload-less F9
+  quick-load → `LOAD ok`, audio continuous).
 - `stm32f4-emulator` npm package (packed, not published) with a clean
   `createSTM32F407({firmware})` API.
 - CI runs the Node test suite on every push; Pages deploys the demo.
 
 ### Recently fixed (2026-08-09)
-- **Unicorn 40k-instruction wedge**: one `emu_start` running ~40k+
+- **DOOM save/load (2026-08-14)**: firmware save shim routes
+  `doomsavN.dsg` file ops to a 2×256 KB EXTRAM staging area through a
+  private fd (0x7f00), commits via the newlib `rename` = `_link` +
+  `_unlink` chain, and busy-waits for the driver on load — with the
+  driver (`doom.js`) mirroring the blob to `localStorage`. Also fixed
+  the browser's F-key codes (engine `KEY_F1..F12 = 0xBB..0xC6`; the
+  old 0x80..0x8B mapping made F2/F3/F6/F9 dead keys) and passed raw
+  ASCII letters through for the save-name entry and 'y' confirms.
+  Details + gotchas in AGENTS.md §16.- **Unicorn 40k-instruction wedge**: one `emu_start` running ~40k+
   instructions without a stop condition permanently wedges this WASM build
   (broken timeout path, `qemu_thread_create: Not supported`). Fix:
   `maxBatch` capped at 20000 (`MAX_BATCH` env). After the cap: 604 TCP

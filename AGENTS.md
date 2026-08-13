@@ -1353,10 +1353,11 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
 - **Menu navigation with doom1.wad = retail: New Game goes to an EPISODE
   select first** (EpiDef), then the skill menu. The skill menu selects by
   CURSOR, not number keys: Enter(menu) → Enter(New Game) → Enter(episode 1)
-  → Down, Down (skill 3) → Enter(start). NOTE: the skill menu **opens at
-  item 2** (`NewDef.lastOn = hurtme`, m_menu.c:323) — one ArrowDown lands on
-  skill 3. Full working sequence in site/test_doom.mjs (change-gated on
-  `menuactive` at 0xC00166F8).
+  → Down (skill 3) → Enter(start). NOTE: the skill menu **opens at item 2**
+  (`NewDef.lastOn = hurtme`, m_menu.c:323) — ONE ArrowDown lands on skill 3;
+  a second Down lands on item 4 (NIGHTMARE), which pops the "ARE YOU
+  SURE?" confirm prompt needing 'y' (0x79). Full working sequence in
+  site/test_doom.mjs (change-gated on `menuactive` at 0xC00166F8).
 - In-game state: `gamestate` at 0xC00153AC == 0 (GS_LEVEL),
   `menuactive` at 0xC00166F8 == 0. **In-game turning is verified by reading
   `players[0].mo->angle`: mo = read32(0xC00153B4), angle = read32(mo+32) —

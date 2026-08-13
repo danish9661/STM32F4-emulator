@@ -312,12 +312,37 @@ clamp) backs the device; the JS side decodes the BCD registers live into
 
 ---
 
+## DOOM (2026-08-14)
+
+### test_doom.mjs — DOOM boot → menu → E1M1 gameplay + save/load (doom)
+Boots the doomgeneric F407 port with the 4.2 MB shareware WAD in
+`extra_mem` (0xB8000000), drives the retail menu sequence (New Game →
+episode → skill 3) with change-gated key taps, holds W + fires + turns in
+E1M1, then runs the **save flow**: F6 quick-save (0xC0) → Enter on the
+save-slot menu → name char 'a' (0x61) + Enter → asserts the firmware's
+`SAVE ok slot=0 bytes=NNNN` UART print and the ABI `saveFlag == 1`.
+- Exercises: guest↔driver ABI ring (keyWr/keyRd), EXTRAM save staging
+  (fd 0x7f00 → 0xC0080000), newlib `rename` = `_link`+`_unlink` commit
+  hook, CMAP256 framebuffer + BGRA palette, I2S mixer audio.
+- Key ABI asserts: `save: flag=1 size>0 … qss=0` and the EXTRAM blob
+  contains the save archive (level state, ~25 KB).
+- Key-ring gotcha: the guest drains ~1 (D,U) pair per frame, so the
+  harness re-asserts held W sparingly (every 25 iters) and taps
+  turn/fire every 40 — per-iteration spam overflows the 256-byte ring
+  and clobbers the queued save-menu events (keyRd freezes, menu opens
+  at SaveDef, sse=0, qss=-2 forever).
+- Pass: `Z_Init` + `adding doom1.wad` + `I_InitGraphics` boot markers,
+  palette non-zero, fb at 0xC0700008, `phase === 'play'`, `SAVE ok slot=0`.
+
+---
+
 ## Expected PASS summary
 
 | Test | Firmware | Peripherals | Key output markers |
 |---|---|---|---|
 | test_flow | eth_http | ETH/DMA/USART/TIM | `TCP connected`, `Hello from openhw HTTP server`, `!CONN`, ≥2 rounds |
 | test_eth_irq | eth_irq_test | NVIC/DMA/ETH | `TX done via IRQ`, `ETH IRQ Test: done` |
+| test_doom | doom | ABI ring/EXTRAM/I2S | `SAVE ok slot=0 bytes=…`, fb changes ≥ 20, audio peak > 0 |
 | test_rx_interrupt | rx_interrupt_test, rx_crypto_test | USART1/NVIC | `CRC=`, `DONE` |
 | test_blinky | blinky | GPIOA/RCC/USART | `tick 0 LED=ON`, `No ethernet required` |
 | test_exti | exti_test | EXTI/NVIC/GPIO | `EXTI TEST DONE` |

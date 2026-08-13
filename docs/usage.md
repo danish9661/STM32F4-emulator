@@ -120,7 +120,7 @@ https://danish9661.github.io/stm32F4-emulator/ (GitHub Pages, CI-deployed).
 
 ### What you get
 
-- **Preset dropdown** — 21 bundled firmwares. Auto-boot with
+- **Preset dropdown** — 31 bundled firmwares. Auto-boot with
   `?fw=eth_http`, `?fw=blinky`, `?fw=crypto_test`, … (or `?fw=<name>`
   for any preset).
 - **UART terminal** — firmware TX scrolls here; the input box sends bytes
@@ -142,6 +142,26 @@ https://danish9661.github.io/stm32F4-emulator/ (GitHub Pages, CI-deployed).
   preset's PA5 toggles visibly.
 - **Key peripheral registers** — ETH DMASR/MACCR, USART1 SR, RCC AHB1ENR.
 - **Packet viewer** — see TX frames the firmware emits.
+
+### DOOM page (`site/doom.html`)
+
+A second page (linked from the console's header/footer) that runs DOOM 1
+shareware on the emulated F407 — `site/doom1.wad` (4.2 MB) is loaded into
+8 MB of `extra_mem` by the driver, and the guest renders the CMAP256
+framebuffer to a 640×400 canvas at ~24 MIPS / ~24 FPS with audio (I2S
+mixer → AudioWorklet, 11025 Hz).
+
+- **Controls**: move W/S/A/D + arrows · strafe Shift · fire Ctrl · use
+  Space · menu Enter/Esc · save F2 (menu) / F6 (quick-save) · load F3
+  (menu) / F9 (quick-load, then 'y' to confirm).
+- **Save/load**: the firmware stages savegames to EXTRAM (0xC0080000,
+  2 slots × 256 KB) and `doom.js` mirrors them to
+  `localStorage['doom-save-0'|'doom-save-1']` — saves survive page
+  reloads, and `saveMap` is restored at boot so the load menus show them.
+- Terminal: the UART box under the screen shows the guest's boot prints
+  and save/load confirmations (`SAVE ok slot=0 bytes=…`, `LOAD ok …`).
+- Node regression: `node site/test_doom.mjs` (boot → menu → E1M1 →
+  quick-save flow).
 
 ### Browser debug handles
 
