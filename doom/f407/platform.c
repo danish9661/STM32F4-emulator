@@ -36,6 +36,7 @@ typedef struct {
     volatile uint32_t saveReady;
     volatile uint32_t saveSlot;
     volatile uint32_t saveMap;
+    volatile uint32_t detail;         // driver->guest: 0 = high, 1 = low detail
 } doom_abi_t;
 
 __attribute__((section(".abi"), aligned(16)))
@@ -232,6 +233,33 @@ void DG_Init()
     g_abi.screenBuffer = (uint32_t)(uintptr_t)DG_ScreenBuffer;
 }
 
+// Apply a driver-requested detail level through the engine's own API.
+// detailshift (and the colfunc/spanfunc render pointers that actually make
+// low detail cheaper) are recomputed ONLY inside R_ExecuteSetViewSize(), so
+// poking the `detailLevel` global from JS does nothing — measured: it leaves
+// inst/frame bit-identical.
+//
+// R_SetViewSize() only *requests* the change (setsizeneeded=1); D_Display()
+// is supposed to consume it, but in this build that check never fires
+// (probed: setsizeneeded stays 1 across frames while rendering continues),
+// so we execute it here.  Safe: DG_DrawFrame runs at the end of a frame,
+// right after I_FinishUpdate's blit — exactly the "takes effect next
+// refresh" boundary R_SetViewSize's own comment describes.
+extern void R_SetViewSize(int blocks, int detail);
+extern void R_ExecuteSetViewSize(void);
+extern int screenblocks;
+extern int detailLevel;
+
+static void apply_detail_request(void)
+{
+    int want = (int)(g_abi.detail ? 1 : 0);
+    if (want == detailLevel)
+        return;
+    detailLevel = want;
+    R_SetViewSize(screenblocks, detailLevel);
+    R_ExecuteSetViewSize();
+}
+
 void DG_DrawFrame()
 {
     // Export the current CMAP256 palette to the fixed ABI address so the JS
@@ -239,6 +267,7 @@ void DG_DrawFrame()
     // (the driver paces the loop to realtime 35 tics/s using this counter).
     memcpy((void*)g_abi.palette, (const void*)colors, PALETTE_SIZE);
     g_abi.frameCount++;
+    apply_detail_request();
     // One frame's worth of audio (11025/35 samples) -> I2S1 capture FIFO.
     DOOM_SubmitAudio();
 }

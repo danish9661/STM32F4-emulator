@@ -32,10 +32,15 @@ document is the readable summary.
   connection to real gVisor networking, live GPIO grid, peripheral register
   readout, packet viewer. Deployed to GitHub Pages.
 - **DOOM runs in the browser** (`site/doom.html`): the doomgeneric F407
-  port boots, plays the shareware WAD at ~24 MIPS/~24 FPS (realtime-locked
+  port boots, plays the shareware WAD at ~23 MIPS/~22-24 FPS (realtime-locked
   guest clock, I2S mixer → AudioWorklet), and **saves/loads games to
   `localStorage`** (F2/F6 save, F3/F9 load — firmware stages savegames in
   EXTRAM at 0xC0080000, 2 slots × 256 KB, mirrored by doom.js).
+  Below DOOM's native 35 fps: ~918k guest instructions/frame means 35 fps
+  needs ~32 MIPS against a ~23 MIPS core ceiling (measured 2026-08-14, see
+  AGENTS.md §16 — step size, the counting hook, and `-O2` were each ruled
+  out as causes). Audio is mixed per rendered frame, so it underruns at the
+  same ratio; decoupling it from frame rate is the open follow-up.
   Verified: `node site/test_doom.mjs` (boot → menu → E1M1 → `SAVE ok
   slot=0`) and a headless-Chrome CDP smoke (save → reload-less F9
   quick-load → `LOAD ok`, audio continuous).
@@ -150,6 +155,24 @@ document is the readable summary.
       JS (Unicorn owns guest memory).
 
 ### Priority 2 — peripheral depth
+- [ ] **DOOM audio choppiness — a symptom of the fps shortfall, not a
+      separate bug.** `DOOM_SubmitAudio` emits one frame's worth (11025/35 =
+      315 samples) per rendered frame. Since the driver derives the guest
+      clock FROM the frame counter (`bootClock + frames*FRAME_MS`), that is
+      already exactly realtime *in game time* — the game simply runs at
+      ~63% of wall speed, so it yields ~63% of the audio wall time wants,
+      and `site/audio-worklet.js` turns each shortfall into an audible gap
+      (on underrun it emits silence AND flushes the queue).
+      **Do not "mix by elapsed guest time"** (an earlier version of this
+      entry suggested it): guest time is frame-derived, so that yields the
+      identical 315/frame. Mixing by WALL time would advance sfx sample
+      positions faster than the game logic and pitch-shift/garble the
+      sounds. Real options, in order of honesty:
+      (a) raise fps — the only true fix, blocked by the ~23 MIPS core;
+      (b) change the worklet's underrun policy to stretch/resample instead
+          of inserting silence — continuous but slightly slowed/pitched
+          audio, consistent with a game running in slow motion;
+      (c) accept it and document (current state).
 - [x] LTDC scanout + display sink: the model advances a scanline/scanframe
       (2 px per tick from the real SSCR/BPCR/AWCR geometry), fires LIF at
       LIPCR and the frame-end F flag, and pends LTDC IRQ 88; exports

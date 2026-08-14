@@ -57,6 +57,14 @@
 #define SAVEREADY_ADDR (DOOM_ABI_ADDR + 0x524u)
 #define SAVESLOT_ADDR  (DOOM_ABI_ADDR + 0x528u)
 #define SAVEMAP_ADDR   (DOOM_ABI_ADDR + 0x52Cu)
+// Low-detail render request (driver→guest): 0 = high, 1 = low (every other
+// column, ~12% fewer guest instructions per frame).  The guest applies it
+// through the engine's own R_SetViewSize() — poking the `detailLevel`
+// global from JS does NOT work: detailshift is only recomputed inside
+// R_ExecuteSetViewSize(), which runs only when R_SetViewSize() has set
+// setsizeneeded (measured: writing detailLevel alone leaves inst/frame
+// bit-identical).
+#define DETAIL_ADDR    (DOOM_ABI_ADDR + 0x530u)
 
 // wad lookup + file-exists shim (platform.c)
 const char *doom_wad_name(const char *path);

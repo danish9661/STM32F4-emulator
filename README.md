@@ -36,8 +36,12 @@ preset can auto-boot via the URL: `?fw=eth_http`, `?fw=blinky`, `?fw=crypto_test
 ## DOOM (in the browser)
 
 **[`site/doom.html`](site/doom.html)** runs DOOM 1 shareware
-(doomgeneric, ported to the emulated F407) at ~24 MIPS / ~24 FPS in a
-headless-Chrome-verified browser page: 320×200 CMAP256 framebuffer,
+(doomgeneric, ported to the emulated F407) at ~23 MIPS / ~22-24 FPS in a
+headless-Chrome-verified browser page — playable, but below DOOM's native
+35 fps: at ~918k guest instructions per rendered frame, 35 fps would need
+~32 MIPS and the Unicorn WASM core tops out near 23 (details and the
+measurements in AGENTS.md §16). Sound is produced per rendered frame, so
+it thins out at the same ratio. The page: 320×200 CMAP256 framebuffer,
 WASD + arrows + Ctrl/Space/Shift + F-keys, I2S audio out (mixer →
 AudioWorklet at 11025 Hz), and a realtime lock that paces the guest to
 wall time. **Save/load works**: the firmware stages savegames to an

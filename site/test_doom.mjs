@@ -64,7 +64,21 @@ let saveSlotKey = false, saveNameKey = false;
 let gate = 0;            // change-count snapshot between key sends
 let maxSteps = 0;
 let crashed = false;
+// Samples are floats in -1..1 (emulator.js normalizes the I2S u16 capture).
+// `audioClipped` guards the mixer's gain staging: the scale constant in
+// doom/f407/i_sound_f407.c has been wrong in BOTH directions historically
+// (8.47x too quiet, then 8.47x too loud — which hard-clipped ~45% of all
+// nonzero samples), and neither shows up in a "did any sample arrive" check.
 let audioPeak = 0, audioSamples = 0;   // drained incrementally (ring windows)
+let audioNonzero = 0, audioClipped = 0;
+const tallyAudio = (a) => {
+    for (let i = 0; i < a.length; i++) {
+        const v = Math.abs(a[i]);
+        if (v > audioPeak) audioPeak = v;
+        if (a[i] !== 0) audioNonzero++;
+        if (v >= 0.999) audioClipped++;
+    }
+};
 
 try {
     for (let i = 0; i < 400; i++) {
@@ -77,7 +91,7 @@ try {
 
         const a = emu.takeSpeakerSamples();
         audioSamples += a.length;
-        for (let j = 0; j < a.length; j++) { const v = Math.abs(a[j]); if (v > audioPeak) audioPeak = v; }
+        tallyAudio(a);
 
         const sb = read32(DGSB);
         if (sb && BigInt(sb) !== fbAddr) { fbAddr = BigInt(sb); console.log(`[fb] DG_ScreenBuffer = 0x${sb.toString(16)}`); }
@@ -161,11 +175,12 @@ const pal = fbAddr ? memRead(PALETTE, 256 * 4) : null;
 const palOk = pal && pal[3] + pal[4] + pal[5] + pal[7] > 0;   // non-zero entries exist
 const audio = emu.takeSpeakerSamples();   // final drain
 audioSamples += audio.length;
-for (let i = 0; i < audio.length; i++) { const v = Math.abs(audio[i]); if (v > audioPeak) audioPeak = v; }
+tallyAudio(audio);
+const clipPct = audioNonzero ? (100 * audioClipped / audioNonzero) : 0;
 console.log();
 console.log('uart tail:', all.replace(/\r/g, '').split('\n').filter(Boolean).slice(-8).join(' | '));
 console.log(`fbAddr=0x${fbAddr.toString(16)} frame_changes=${changes} keyRd=${keyRd} inst=${maxSteps} crashed=${crashed} phase=${phase} menuActive=${read32(0xC00166F8)} gamestate=${read32(0xC00153AC)}`);
-console.log(`audio: ${audioSamples} samples drained, peak amplitude ${audioPeak.toFixed(0)}`);
+console.log(`audio: ${audioSamples} samples drained, peak ${audioPeak.toFixed(3)} (of 1.0), nonzero ${audioNonzero}, clipped ${audioClipped} (${clipPct.toFixed(1)}% of nonzero)`);
 console.log(`save: flag=${read32(0x2000251C)} size=${read32(0x20002520)} ready=${read32(0x20002524)} slot=${read32(0x20002528)} map=${read32(0x2000252C)} sendsave=${read32(0xC0015848)} sse=${read32(0xC00166FC)} saveSlot=${read32(0xC0016700)} qss=${read32(0xC0016818)}`);
 
 const pass =
@@ -180,6 +195,7 @@ const pass =
     palOk &&              // guest exported the palette
     audioSamples > 0 &&   // I2S mixer is streaming audio frames
     audioPeak > 0.005 &&  // and the weapon/menu sounds actually produced signal
+    clipPct < 5 &&        // mixer gain staging sane (was ~45% when scaled 8.47x too hot)
     read32(0xC00166F8) === 0 &&   // menu closed = game actually started
     phase === 'play';
 console.log(pass ? 'PASS' : 'FAIL');

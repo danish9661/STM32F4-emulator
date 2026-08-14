@@ -25,6 +25,14 @@ export async function createEmulator(opts) {
         // doom fast path: HOOK_BLOCK instead of HOOK_CODE (size/2 inst per
         // block). Only valid with minimalPolls (no tick/poll logic to run).
         blockCounting = false,
+        // Fastest path: register NO counting hook at all. Every basic block
+        // otherwise crosses the WASM->JS boundary just to bump a counter,
+        // which is pure overhead for a firmware (like doom) that paces off
+        // its own frame counter rather than instCount. `instCount` then
+        // tracks the emu_start budget issued per step() — which is actually
+        // MORE accurate than block counting (that over-reports ~1.39x, see
+        // AGENTS §16). Requires minimalPolls; overrides blockCounting.
+        noCountHook = false,
         maxBatch = 100000,    // emu_start instruction budget per step()
         onTx = null,          // (frame: Uint8Array, meta) called per TX capture
         eth = {},             // firmware-specific SRAM addresses (defaults above)
@@ -284,7 +292,8 @@ export async function createEmulator(opts) {
     const blockHook = (handle, address, size, user_data) => {
         instCount += Number(size) / 2; // Thumb-2: block size in bytes
     };
-    if (blockCounting) uc.hook_add(Module.HOOK_BLOCK, blockHook, null);
+    if (noCountHook) { /* no per-block/per-inst hook: step() accounts the budget */ }
+    else if (blockCounting) uc.hook_add(Module.HOOK_BLOCK, blockHook, null);
     else uc.hook_add(Module.HOOK_CODE, codeHook, null);
 
     // ── virtual peripheral devices (JS hardware layer) ────────────────────
@@ -684,6 +693,9 @@ export async function createEmulator(opts) {
                 }
             } else throw e;
         }
+        // With no counting hook the budget issued IS the instruction account
+        // (emu_start runs to the budget unless something stops it early).
+        if (noCountHook) instCount += max_inst;
         tick();
         applyFlashErase();
         syncFlashProtection();

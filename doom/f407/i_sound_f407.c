@@ -153,18 +153,24 @@ boolean I_MusicIsPlaying(void) { return false; }
 void DOOM_SubmitAudio(void)
 {
     int s, i;
-    // Per-frame normalization: each channel contributes sample*vol.  Max
-    // |sample-128| is 127 and the engine volume range is 0..15, so the worst
-    // case per channel is 127*15 = 1905 (NOT 127*127=16129 — that would
-    // leave even an all-channels-maxed mix at ~12% of full scale, i.e.
-    // permanently weak/muffled audio).  Scale the summed mix so full-scale
-    // needs every ACTIVE channel at max vol.
-    int active = 0;
-    for (i = 0; i < SFX_CHANNELS; i++)
-        if (chans[i].active) active++;
-    const uint32_t scale = active
-        ? ((32768u << 8) / (1905u * (uint32_t)active))
-        : 0;
+    // Fixed normalization: one channel at max volume == full scale.  Each
+    // channel contributes (sample-128)*vol; |sample-128| maxes at 127 and
+    // the volume handed to I_StartSound is the engine's INTERNAL level,
+    // "ranging from 0-127" (engine/s_sound.c:92 — NOT the 0..15 menu
+    // setting `sfxVolume`), so the per-channel max is 127*127 = 16129.
+    //
+    // History (both wrong, in opposite directions):
+    //   * dividing by the ACTIVE channel count made one sound 8x quieter
+    //     whenever 8 channels were live — that, not the constant, is what
+    //     produced the old "~12% of full scale / weak and muffled" report
+    //     (1/8 == 12.5%);
+    //   * "fixing" it by swapping 16129 -> 1905 (assuming vol maxed at 15)
+    //     over-amplified by 8.47x and hard-clipped ~45% of all nonzero
+    //     samples — measured, and the cause of the harsh/distorted audio.
+    // Summing without a per-frame divisor and clamping is what a normal
+    // mixer does: simultaneous loud sounds may clip occasionally, a single
+    // sound is never attenuated by unrelated channels.
+    const uint32_t scale = (32768u << 8) / 16129u;
     int16_t frame[FRAME_SAMPLES];
     for (s = 0; s < FRAME_SAMPLES; s++)
     {

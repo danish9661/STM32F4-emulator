@@ -16,8 +16,17 @@ const img = ctx.createImageData(320, 200);
 // used to waste ~360k instructions per frame).  The guest advances its own
 // frame counter (ABI +0x514) once per rendered frame at 35 tics/s of game
 // time, so the driver paces by wall clock: run steps until the guest's frame
-// count catches up to realtime 35 fps.  Any machine above ~3.5 MIPS holds
-// exactly 35 fps; slower machines degrade gracefully (as fast as they can).
+// count catches up to realtime 35 fps.
+//
+// Measured cost (2026-08-14, E1M1, low detail ON): ~918k guest instructions
+// per frame, so a full 35 fps needs ~32 MIPS.  The Unicorn WASM core tops out
+// around 20-23 MIPS here (step size and the counting hook are NOT the limit —
+// both measured flat), so the page realistically runs ~22-24 fps and degrades
+// gracefully rather than holding 35.  NOTE the audio consequence: the guest
+// mixer emits exactly one frame's worth of samples (11025/35 = 315) per
+// RENDERED frame, so sample production scales with fps — at 22 fps only ~63%
+// of realtime audio is produced and the worklet queue underruns.  Raising fps
+// is therefore also the fix for choppy sound.
 const FRAME_MS = 1000 / 35;      // one game frame (tic) per 28.57ms realtime
 const STEP_BUDGET = 12;          // max steps per rAF
 const MS_BUDGET = 16;            // max wall time per rAF
@@ -25,17 +34,25 @@ const STEP_INST = 60000;         // instructions per emu.step() (~0.66 frames;
                                  // small steps = <1-frame pacing overshoot +
                                  // tight clock updates for time-based waits)
 
-// Low-detail render (guest global detailLevel @ 0xC0016814, 0=high 1=low):
-// the engine renders every other column -> ~30-40% fewer guest instructions
-// per frame.  Default ON for speed; toggled from the topbar (persisted).
-const DETAIL_LEVEL = 0xC0016814;
+// Low-detail render (ABI slot DETAIL_ADDR, 0=high 1=low): the engine renders
+// every other column -> measured 1145k -> 918k guest instructions per frame
+// (-20%), i.e. ~19 -> ~24 fps.  Default ON for speed; toggled from the topbar
+// (persisted).
+//
+// This MUST go through the ABI slot: the guest applies it via the engine's
+// R_SetViewSize()+R_ExecuteSetViewSize(), which is the only place detailshift
+// and the colfunc/spanfunc render pointers are recomputed.  Writing the
+// engine's `detailLevel` global directly (what this used to do, at
+// 0xC0016814) is a NO-OP — measured bit-identical inst/frame with
+// detailshift stuck at 0.
+const DETAIL_ADDR = 0x20002530;
 let lowDetail = localStorage.getItem('doomDetail') !== '0';
 const detailToggle = $('detail');
 detailToggle.checked = lowDetail;
 detailToggle.addEventListener('change', () => {
     lowDetail = detailToggle.checked;
     localStorage.setItem('doomDetail', lowDetail ? '1' : '0');
-    if (emu) emu.write32(DETAIL_LEVEL, lowDetail ? 1 : 0);
+    if (emu) emu.write32(DETAIL_ADDR, lowDetail ? 1 : 0);
 });
 
 // Doom keycodes (engine/doomkeys.h; TranslateKey is identity)
@@ -384,7 +401,7 @@ async function boot() {
             maxBatch: STEP_INST,
             ext_devices: { speaker: true },   // enable the I2S capture drain
         });
-        emu.write32(DETAIL_LEVEL, lowDetail ? 1 : 0);
+        emu.write32(DETAIL_ADDR, lowDetail ? 1 : 0);
         uc = emu.uc;
         bootClock = performance.now();
         clockMs = 0;

@@ -1510,6 +1510,82 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
 - `tools/make_firmware.mjs` has the `doom` entry; `site/firmware.js`
   regenerated (31 firmwares, doom.bin 277 KB).
 
+### Speed + audio corrections (2026-08-14) — MEASURED, supersedes claims below
+
+Investigated a "speed issue and audio" report. Three things below this line
+turned out to be wrong; all numbers here are measured, not estimated
+(diagnostics drove boot→menu→E1M1 and sampled guest globals directly).
+
+- **The low-detail toggle was a NO-OP.** `site/doom.js` wrote the engine's
+  `detailLevel` global (0xC0016814) directly. `detailshift` — and the
+  `colfunc`/`spanfunc` pointers that actually make low detail cheaper — are
+  recomputed ONLY inside `R_ExecuteSetViewSize()`, which runs only when
+  `R_SetViewSize()` has set `setsizeneeded`. Measured: writing `detailLevel`
+  left inst/frame bit-identical (1145k both ways) with `detailshift` stuck
+  at 0, i.e. the page shipped a default-ON speed control that did nothing.
+  **Fix**: new ABI slot `DETAIL_ADDR` (+0x530); `apply_detail_request()` in
+  platform.c (called from `DG_DrawFrame`, a safe end-of-frame boundary) sets
+  `detailLevel` and calls `R_SetViewSize()` **and** `R_ExecuteSetViewSize()`.
+  Probed: `setsizeneeded` is never consumed by `D_Display` in this build
+  (stays 1 across frames while rendering continues, with `screenvisible=1`
+  and `nodrawers=0`), so the guest must execute it itself.
+  Result: 1145k → **918k inst/frame (-20%)**, 19.2 → **24.0 fps (+25%)**.
+- **"Any machine above ~3.5 MIPS holds exactly 35 fps" (old doom.js header)
+  was wrong by ~10x.** At ~918k inst/frame (low detail) 35 fps needs
+  **~32 MIPS**; high detail needs ~40 MIPS, and moving+turning peaks near
+  1.7M inst/frame (~60 MIPS). The core delivers **~20-23 MIPS**, so the page
+  runs ~22-24 fps. Verified NOT fixable by driver tuning: step size is flat
+  from 60k to 600k inst (16.6-17.0 MIPS), removing the per-block counting
+  hook buys only ~6% (`noCountHook` option added to emulator.js), and
+  rebuilding the firmware `-O2` instead of `-Os` changed inst/frame by <1%
+  (reverted; it only cost 28 KB). The ceiling is the Unicorn WASM core.
+- **The mixer clipped ~45% of all nonzero samples.** The scale constant has
+  been wrong in BOTH directions: the original 16129 was blamed for "weak and
+  muffled" audio, but the real cause was the per-frame `/ active` divisor
+  (8 live channels = exactly the "~12% of full scale" that was reported);
+  "fixing" it by swapping 16129 → 1905 (assuming vol maxed at 15) then
+  over-amplified by **8.47x**. `I_StartSound` receives the engine's INTERNAL
+  volume, "ranging from 0-127" (engine/s_sound.c:92) — NOT the 0..15 menu
+  setting — so the true per-channel max is 127*127 = 16129.
+  **Fix**: fixed scale `(32768<<8)/16129`, no `/active` divisor, sum+clamp
+  like a normal mixer. Measured over the same E1M1 run:
+
+  | | before | after |
+  |---|---|---|
+  | clipped samples | 1396 (**45% of nonzero**) | **0** |
+  | distinct 16-bit levels | 61 | **204** |
+  | crest factor | 3.39 (squashed) | **8.10** |
+  | peak | 1.0000 (pinned) | 0.508 |
+
+  `site/test_doom.mjs` printed `peak amplitude ${audioPeak.toFixed(0)}` on a
+  ±1.0 float — so full-scale clipping rendered as the reassuring "peak
+  amplitude 1" and near-silence would print "0". It now reports peak to 3dp
+  plus nonzero/clipped counts and **asserts `clipPct < 5`**; verified the
+  guard fails (24.6%) against the pre-fix firmware.
+- **Remaining audio limitation (NOT fixed) — it is the fps shortfall, not
+  a separate audio bug.** `DOOM_SubmitAudio` emits one frame's worth
+  (11025/35 = 315 samples) per RENDERED frame. The driver derives the guest
+  clock FROM the frame counter (`clockMs = bootClock + frames*FRAME_MS`,
+  doom.js:186/499), so guest time advances exactly one frame-period per
+  frame and those 315 samples are **already exactly realtime in game
+  time**. The game just runs at ~63% of wall speed, so it produces ~63% of
+  the audio wall time consumes (measured: 27720 samples in 5 s of play at
+  ~22 fps), and `site/audio-worklet.js` converts each shortfall into an
+  audible gap — on underrun it emits silence AND flushes the queue
+  (`this.q = new Float32Array(0); this.pos = 0`).
+  **Correction to an earlier note in this file: "mix by elapsed guest time"
+  is NOT a fix** — guest time is frame-derived, so it yields the identical
+  315/frame. Mixing by WALL time is worse: it advances sfx sample positions
+  faster than the game logic, pitch-shifting/garbling the sounds. Real
+  options: (a) raise fps (the only true fix, blocked by the ~23 MIPS core
+  ceiling); (b) make the worklet stretch/resample on underrun instead of
+  inserting silence — continuous but slightly slowed audio, matching a game
+  in slow motion; (c) accept and document (current state).
+- Browser-verified on an isolated headless Chrome (own `--user-data-dir`
+  and a unique CDP port — **note: the default 9334 may already be held by a
+  real Chrome session on this machine; always pick a fresh port**):
+  `MIPS: 23.4 · FPS: 22`, detail toggle active, 64000 non-black pixels.
+
 ### Audio (I2S mixer) + WASD (2026-08-13, doom.bin now ~284 KB)
 - **Sound path**: `doom/f407/i_sound_f407.c` (was fully stubbed) now has an
   8-channel 8-bit→16-bit mixer. Sfx lumps are resolved lazily via the
