@@ -20,13 +20,19 @@ const img = ctx.createImageData(320, 200);
 //
 // Measured cost (2026-08-14, E1M1, low detail ON): ~918k guest instructions
 // per frame, so a full 35 fps needs ~32 MIPS.  The Unicorn WASM core tops out
-// around 20-23 MIPS here (step size and the counting hook are NOT the limit —
-// both measured flat), so the page realistically runs ~22-24 fps and degrades
-// gracefully rather than holding 35.  NOTE the audio consequence: the guest
-// mixer emits exactly one frame's worth of samples (11025/35 = 315) per
-// RENDERED frame, so sample production scales with fps — at 22 fps only ~63%
-// of realtime audio is produced and the worklet queue underruns.  Raising fps
-// is therefore also the fix for choppy sound.
+// near 20-24 MIPS here, so the page runs ~25 fps and degrades gracefully
+// rather than holding 35.  Ruled out as causes: emu.step() size (flat from
+// 60k to 600k inst) and building the firmware -O2 (<1% change).  Dropping the
+// per-block counting hook entirely (noCountHook, below) DID help: ~22 -> 25
+// fps.
+//
+// Audio consequence: the guest mixer emits exactly one frame's worth of
+// samples (11025/35 = 315) per RENDERED frame, so production scales with fps
+// — at 25 fps it yields ~70% of what realtime playback consumes.  That is
+// handled in site/audio-worklet.js by rate control (playback slows to match,
+// staying continuous instead of gapping), NOT by silence insertion.  Do not
+// "fix" it by making the guest mix more per frame: sample position would then
+// advance faster than the game logic and pitch-shift every sound.
 const FRAME_MS = 1000 / 35;      // one game frame (tic) per 28.57ms realtime
 const STEP_BUDGET = 12;          // max steps per rAF
 const MS_BUDGET = 16;            // max wall time per rAF
@@ -112,7 +118,7 @@ let lastPump = 0;                    // last pump burst — rAF must not start
                                      // stepping wedges the TCI interpreter)
                                      // rAF is dead (hidden tab) and the
                                      // worklet hunger pump takes over driving
-let statLast = performance.now(), statInst = 0;
+let statLast = performance.now(), statInst = 0, statFrames = 0;
 let activeMs = 0;                    // wall time spent inside emu.step() (MIPS meter)
 let paceWall = 0, paceFrames = -1;  // realtime pacing anchor (wall ms, frame#)
 let bootClock = 0;
@@ -136,7 +142,10 @@ async function initAudio() {
     if (audioCtx) return;
     try {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        await audioCtx.audioWorklet.addModule('audio-worklet.js?v=19');
+        // NOTE: bump this ?v= whenever audio-worklet.js changes — the module
+        // is cached hard, and a stale worklet is indistinguishable from an
+        // audio bug (v20 = dynamic rate control, replacing silence+flush).
+        await audioCtx.audioWorklet.addModule('audio-worklet.js?v=23');
         audioNode = new AudioWorkletNode(audioCtx, 'doom-audio');
         window.__audioNode = audioNode;
         audioNode.connect(audioCtx.destination);
@@ -145,7 +154,12 @@ async function initAudio() {
         // when rAF is dead (hidden tab / throttled to <5 Hz) — while visible
         // the rAF loop is the sole driver (no double-driving, no CPU waste).
         audioNode.port.onmessage = (e) => {
-            if (e.data === 'need') pumpAudio();
+            if (e.data === 'need') { pumpAudio(); return; }
+            if (e.data && e.data.stat) {
+                // starved = output samples the worklet could not fill (the
+                // audible crackle); rate = playback speed vs correct pitch.
+                window.__audioStat = e.data;
+            }
         };
         // self-timed safety net: pump on a timer too, so production never
         // depends on the worklet's message cadence (headless/weird audio
@@ -171,7 +185,16 @@ async function initAudio() {
 function pumpAudio() {
     if (!booted || paused || !emu) return;
     const now = performance.now();
-    if (now - lastRAF <= 200) return;   // rAF alive — it drives
+    if (now - lastRAF <= 200) {
+        // rAF is alive and owns the STEPPING — but still hand any produced
+        // samples to the worklet on this 40 ms tick.  The rAF loop drains only
+        // once per frame, and its own cadence is irregular (each frame does up
+        // to MS_BUDGET of stepping), so audio otherwise reaches the worklet in
+        // clumps and its buffer dips empty between them.  Draining here is
+        // cheap (a FIFO read + a transfer) and adds no latency.
+        drainAudio();
+        return;
+    }
     let frames = emu.read32(FRAMECOUNT);
     const target = paceFrames + Math.floor((now - paceWall) / FRAME_MS);
     let steps = 0;
@@ -397,7 +420,13 @@ async function boot() {
                 { addr: 0xB8000000, size: 8 * 1024 * 1024 },    // WAD image
             ],
             extra_mem: [{ addr: 0xB8000000, data: new Uint8Array(wad) }],
-            minimalPolls: true, blockCounting: true,
+            // noCountHook: no per-block JS callback at all (measured ~6%
+            // faster than blockCounting, which crossed the WASM->JS boundary
+            // on every basic block just to bump a counter).  Safe here because
+            // doom paces off the guest's FRAME counter, not instCount —
+            // instCount then tracks the emu_start budget, which is what the
+            // MIPS readout wants anyway (block counting over-reported ~1.39x).
+            minimalPolls: true, noCountHook: true,
             maxBatch: STEP_INST,
             ext_devices: { speaker: true },   // enable the I2S capture drain
         });
@@ -518,8 +547,23 @@ async function loop() {
         if (now - statLast >= 500) {
             const dt = (now - statLast) / 1000;
             const mips = activeMs > 0 ? (instTotal - statInst) / (activeMs / 1000) / 1e6 : 0;
+            // FPS = the guest's OWN rendered-frame counter, not the count of
+            // frames whose pixels changed.  The old meter counted framebuffer
+            // changes, so it read ~0 whenever the view was static (menus,
+            // standing still, firing in place) and badly understated the real
+            // rate — a run measured "FPS: 4" while the guest was actually
+            // producing ~17 frames/s.  `drawn` is kept as a second number so
+            // the change-gated re-render is still observable.
+            const guestFrames = Number(emu.read32(FRAMECOUNT));
+            const fps = (guestFrames - statFrames) / dt;
+            statFrames = guestFrames;
+            // Audio health: playback rate vs correct pitch (1.00 = in tune).
+            // Below 1.0 means the guest is producing audio slower than
+            // realtime and the worklet is stretching to stay continuous.
+            const a = window.__audioStat;
+            const audioTxt = a && a.rate ? ` · audio ${a.rate.toFixed(2)}x` : '';
             $('stats').textContent =
-                `MIPS: ${mips.toFixed(1)} · FPS: ${(framesShown / dt).toFixed(0)} · ${(instTotal / 1e6).toFixed(1)}M inst`;
+                `MIPS: ${mips.toFixed(1)} · FPS: ${fps.toFixed(0)}/35 · drawn ${(framesShown / dt).toFixed(0)}${audioTxt} · ${(instTotal / 1e6).toFixed(1)}M inst`;
             statLast = now; statInst = instTotal;
             activeMs = 0;
             framesShown = 0;

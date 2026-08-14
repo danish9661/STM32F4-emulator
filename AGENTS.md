@@ -1562,8 +1562,44 @@ turned out to be wrong; all numbers here are measured, not estimated
   amplitude 1" and near-silence would print "0". It now reports peak to 3dp
   plus nonzero/clipped counts and **asserts `clipPct < 5`**; verified the
   guard fails (24.6%) against the pre-fix firmware.
-- **Remaining audio limitation (NOT fixed) — it is the fps shortfall, not
-  a separate audio bug.** `DOOM_SubmitAudio` emits one frame's worth
+- **THE audio bug (fixed 2026-08-14): the worklet's resample ratio was
+  INVERTED.** `site/audio-worklet.js` had `this.ratio = sampleRate / 11025`
+  (≈4.35 at 48 kHz) and advanced the 11025 Hz read cursor by that per OUTPUT
+  sample. The correct step is SRC/DST — `11025 / sampleRate` ≈ 0.23. The
+  inverted form consumed input **~19x too fast**, so every sound played far
+  above audible pitch and the queue starved instantly: the user-visible
+  symptom was "no correct sound, only crackling", and it had been that way
+  since the worklet landed. It survived because the tests only counted
+  samples the guest PRODUCED — nothing ever checked that playback consumed
+  them at the right rate, so a completely broken resampler passed.
+  Measured on the real page (8 s of gameplay): **starved output samples
+  364476 → 0**; cumulative starvation 91276 → ~3k (boot only).
+- **Rate control replaced silence+flush.** The old underrun path emitted
+  silence AND did `this.q = new Float32Array(0)`, discarding audio that had
+  already arrived — which is why the deficit became *pure* crackle rather
+  than occasional gaps. The worklet now runs a proportional controller on
+  buffer depth (TARGET_Q) that nudges playback rate to match production and
+  never flushes; starvation holds the last sample and decays it (soft fade,
+  no click). Gotchas learned tuning it:
+  * **RATIO_MIN must sit below the slowest rate the guest can force.**
+    Required rate == fps/35, so 24 fps needs 0.69 but a dip to 14 fps needs
+    0.40 — a 0.5 floor guaranteed dropouts on every dip. Floor is 0.28.
+  * **Drain audio on the 40 ms pump tick even while rAF is alive.** The rAF
+    loop drains once per frame with irregular cadence, so samples reached
+    the worklet in clumps and the buffer dipped empty between them
+    (7.5% → 5.5% starvation from this alone).
+  * **Bump the `?v=` on `addModule('audio-worklet.js?v=N')` on every edit** —
+    the module is cached hard and a stale worklet is indistinguishable from
+    an audio bug.
+  Consequence, by design: when the guest runs below 35 fps the stream plays
+  slow/pitched-down (rate ~0.72 at 25 fps) but CONTINUOUS — which matches
+  the visibly slow-motion game. The stats line now shows it (`audio 0.72x`).
+- **`noCountHook` adopted for doom (2026-08-14)**: no per-block JS callback
+  at all. Measured on the page: FPS 22 → **25/35**, audio production +16%
+  (rate 0.62 → 0.72). The MIPS readout *drops* (24.5 → 19.0) because block
+  counting over-reported ~1.39x; the new number is the honest one.
+- **Old note, kept because the framing is still right — the residual
+  slowness is the fps shortfall, not a separate audio bug.** `DOOM_SubmitAudio` emits one frame's worth
   (11025/35 = 315 samples) per RENDERED frame. The driver derives the guest
   clock FROM the frame counter (`clockMs = bootClock + frames*FRAME_MS`,
   doom.js:186/499), so guest time advances exactly one frame-period per
