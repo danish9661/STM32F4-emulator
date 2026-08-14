@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Submit this in Google Search Console: Sitemaps -> add
+     https://danish9661.github.io/stm32F4-emulator/sitemap.xml
+     Only the two real pages are listed; everything else under site/ is an
+     asset (wasm, SVD, WAD, JS) and must not be indexed as a page. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://danish9661.github.io/stm32F4-emulator/</loc>
+    <lastmod>2026-08-14</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://danish9661.github.io/stm32F4-emulator/doom.html</loc>
+    <lastmod>2026-08-14</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+</urlset>

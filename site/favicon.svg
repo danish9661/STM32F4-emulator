@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="STM32F4 emulator">
+  <rect width="64" height="64" rx="10" fill="#0d1117"/>
+  <!-- MCU package body -->
+  <rect x="16" y="16" width="32" height="32" rx="3" fill="#161b22" stroke="#3fb950" stroke-width="2.5"/>
+  <!-- pins -->
+  <g fill="#3fb950">
+    <rect x="8"  y="22" width="6" height="3"/><rect x="8"  y="30" width="6" height="3"/><rect x="8"  y="38" width="6" height="3"/>
+    <rect x="50" y="22" width="6" height="3"/><rect x="50" y="30" width="6" height="3"/><rect x="50" y="38" width="6" height="3"/>
+    <rect x="22" y="8"  width="3" height="6"/><rect x="30" y="8"  width="3" height="6"/><rect x="38" y="8"  width="3" height="6"/>
+    <rect x="22" y="50" width="3" height="6"/><rect x="30" y="50" width="3" height="6"/><rect x="38" y="50" width="3" height="6"/>
+  </g>
+  <text x="32" y="39" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="15"
+        font-weight="700" fill="#e6edf3" text-anchor="middle">F4</text>
+</svg>

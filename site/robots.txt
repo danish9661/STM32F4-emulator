@@ -1,0 +1,11 @@
+User-agent: *
+Allow: /
+
+# Crawlers get nothing useful from the runtime assets (4.2 MB WAD, wasm
+# blobs, the SVD, the base64 firmware bundle) and fetching them wastes
+# crawl budget on a Pages site.
+Disallow: /vendor/
+Disallow: /doom1.wad
+Disallow: /firmware.js
+
+Sitemap: https://danish9661.github.io/stm32F4-emulator/sitemap.xml
