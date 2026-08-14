@@ -4,8 +4,12 @@
   "description": "STM32F407 emulator: Unicorn (WASM) CPU + Rust peripheral model. Runs real Cortex-M4 firmware in Node or the browser.",
   "type": "module",
   "main": "index.mjs",
+  "bin": {
+    "stm32f4-mcp": "./mcp/server.mjs"
+  },
   "exports": {
     ".": "./index.mjs",
+    "./components": "./site/components.js",
     "./emulator": "./site/emulator.js",
     "./netsim": "./site/netsim.js",
     "./firmwares": "./site/firmware.js",
@@ -18,6 +22,8 @@
     "index.mjs",
     "README.md",
     "site/emulator.js",
+    "site/components.js",
+    "mcp/server.mjs",
     "site/netsim.js",
     "site/firmware.js",
     "site/loaders.js",
@@ -43,12 +49,18 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node site/test_flow.mjs && node site/test_blinky.mjs && node site/test_rx_interrupt.mjs",
+    "test": "node site/test_flow.mjs && node site/test_blinky.mjs && node site/test_rx_interrupt.mjs && node site/test_component_led.mjs && node site/test_component_button.mjs && node site/test_component_pwm.mjs && node site/test_component_i2cregfile.mjs && node site/test_component_adc.mjs",
     "test:flow": "node site/test_flow.mjs",
     "test:blinky": "node site/test_blinky.mjs",
     "test:rx": "node site/test_rx_interrupt.mjs",
+    "test:components": "node site/test_component_led.mjs && node site/test_component_button.mjs && node site/test_component_pwm.mjs && node site/test_component_i2cregfile.mjs && node site/test_component_adc.mjs",
+    "test:mcp": "node mcp/test_mcp.mjs",
+    "mcp": "node mcp/server.mjs",
     "firmwares": "node tools/make_firmware.mjs",
     "serve": "python3 -m http.server 8123 --directory site",
     "prepack": "node tools/make_firmware.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
   }
 }

@@ -1,6 +1,20 @@
 /* tslint:disable */
 /* eslint-disable */
 
+/**
+ * Remove a channel override, reverting it to the synthetic default.
+ */
+export function adc_clear_channel_value(peripheral: string, channel: number): void;
+
+/**
+ * Force an ADC channel's next conversion(s) to return `value` (clamped to
+ * 12-bit) instead of the synthetic temp/vref/vbat/random default. Unlike
+ * spi_tap/i2c_register_slave this can be called any time, including after
+ * init() — it's a global override table, not per-instance device wiring
+ * (see docs/components.md).
+ */
+export function adc_set_channel_value(peripheral: string, channel: number, value: number): void;
+
 export function add_i2c_eeprom(peripheral: string, address: number, data: Uint8Array): void;
 
 /**
@@ -263,6 +277,8 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly adc_clear_channel_value: (a: number, b: number, c: number) => void;
+    readonly adc_set_channel_value: (a: number, b: number, c: number, d: number) => void;
     readonly add_i2c_eeprom: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly add_software_spi: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
     readonly add_spi_flash: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;

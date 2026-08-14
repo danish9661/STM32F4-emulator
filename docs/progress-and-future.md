@@ -7,8 +7,9 @@ document is the readable summary.
 
 ### Emulator core
 - Full Cortex-M4 Thumb-2 execution via Unicorn 2.1.4 (WASM) — the same
-  firmware binaries run here and on real silicon.
-- 33 peripheral modules, 26 detailed (see [peripherals.md](peripherals.md)).
+  firmware binaries run here and on real silicon, for **logic**; timing
+  is instruction-count driven, not wall-clock (see Known limitations #4).
+- 33 peripheral modules, 28 detailed (see [peripherals.md](peripherals.md)).
 - Deterministic instruction-count clock (timers, ADC, RNG, RTC, watchdogs).
 - NVIC interrupt model with an opt-in guest-IRQ pump for interrupt-driven
   firmware (UART RX + crypto firmwares verified in Node and in a browser).
@@ -101,14 +102,26 @@ document is the readable summary.
 
 ## Known limitations
 
-1. **Unicorn WASM wedge** (above) — the cap costs a few % throughput;
-   the real fix is a newer/better Unicorn build.
+1. ~~**Unicorn WASM wedge**~~ — **resolved 2026-08-10**: does not
+   reproduce on Node 22.22 (V8); fresh characterization with count-based
+   `emu_start` at n=1000..1,000,000, and 150M-instruction cli.mjs soaks at
+   `MAX_BATCH=500000`, ran wedge-free (AGENTS.md §7). Ruling: the original
+   wedge was build/environment-specific to an older Node/V8 WASM engine,
+   not the vendored Unicorn build itself. `cli.mjs`'s `maxBatch` (default
+   200000, `MAX_BATCH` env override) remains, but as a throughput/
+   responsiveness knob — the driver still needs periodic `emu_start`
+   returns to service DMA/ETH polling and interrupts regardless of any
+   wedge — not a workaround for a bug. One unrelated, still-reproducible
+   instance killer: passing the `timeout` argument to `emu_start` aborts
+   the instance (`qemu_thread_create: Not supported`); nothing in this
+   repo passes it.
 2. **Guest-IRQ pump vs ETH firmware**: the pump must stay disabled for ETH
    firmware (an emulated ETH_IRQHandler re-scans `rx_desc` and stomps the
    driver's frame bookkeeping).
-3. **Hardware paths not modeled**: DCMI has no pixel source; USB OTG has
-   no model (CAN now has a real two-node bus with arbitration; I2S/SAI have
-   a WAV-backed DMA capture path; LTDC has real scanout + a browser sink).
+3. **Hardware paths not modeled**: DCMI has no pixel source (CAN now has
+   a real two-node bus with arbitration; I2S/SAI have a WAV-backed DMA
+   capture path; LTDC has real scanout + a browser sink). USB OTG is
+   **explicitly out of scope**, not a to-do — see roadmap note below.
 4. **Timers are instruction-count driven**, not wall-clock driven — a
    `delay_ms(100)` is ~2.4M emulated instructions, so real-time blink
    rates don't hold (documented in AGENTS.md §11).
@@ -161,7 +174,13 @@ document is the readable summary.
       LISR/HISR read path) and stay set until the guest clears them through
       IFCR — real-w1c semantics.
 - [ ] DCMI real pixel source.
-- [ ] USB OTG (huge: host/device state machine) — biggest single gap.
+- [x] USB OTG — **deferred, not planned**: none of this repo's firmware
+      targets or intended use cases (networking demos, DOOM, breadboard-
+      style peripheral simulation) exercise USB, and a browser sandbox has
+      no real USB host to enumerate against without WebUSB passthrough to
+      physical hardware — which isn't emulation. Revisit only if a
+      concrete firmware need appears (a lighter USB CDC echo sample is a
+      much smaller ask, see Priority 3).
 - [ ] EtherCAT / timers in PWM servo mode for the printer heritage
       firmwares.
 - [x] CAN bus peer / arbitration between CAN1 and CAN2 on a shared bus:
@@ -179,17 +198,38 @@ document is the readable summary.
       filter gating, FIFO overflow/release. Also fixed the minimal
       (no-SVD) register list — it was missing CAN1/CAN2 entirely, so CAN
       firmware silently did nothing in browser/test builds.
-- [ ] I2S/SAI real audio (WAV-backed DMA).
-- [ ] USB OTG (huge: host/device state machine) — biggest single gap.
 
 ### Priority 3 — product / ecosystem
+- [x] **Component-attachment API** (2026-08-14, rp2040js-style): public
+      `emu.pin()`/`watchPin()`/`i2cRegfile()`/`setAdcChannel()` plus
+      `LED`/`Button`/`Pwm`/`Potentiometer`/`I2cRegisterDevice` in
+      `site/components.js`, and `ext_devices.spiDevices`/`i2cDevices` for
+      embedder-defined bus protocols on the existing SPI/I2C taps. Each
+      class is verified against real firmware in its own process
+      (`site/test_component_{led,button,pwm,i2cregfile,adc}.mjs`).
+      ADC injection needed the one Rust change (a global override table in
+      `system.rs` + `adc_set_channel_value`/`adc_clear_channel_value`
+      exports) since channels previously only produced LCG noise.
+      See [components.md](components.md).
+- [x] **MCP server** (2026-08-14): `mcp/server.mjs` exposes the emulator
+      as 14 MCP tools (load/step/UART/pins/ADC/registers/memory/components)
+      over stdio via the official `@modelcontextprotocol/sdk` — the
+      project's first runtime npm dependency. Protocol round-trip smoke
+      test: `npm run test:mcp`. See [mcp.md](mcp.md).
+- [x] **Windows/macOS CI** (2026-08-14): `ci.yml` runs the suite on
+      `ubuntu-latest`/`windows-latest`/`macos-latest`. No source changes
+      were needed — the test path was already portable (plain `node`
+      invocations, `new URL(..., import.meta.url)` paths, no
+      `child_process`/native addons, prebuilt WASM needs no Rust
+      toolchain).
 - [ ] Publish `stm32f4-emulator` to npm (README documents `npm pack` flow
       already; a `npm publish` + consumer verification remains).
 - [ ] GitHub Pages: serve the demo over https (gateway mode currently
       needs http:// for plain `ws://`; document a WSS gateway or a
       local-proxy flow).
 - [ ] VS Code extension / devcontainer with the full toolchain
-      (wasm-pack, arduino-cli, go).
+      (wasm-pack, arduino-cli, go). (An MCP server now covers part of the
+      "drive the emulator from your editor" use case — see above.)
 - [ ] Waveform/DMA trace view in the browser console.
 - [x] Interrupt-driven ETH driver (`eth_irq_test`): NVIC ETH IRQ 61 +
       DMAIER, the pump runs `ETH_IRQHandler` which reads DMASR TS/RS,
@@ -198,12 +238,12 @@ document is the readable summary.
       format: FS/LS marker bits at 28/27 corrupted the frame-length window
       [29:16] (`len<<16` only, like real F407).
 - [ ] More firmware samples: USB CDC echo, FreeRTOS port.
-- [ ] Windows/macOS CI coverage (currently Linux runner).
 
 ## Verification checklist (regression)
 
 ```bash
-npm test                                    # flow + blinky + rx-interrupt
+npm test                                    # flow + blinky + rx-interrupt + 5 component tests
+npm run test:mcp                            # MCP protocol round-trip (needs npm install)
 scripts/verify_ethernet.sh 10000000         # 3 firmwares through gateway
 node site/probe_firmwares.mjs               # every preset boots to a banner
 node site/test_rx_interrupt.mjs             # interrupt-driven UART/CRC

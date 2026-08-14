@@ -7,6 +7,7 @@ import * as bindings from './site/vendor/stm32_periph_wasm.js';
 import { createEmulator } from './site/emulator.js';
 import { createNetSim } from './site/netsim.js';
 import { FIRMWARES } from './site/firmware.js';
+import { LED, Button, Pwm, I2cRegisterDevice, Potentiometer } from './site/components.js';
 
 const require = createRequire(import.meta.url);
 const unicornFactory = require('./site/vendor/unicorn_arm.cjs');
@@ -35,4 +36,4 @@ export async function createSTM32F407(opts = {}) {
     return createEmulator({ ...opts, firmware: bin, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes });
 }
 
-export { createEmulator, createNetSim, FIRMWARES, bindings, unicornFactory, svdXml };
+export { createEmulator, createNetSim, FIRMWARES, bindings, unicornFactory, svdXml, LED, Button, Pwm, I2cRegisterDevice, Potentiometer };

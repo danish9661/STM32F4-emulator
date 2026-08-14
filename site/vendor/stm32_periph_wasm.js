@@ -1,6 +1,33 @@
 /* @ts-self-types="./stm32_periph_wasm.d.ts" */
 
 /**
+ * Remove a channel override, reverting it to the synthetic default.
+ * @param {string} peripheral
+ * @param {number} channel
+ */
+export function adc_clear_channel_value(peripheral, channel) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.adc_clear_channel_value(ptr0, len0, channel);
+}
+
+/**
+ * Force an ADC channel's next conversion(s) to return `value` (clamped to
+ * 12-bit) instead of the synthetic temp/vref/vbat/random default. Unlike
+ * spi_tap/i2c_register_slave this can be called any time, including after
+ * init() — it's a global override table, not per-instance device wiring
+ * (see docs/components.md).
+ * @param {string} peripheral
+ * @param {number} channel
+ * @param {number} value
+ */
+export function adc_set_channel_value(peripheral, channel, value) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.adc_set_channel_value(ptr0, len0, channel, value);
+}
+
+/**
  * @param {string} peripheral
  * @param {number} address
  * @param {Uint8Array} data

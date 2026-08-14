@@ -1,4 +1,4 @@
-use crate::system::{System, instruction_count};
+use crate::system::{System, instruction_count, adc_get_override};
 use super::Peripheral;
 use std::sync::atomic::Ordering;
 
@@ -94,15 +94,44 @@ impl Adc {
             let conv_cycles = sampling_cycles + 12;
             if elapsed >= conv_cycles as u64 {
                 let channel = self.sqr3 & 0x1F;
-                let val = match channel {
+                let val = adc_get_override(&self.name, channel).unwrap_or_else(|| match channel {
                     16 | 17 => 1200 + (adc_rand() % 50),
                     18 => 1500,
                     _ => adc_rand() % 4096,
-                };
+                });
                 self.dr = val;
                 self.set_eoc(sys);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system::{adc_set_override, adc_clear_override, INSTRUCTION_COUNT};
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn channel_override_takes_priority_over_random() {
+        let mut boxed = Adc::new("ADC1").unwrap();
+        let adc = boxed.as_any_mut().downcast_mut::<Adc>().unwrap();
+        let sys = crate::system::test_dummy_system();
+
+        adc_set_override("ADC1", 5, 0x0ABC);
+        adc.write(&sys, 0x34, 5);              // SQR3: select channel 5
+        adc.write(&sys, 0x08, (1 << 30) | 1);   // CR2: SWSTART, keep ADON set
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed); // elapse past conv_cycles
+        adc.read(&sys, 0x08);                   // CR2 read drives start_conversion
+        assert_eq!(adc.read(&sys, 0x4C), 0x0ABC, "DR should reflect the override, not LCG random");
+        adc_clear_override("ADC1", 5);
+
+        // Without an override, the channel falls back to the existing
+        // pseudo-random behavior (still in the real 12-bit ADC range).
+        adc.write(&sys, 0x08, (1 << 30) | 1);
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        assert!(adc.read(&sys, 0x4C) < 4096);
     }
 }
 

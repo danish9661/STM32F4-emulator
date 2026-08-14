@@ -1,6 +1,8 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const adc_clear_channel_value: (a: number, b: number, c: number) => void;
+export const adc_set_channel_value: (a: number, b: number, c: number, d: number) => void;
 export const add_i2c_eeprom: (a: number, b: number, c: number, d: number, e: number) => void;
 export const add_software_spi: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
 export const add_spi_flash: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;

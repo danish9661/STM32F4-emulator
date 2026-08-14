@@ -141,6 +141,22 @@ pub fn gpio_read_input(port: u32, pin: u32) -> bool {
     sys().p.gpio.borrow().read_input_pin(port as u8, pin as u8)
 }
 
+/// Force an ADC channel's next conversion(s) to return `value` (clamped to
+/// 12-bit) instead of the synthetic temp/vref/vbat/random default. Unlike
+/// spi_tap/i2c_register_slave this can be called any time, including after
+/// init() — it's a global override table, not per-instance device wiring
+/// (see docs/components.md).
+#[wasm_bindgen]
+pub fn adc_set_channel_value(peripheral: &str, channel: u32, value: u32) {
+    system::adc_set_override(peripheral, channel, value);
+}
+
+/// Remove a channel override, reverting it to the synthetic default.
+#[wasm_bindgen]
+pub fn adc_clear_channel_value(peripheral: &str, channel: u32) {
+    system::adc_clear_override(peripheral, channel);
+}
+
 #[wasm_bindgen]
 pub fn is_watchdog_reset_requested() -> bool {
     system::is_watchdog_reset_requested()

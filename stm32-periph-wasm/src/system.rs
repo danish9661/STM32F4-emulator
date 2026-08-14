@@ -267,6 +267,27 @@ pub(crate) fn audio_buses_ready() -> bool {
     AUDIO_SOURCE.get().is_some() && AUDIO_CAPTURE.get().is_some()
 }
 
+// ── ADC channel-value injection (JS hardware layer plumbing) ───────────────
+// A global override table, not per-Adc-instance state: JS can set/clear a
+// channel value at any time (unlike spi_tap/i2c_register_slave, which must
+// run before init() because Spi/I2c snapshot their device list once at
+// construction — see docs/components.md). Adc::start_conversion checks this
+// before falling back to its synthetic temp/vref/vbat/random logic.
+static ADC_OVERRIDES: OnceLock<Mutex<std::collections::HashMap<(String, u32), u32>>> = OnceLock::new();
+
+fn adc_overrides() -> &'static Mutex<std::collections::HashMap<(String, u32), u32>> {
+    ADC_OVERRIDES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+pub fn adc_set_override(peripheral: &str, channel: u32, value: u32) {
+    adc_overrides().lock().unwrap().insert((peripheral.to_string(), channel), value & 0xFFF);
+}
+pub fn adc_clear_override(peripheral: &str, channel: u32) {
+    adc_overrides().lock().unwrap().remove(&(peripheral.to_string(), channel));
+}
+pub fn adc_get_override(peripheral: &str, channel: u32) -> Option<u32> {
+    adc_overrides().lock().unwrap().get(&(peripheral.to_string(), channel)).copied()
+}
+
 // ── SPI bus taps (JS hardware layer plumbing) ──────────────────────────────
 // Event word layout: bit 31 = CS edge event, bit 30 = asserted (1) when CS
 // is a CS event, bit 29 = DC level (1 = data) when the tap has a DC pin,

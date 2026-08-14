@@ -56,9 +56,12 @@ export async function createEmulator(opts) {
         eth_is_rx_poll, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
         get_next_pending_interrupt, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
-        spi_tap, spi_take_events, i2c_register_slave, i2c_take_events,
-        i2c_register_regfile, i2c_regfile_get,
+        spi_tap, spi_take_events, spi_push_miso,
+        i2c_register_slave, i2c_take_events, i2c_push_rx,
+        i2c_register_regfile, i2c_regfile_get, i2c_regfile_set,
         audio_take_capture,
+        gpio_read_output, gpio_read_input, gpio_set_input,
+        adc_set_channel_value, adc_clear_channel_value,
     } = bindings;
 
     const E = {
@@ -107,6 +110,21 @@ export async function createEmulator(opts) {
     }
     if (ext_devices.tft) {
         spi_tap(ext_devices.tft.spi || 'SPI2', ext_devices.tft.cs || null, ext_devices.tft.dc || null);
+    }
+    // Custom SPI/I2C devices (site/components.js-style embedder devices):
+    // { peripheral, cs?, dc?, handler(events, push) } / { peripheral, address, handler }.
+    // spi_tap/i2c_register_slave must run before init() below — the Spi/I2c
+    // peripheral objects snapshot their attached-device list once at
+    // construction and never rescan it (see spi.rs Spi::new).
+    const spiDevices = [];
+    for (const cfg of (ext_devices.spiDevices || [])) {
+        spi_tap(cfg.peripheral, cfg.cs ?? null, cfg.dc ?? null);
+        spiDevices.push({ peripheral: cfg.peripheral, handler: cfg.handler });
+    }
+    const i2cDevices = [];
+    for (const cfg of (ext_devices.i2cDevices || [])) {
+        i2c_register_slave(cfg.peripheral, cfg.address);
+        i2cDevices.push({ peripheral: cfg.peripheral, handler: cfg.handler });
     }
     init_svd(svdXml);
     bindings.init();
@@ -458,12 +476,69 @@ export async function createEmulator(opts) {
         if (key !== rtc.lastKey) { rtc.lastKey = key; rtc.change++; }
     };
 
+    // ── Public component-attachment API (LED/Button/custom SPI/I2C
+    // devices) — built on the same GPIO shims and bus taps the oled/tft
+    // blocks above use internally, but reusable by embedder code without
+    // editing this file. See site/components.js and docs/components.md.
+    const portIndex = (port) => typeof port === 'string' ? port.toUpperCase().charCodeAt(0) - 65 : port;
+
+    const pin = (port, num) => {
+        const p = portIndex(port);
+        return {
+            read: () => gpio_read_output(p, num),
+            readInput: () => gpio_read_input(p, num),
+            write: (level) => gpio_set_input(p, num, !!level),
+        };
+    };
+
+    const i2cRegfile = (peripheral) => ({
+        get: (offset) => i2c_regfile_get(peripheral, offset),
+        set: (offset, value) => i2c_regfile_set(peripheral, offset, value & 0xFF),
+    });
+
+    const setAdcChannel = (peripheral, channel, value) => adc_set_channel_value(peripheral, channel, value);
+    const clearAdcChannel = (peripheral, channel) => adc_clear_channel_value(peripheral, channel);
+
+    const gpioWatchers = [];
+    const watchPin = (port, num, callback) => {
+        const p = portIndex(port);
+        const w = { p, num, last: gpio_read_output(p, num), callback };
+        gpioWatchers.push(w);
+        return () => {
+            const i = gpioWatchers.indexOf(w);
+            if (i >= 0) gpioWatchers.splice(i, 1);
+        };
+    };
+    const processGpioWatchers = () => {
+        for (const w of gpioWatchers) {
+            const v = gpio_read_output(w.p, w.num);
+            if (v !== w.last) { w.last = v; w.callback(v); }
+        }
+    };
+
+    const processSpiDevices = () => {
+        for (const d of spiDevices) {
+            const events = spi_take_events(d.peripheral);
+            if (events.length) d.handler(events, (bytes) => spi_push_miso(d.peripheral, bytes));
+        }
+    };
+
+    const processI2cDevices = () => {
+        for (const d of i2cDevices) {
+            const events = i2c_take_events(d.peripheral);
+            if (events.length) d.handler(events, (bytes) => i2c_push_rx(d.peripheral, bytes));
+        }
+    };
+
     const processDevices = () => {
         processOled();
         processTft();
         processBuzzer();
         processSpeaker();
         processRtc();
+        processGpioWatchers();
+        processSpiDevices();
+        processI2cDevices();
     };
 
     // ── ETH TX capture + RX injection ──
@@ -641,6 +716,7 @@ export async function createEmulator(opts) {
             for (const b of bytes) uart_rx_byte(uart_addr, b & 0xFF);
         },
         rxQueue,
+        pin, watchPin, i2cRegfile, setAdcChannel, clearAdcChannel,
         oled: oled ? { fb: oled.fb, frame: () => oled.frame } : null,
         tft: tft ? { fb: tft.fb, w: tft.w, h: tft.h, frame: () => tft.frame } : null,
         buzzer: buzzer ? { get freq() { return buzzer.freq; }, get duty() { return buzzer.duty; }, get change() { return buzzer.change; } } : null,

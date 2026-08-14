@@ -97,6 +97,25 @@ emu.injectFrame(packetBytes);  // inject an Ethernet frame
 See `site/test_flow.mjs` and the exports in `index.mjs` for the full API
 (`decodeFirmware`, `createEmulator`, `createNetSim` re-exports).
 
+Attach virtual hardware (LEDs, buttons, PWM readers, analog sensors,
+custom SPI/I2C devices) to pins and buses with the component API —
+`emu.pin()`/`emu.watchPin()`/`emu.setAdcChannel()` plus the
+`LED`/`Button`/`Pwm`/`Potentiometer`/`I2cRegisterDevice` components, or
+`ext_devices.spiDevices`/`i2cDevices` for your own bus protocol. See
+[docs/components.md](docs/components.md).
+
+## Drive it from an AI agent (MCP)
+
+`mcp/server.mjs` exposes the emulator over the Model Context Protocol —
+boot firmware, step, read UART, poke pins, inject ADC values, and inspect
+registers as tools an MCP client (Claude Code, Claude Desktop) can call:
+
+```bash
+npm install && npm run mcp
+```
+
+See [docs/mcp.md](docs/mcp.md) for the tool reference and client config.
+
 ## Firmwares
 
 | Firmware | What it does | Success marker |
@@ -114,7 +133,11 @@ print a banner over UART (probe: `node site/probe_firmwares.mjs`).
 
 All are bare-metal (no RTOS), built with the Arduino core's
 arm-none-eabi-gcc, and driven purely through memory-mapped registers —
-the same firmware binaries run on the emulator and on real silicon.
+the same firmware binaries run on the emulator and on real silicon. That
+equivalence is for **logic**, not **timing**: timers/ADC/RNG/RTC/watchdogs
+are instruction-count driven rather than wall-clock driven, so firmware
+relying on real-time behavior (PWM frequency matching real hardware,
+watchdog timeouts close to spec) will diverge — see docs/progress-and-future.md#known-limitations.
 
 ## Architecture
 
@@ -153,15 +176,18 @@ firmware .bin ──► Unicorn WASM CPU ──► memory hooks
 │   ├── index.html, app.js   Console UI (UART, presets, loaders, gateway, GPIO)
 │   ├── doom.html, doom.js   DOOM page (gameplay + save/load via localStorage)
 │   ├── emulator.js          Import-free emulator factory (Node + browser)
+│   ├── components.js        Virtual components (LED/Button/Pwm/Potentiometer/...)
 │   ├── netsim.js            Canned DHCP/TCP/HTTP network peer (fallback)
 │   ├── loaders.js           Intel HEX / ELF32 / linker-map parsers
 │   ├── test_flow.mjs        Node E2E flow test (npm test)
 │   ├── test_blinky.mjs      Node blinky GPIO test (npm test)
 │   ├── test_rx_interrupt.mjs Node UART-interrupt test (npm test)
+│   ├── test_component_*.mjs Component-API tests, one firmware each (npm test)
 │   ├── test_doom.mjs        Node DOOM boot/menu/gameplay/save test
 │   └── vendor/              Browser WASM build, SVD, Unicorn
 ├── index.mjs, package.json  npm package entry (stm32f4-emulator)
-├── .github/workflows/       CI (test suite) + GitHub Pages deploy
+├── mcp/                     MCP server (drive the emulator from an AI agent)
+├── .github/workflows/       CI (Linux/Windows/macOS test matrix) + Pages deploy
 ├── tools/make_firmware.mjs  Regenerates site/firmware.js from eth_*/.bin
 ├── stm32-periph-wasm/       Rust peripheral model (WASM build + pkg/)
 ├── eth_http/ eth_dhcp/ eth_test/   Sample network firmwares + configs
@@ -192,8 +218,14 @@ rebuild — delete it so the vendor assets stay tracked/committed.
 ## Testing
 
 - `npm test` — flow test (`site/test_flow.mjs`) + blinky test
-  (`site/test_blinky.mjs`) + interrupt-UART test (`site/test_rx_interrupt.mjs`),
-  exit 0 = all PASS. The same suite runs in CI
+  (`site/test_blinky.mjs`) + interrupt-UART test (`site/test_rx_interrupt.mjs`)
+  + component-API tests (`site/test_component_{led,button,pwm,i2cregfile}.mjs`,
+  each against real firmware — LED/blinky, Button/exti_test, Pwm/buzzer_test,
+  I2cRegisterDevice/rtc_test), exit 0 = all PASS. Each test file boots
+  exactly one firmware in its own `node` process — `createEmulator()`
+  instances aren't safe to reuse across different firmware in the same
+  process (see docs/components.md). The same suite runs in CI on
+  `ubuntu-latest`/`windows-latest`/`macos-latest`
   ([.github/workflows/ci.yml](.github/workflows/ci.yml)) on every push.
 - `node site/test_doom.mjs` — DOOM boot → menu → E1M1 gameplay + save/load
   (see the DOOM section above).
@@ -210,6 +242,11 @@ rebuild — delete it so the vendor assets stay tracked/committed.
   level each is implemented to, plus external devices and known gaps.
 - [docs/usage.md](docs/usage.md) — CLI, browser, and npm-library usage,
   config files, env vars, building.
+- [docs/components.md](docs/components.md) — attach virtual LEDs, buttons,
+  PWM/analog sensors, and custom SPI/I2C devices to pins/buses
+  (rp2040js-style component API).
+- [docs/mcp.md](docs/mcp.md) — the MCP server: drive the emulator as tools
+  from Claude Code / Claude Desktop or any MCP client.
 - [docs/benchmarks.md](docs/benchmarks.md) — throughput numbers, soak
   results, tunables.
 - [docs/progress-and-future.md](docs/progress-and-future.md) — status,

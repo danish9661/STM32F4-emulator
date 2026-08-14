@@ -19,8 +19,8 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 | | Count |
 |---|---|
 | Modules | 33 |
-| Detailed | 26 |
-| Partial | 7 |
+| Detailed | 28 |
+| Partial | 5 |
 | Stub / passthrough-only | 0 |
 
 ## The matrix
@@ -28,7 +28,7 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 | Peripheral | Loc | Level | What's implemented | IRQ | tick | ext |
 |---|---|---|---|---|---|---|
 | ADC | 183 | Detailed | SR/CR1/CR2/SMPR1-2/JOFR/HTR/LTR/SQR1-3/JSQR/JDR/DR; SWSTART-gated conversion, real sampling-time logic (SMPR lookup), channel values (16/17 = temp/Vref, 18 = Vbat, others LCG pseudo-random), EOC/OVR flags | Y (EOC/OVR → 18/47) | N | N |
-| CAN | 194 | Detailed | MCR/MSR/TSR/RF0R/RF1R/IER/ESR/BTR; 3 TX + 2 RX mailboxes, filter banks (FMR/FM1R/FS1R/FFA1R/FA1R + 56 filter words), TX request → TXOK/RQCP, RX FIFO release decrements FMP, INIT/SLEEP transitions | Y (TX/RX/SCE → 19/63) | N | N |
+| CAN | 494 | Detailed | MCR/MSR/TSR/RF0R/RF1R/IER/ESR/BTR; 3 TX + 2 RX mailboxes, filter banks (FMR/FM1R/FS1R/FFA1R/FA1R + 56 filter words), TX request → TXOK/RQCP, RX FIFO release decrements FMP, INIT/SLEEP transitions; **two-node bus arbitration** (lowest ID wins, ties by node/mailbox), winner broadcasts to every RX passing its filters (including itself), BTR LBKM loopback delivers only to the sender | Y (TX/RX/SCE → 19/63) | N | N |
 | CRC | 39 | Detailed | Real CRC-32 (poly 0x04C11DB7, MSB-first), accumulated on DR writes; DR/IDR/CR, RESET → 0xFFFFFFFF | N | N | N |
 | CRYP | 628 | Detailed | Full crypto core via real `aes`/`des` crates: AES-128/192/256 ECB/CBC/CTR, DES + 3DES (EDE3), GCM (GHASH + GF(2¹²⁸) + CTR + tag), CCM (CBC-MAC + CTR); 64-byte FIFO with IFEM/IFNF/OFNE/OFFU/BUSY, datatype byte-swap | Y (79: OFNE/IFNF) | N | N |
 | DAC | 135 | Detailed | CR/SWTRIGR/all DHR regs/DOR1-2/SR; DOR update on trigger + writes, LFSR noise, triangle-waveform counter/direction, MAMP masks | N | N | N |
@@ -38,19 +38,19 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 | ETH | 311 | Detailed | All 4 blocks (MAC/MMC/PTP/DMA) full register maps; PHY emulation (MIIAR read → fixed PHY regs), write-1-clear DMASR, DMAIER masking, AIS/NIS, TX/RX done → TS/RS bits, DMABMR soft-reset, DMAOMR ST/SR → `eth_signal_tx/rx_poll` atomics | Y (61) | Y | N |
 | EXTI | 70 | Detailed | IMR/EMR/RTSR/FTSR/SWIER/PR with correct line→IRQ mapping; **GPIO edge-trigger path**: `scan_lines` per tick compares GPIO line levels vs `last_state`, RTSR/FTSR gating, line→IRQ map (0-4→6-10, 5-9→23, 10-15→40) | Y (6-10/23/40) | N | N |
 | FLASH | 80 | Detailed | ACR, KEYR two-step unlock (0x45670123→0xCDEF89AB), OPTKEYR, SR write-1-clear, CR + LOCK/PSIZE, OPTCR1; program (PG) and sector-erase (SER) dispatch into the emulated flash backing buffer via `flash_erase_applied` (JS driver gated on `syncFlashProtection`) | N | N | N |
-| FSMC | 111 | Detailed | 4 banks 0x60000000-0xA0001000; accesses forwarded to attached memory-mapped ext device (display); BCR/BTR/PCR stored per bank | N | N | Y |
+| FSMC | 100 | Partial | 4 banks 0x60000000-0xA0001000; BCR/BTR/PCR stored per bank; `read_data`/`write_data` are no-op stubs — the memory-mapped-display forwarding path was removed with `ext_devices/{lcd,display}.rs` (commit `13d7cdb`, superseded by the generic SPI/I2C bus-tap devices) and never rebuilt for FSMC | N | N | N |
 | GPIO | 229 | Detailed | MODER/OTYPER/OSPEEDR/PUPDR/IDR/ODR/BSRR/LCKR/AFRL/AFRH; ODR/BSRR drive output_state + write callbacks, MODER→input clears output, IDR = input_state + read callbacks, 11 ports (A-K) | N | N | Y |
 | HASH | 164 | Detailed | Real SHA-1/MD5/SHA-256 (sha1/md5/sha2 crates) with NBLW/length handling; CR/INIT, DIN FIFO, STR, HR + HASH_HR, IMR/SR, 54 CSR words | Y (80) | N | N |
 | I2C | 204 | Detailed | Full master state machine (Idle→Start→Addr→Active read/write), START/STOP, SWRST, address match vs attached EEPROMs (NACK/AF on miss), byte R/W, SR1/SR2 ordering semantics, event/buffer/error IRQ masking | Y (31-34, 72-73) | N | Y |
-| I2S | 144 | Partial | CR1/CR2/SR/DR/CRC/I2SCFGR/I2SPR; synthetic triangle-wave audio on DR write, SR flags | Y (35/36/51) | N | N |
+| I2S | 150 | Detailed | CR1/CR2/SR/DR/CRC/I2SCFGR/I2SPR; DR reads consume WAV-backed PCM16 audio (`audio_load_wav`) with fallback to a synthetic generator, DR writes push into a capture FIFO (`audio_take_capture`), SR flags | Y (35/36/51) | N | N |
 | IWDG | 70 | Detailed | KR keys (0x5555 write-enable, 0xAAAA reload, 0xCCCC start), PR prescaler, RLR; instruction-count driven; underflow → `request_watchdog_reset()`; SR PVU/RVU | reset (not IRQ) | N (self-timed) | N |
-| LTDC | 146 | Partial | Global regs + 2 layers (CR/whpcr/wvpcr/ckcr/pfcr/cacr/dccr/bfcr/cfbar/cfblr/cfblnr/clutwr); SRCR triggers ISR bits; **no framebuffer scanout** | Y (88) | N | N |
+| LTDC | 260 | Detailed | Global regs + 2 layers (CR/whpcr/wvpcr/ckcr/pfcr/cacr/dccr/bfcr/cfbar/cfblr/cfblnr/clutwr); real scanline/frame advance from SSCR/BPCR/AWCR geometry (`ltdc_get_scanline`/`ltdc_get_frame_count`), LIF at LIPCR + frame-end F flag, IRQ 88; browser console renders layer0 (ARGB8888/RGB565) to a canvas | Y (88) | N | N |
 | NVIC | 226 | Detailed | ISER/ICER/ISPR/ICPR/IABR/priority; u128 pending mask, enable/active arrays; `set_intr_pending` sets pending only (no auto-enable — pending is delivered only when ISER is set, and disabled pending stays set until taken or ICPR); `get_and_clear_next_intr_pending` delivers the highest-priority enabled IRQ, skips disabled ones without clearing; `has_pending` reflects deliverable-only; ICSR VECTPENDING returns the exception vector number; SysTick periodic pending; `in_interrupt` | controller | via System::tick | N |
 | PWR | 47 | Partial | CR/CSR masked storage, WUF on valid wakeup write pattern | N | N | N |
 | RCC | 221 | Detailed | CR/PLLCFGR/CFGR/CIR/reset-enable/low-power/BDCR/CSR/SSCG/PLLI2SCFGR/PLLSAI/DCKCFGR/CKGATENR/DCKCFGR2; HSE/PLL ready after instruction-count delays, HSIRDY, SWS mirrors SW, real freq math (system/pll/ahb/apb1/apb2), enable-bit gating map, LSE/LSI ready timing | N | N | N |
 | RNG | 85 | Detailed | CR/SR/DR; LCG pseudo-random 32-bit values regenerated every 40 inst, DRDY, error flags + IRQ | Y (80) | N | N |
 | RTC | 198 | Detailed | TR/DR/CR/ISR/PRER/WUTR/CALIBR/ALRMAR/ALRMBR/WPR/SSR/SHIFTR/timestamp/CALR/TAFCR/ALRMASSR/ALRMBSSR + 20 backup regs; BCD time advances via PRER prescaler vs instruction count, alarm A/B matching with don't-care masks | Y (43) | N (advances on access) | N |
-| SAI | 102 | Partial | GCR + 2 blocks (CR1/CR2/FRCR/SLOTR/IM/SR/CLRFR/DR); SR flags on DR access, masked interrupt; no real audio | Y (87) | N | N |
+| SAI | 106 | Detailed | GCR + 2 blocks (CR1/CR2/FRCR/SLOTR/IM/SR/CLRFR/DR); shares the WAV-backed audio path with I2S (block routes DR to audio when I2SMOD is set), SR flags on DR access, masked interrupt | Y (87) | N | N |
 | SCB | 130 | Detailed | CPUID (Cortex-M4 r0p1), ICSR set/clear pending (PendSV/SysTick) + pending-vector report, AIRCR VECTKEY + SYSRESETREQ → `request_watchdog_reset()`, VTOR, SCR/CCR/SHPR/SHCSR/CFSR/HFSR/DFSR/MMFAR/BFAR/AFSR/CPACR | indirect (PendSV/SysTick) | N | N |
 | SDIO | 143 | Detailed | Full register set + emulated SD card state machine (Idle→Ident→Stby→Tran), canned responses for CMD0/2/3/5/7/8/9/10/13/16/17/18/41/55, RCA matching, data-transfer simulation (DCOUNT/FIFOCNT, CMD17/18), status flags + ICR/MASK | Y (49) | N | N |
 | SPI | 157 | Detailed | CR1/CR2/SR/DR/RXCRC/TXCRC/I2SCFGR/I2SPR; full-duplex 8/16-bit transfers to attached device with CS selection via GPIO, I2S mode audio generation, TXE/RXNE toggling; **CS edges delivered via GPIO write callbacks** (`register_cs_callbacks`, sw_spi pattern) so attached-device CS deassert is observed immediately | Y (35/36/51) | N | Y |
@@ -63,14 +63,20 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 
 ## External devices (`stm32-periph-wasm/src/ext_devices/`)
 
+`ext_devices/{lcd,touchscreen,usart_probe,display}.rs` (protocol-specific
+device models) were removed in commit `13d7cdb` in favor of two generic,
+protocol-agnostic bus taps — real device *behavior* now lives in JS on top
+of them (`site/emulator.js`'s `oled`/`tft`/`rtc` blocks implement the
+SSD1306/ILI9341/DS3231 protocols client-side; see [components.md](components.md)
+for the public attachment API built on the same taps).
+
 | Device | Lines | Behavior |
 |---|---|---|
-| SpiFlash | 167 | SPI NOR flash: JEDEC ID (0x9F), device ID (0x90), status regs (0x05/0x35), ReadData (0x03)/FastRead (0x0B) streaming, WriteEnable (0x06), PageProgram (0x02), SectorErase4k (0x20) **with CS-deassert commit** (program ANDs bits, erase sets 0xFF, WEL auto-clears after program/erase like real W25Q). MISO timing: `dummy_pending` returns 0 while the command+address bytes are clocked in (one dummy per written byte), so the first real data byte appears only on the byte after the address phase |
+| SpiFlash | 399 | SPI NOR flash: JEDEC ID (0x9F), device ID (0x90), status regs (0x05/0x35), ReadData (0x03)/FastRead (0x0B) streaming, WriteEnable (0x06), PageProgram (0x02), SectorErase4k (0x20) **with CS-deassert commit** (program ANDs bits, erase sets 0xFF, WEL auto-clears after program/erase like real W25Q). MISO timing: `dummy_pending` returns 0 while the command+address bytes are clocked in (one dummy per written byte), so the first real data byte appears only on the byte after the address phase |
 | I2cEeprom | 78 | I²C EEPROM: 1/2-byte address phase, sequential byte read/write into RAM copy |
-| Lcd | 65 | 128×64 SPI LCD: 0xFB → drawing mode, cursor advances on writes |
-| Touchscreen | 40 | Stub: GPIO touch-detect pin callback (always true), reads 0 |
-| UsartProbe | 38 | Buffers bytes, logs the line at `\n` — attached via the SPI device lookup |
-| Display | 112 | 240×240 FSMC/parallel display: 0x2A/0x2B window, 0x2C drawing (cursor advance, wrap), canned replies |
+| I2cRegfile | 139 | Pointer-addressed I²C register file (DS3231 RTC): auto-increment pointer, JS seeds/reads registers via `i2c_regfile_get`/`set` |
+| SpiTap | 54 | Generic protocol-agnostic SPI slave: CS/DC edges + bytes queued for JS (`spi_take_events`), JS answers reads via `spi_push_miso` — the oled/tft/custom-device bridge |
+| I2cTap | 38 | Generic protocol-agnostic I²C slave: START/STOP + bytes queued for JS (`i2c_take_events`), JS answers reads via `i2c_push_rx` |
 
 ## How the matrix is exercised
 
@@ -98,8 +104,8 @@ prints a banner over UART when it boots.
   `dma_periph_write` — one WASM call per transfer instead of size/4);
   RAM-to-RAM copies still run in the JS driver because guest memory lives
   in Unicorn, not in the Rust model.
-- FLASH programs/erases emulated flash; DCMI produces synthetic data;
-  LTDC has no scanout; SAI/I2S produce synthetic audio; CAN drives the
-  mailbox/status machinery but no bus arbitration with a peer.
+- FLASH programs/erases emulated flash; DCMI produces synthetic data
+  (no pixel source). LTDC scanout, SAI/I2S WAV-backed audio, and CAN
+  two-node bus arbitration are implemented (see rows above).
 - Timers/ADC/RNG/RTC/IWDG/WWDG are instruction-count driven, not
   wall-clock driven (deterministic across machines).
