@@ -390,6 +390,31 @@ function fitCanvas() {
     canvas.style.height = Math.max(2, Math.floor(400 * scale)) + 'px';
 }
 window.addEventListener('resize', fitCanvas);
+// Re-fit whenever the wrap itself changes size, not just on window resize.
+// Calling fitCanvas() only at boot meant that if it measured before layout
+// settled (fonts/log/guide still reflowing) the canvas stayed stuck at that
+// wrong size forever — the page rendered a small game floating in a large
+// black void.  A ResizeObserver removes that whole class of race, and also
+// handles fullscreen and the log/guide toggles for free.
+if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => fitCanvas()).observe($('screenWrap'));
+}
+
+// ── log / guide visibility: hiding them hands the space to the game ──
+let logHidden = localStorage.getItem('doomHideLog') === '1';
+function applyLogVisibility() {
+    document.body.classList.toggle('nolog', logHidden);
+    document.body.classList.toggle('noguide', logHidden);
+    const b = $('btnLog');
+    if (b) { b.textContent = logHidden ? 'Show log' : 'Hide log'; b.setAttribute('aria-pressed', String(logHidden)); }
+    fitCanvas();
+}
+$('btnLog').addEventListener('click', () => {
+    logHidden = !logHidden;
+    localStorage.setItem('doomHideLog', logHidden ? '1' : '0');
+    applyLogVisibility();
+});
+applyLogVisibility();
 
 async function boot() {
     setStatus('booting…');
@@ -447,7 +472,10 @@ async function boot() {
         emu.write32(SAVEMAP, saveMap);
         fitCanvas();
         booted = true;
-        setStatus('running — DOOM booting (WAD at 0xB8000000)');
+        // Live from here on: the loop updates this as the guest progresses.
+        // It used to be set once to "running — DOOM booting" and never again,
+        // so the page claimed it was still booting during actual gameplay.
+        setStatus('loading WAD…');
         requestAnimationFrame(loop);
     } catch (e) {
         setStatus('boot failed: ' + e.message, 'error');
@@ -557,6 +585,17 @@ async function loop() {
             const guestFrames = Number(emu.read32(FRAMECOUNT));
             const fps = (guestFrames - statFrames) / dt;
             statFrames = guestFrames;
+            // Keep the status honest: rendering frames = actually playing.
+            // Also surface the two states a user would otherwise misread as
+            // a hang — the pre-first-frame boot, and audio still locked by
+            // the browser's autoplay policy until the first keypress.
+            if (guestFrames === 0) {
+                setStatus('booting — loading WAD…');
+            } else if (!audioCtx || audioCtx.state !== 'running') {
+                setStatus('running — press any key to enable sound', 'warn');
+            } else {
+                setStatus('running');
+            }
             // Audio health: playback rate vs correct pitch (1.00 = in tune).
             // Below 1.0 means the guest is producing audio slower than
             // realtime and the worklet is stretching to stay continuous.

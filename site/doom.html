@@ -11,26 +11,38 @@
   html, body { height: 100%; }
   body { background: #000; color: #ccc; font: 14px/1.4 monospace; margin: 0; padding: 0;
          display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box; }
-  #topbar { display: flex; align-items: center; gap: 14px; padding: 6px 12px;
-            border-bottom: 1px solid #222; flex: none; }
+  /* Topbar wraps instead of pushing controls off-screen: at 1280px the
+     Pause/Fullscreen/Clear buttons used to be clipped past the right edge. */
+  #topbar { display: flex; align-items: center; gap: 8px 14px; padding: 6px 12px;
+            border-bottom: 1px solid #222; flex: none; flex-wrap: wrap; }
   h1 { font-size: 15px; color: #f90; margin: 0; white-space: nowrap; }
   #status { color: #8c8; white-space: nowrap; }
   #status.error { color: #f66; }
-  #stats { color: #8c8; font-size: 12px; white-space: nowrap; }
-  #keys { color: #aaf; font-size: 12px; white-space: nowrap; flex: 1; text-align: right; }
-  .btns { display: flex; gap: 6px; align-items: center; }
+  #status.warn { color: #fc6; }
+  #stats { color: #8c8; font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* Held-keys readout absorbs the slack but may shrink to nothing; the
+     buttons must never be the thing that gets clipped. */
+  #keys { color: #aaf; font-size: 12px; white-space: nowrap; flex: 1 1 0; min-width: 0;
+          text-align: right; overflow: hidden; text-overflow: ellipsis; }
+  .btns { display: flex; gap: 6px; align-items: center; flex: none; }
   #detailLbl { font-size: 12px; color: #aaa; user-select: none; white-space: nowrap; }
   button { background: #222; color: #ccc; border: 1px solid #444; padding: 3px 10px;
-           cursor: pointer; font: 12px monospace; }
-  button:hover { background: #333; }
+           cursor: pointer; font: 12px monospace; border-radius: 3px; }
+  button:hover { background: #333; border-color: #666; }
+  button:active { background: #444; }
+  button[aria-pressed="true"] { background: #3a2c12; border-color: #f90; color: #fc6; }
   #screenWrap { flex: 1; min-height: 0; display: flex; justify-content: center; align-items: center;
                 background: #000; position: relative; }
-  canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000; }
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000;
+           display: block; }
   #guide { flex: none; border-top: 1px solid #222; padding: 5px 12px; font-size: 12px;
            color: #999; display: flex; flex-wrap: wrap; gap: 3px 22px; line-height: 1.5; }
   #guide b { color: #eee; }
   pre#uart { height: 66px; overflow-y: auto; background: #000; border-top: 1px solid #222;
-             padding: 4px 12px; margin: 0; white-space: pre-wrap; font-size: 12px; }
+             padding: 4px 12px; margin: 0; white-space: pre-wrap; font-size: 12px; flex: none; }
+  /* Collapsing the log hands its space back to the game. */
+  body.nolog pre#uart { display: none; }
+  body.noguide #guide { display: none; }
 </style>
 </head>
 <body>
@@ -40,14 +52,20 @@
   <div id="stats">MIPS: — · FPS: —</div>
   <div id="keys"></div>
   <div class="btns">
-    <label id="detailLbl" title="Low detail: renders half columns (classic low-res mode), ~30-40% fewer instructions per frame"><input type="checkbox" id="detail"> Low detail</label>
-    <button id="btnReset">Reset</button>
-    <button id="btnPause">Pause</button>
-    <button id="btnFull">Fullscreen</button>
-    <button id="btnClear">Clear log</button>
+    <label id="detailLbl" title="Low detail: renders every other column (classic low-res mode). Measured ~20% fewer guest instructions per frame (~19 -> ~24 fps)."><input type="checkbox" id="detail"> Low detail</label>
+    <button id="btnReset" title="Reboot the emulator and restart DOOM">Reset</button>
+    <button id="btnPause" title="Pause/resume emulation">Pause</button>
+    <button id="btnFull" title="Fullscreen (Esc to exit)">Fullscreen</button>
+    <button id="btnLog" title="Show/hide the UART log and control guide — hiding them gives the game the space">Hide log</button>
+    <button id="btnClear" title="Clear the UART log">Clear</button>
   </div>
 </div>
-<div id="screenWrap"><canvas id="screen" width="640" height="400"></canvas></div>
+<!-- Backing store MUST be the native framebuffer size (320x200): renderFb
+     uses ctx.putImageData, which writes pixels 1:1 and ignores scaling, so a
+     640x400 buffer left DOOM drawn into the top-left quarter with the rest
+     black (the game appeared at half size in the corner of a big canvas).
+     CSS scales this up; image-rendering:pixelated keeps it crisp. -->
+<div id="screenWrap"><canvas id="screen" width="320" height="200"></canvas></div>
 <div id="guide">
   <span><b>Move</b>: W forward · S back · A / ← turn left · D / → turn right</span>
   <span><b>Strafe</b>: Left Shift left · Right Shift right</span>
@@ -61,6 +79,8 @@
 <pre id="uart"></pre>
 
 <script src="vendor/unicorn_arm.js?v=20"></script>
-<script type="module" src="doom.js?v=22"></script>
+<!-- Bump ?v= on every doom.js edit: the module is cached hard, and a stale
+     copy looks exactly like the bug you thought you just fixed. -->
+<script type="module" src="doom.js?v=25"></script>
 </body>
 </html>
