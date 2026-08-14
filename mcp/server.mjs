@@ -10,10 +10,27 @@
 // across different firmware in the same process, so we close the old
 // instance before creating a new one and surface a warning that a fresh
 // server process is the only fully clean way to switch firmware.
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { z } from 'zod';
 import { createSTM32F407, FIRMWARES, LED, Button, Pwm, Potentiometer } from '../index.mjs';
+
+// The MCP SDK and zod are OPTIONAL peer dependencies: the emulator library
+// itself has no runtime dependencies, and only this server needs them, so
+// they aren't forced on consumers who just want to run firmware. Loaded
+// dynamically to turn a missing install into an actionable message rather
+// than a raw ERR_MODULE_NOT_FOUND stack.
+let McpServer, StdioServerTransport, z;
+try {
+    ({ McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js'));
+    ({ StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js'));
+    ({ z } = await import('zod'));
+} catch (e) {
+    process.stderr.write(
+        'stm32f4-mcp: missing optional dependencies.\n\n' +
+        '  npm install @modelcontextprotocol/sdk zod\n\n' +
+        'They are optional peer dependencies so that using this package as an\n' +
+        'emulator library stays dependency-free. See docs/mcp.md.\n' +
+        `\nOriginal error: ${e.message}\n`);
+    process.exit(1);
+}
 
 let session = null;      // { emu, firmware, components: Map }
 let componentSeq = 0;

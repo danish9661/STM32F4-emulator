@@ -114,7 +114,10 @@ registers as tools an MCP client (Claude Code, Claude Desktop) can call:
 npm install && npm run mcp
 ```
 
-See [docs/mcp.md](docs/mcp.md) for the tool reference and client config.
+The MCP SDK is an *optional peer dependency*, so installing this package
+as a library stays dependency-free; only MCP users need
+`npm i @modelcontextprotocol/sdk zod`. See [docs/mcp.md](docs/mcp.md) for
+the tool reference and client config.
 
 ## Firmwares
 

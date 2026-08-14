@@ -21,3 +21,10 @@ jobs:
         run: node site/probe_firmwares.mjs
       - name: Run the test suite
         run: npm test
+      # The MCP server's deps are optional peer deps, so they need an
+      # explicit install; the emulator library and the suite above stay
+      # dependency-free. Linux-only: the server is platform-agnostic and
+      # this just guards the protocol wiring.
+      - name: MCP server protocol round-trip
+        if: matrix.os == 'ubuntu-latest'
+        run: npm ci && npm run test:mcp

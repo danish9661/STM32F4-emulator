@@ -8,11 +8,22 @@ registers interactively — firmware debugging driven by an agent instead
 of a hand-written script.
 
 Built on the official `@modelcontextprotocol/sdk` over a stdio transport.
-This is the project's only runtime npm dependency, so `npm install` is
-required before using the MCP server (the emulator library and test suite
-still need no dependencies).
 
-## Run it
+## Install
+
+The SDK and `zod` are **optional peer dependencies** — using this package
+as an emulator library stays completely dependency-free (a plain
+`npm i stm32f4-emulator` installs exactly one package), and only the MCP
+server needs them:
+
+```bash
+npm install stm32f4-emulator @modelcontextprotocol/sdk zod
+```
+
+Running the server without them exits with a message telling you exactly
+what to install, rather than a module-resolution stack trace.
+
+From a clone of this repo, `npm install` picks them up as devDependencies:
 
 ```bash
 npm install
