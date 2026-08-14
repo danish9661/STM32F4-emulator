@@ -3,7 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>STM32F407 Emulator — Single-Page Console</title>
+<meta name="google-site-verification" content="15oUGn7tDY5qFKh0oX7q0zWcuUJ_nFIIjjZk6ixculo" />
+<title>STM32F407 Emulator in the Browser — run real Cortex-M4 firmware (and DOOM)</title>
+<!-- Search + social metadata.  The page had none, so search results and
+     shared links showed only the bare title with no summary. -->
+<meta name="description" content="An STM32F407 microcontroller emulator that runs unmodified Cortex-M4 firmware in your browser: Unicorn CPU core plus a Rust peripheral model (GPIO, USART, DMA, ETH, I2C, SPI, ADC, timers), all compiled to WebAssembly. Boot 31 firmware presets, do real DHCP/TCP/HTTP networking, or play DOOM.">
+<link rel="canonical" href="https://danish9661.github.io/stm32F4-emulator/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="STM32F407 Emulator">
+<meta property="og:title" content="STM32F407 Emulator in the Browser">
+<meta property="og:description" content="Run real Cortex-M4 firmware in a browser tab — Unicorn CPU + a Rust peripheral model in WebAssembly. Networking demos, 31 firmware presets, and DOOM.">
+<meta property="og:url" content="https://danish9661.github.io/stm32F4-emulator/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="STM32F407 Emulator in the Browser">
+<meta name="twitter:description" content="Run real Cortex-M4 firmware in a browser tab — Unicorn CPU + a Rust peripheral model in WebAssembly. Networking demos, 31 firmware presets, and DOOM.">
 <style>
 :root {
   --bg: #0d1117;
@@ -29,11 +42,25 @@ header {
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   position: sticky; top: 0; z-index: 5;
+  /* Deliberately NOT flex-wrap:wrap — wrapping happens before shrinking, so
+     it pushed the status onto a second row (taller header, bottom controls
+     clipped).  The tagline shrinks/ellipses instead, then hides <980px. */
 }
-header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+/* The title and the DOOM link must never wrap their own text — only the
+   tagline is allowed to give up space. */
+header h1 { font-size: 14px; margin: 0; font-weight: 600; white-space: nowrap; flex: none; }
+/* One-line answer to "what am I looking at?" — the page previously jumped
+   straight into controls with no explanation of what it is. */
+/* Shrinks with an ellipsis rather than forcing the header onto a second
+   row (which pushed the terminal's buttons off the bottom of the page). */
+.tagline { font-size: 12px; color: var(--dim); white-space: nowrap;
+           flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tagline b { color: var(--fg); font-weight: 600; }
+@media (max-width: 980px) { .tagline { display: none; } }
 a.doomLink {
   font-size: 12px; font-weight: 600; color: #000; text-decoration: none;
   background: var(--green); padding: 4px 10px; border-radius: 4px;
+  white-space: nowrap; flex: none;
 }
 a.doomLink:hover { filter: brightness(1.2); }
 #status { font-size: 12px; color: var(--dim); margin-left: auto; white-space: nowrap; }
@@ -106,6 +133,7 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
 <body>
 <header>
   <h1>STM32F407 in the Browser</h1>
+  <span class="tagline">Real Cortex-M4 firmware on an emulated MCU — <b>Unicorn CPU + Rust peripherals</b>, all WebAssembly</span>
   <a class="doomLink" href="doom.html">▶ Play DOOM</a>
   <span id="status"><span class="dot" id="dot"></span><span id="statusText">booting…</span></span>
 </header>

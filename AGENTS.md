@@ -1409,7 +1409,9 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   `menuActive === 0`, `phase === 'play'`, keyRd > 0. 80M-inst cap, 200k
   batches, ~45 s wall, exit 0.
 - `site/doom.html` + `site/doom.js` — browser demo (serve site/, open
-  /doom.html): canvas 640×400 (2× 320×200, BGRA→RGBA per frame), WASD +
+  /doom.html): canvas backing store 320×200 = the native framebuffer
+  (BGRA→RGBA per frame; CSS scales it up, see the quarter-size bug below),
+  WASD +
   arrows + Ctrl/Space/Shift + F-keys, **held keys are held (D once, U gated
   on guest consumption — no re-assert spam)**, click = fire with pointer
   lock. Links from index.html footer.
@@ -1470,9 +1472,25 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   the 64KB fb, change-gated re-render) — reads ~0 on static views (title,
   menus, pushing into the spawn wall) by design, real numbers when the
   view moves. Smoke asserts FPS ≥ 5 while holding W + ArrowLeft.
+- **Quarter-size render bug (fixed 2026-08-14) — the game drew into the
+  top-left quarter of the canvas.** `renderFb` blits with
+  `ctx.putImageData(img, 0, 0)`, which writes pixels **1:1 and ignores all
+  scaling** (CSS size and transforms alike). The canvas backing store was
+  640×400 while the DOOM framebuffer (and `img`) is 320×200, so three
+  quarters of the buffer stayed black and CSS then scaled that mostly-empty
+  buffer to fit — a 1280×860 window showed an ~422×264 game floating in an
+  844×528 element. **Fix**: canvas `width`/`height` attributes are now
+  320×200 (native), CSS does the upscale, `image-rendering: pixelated`
+  keeps it crisp — 4× the visible area, and a smaller buffer to boot.
+  Diagnosis note: `fitCanvas()` was NOT at fault (measured wrap 1280×528
+  and canvas CSS 844×528 — both correct); the giveaway was that the visible
+  game was exactly half the canvas in each dimension. If you ever change
+  `DOOMGENERIC_RESX/RESY`, the canvas attributes must follow.
 - **Canvas sizing via `fitCanvas()` (JS, contain-fit since 2026-08-13)**: the
   canvas is sized to the **largest 16:10 box inside `#screenWrap`**
-  (`scale = min(wrap.w/640, wrap.h/400)`, inline px styles) and centered by
+  (`scale = min(wrap.w/640, wrap.h/400)` — 640/400 here is just the 16:10
+  ASPECT reference for the CSS box, independent of the 320×200 backing
+  store above; using 320/200 would give the identical result) and centered by
   the wrap's flexbox — aspect is always exactly 1.6 (verified: 1467×917 at
   1920×1080 and 884×553 at 1000×900, equal side gaps in both), with black
   bars only where the window isn't 16:10. History: CSS-only sizing failed
