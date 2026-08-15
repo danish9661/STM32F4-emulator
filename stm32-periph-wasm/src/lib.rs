@@ -488,6 +488,39 @@ pub fn i2c_regfile_set(peripheral: &str, offset: usize, value: u8) {
     }
 }
 
+// ── FSMC bank taps (JS memory-mapped device) ───────────────────────────────
+
+/// Register a protocol-agnostic tap on an FSMC memory bank (0 = BANK1, the
+/// 0x6000_0000 window). Must be called before init(): the Fsmc peripheral
+/// binds its banks' devices once at construction and never rescans.
+///
+/// Every data-space access to the bank is queued for JS as TWO words —
+/// header then value — where the header is `1<<31 | offset` for a write and
+/// `offset` for a read. The offset matters: memory-mapped displays in
+/// 8080 mode decode an address line as RS/DC, so the address is the only
+/// thing separating a command write from a pixel write.
+#[wasm_bindgen]
+pub fn fsmc_tap(bank: u32) {
+    use crate::ext_devices::fsmc_tap::{FsmcTap, FsmcTapConfig};
+    let config = FsmcTapConfig { bank: bank as usize };
+    system::get_ext_devices().lock().unwrap().fsmc_taps
+        .push(std::rc::Rc::new(std::cell::RefCell::new(FsmcTap::new(config))));
+}
+
+/// Drain all FSMC tap events for a bank since the last call (2 words per
+/// access, see `fsmc_tap`).
+#[wasm_bindgen]
+pub fn fsmc_take_events(bank: u32) -> Vec<u32> {
+    system::fsmc_tap_take_events(bank as usize)
+}
+
+/// Queue values the JS device answers on subsequent bank reads, oldest
+/// first. An exhausted queue reads back 0.
+#[wasm_bindgen]
+pub fn fsmc_push_data(bank: u32, values: &[u32]) {
+    system::fsmc_tap_data_push(bank as usize, values);
+}
+
 // ── DCMI frame source (JS camera sensor) ───────────────────────────────────
 // The camera sensor is external hardware (JS). This feeds one captured
 // frame (8-bit pixels, row-major) into the on-chip DCMI controller, which

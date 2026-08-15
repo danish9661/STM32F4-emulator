@@ -149,6 +149,31 @@ export function flash_is_programming(): boolean;
  */
 export function flash_take_erase(): Uint32Array;
 
+/**
+ * Queue values the JS device answers on subsequent bank reads, oldest
+ * first. An exhausted queue reads back 0.
+ */
+export function fsmc_push_data(bank: number, values: Uint32Array): void;
+
+/**
+ * Drain all FSMC tap events for a bank since the last call (2 words per
+ * access, see `fsmc_tap`).
+ */
+export function fsmc_take_events(bank: number): Uint32Array;
+
+/**
+ * Register a protocol-agnostic tap on an FSMC memory bank (0 = BANK1, the
+ * 0x6000_0000 window). Must be called before init(): the Fsmc peripheral
+ * binds its banks' devices once at construction and never rescans.
+ *
+ * Every data-space access to the bank is queued for JS as TWO words —
+ * header then value — where the header is `1<<31 | offset` for a write and
+ * `offset` for a read. The offset matters: memory-mapped displays in
+ * 8080 mode decode an address line as RS/DC, so the address is the only
+ * thing separating a command write from a pixel write.
+ */
+export function fsmc_tap(bank: number): void;
+
 export function get_next_pending_interrupt(): number;
 
 /**
@@ -314,6 +339,9 @@ export interface InitOutput {
     readonly flash_erase_applied: () => void;
     readonly flash_is_programming: () => number;
     readonly flash_take_erase: () => [number, number];
+    readonly fsmc_push_data: (a: number, b: number, c: number) => void;
+    readonly fsmc_take_events: (a: number) => [number, number];
+    readonly fsmc_tap: (a: number) => void;
     readonly get_next_pending_interrupt: () => number;
     readonly get_uart_output: () => [number, number];
     readonly gpio_read_input: (a: number, b: number) => number;

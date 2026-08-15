@@ -351,6 +351,43 @@ pub(crate) fn i2c_tap_rx_pop(peri: &str) -> u8 {
     i2c_tap_rx().lock().unwrap().get_mut(peri).and_then(|q| q.first().copied().map(|b| { q.remove(0); b })).unwrap_or(0xFF)
 }
 
+// ── FSMC bank taps (JS memory-mapped device plumbing) ─────────────────────
+// Each access is TWO event words, so the JS device sees the address as well
+// as the value (an 8080-mode display decodes one address line as RS/DC —
+// command vs pixel data — so the offset is what distinguishes them):
+//   word0: bit31 = 1 write / 0 read, bits 30..0 = byte offset in the bank
+//   word1: value written, or value returned on a read
+// Reads are answered from FSMC_TAP_DATA, a JS-pushed queue (`fsmc_push_data`)
+// analogous to the SPI tap's MISO queue; an empty queue reads back 0.
+static FSMC_TAP_EVENTS: OnceLock<Mutex<std::collections::HashMap<usize, Vec<u32>>>> = OnceLock::new();
+static FSMC_TAP_DATA: OnceLock<Mutex<std::collections::HashMap<usize, Vec<u32>>>> = OnceLock::new();
+
+fn fsmc_tap_events() -> &'static Mutex<std::collections::HashMap<usize, Vec<u32>>> {
+    FSMC_TAP_EVENTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+fn fsmc_tap_data() -> &'static Mutex<std::collections::HashMap<usize, Vec<u32>>> {
+    FSMC_TAP_DATA.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+pub(crate) fn fsmc_tap_push(bank: usize, write: bool, offset: u32, value: u32) {
+    let hdr = (offset & 0x7FFF_FFFF) | if write { 1 << 31 } else { 0 };
+    let mut m = fsmc_tap_events().lock().unwrap();
+    let q = m.entry(bank).or_default();
+    q.push(hdr);
+    q.push(value);
+}
+pub fn fsmc_tap_take_events(bank: usize) -> Vec<u32> {
+    fsmc_tap_events().lock().unwrap().get_mut(&bank).map(std::mem::take).unwrap_or_default()
+}
+pub fn fsmc_tap_data_push(bank: usize, values: &[u32]) {
+    fsmc_tap_data().lock().unwrap().entry(bank).or_default().extend_from_slice(values);
+}
+pub(crate) fn fsmc_tap_data_pop(bank: usize) -> u32 {
+    fsmc_tap_data().lock().unwrap().get_mut(&bank)
+        .and_then(|q| if q.is_empty() { None } else { Some(q.remove(0)) })
+        .unwrap_or(0)
+}
+
 // ── DCMI frame source (JS camera sensor plumbing) ─────────────────────────
 static DCMI_FRAME: OnceLock<Mutex<Option<(u32, u32, Vec<u8>)>>> = OnceLock::new();
 pub fn dcmi_feed_frame(w: u32, h: u32, pixels: &[u8]) {
@@ -380,6 +417,16 @@ pub fn test_dummy_system() -> ::std::rc::Rc<crate::system::System> {
     // tests run in parallel (see bug fix 2026-08-10).
     let empty = ExtDevices::default();
     let p = Rc::new(Peripherals::new_wasm(gpio, &empty));
+    ::std::rc::Rc::new(WasmSystem { p, pending_dma: RefCell::new(Vec::new()) })
+}
+
+/// Like `test_dummy_system` but with a caller-supplied device list, for
+/// tests that need a peripheral actually bound to an ext device (the
+/// binding happens once, at construction).
+#[cfg(test)]
+pub fn test_system_with(ext: &crate::ext_devices::ExtDevices) -> ::std::rc::Rc<crate::system::System> {
+    use crate::peripherals::Peripherals;
+    let p = Rc::new(Peripherals::new_wasm(GpioPorts::default(), ext));
     ::std::rc::Rc::new(WasmSystem { p, pending_dma: RefCell::new(Vec::new()) })
 }
 
@@ -575,6 +622,8 @@ pub fn reset_globals() {
     if let Some(m) = UART_OUTPUT.get() { m.lock().unwrap().clear(); }
     if let Some(m) = SPI_TAP_EVENTS.get() { m.lock().unwrap().clear(); }
     if let Some(m) = SPI_TAP_MISO.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = FSMC_TAP_EVENTS.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = FSMC_TAP_DATA.get() { m.lock().unwrap().clear(); }
     if let Some(m) = I2C_TAP_TX.get() { m.lock().unwrap().clear(); }
     if let Some(m) = I2C_TAP_RX.get() { m.lock().unwrap().clear(); }
     if let Some(m) = ADC_OVERRIDES.get() { m.lock().unwrap().clear(); }

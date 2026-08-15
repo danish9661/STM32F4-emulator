@@ -3,12 +3,14 @@ pub mod i2c_eeprom;
 pub mod spi_tap;
 pub mod i2c_tap;
 pub mod i2c_regfile;
+pub mod fsmc_tap;
 
 pub use spi_flash::SpiFlash;
 pub use i2c_eeprom::I2cEeprom;
 pub use spi_tap::SpiTap;
 pub use i2c_tap::I2cTap;
 pub use i2c_regfile::I2cRegFile;
+pub use fsmc_tap::FsmcTap;
 
 use std::{rc::Rc, cell::RefCell};
 
@@ -41,6 +43,10 @@ pub struct ExtDevices {
     /// = register pointer, then data auto-increments; reads follow the
     /// current pointer. Device-side protocol, model-side chip.
     pub i2c_regfiles: Vec<Rc<RefCell<I2cRegFile>>>,
+    /// Protocol-agnostic FSMC bank taps: every data-space access to a tapped
+    /// bank is queued for the JS hardware layer and reads are answered from a
+    /// JS-pushed queue. Chip-side plumbing only.
+    pub fsmc_taps: Vec<Rc<RefCell<FsmcTap>>>,
 }
 
 impl ExtDevices {
@@ -107,6 +113,13 @@ impl ExtDevices {
             }
         }
         out
+    }
+
+    /// The tap attached to FSMC bank `bank` (0 = BANK1), if any.
+    pub fn find_mem_device(&self, bank: usize) -> Option<Rc<RefCell<dyn ExtDevice<u32, u32>>>> {
+        self.fsmc_taps.iter()
+            .find(|d| d.borrow().config.bank == bank)
+            .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<u32, u32>>>)
     }
 }
 

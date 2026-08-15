@@ -70,6 +70,8 @@ export async function createEmulator(opts) {
         get_next_pending_interrupt, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
         spi_tap, spi_take_events, spi_push_miso,
+        fsmc_tap, fsmc_take_events, fsmc_push_data,
+        dcmi_feed_frame, dcmi_clear,
         i2c_register_slave, i2c_take_events, i2c_push_rx,
         i2c_register_regfile, i2c_regfile_get, i2c_regfile_set,
         audio_take_capture,
@@ -145,6 +147,17 @@ export async function createEmulator(opts) {
     for (const cfg of (ext_devices.i2cDevices || [])) {
         i2c_register_slave(cfg.peripheral, cfg.address);
         i2cDevices.push({ peripheral: cfg.peripheral, handler: cfg.handler });
+    }
+    // Memory-mapped FSMC devices: { bank, handler(events, push) }. `bank` is
+    // 0-based (0 = BANK1 @ 0x60000000). Events arrive as PAIRS of words —
+    // header then value — because an FSMC access carries an address as well
+    // as a value; see the fsmc_tap doc comment in lib.rs. Same before-init()
+    // rule as spi_tap: Fsmc binds its banks' devices once at construction.
+    const fsmcDevices = [];
+    for (const cfg of (ext_devices.fsmcDevices || [])) {
+        const bank = cfg.bank ?? 0;
+        fsmc_tap(bank);
+        fsmcDevices.push({ bank, handler: cfg.handler });
     }
     // Exactly ONE of these. They both install a fresh WasmSystem and the last
     // one wins, so calling init() after init_svd() would replace the
@@ -611,6 +624,33 @@ export async function createEmulator(opts) {
         }
     };
 
+    // ── DCMI camera sensor (JS pixel source) ──
+    // The DCMI model consumes one fed frame with real VSYNC/LINE/FRAME/OVR
+    // semantics and drops it when fully read, so a live camera just has to
+    // keep supplying frames. Unlike the bus taps this needs no registration
+    // before init() — the frame slot is a global the model polls.
+    const camera = ext_devices.camera || null;
+    let cameraFrames = 0;
+    let cameraRunning = true;
+    const processCamera = () => {
+        if (!camera || !cameraRunning) return;
+        // `frame(n)` returns the next frame's pixels, or null/undefined to
+        // leave the current one in place (a sensor running slower than the
+        // step loop, which is the normal case).
+        const px = camera.frame ? camera.frame(cameraFrames) : camera.pixels;
+        if (!px) return;
+        dcmi_feed_frame(camera.width, camera.height,
+            px instanceof Uint8Array ? px : Uint8Array.from(px));
+        cameraFrames++;
+    };
+
+    const processFsmcDevices = () => {
+        for (const d of fsmcDevices) {
+            const events = fsmc_take_events(d.bank);
+            if (events.length) d.handler(events, (values) => fsmc_push_data(d.bank, Uint32Array.from(values)));
+        }
+    };
+
     const processDevices = () => {
         processOled();
         processTft();
@@ -620,6 +660,8 @@ export async function createEmulator(opts) {
         processGpioWatchers();
         processSpiDevices();
         processI2cDevices();
+        processFsmcDevices();
+        processCamera();
     };
 
     // ── ETH TX capture + RX injection ──
@@ -806,6 +848,23 @@ export async function createEmulator(opts) {
         buzzer: buzzer ? { get freq() { return buzzer.freq; }, get duty() { return buzzer.duty; }, get change() { return buzzer.change; } } : null,
         takeSpeakerSamples,
         rtc: rtc ? { get time() { return rtc.time; }, get temp() { return rtc.temp; }, get change() { return rtc.change; } } : null,
+        // DCMI pixel source. Usable with or without `ext_devices.camera`:
+        // feed() hands the model one frame directly, stop() empties the slot.
+        camera: {
+            feed(w, h, pixels) {
+                dcmi_feed_frame(w, h, pixels instanceof Uint8Array ? pixels : Uint8Array.from(pixels));
+            },
+            // Unplug the sensor: drops the pending frame AND stops any
+            // `ext_devices.camera` source from feeding more, so a later
+            // feed() is not overwritten on the next step.
+            stop() { cameraRunning = false; dcmi_clear(); },
+            start() { cameraRunning = true; },
+            get frames() { return cameraFrames; },
+        },
+        // Push values a memory-mapped FSMC device answers on bank reads,
+        // for embedders driving a bank without a `fsmcDevices` handler.
+        pushFsmcData(bank, values) { fsmc_push_data(bank, Uint32Array.from(values)); },
+        takeFsmcEvents(bank) { return fsmc_take_events(bank); },
         stop() {
             stopRequested = true;
             try { uc.emu_stop(); } catch (e) {}

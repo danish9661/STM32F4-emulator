@@ -310,6 +310,47 @@ export function flash_take_erase() {
 }
 
 /**
+ * Queue values the JS device answers on subsequent bank reads, oldest
+ * first. An exhausted queue reads back 0.
+ * @param {number} bank
+ * @param {Uint32Array} values
+ */
+export function fsmc_push_data(bank, values) {
+    const ptr0 = passArray32ToWasm0(values, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.fsmc_push_data(bank, ptr0, len0);
+}
+
+/**
+ * Drain all FSMC tap events for a bank since the last call (2 words per
+ * access, see `fsmc_tap`).
+ * @param {number} bank
+ * @returns {Uint32Array}
+ */
+export function fsmc_take_events(bank) {
+    const ret = wasm.fsmc_take_events(bank);
+    var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v1;
+}
+
+/**
+ * Register a protocol-agnostic tap on an FSMC memory bank (0 = BANK1, the
+ * 0x6000_0000 window). Must be called before init(): the Fsmc peripheral
+ * binds its banks' devices once at construction and never rescans.
+ *
+ * Every data-space access to the bank is queued for JS as TWO words —
+ * header then value — where the header is `1<<31 | offset` for a write and
+ * `offset` for a read. The offset matters: memory-mapped displays in
+ * 8080 mode decode an address line as RS/DC, so the address is the only
+ * thing separating a command write from a pixel write.
+ * @param {number} bank
+ */
+export function fsmc_tap(bank) {
+    wasm.fsmc_tap(bank);
+}
+
+/**
  * @returns {number}
  */
 export function get_next_pending_interrupt() {
@@ -718,6 +759,13 @@ function getUint8ArrayMemory0() {
 
 function isLikeNone(x) {
     return x === undefined || x === null;
+}
+
+function passArray32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getUint32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passArray8ToWasm0(arg, malloc) {

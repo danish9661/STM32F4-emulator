@@ -152,6 +152,68 @@ same raw tap format the built-in `oled`/`tft` devices decode internally —
 see `processOled`/`processTft` in `site/emulator.js` for a worked example
 of parsing a real protocol (SSD1306 / ILI9341) on top of the same taps.
 
+## FSMC: memory-mapped devices, at construction time
+
+`fsmcDevices` taps an FSMC bank's data window (`bank` is 0-based; 0 =
+BANK1 @ 0x6000_0000). It works like the SPI/I2C taps with one difference:
+an FSMC access carries an **address** as well as a value, so events arrive
+as PAIRS of words — header, then value. The header is `1<<31 | offset` for
+a write and `offset` for a read. The address matters because a display in
+Intel-8080 mode decodes one address line as RS/DC, which is the only thing
+separating a command write from a pixel write.
+
+```js
+ext_devices: {
+    fsmcDevices: [{
+        bank: 0,
+        handler(events, pushData) {
+            for (let i = 0; i + 1 < events.length; i += 2) {
+                const hdr = events[i] >>> 0, val = events[i + 1] >>> 0;
+                if (!(hdr & 0x80000000)) continue;      // a read, not a write
+                const offset = hdr & 0x7fffffff;
+                if (offset & 0x20000) drawPixel(val);   // RS high  -> data
+                else command(val & 0xff);               // RS low   -> command
+            }
+            pushData([0x9341]);   // answer the next bank read
+        },
+    }],
+}
+```
+
+An untapped bank reads back 0 and swallows writes. Reads with an empty
+`pushData` queue also read 0.
+
+## DCMI: camera frames, anytime
+
+The DCMI model consumes a frame with real VSYNC/LINE/FRAME/OVR semantics
+and a 4-deep FIFO. Supply frames either from a live source pumped once per
+`step()`:
+
+```js
+ext_devices: {
+    camera: {
+        width: 160, height: 120,
+        // Return the next frame's 8-bit pixels (row-major), or null to
+        // leave the current one in place.
+        frame(n) { return n % 4 === 0 ? grabFrame() : null; },
+    },
+}
+```
+
+…or by injecting directly at any time, no registration needed:
+
+```js
+emu.camera.feed(160, 120, pixels);
+emu.camera.stop();    // unplug: drops the pending frame and halts the source
+emu.camera.start();   // plug the ext_devices.camera source back in
+```
+
+The controller reloads a frame on CAPTURE's **rising** edge, and CAPTURE
+auto-clears when a frame completes — so re-arming means writing CR bit 0
+low then high, not high again. Note that draining DR from a polling loop
+will hit OVR on any frame wider than the FIFO; that is what real silicon
+does too, and why capture drivers use DMA.
+
 ## Multiple firmwares in one process (fixed 2026-08-15)
 
 Sequential `createEmulator()` instances in a single process are supported.
@@ -185,6 +247,6 @@ for why), so a process that boots thousands of firmwares will grow.
   step-granularity polling. A `gpio_tap`-style Rust event queue (matching
   `spi_tap`/`i2c_tap`) is a possible follow-up if that granularity proves
   too coarse for a specific firmware.
-- FSMC has no device-attachment path (`docs/peripherals.md`'s FSMC row) —
-  `read_data`/`write_data` are stubs; a memory-mapped-display bridge would
-  need new Rust work, not just a JS API.
+- No FSMC or DCMI **firmware** exists in the tree, so both paths are only
+  covered by `site/test_fsmc_dcmi.mjs`, which drives them over the MMIO bus
+  rather than from guest code.
