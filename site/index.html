@@ -83,12 +83,42 @@ a.doomLink:hover { filter: brightness(1.2); }
 .dot.run { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .dot.stop { background: var(--yellow); }
 .dot.err  { background: var(--red); }
-main { display: grid; grid-template-columns: 1fr 360px; gap: 12px; padding: 12px; max-width: 1500px; margin: 0 auto; }
-@media (max-width: 960px) { main { grid-template-columns: 1fr; } }
+/* App-shell layout: the header stays put, the terminal fills the left, and
+   the 13-panel sidebar scrolls on its own.  Previously the whole document
+   scrolled, so reaching GPIO/peripherals meant scrolling the terminal off
+   the screen too. */
+html, body { height: 100%; }
+body { display: flex; flex-direction: column; overflow: hidden; }
+main { display: grid; grid-template-columns: 1fr 360px; gap: 12px; padding: 12px;
+       max-width: 1500px; margin: 0 auto; width: 100%; box-sizing: border-box;
+       flex: 1; min-height: 0; }
+main > section { display: flex; flex-direction: column; min-height: 0; }
+main > aside { overflow-y: auto; min-height: 0; padding-right: 2px; }
+/* Below the breakpoint the columns stack, so let the page scroll normally
+   again — otherwise the lower panels become unreachable. */
+@media (max-width: 960px) {
+  body { overflow: auto; }
+  main { grid-template-columns: 1fr; flex: none; min-height: 0; }
+  main > aside { overflow-y: visible; }
+}
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .panel h2 { margin: 0; padding: 8px 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); border-bottom: 1px solid var(--border); }
+/* Sidebar panels fold away: 13 of them stacked in a 360px column meant a
+   long scroll to reach GPIO/peripherals, and most (OLED/TFT/buzzer/RTC…)
+   are irrelevant unless you booted that specific firmware.  Enhanced by JS
+   below — the markup and every app.js selector are untouched, panels are
+   only hidden with CSS, so nothing that reads them breaks. */
+aside .panel h2 { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px; }
+aside .panel h2::before { content: "▾"; font-size: 9px; color: var(--dim); transition: transform .12s; }
+aside .panel.collapsed h2 { border-bottom: none; }
+aside .panel.collapsed h2::before { transform: rotate(-90deg); }
+aside .panel.collapsed > *:not(h2) { display: none !important; }
+aside .panel h2:hover { color: var(--fg); }
 #uart {
-  height: calc(100vh - 140px); min-height: 320px;
+  /* Fills whatever the flex column leaves after the h2 and the controls
+     row, instead of a hardcoded 100vh-140px that had to be re-guessed
+     every time the header or button row changed height. */
+  flex: 1; min-height: 200px;
   overflow-y: auto; padding: 10px 12px;
   font: inherit; white-space: pre-wrap; word-break: break-all;
   background: #010409; color: #c9d1d9;
@@ -316,5 +346,40 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
 
 <script src="vendor/unicorn_arm.js"></script>
 <script type="module" src="app.js"></script>
+<script>
+// Collapsible sidebar panels (progressive enhancement — app.js owns the
+// contents, this only toggles a class).  Device panels start collapsed
+// because they are only meaningful for the firmware that drives them;
+// Firmware/Network/Machine state stay open since they are the controls you
+// actually start from.  Choices persist per panel.
+(() => {
+  const COLLAPSED_BY_DEFAULT = new Set([
+    'ltdc display', 'oled ssd1306 (i2c)', 'tft ili9341 (spi)', 'buzzer (tim pwm)',
+    'speaker (i2s)', 'rtc ds3231 (i2c)', 'symbols', 'network packets',
+  ]);
+  for (const panel of document.querySelectorAll('aside .panel')) {
+    const h2 = panel.querySelector('h2');
+    if (!h2) continue;
+    const key = 'panel:' + h2.textContent.trim().toLowerCase();
+    const saved = localStorage.getItem(key);
+    const collapsed = saved === null
+      ? COLLAPSED_BY_DEFAULT.has(h2.textContent.trim().toLowerCase())
+      : saved === '1';
+    panel.classList.toggle('collapsed', collapsed);
+    h2.setAttribute('role', 'button');
+    h2.setAttribute('tabindex', '0');
+    h2.setAttribute('aria-expanded', String(!collapsed));
+    const toggle = () => {
+      const now = panel.classList.toggle('collapsed');
+      h2.setAttribute('aria-expanded', String(!now));
+      localStorage.setItem(key, now ? '1' : '0');
+    };
+    h2.addEventListener('click', toggle);
+    h2.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+  }
+})();
+</script>
 </body>
 </html>

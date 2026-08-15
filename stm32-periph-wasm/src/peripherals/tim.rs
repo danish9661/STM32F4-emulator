@@ -12,6 +12,18 @@ fn tim_irq(name: &str) -> Option<i32> {
     }
 }
 
+/// Counter width. On the STM32F407 only TIM2 and TIM5 are 32-bit
+/// (RM0090 §17 "TIM2 to TIM5" — TIM2/TIM5 have 32-bit counters, TIM3/TIM4
+/// are 16-bit); every other timer is 16-bit.  This governs CNT, ARR and the
+/// capture/compare registers together — they are all the same width as the
+/// counter, so masking them differently is always a bug.
+fn counter_mask(name: &str) -> u32 {
+    match name {
+        "TIM2" | "TIM5" => 0xFFFF_FFFF,
+        _ => 0xFFFF,
+    }
+}
+
 pub struct Timer {
     cr1: u32,
     cr2: u32,
@@ -47,7 +59,9 @@ impl Timer {
             Box::new(Self {
                 cr1: 0, cr2: 0, smcr: 0, dier: 0, sr: 0, egr: 0,
                 ccmr1: 0, ccmr2: 0, ccer: 0, cnt: 0, psc: 0,
-                arr: 0xFFFF_FFFF,
+                // Free-running by default, but only as wide as the counter
+                // actually is (0xFFFF on the 16-bit timers).
+                arr: counter_mask(name),
                 ccr: [0; 4], rcr: 0, dcr: 0, dmar: 0, or_: 0,
                 ccmr3: 0, ccr5: 0, ccr6: 0, pwm_duty: [0; 4],
                 last_tick: instruction_count(),
@@ -82,7 +96,14 @@ impl Timer {
         for _ in 0..ticks.min(100) {
             match (cms, dir) {
                 (0, 0) => { // Up-counting
-                    if self.cnt < self.arr - 1 { self.cnt += 1; }
+                    // Counts 0..=ARR then reloads, so the period is ARR+1
+                    // ticks (RM0090 §18.3.1).  This was `self.arr - 1`, which
+                    // (a) made the period ARR and never let CNT reach ARR — so
+                    // a compare at CCR==ARR could never match — and (b)
+                    // underflowed when ARR==0 (a legal value): panic in debug,
+                    // wrap to 0xFFFFFFFF in release, turning a
+                    // fire-every-tick timer into a free-running one.
+                    if self.cnt < self.arr { self.cnt += 1; }
                     else {
                         self.cnt = 0;
                         self.sr |= 1; // UIF
@@ -106,8 +127,8 @@ impl Timer {
                     }
                 }
                 _ => { // Center-aligned modes
-                    // Simplified: just up-count
-                    if self.cnt < self.arr - 1 { self.cnt += 1; }
+                    // Simplified: just up-count (same ARR/ARR-1 fix as above)
+                    if self.cnt < self.arr { self.cnt += 1; }
                     else {
                         self.cnt = 0;
                         self.sr |= 1;
@@ -222,14 +243,21 @@ impl Peripheral for Timer {
             0x18 => self.ccmr1 = value,
             0x1C => self.ccmr2 = value,
             0x20 => self.ccer = value & 0xFFFF,
-            0x24 => self.cnt = value & 0xFFFF,
+            // CNT/ARR/CCRx are all the counter's width: 32-bit on TIM2/TIM5,
+            // 16-bit everywhere else.  This used to mask CNT and CCRx to
+            // 16 bits while letting ARR take a full 32 — a combination that
+            // matches NO real timer: TIM2/TIM5 (32-bit, used for long or
+            // high-resolution timing) had their counter truncated at 0xFFFF,
+            // and the 16-bit timers accepted an out-of-range ARR.
+            0x24 => self.cnt = value & counter_mask(&self.name),
             0x28 => self.psc = value & 0xFFFF,
-            0x2C => self.arr = value & 0xFFFFFFFF,
+            0x2C => self.arr = value & counter_mask(&self.name),
             0x30 => self.rcr = value & 0xFF,
             0x34..=0x40 => {
+                let mask = counter_mask(&self.name);
                 let i = ((offset - 0x34) / 4) as usize;
                 if let Some(ccr) = self.ccr.get_mut(i) {
-                    *ccr = value & 0xFFFF;
+                    *ccr = value & mask;
                 }
             }
             0x48 => self.dcr = value & 0x1F1F,
@@ -240,5 +268,45 @@ impl Peripheral for Timer {
             0x5C => self.ccr6 = value & 0xFFFF,
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression: CNT/ARR/CCR must follow the counter width. The model used
+    // to mask CNT+CCR to 16 bits while ARR took 32 — no real timer behaves
+    // that way, and it silently truncated TIM2/TIM5 (the 32-bit timers).
+    #[test]
+    fn counter_width_follows_the_timer() {
+        let sys = crate::system::test_dummy_system();
+        for (name, wide) in [("TIM2", true), ("TIM5", true), ("TIM3", false), ("TIM4", false)] {
+            let mut boxed = Timer::new(name).unwrap();
+            let t = boxed.as_any_mut().downcast_mut::<Timer>().unwrap();
+            let expect: u32 = if wide { 0x1234_5678 } else { 0x5678 };
+            t.write(&sys, 0x24, 0x1234_5678);            // CNT
+            assert_eq!(t.read(&sys, 0x24), expect, "{name} CNT");
+            t.write(&sys, 0x2C, 0x1234_5678);            // ARR
+            assert_eq!(t.read(&sys, 0x2C), expect, "{name} ARR");
+            t.write(&sys, 0x34, 0x1234_5678);            // CCR1
+            assert_eq!(t.read(&sys, 0x34), expect, "{name} CCR1");
+        }
+    }
+
+    // ARR == 0 is legal and means "reload every tick".  The counter used to
+    // compute `self.arr - 1`, which underflows there: a debug panic, and in
+    // release a wrap to 0xFFFFFFFF that silently turned it free-running.
+    #[test]
+    fn arr_zero_does_not_underflow() {
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Timer::new("TIM3").unwrap();
+        let t = boxed.as_any_mut().downcast_mut::<Timer>().unwrap();
+        t.write(&sys, 0x2C, 0);        // ARR = 0
+        t.write(&sys, 0x00, 1);        // CR1: CEN
+        crate::system::INSTRUCTION_COUNT.fetch_add(50, std::sync::atomic::Ordering::Relaxed);
+        t.tick(&sys);                  // must not panic
+        assert_eq!(t.read(&sys, 0x24), 0, "CNT stays 0 when ARR==0");
+        assert_ne!(t.read(&sys, 0x10) & 1, 0, "UIF set");
     }
 }

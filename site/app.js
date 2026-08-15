@@ -640,7 +640,11 @@ const renderSymbols = (symbols) => {
 setBusy(false);
 $('btnRun').textContent = 'Run';
 setStatus('idle — select a firmware and press Boot', 'stop');
-appendUart('STM32F407 console ready.\r\nSelect a preset below or upload .bin/.hex/.elf/.map, then press Boot.\r\n');
+// "below" was wrong — the Firmware panel is in the sidebar to the right
+// (and the panel names now match what the sidebar actually says).
+appendUart('STM32F407 console ready. Nothing is running yet.\r\n'
+    + 'Pick a firmware under FIRMWARE (right) and press "Boot preset",\r\n'
+    + 'or upload your own .bin/.hex/.elf/.map. Firmware output appears here.\r\n');
 
 const params = new URLSearchParams(location.search);
 const preset = params.get('fw');
