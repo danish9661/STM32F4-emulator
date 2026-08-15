@@ -33,6 +33,11 @@ export async function createEmulator(opts) {
         // MORE accurate than block counting (that over-reports ~1.39x, see
         // AGENTS §16). Requires minimalPolls; overrides blockCounting.
         noCountHook = false,
+        // Escape hatch: force the old per-INSTRUCTION HOOK_CODE path. The
+        // default is now a per-BLOCK hook doing the same accounting (~16%
+        // faster — the crossing, not the work, is what costs). Set this if a
+        // firmware genuinely needs instruction-exact instCount or stops.
+        perInstHook = false,
         maxBatch = 100000,    // emu_start instruction budget per step()
         onTx = null,          // (frame: Uint8Array, meta) called per TX capture
         eth = {},             // firmware-specific SRAM addresses (defaults above)
@@ -193,9 +198,16 @@ export async function createEmulator(opts) {
         uc.mem_write(BigInt(addr), b);
     };
 
+    // Scratch buffers reused across MMIO reads.  This hook fires on EVERY
+    // peripheral read, and polling firmware (ETH spinning on DMASR, USART on
+    // TXE) hits it constantly — allocating a fresh Uint8Array each time was
+    // pure GC churn.  Safe to reuse: uc.mem_write copies the bytes into guest
+    // memory synchronously before returning, so nothing retains the buffer.
+    const rdScratch = [];
     const memReadHook = (handle, type, address, size, value, user_data) => {
         const val = periph_read(Number(address), size) >>> 0;
-        const bytes = new Uint8Array(size);
+        let bytes = rdScratch[size];
+        if (bytes === undefined) bytes = rdScratch[size] = new Uint8Array(size);
         for (let i = 0; i < size; i++) bytes[i] = (val >> (i * 8)) & 0xFF;
         uc.mem_write(address, bytes);
     };
@@ -289,12 +301,60 @@ export async function createEmulator(opts) {
             }
         }
     };
+    // Count-only block hook (doom's old fast path): no tick/poll logic, so it
+    // is ONLY valid alongside minimalPolls.
     const blockHook = (handle, address, size, user_data) => {
         instCount += Number(size) / 2; // Thumb-2: block size in bytes
     };
+    // Full block hook — same work as codeHook, but once per basic block
+    // instead of once per instruction.
+    //
+    // Measured: the WASM->JS crossing itself costs ~16% of throughput, while
+    // the callback BODY costs ~0 (a hook whose body returns immediately is
+    // just as slow as one that does the full accounting). Blocks average
+    // roughly 5-15 Thumb-2 instructions, so this removes ~80-90% of the
+    // crossings and hands that ~16% to EVERY firmware, not just doom.
+    //
+    // Why this is not a behaviour change: the tick/poll thresholds are 5000
+    // and 1000 instructions, so accumulating per block still trips them
+    // within one block (~10 inst) of where per-instruction counting would —
+    // far finer than the thresholds themselves. The rx-poll stop likewise
+    // lands at most a block late, and the driver just services RX and
+    // resumes. The one real cost is that instCount becomes approximate (a
+    // block that exits early still counts its full size), which affects the
+    // MIPS readout but nothing that gates on emu_start's own budget.
+    const blockHookFull = (handle, address, size, user_data) => {
+        const n = Number(size) / 2;
+        instCount += n;
+        if (rxQueue.length > 0 && eth_is_rx_poll()) {
+            uc.emu_stop();
+            return;
+        }
+        tickAcc += n;
+        if (tickAcc >= tickEvery) {
+            tick_n(tickAcc);
+            tickAcc = 0;
+            if (is_watchdog_reset_requested()) {
+                stopRequested = true;
+                uc.emu_stop();
+                return;
+            }
+        }
+        pollAcc += n;
+        if (pollAcc >= pollEvery) {
+            pollAcc = 0;
+            applyFlashErase(); // model holds BSY until the erase is applied
+            if (dma_get_pending_count() > 0 || eth_is_tx_poll()) {
+                uc.emu_stop();
+                return;
+            }
+        }
+    };
     if (noCountHook) { /* no per-block/per-inst hook: step() accounts the budget */ }
     else if (blockCounting) uc.hook_add(Module.HOOK_BLOCK, blockHook, null);
-    else uc.hook_add(Module.HOOK_CODE, codeHook, null);
+    else if (minimalPolls) uc.hook_add(Module.HOOK_CODE, codeHook, null);
+    else if (perInstHook) uc.hook_add(Module.HOOK_CODE, codeHook, null);
+    else uc.hook_add(Module.HOOK_BLOCK, blockHookFull, null);
 
     // ── virtual peripheral devices (JS hardware layer) ────────────────────
     // Device protocols implemented in JS on top of the bus taps:

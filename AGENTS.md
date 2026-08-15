@@ -1465,8 +1465,66 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   instCount meter in block mode over-reports ~1.39× the emu_start budget
   (the guest's straight-line 60k-nop delay loop is one giant TB that
   overshoots the per-step count; the MIPS meter reads ~1.4× true). Do NOT
-  use blockCounting for ETH/DMA firmware (no rx-poll stop → recv-wait
-  wedges, the §7 class of stall).
+  use the `blockCounting` flag for ETH/DMA firmware (that hook is
+  count-only — no rx-poll stop → recv-wait wedges, the §7 class of stall).
+- **Per-BLOCK hook is now the DEFAULT for all firmware (2026-08-14).**
+  The restriction above was a property of the count-only `blockHook`, not
+  of HOOK_BLOCK itself. `blockHookFull` does everything `codeHook` did —
+  rx-poll stop, `tick_n`, watchdog, flash erase, DMA/TX poll — just once
+  per basic block, scaled by `size/2`. Why it is safe: the tick/poll
+  thresholds are 5000/1000 instructions, so accumulating per ~10-instruction
+  block trips them within one block of where per-instruction counting would.
+  Escape hatch: `perInstHook: true` restores the old HOOK_CODE path.
+  * **Rationale, measured**: a hook whose body returns IMMEDIATELY is just
+    as slow as one doing the full accounting (15.09 vs 15.14 MIPS) — the
+    WASM→JS **crossing itself** is the cost, not the work, so the fix is to
+    cross less often. Removing the hook entirely gives 17.70, i.e. ~16% is
+    on the table and the per-block hook captures most of it.
+  * **The CPU hook, not the two-WASM-module boundary — but that depends on
+    the firmware, so measure before concluding.** The Unicorn↔Rust
+    peripheral path (`periph_read`/`periph_write`) fires ~42 times per 3M
+    instructions on blinky (0.001%) — but **2.25M times on an eth_http soak,
+    3.75% of instructions, ~642 per HTTP round**. So for compute-bound
+    firmware (doom, blinky) the second WASM module is nowhere near the hot
+    path, while for I/O-bound firmware it carries real traffic. An earlier
+    version of this note generalised the blinky figure and claimed the
+    boundary never matters; that was wrong.
+  * **`memReadHook` reuses scratch buffers** instead of allocating a
+    `Uint8Array` per MMIO read (safe: `uc.mem_write` copies synchronously).
+    Worth it on I/O firmware — eth_http avoids ~2.25M allocations per 60M
+    inst. NOTE: an earlier claim of "3-5% on blinky" for this change was
+    measurement noise and should not be repeated — blinky issues only 42
+    MMIO reads per 3M instructions, so it cannot have moved the needle
+    there. The change is sound but its magnitude is unquantified.
+  * **Gain, honestly**: +10% on blinky. On a 200M-inst eth_http netsim soak
+    the MIPS meter shows 11.30 → 17.03, but that is INFLATED by block
+    over-counting (~1.32× here). Measured by work actually completed it is
+    **869 → 999 HTTP rounds/sec, ≈ +15%**. Always compare block-mode
+    against per-inst mode by rounds/sec or wall time, never by the MIPS
+    readout.
+  * **Do NOT chase the last ~6% by removing the hook (measured trap).**
+    Hookless runs at 17.70 MIPS vs the per-block hook's 16.61, so it looks
+    like free headroom — but for IO firmware the hook's **rx-poll stop is
+    what lets the driver service RX promptly**. Without it, RX is only
+    serviced between `emu_start` batches and the guest burns its budget
+    spinning in recv-wait. Measured on the eth_http soak, by HTTP
+    rounds/sec (60M inst, equal length):
+    | mode | MIPS | rounds/sec |
+    |---|---|---|
+    | per-block (default) | 16.01 | **947** |
+    | per-inst (old) | 10.47 | 809 |
+    | hookless, batch 5000 | 16.54 | 476 |
+    | hookless, batch 20000 | **20.11** | **143** |
+    The hookless/batch-20000 config posts the HIGHEST MIPS and does **7x
+    less actual work**. This is the clearest example of why MIPS is the
+    wrong metric for this emulator — always measure rounds/sec or wall
+    time for a fixed workload.
+  * **Soak-validated** (the check the old warning demanded): 200M inst,
+    **11692 rounds, 0 `TCP fail`, 0 stalls**, plus npm test 7/7, all eight
+    peripheral tests, test_doom, and 5 deterministic test_flow runs.
+    Harness: `scratchpad/eth_soak.mjs` (`PER_INST=1` for the baseline) —
+    note `cli.mjs` installs its OWN HOOK_CODE and does not exercise
+    emulator.js, so it can neither validate nor benefit from this.
 - **Stats meter**: `#stats` line shows `MIPS: x.x · FPS: n · x.xM inst`,
   updated every 500 ms. FPS counts **framebuffer changes/sec** (fnv1a of
   the 64KB fb, change-gated re-render) — reads ~0 on static views (title,
