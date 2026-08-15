@@ -152,22 +152,32 @@ same raw tap format the built-in `oled`/`tft` devices decode internally —
 see `processOled`/`processTft` in `site/emulator.js` for a worked example
 of parsing a real protocol (SSD1306 / ILI9341) on top of the same taps.
 
-## Gotcha: one firmware per process
+## Multiple firmwares in one process (fixed 2026-08-15)
 
-`createEmulator()`/`createSTM32F407()` instances are **not safe to reuse
-across different firmware images in the same process** — the underlying
-wasm module keeps process-lifetime global state (behind `OnceLock`/`Mutex`
-statics in `stm32-periph-wasm/src/system.rs`) that a second `init()` call
-does not fully reset. Concretely: booting `blinky` then `rtc_test`
-sequentially in one script reproducibly hangs the second instance's I2C
-register-file path right after its first UART line, even though each
-firmware boots cleanly on its own. This is pre-existing (found while
-testing the component API's `Pwm`/`I2cRegisterDevice` classes against
-real firmware) and not limited to any one peripheral — treat it as a
-hard rule, not a peripheral-specific quirk: **one firmware per Node
-process.** Every test in `site/test_*.mjs` and `site/test_component_*.mjs`
-follows this — each boots exactly one firmware and is invoked as its own
-`node` process from `npm test`, never looped/chained in a shared script.
+Sequential `createEmulator()` instances in a single process are supported.
+Booting `blinky`, then `rtc_test`, then `buzzer_test` in one script works in
+any order; `site/test_multi_instance.mjs` covers three orderings plus a
+seven-instance run and is part of `npm test`.
+
+This used to be a hard "one firmware per process" rule, because the second
+instance's I2C register-file path hung right after its first UART line. Two
+independent causes, both now fixed:
+
+- `stm32-periph-wasm/src/lib.rs` held the system in a `OnceLock`, whose
+  `set()` accepts only the first value. Every later `init()`/`init_svd()`
+  was silently discarded, so instance 2 ran on instance 1's entire
+  peripheral tree. `SYS` is now an `AtomicPtr` to a leaked `Box`, so each
+  `init` installs a fresh system.
+- The module-level device list and the tap/atomic globals in
+  `system.rs` accumulated across instances, so peripheral constructors
+  (which bind by first match) attached to the previous instance's devices.
+  `createEmulator()` now calls `reset_state()` before registering devices.
+
+Instances are still not safe to run *concurrently* — there is exactly one
+active system per process, and creating a new one detaches the old. Close
+an instance before creating the next, as the tests do. Note also that the
+old system is leaked rather than freed (see the `SYS` comment in `lib.rs`
+for why), so a process that boots thousands of firmwares will grow.
 
 ## Out of scope
 

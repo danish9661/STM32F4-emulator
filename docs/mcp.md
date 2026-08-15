@@ -84,12 +84,11 @@ public library API, not a parallel implementation.
 The server keeps a single active emulator. `load_firmware` closes any
 previous session first, and `reset` clears it.
 
-Switching firmware within one server process is allowed but **not fully
-clean**: the wasm peripheral model holds process-lifetime global state
-that a second `init()` does not reset (see the "one firmware per process"
-gotcha in [components.md](components.md) and AGENTS.md §9). `load_firmware`
-returns a note when it replaces a session. For a guaranteed-clean boot,
-restart the server process.
+Switching firmware within one server process is supported: `load_firmware`
+closes the previous instance and the wasm model installs a fresh peripheral
+tree and clears its globals (see [components.md](components.md) and
+AGENTS.md §9). The one hard requirement is that sessions are sequential,
+never concurrent — which is what "one session at a time" enforces.
 
 ## Example session
 

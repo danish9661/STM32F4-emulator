@@ -423,20 +423,24 @@ Once execution is reliable, finish `test_webserver_net.mjs`:
   re-init rather than trying to recover.
 - The step throughput degrades sharply over long runs (translation cache
   growth); prefer short runs and checkpointing to one long run.
-- **2026-08-14: `createEmulator()` instances are not safe to reuse across
-  different firmware in the same process** — even without any wedge.
-  Booting `blinky` then `rtc_test` sequentially in one script hangs the
-  second instance's I2C register-file path right after its first UART
-  line (confirmed reproducible with zero component-API code involved,
-  pure `createEmulator()` + `ext_devices.rtc`; also reproduces with
-  `buzzer_test` → `rtc_test`). Root cause not chased down (likely
-  process-lifetime `OnceLock`/`Mutex` globals in `system.rs` that a
-  second `init()`/`init_svd()` call doesn't fully reset) — the existing
-  test suite already avoids this by construction (one firmware per
-  `node` process per `site/test_*.mjs` file); the new
-  `site/test_component_*.mjs` files (added 2026-08-14, see
-  docs/components.md) follow the same rule. Treat "one firmware per
-  process" as a hard rule for any new test/tool, not a suggestion.
+- **2026-08-15: sequential `createEmulator()` instances in one process now
+  work** (this reverses the 2026-08-14 "one firmware per process" rule).
+  Two causes, both fixed: (1) `SYS` in `lib.rs` was a `OnceLock`, so every
+  `init()` after the first was silently dropped and instance 2 ran on
+  instance 1's peripheral tree — it is now an `AtomicPtr` to a leaked
+  `Box`; (2) `system.rs` globals accumulated across instances —
+  `createEmulator()` now calls `reset_state()` before registering devices.
+  Regression test: `site/test_multi_instance.mjs` (three orderings of
+  blinky/rtc/buzzer plus a 7-instance run), in `npm test`.
+  Two things to keep in mind when touching this:
+  - Call **exactly one** of `init_svd()` / `init()` per instance. Both
+    install a system and the last wins, so `init()` after `init_svd()`
+    silently replaces the SVD map with the hardcoded one. Under the old
+    `OnceLock` that was a harmless no-op, and `emulator.js` did exactly
+    that — which is why the first attempt at this fix looked like it
+    regressed `test_exti`/`test_audio`. Those two remain the canaries.
+  - Instances are still not safe **concurrently**: one active system per
+    process, and a new `init` detaches the old. Close before re-creating.
 
 ---
 

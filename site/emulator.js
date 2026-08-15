@@ -146,8 +146,13 @@ export async function createEmulator(opts) {
         i2c_register_slave(cfg.peripheral, cfg.address);
         i2cDevices.push({ peripheral: cfg.peripheral, handler: cfg.handler });
     }
-    init_svd(svdXml);
-    bindings.init();
+    // Exactly ONE of these. They both install a fresh WasmSystem and the last
+    // one wins, so calling init() after init_svd() would replace the
+    // SVD-derived peripheral map with the hardcoded one. (It used to be a
+    // harmless no-op only because SYS was a OnceLock that ignored the second
+    // call — see the SYS comment in stm32-periph-wasm/src/lib.rs.)
+    if (svdXml) init_svd(svdXml);
+    else bindings.init();
 
     const uc = new Module.Unicorn(
         Module.ARCH_ARM,

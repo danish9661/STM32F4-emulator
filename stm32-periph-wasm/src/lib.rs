@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use wasm_bindgen::prelude::*;
 
 mod system;
@@ -7,22 +7,38 @@ pub mod ext_devices;
 
 use system::WasmSystem;
 
-// KNOWN BUG (diagnosed 2026-08-14, NOT yet fixed): this is a OnceLock and
-// `init()`/`init_svd()` below use `let _ = SYS.set(...)`. OnceLock accepts
-// only the FIRST value, so every later init() is SILENTLY DISCARDED and a
-// second emulator instance in the same process keeps running on the FIRST
-// instance's entire peripheral tree. That is the root cause of the
-// "one firmware per process" rule in AGENTS.md §9 / docs/components.md.
+// The process-wide system instance. This used to be a `OnceLock`, which
+// accepts only the FIRST value: every later `init()` was silently discarded
+// and a second emulator instance in the same process kept running on the
+// FIRST instance's entire peripheral tree. That was the root cause of the
+// old "one firmware per process" rule.
 //
-// Attempted fix (AtomicPtr to a leaked Box, so sys() can still hand out
-// &'static while being replaceable) DID fix multi-instance — blinky/rtc/
-// buzzer ran in any order in one process — but regressed test_exti and
-// test_audio, so it was reverted. Whatever the next attempt is, it must keep
-// those two green; they are the canaries.
-static SYS: OnceLock<WasmSystem> = OnceLock::new();
+// It is now an AtomicPtr to a leaked Box, so `init()`/`init_svd()` can
+// replace it while `sys()` still hands out a `&'static`. The previous
+// WasmSystem is deliberately LEAKED rather than dropped: `sys()` has already
+// handed out `&'static` references that may still be live on the stack (an
+// in-flight MMIO callback re-entering from the CPU core), so freeing the old
+// one would dangle. A system is a few hundred KB and instances are created
+// once per firmware, so the leak is bounded by firmware count.
+//
+// An earlier attempt at this same change appeared to regress test_exti and
+// test_audio. The real cause was on the JS side: site/emulator.js called
+// `init_svd(svd)` and then `init()`, which is a no-op under OnceLock but
+// clobbers the SVD-built system with the hardcoded map once SYS is
+// replaceable. That call is now conditional; those two tests are the
+// canaries for this code.
+static SYS: AtomicPtr<WasmSystem> = AtomicPtr::new(std::ptr::null_mut());
 
 fn sys() -> &'static WasmSystem {
-    SYS.get().expect("WasmSystem not initialized")
+    let p = SYS.load(Ordering::Acquire);
+    assert!(!p.is_null(), "WasmSystem not initialized");
+    // SAFETY: p came from Box::into_raw in set_sys and is never freed.
+    unsafe { &*p }
+}
+
+/// Install a fresh system, leaking the previous one (see SYS above).
+fn set_sys(s: WasmSystem) {
+    SYS.store(Box::into_raw(Box::new(s)), Ordering::Release);
 }
 
 /// Initialize the emulator with hardcoded peripheral map.
@@ -30,7 +46,7 @@ fn sys() -> &'static WasmSystem {
 #[wasm_bindgen]
 pub fn init() {
     console_error_panic_hook::set_once();
-    let _ = SYS.set(WasmSystem::new());
+    set_sys(WasmSystem::new());
 }
 
 /// Initialize the emulator from an SVD XML string (e.g., STM32F407.svd).
@@ -38,7 +54,7 @@ pub fn init() {
 #[wasm_bindgen]
 pub fn init_svd(svd_xml: &str) {
     console_error_panic_hook::set_once();
-    let _ = SYS.set(WasmSystem::new_svd(svd_xml));
+    set_sys(WasmSystem::new_svd(svd_xml));
 }
 
 #[wasm_bindgen]

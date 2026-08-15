@@ -5,11 +5,9 @@
 // values, and inspect CPU registers.
 //
 // One active emulator session at a time — load_firmware/reset replaces it.
-// This mirrors the hard "one firmware per process" constraint documented in
-// docs/components.md: createEmulator() instances are not safe to reuse
-// across different firmware in the same process, so we close the old
-// instance before creating a new one and surface a warning that a fresh
-// server process is the only fully clean way to switch firmware.
+// Sequential instances are supported (see docs/components.md), but there is
+// exactly one active system per process and creating a new one detaches the
+// old, so we close the previous instance before creating the next.
 import { createSTM32F407, FIRMWARES, LED, Button, Pwm, Potentiometer } from '../index.mjs';
 
 // The MCP SDK and zod are OPTIONAL peer dependencies: the emulator library
