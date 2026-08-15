@@ -183,6 +183,14 @@ ext_devices: {
 An untapped bank reads back 0 and swallows writes. Reads with an empty
 `pushData` queue also read 0.
 
+Note the model splits the four banks every 0x1000_0000 (BANK1 0x6000_0000,
+BANK2 0x7000_0000, BANK3 0x8000_0000, BANK4 0x9000_0000), *not* at real
+silicon's 64 MB NOR/SRAM sub-bank boundaries — 0x6C00_0000 is still BANK1
+here. Control registers are at 0xA000_0000.
+
+Worked example: `fsmc_test/` drives an 8080-mode display from guest code
+(A16 as RS/DC), decoded by `site/test_fsmc.mjs`.
+
 ## DCMI: camera frames, anytime
 
 The DCMI model consumes a frame with real VSYNC/LINE/FRAME/OVR semantics
@@ -207,6 +215,9 @@ emu.camera.feed(160, 120, pixels);
 emu.camera.stop();    // unplug: drops the pending frame and halts the source
 emu.camera.start();   // plug the ext_devices.camera source back in
 ```
+
+Worked example: `dcmi_test/` drives a capture from guest code, with
+`site/test_dcmi.mjs` acting as the sensor.
 
 The controller reloads a frame on CAPTURE's **rising** edge, and CAPTURE
 auto-clears when a frame completes — so re-arming means writing CR bit 0
@@ -247,6 +258,7 @@ for why), so a process that boots thousands of firmwares will grow.
   step-granularity polling. A `gpio_tap`-style Rust event queue (matching
   `spi_tap`/`i2c_tap`) is a possible follow-up if that granularity proves
   too coarse for a specific firmware.
-- No FSMC or DCMI **firmware** exists in the tree, so both paths are only
-  covered by `site/test_fsmc_dcmi.mjs`, which drives them over the MMIO bus
-  rather than from guest code.
+- FSMC has no interrupt or DMA path, and DCMI's is untested: a real capture
+  driver would use DMA rather than polling DR, which is the case
+  `dcmi_test` deliberately does NOT cover (it asserts the OVR that polling
+  produces instead).
