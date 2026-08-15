@@ -4,9 +4,9 @@
 // cannot touch, and does nothing per frame but putImageData.
 //
 // Why a worker at all: stepping the guest is a long synchronous WASM call, so
-// on the main thread every burst blocked input, layout and paint. This is a
-// RESPONSIVENESS win, not a throughput one — there is still exactly one
-// emulation thread. SharedArrayBuffer is deliberately NOT used: it needs
+// on the main thread every burst blocked input, layout and paint. It costs no
+// throughput (page-driven cadence, see below) but there is still exactly one
+// emulation thread — this makes the page smooth, not the guest faster. SharedArrayBuffer is deliberately NOT used: it needs
 // COOP/COEP headers GitHub Pages cannot set, and it would buy nothing here
 // (the two WASM modules have separate linear memories regardless, and
 // Unicorn's build is single-threaded — see AGENTS.md §7).
@@ -34,34 +34,48 @@ import { createEmulator } from './emulator.js';
 // then advance faster than game logic and pitch-shift every sound.
 const FRAME_MS = 1000 / 35;      // one game frame (tic) per 28.57ms realtime
 const STEP_BUDGET = 32;          // max steps per burst
-const MS_BUDGET = 44;            // max wall time per burst
 const STEP_INST = 60000;         // instructions per emu.step()
 // Between bursts the loop must RETURN TO THE EVENT LOOP: stepping the guest
-// gap-free wedges Chrome's TCI interpreter (AGENTS §7/§16). The old loop got
-// that for free by living on rAF; on a timer we have to ask for it.
+// gap-free wedges Chrome's TCI interpreter (AGENTS §7/§16). The old
+// main-thread loop got that for free by living on rAF.
 //
-// setTimeout is clamped to ~4ms once nested, so that gap is a straight duty-
-// cycle tax and the burst budget has to absorb it: 44ms of work per 48ms of
-// wall clock is 92% duty, against rAF's 16/16.7 = 96%. Do not shrink
-// MS_BUDGET without re-measuring — at 28ms (87% duty) throughput was 12%
-// below the old main-thread build; at 44ms it is ~6%.
+// A worker has no rAF, and setTimeout is clamped to ~4ms once nested, which
+// is a straight duty-cycle tax: measured against the old build, a self-timed
+// 28ms burst (87% duty) ran 12% fewer guest instructions and a 44ms burst
+// (92%) ran ~6% fewer.
 //
-// Measured headless (interleaved A/B, 45s runs, 2-3 each, on a machine with
-// other load — treat the absolute numbers as approximate and the ratio as the
-// result):
-//     main-thread build   758-782M guest inst   rAF-gap p95 33.4ms
-//     worker MS_BUDGET 28 668-681M              p95 16.8ms
-//     worker MS_BUDGET 44 720-724M              p95 16.8ms
-// Halving the page's frame-gap p95 is the entire point; the ~6% is the price.
+// A MessageChannel yield (~0.05ms, ~99% duty) was tried to close that gap and
+// is NOT viable: over a 60s run it degraded to 760M instructions at MIPS 1.1,
+// i.e. it hit exactly the stall a real gap avoids. Do not "optimize" it back.
+// So the burst cadence is driven by the PAGE's rAF: doom.js posts a 'tick'
+// every animation frame and the worker runs one burst per tick. That
+// reproduces the old main-thread build's 16ms-per-16.7ms duty (96%) without
+// putting the work on the main thread — its rAF callback only posts a
+// message. Receiving that message is itself an event-loop turn, so the TCI
+// still gets its gap.
 //
-// A MessageChannel yield (~0.05ms, ~99% duty) was tried to reclaim the rest
-// and is NOT viable: over a 60s run it degraded to 760M instructions and MIPS
-// 1.1, i.e. it hit exactly the stall that a real gap avoids. Do not
-// "optimize" this back.
+// A self-timer remains as the fallback for when rAF is dead (hidden tab,
+// which Chrome throttles to nothing). It runs a bigger burst because its
+// gap is the clamped 4ms and there is no frame to pace to.
 const YIELD_MS = 4;
+const RAF_MS_BUDGET = 16;       // page-driven: one animation frame of work
+const SELF_MS_BUDGET = 44;      // self-driven: amortize the 4ms clamp
+const TICK_STALE_MS = 200;      // no tick for this long => rAF is dead
 let timer = null;
-function scheduleLoop() {
-    if (timer === null) timer = setTimeout(loop, YIELD_MS);
+let lastTickAt = 0;
+function scheduleLoop(delay) {
+    if (timer === null) timer = setTimeout(selfTick, delay === undefined ? YIELD_MS : delay);
+}
+// Fallback driver: only actually steps when the page's ticks have stopped.
+function selfTick() {
+    timer = null;
+    if (!booted) return;
+    if (performance.now() - lastTickAt > TICK_STALE_MS) {
+        loop(SELF_MS_BUDGET);
+        scheduleLoop(YIELD_MS);
+    } else {
+        scheduleLoop(TICK_STALE_MS);   // page is driving; just watch
+    }
 }
 
 const ABI = 0x20002000n;
@@ -230,8 +244,7 @@ function drainAudio() {
     post({ t: 'audio', samples: s }, [s.buffer]);
 }
 
-function loop() {
-    timer = null;
+function loop(msBudget) {
     if (!booted || !emu) return;
     const t0 = performance.now();
     if (!paused && !loadPending) {
@@ -248,7 +261,7 @@ function loop() {
             // and no rAF pacing to respect, so run flat out and let the
             // worklet's bounded queue keep audio continuous.
             const target = hidden ? Infinity : paceFrames + Math.floor((t0 - paceWall) / FRAME_MS);
-            while (steps < STEP_BUDGET && performance.now() - t0 < MS_BUDGET && frames < target) {
+            while (steps < STEP_BUDGET && performance.now() - t0 < msBudget && frames < target) {
                 // Drive the guest clock BEFORE every step: DG_GetTicksMs reads
                 // g_abi.clockMs, so I_GetTime advances even inside a single
                 // doomgeneric_Tick (the melt wipe spins on I_GetTime). The
@@ -277,7 +290,6 @@ function loop() {
     } else {
         paceFrames = -1;    // re-anchor on resume
     }
-    scheduleLoop();
 }
 
 function reportStats() {
@@ -350,7 +362,7 @@ async function boot(msg) {
         booted = true;
         status('loading WAD…');
         post({ t: 'booted' });
-        loop();
+        scheduleLoop(TICK_STALE_MS);   // the page's ticks take over from here
     } catch (e) {
         status('boot failed: ' + e.message, 'error');
         post({ t: 'error', message: String(e && e.message || e) });
@@ -381,6 +393,18 @@ self.onmessage = (e) => {
         case 'detail':
             lowDetail = m.lowDetail;
             if (emu) emu.write32(DETAIL_ADDR, lowDetail ? 1 : 0);
+            break;
+        case 'tick':
+            // One burst per page animation frame. The gap between bursts is
+            // the message dispatch plus whatever is left of the frame — the
+            // same ~0.7ms the old main-thread rAF loop ran with, which is a
+            // real event-loop turn and is what the TCI needs. Do NOT add a
+            // minimum-gap guard that SKIPS ticks: dropping a tick that queued
+            // behind a burst costs a whole frame and measured 413M vs 720M
+            // guest instructions.
+            lastTickAt = performance.now();
+            if (!booted) break;
+            loop(RAF_MS_BUDGET);
             break;
         case 'hidden':
             hidden = m.hidden;

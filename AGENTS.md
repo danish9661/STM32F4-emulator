@@ -1819,27 +1819,42 @@ and the framebuffer→RGBA conversion. The page keeps only what a worker
 cannot touch — canvas, keyboard, `AudioContext`/worklet, `localStorage` —
 and does one `putImageData` per frame on a transferred buffer.
 
-**It buys responsiveness, not throughput.** There is still exactly one
-emulation thread. Interleaved A/B, 45s headless runs (machine had other
-load — the ratio is the result, not the absolute numbers):
+**It buys responsiveness at no throughput cost** — but only because the
+burst cadence is driven by the PAGE's rAF: `doom.js` posts a `tick` every
+animation frame and the worker runs one burst per tick. Its rAF callback
+only posts a message, so the main thread stays free while the guest keeps
+the old build's 16ms-per-16.7ms duty.
+
+Interleaved A/B, 45s headless runs (machine had other load — the ratio is
+the result, not the absolute numbers):
 
 | build | guest inst | rAF-gap p95 |
 |---|---|---|
-| main-thread (pre-worker) | 758–782M | 33.4ms |
-| worker, `MS_BUDGET` 28 | 668–681M | 16.8ms |
-| worker, `MS_BUDGET` 44 (shipped) | 720–724M | 16.8ms |
+| main-thread (pre-worker) | 770–779M | 33.4ms |
+| worker, self-timed `MS_BUDGET` 28 | 668–681M | 16.8ms |
+| worker, self-timed `MS_BUDGET` 44 | 720–724M | 16.8ms |
+| worker, page-tick driven (shipped) | 762–780M | 16.8ms |
 
 Things that bite here:
 
 - **No `SharedArrayBuffer`.** It needs COOP/COEP headers GitHub Pages cannot
   set, and it would buy nothing: the two WASM modules have separate linear
   memories regardless, and Unicorn's build is single-threaded (§7).
-- **The yield between bursts must be a real timer.** `setTimeout` is clamped
-  to ~4ms once nested, which is a pure duty-cycle tax, so `MS_BUDGET` is
-  sized to absorb it (44ms work / 48ms wall = 92%, vs rAF's 96%). Replacing
-  it with a `MessageChannel` yield (~99% duty) degraded a 60s run to 760M
-  inst at MIPS 1.1 — the same class of stall §7/§16 describe. Do not
-  "optimize" it back.
+- **Never SKIP a queued tick.** A "minimum gap between bursts" guard that
+  dropped ticks arriving while a burst was still running cost a whole frame
+  each time and measured 413M vs 720M guest inst. The gap between bursts is
+  the message dispatch plus the rest of the frame — the same ~0.7ms the old
+  rAF loop ran with, and a real event-loop turn is all the TCI needs.
+- **The self-timed fallback is for when rAF is dead** (hidden tab). The
+  worker watches for ticks going stale (200ms) and then drives itself on a
+  `setTimeout`, with a bigger burst budget because `setTimeout` is clamped
+  to ~4ms once nested and that clamp is a pure duty-cycle tax (self-timed
+  at 28ms burst = 12% below baseline, at 44ms = ~6%). Verified with
+  `window.__doom.stopTicks()`: +131.5M inst over 8s with no ticks, and
+  resuming them does not wedge it.
+- **A `MessageChannel` yield is NOT a valid way to reclaim duty cycle**
+  (~99%, no clamp): over a 60s run it degraded to 760M inst at MIPS 1.1 —
+  the same class of stall §7/§16 describe. Do not "optimize" it back.
 - **Unicorn cannot be `import`ed into the worker.** It is a classic
   emscripten script that assigns a global, so the worker fetches and
   indirect-`eval`s it, and must pass an explicit `locateFile`: there is no
@@ -1855,4 +1870,5 @@ Things that bite here:
   as module scripts. Bump the right one.
 - `window.__emu` / `window.__pump` / `window.__audioPumpTimer` are gone from
   this page — the emulator is not on that thread. `window.__doom` exposes
-  `booted`, `paused`, `stats`, `key(code, pressed)` and `send(msg)`.
+  `booted`, `paused`, `stats`, `key(code, pressed)`, `send(msg)` and the
+  `stopTicks()`/`startTicks()` test hooks.

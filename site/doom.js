@@ -8,7 +8,9 @@
 //
 // It is a responsiveness win, not a throughput one — there is still one
 // emulation thread, and the guest still runs at whatever the Unicorn WASM
-// core manages (~20-24 MIPS, so ~25 of the target 35 fps).
+// core manages (~20-24 MIPS, so ~25 of the target 35 fps). Throughput is
+// unchanged from the old main-thread build because this file still sets the
+// cadence: one 'tick' per rAF, one burst per tick (AGENTS §17).
 //
 // Serve from site/ (python3 -m http.server 8123 --directory site) — the page
 // fetches the WAD + SVD + wasm at runtime (file:// won't work).
@@ -77,12 +79,35 @@ window.__doom = {
     get stats() { return lastStats; },
     key(code, pressed) { send({ t: 'key', code, pressed }); },
     send: (m) => send(m),
+    // Test hooks: stopping the ticks is how a hidden tab looks to the
+    // worker, and is the only way to exercise its self-timed fallback
+    // without actually backgrounding the browser.
+    stopTicks: () => stopTicking(),
+    startTicks: () => startTicking(),
 };
 let lastStats = null;
 
 function send(msg, transfer) {
     if (worker) worker.postMessage(msg, transfer || []);
 }
+
+// The worker steps one burst per animation frame, driven from here. This
+// callback does nothing but post a message (microseconds), so the main thread
+// stays free — but the guest still gets the old build's 16ms-per-16.7ms
+// cadence instead of paying setTimeout's 4ms nested clamp inside the worker.
+// When this stops firing (hidden tab), the worker notices and self-drives.
+let ticking = false;
+function startTicking() {
+    if (ticking) return;
+    ticking = true;
+    const tick = () => {
+        if (!worker || !ticking) { ticking = false; return; }
+        worker.postMessage({ t: 'tick' });
+        requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+}
+function stopTicking() { ticking = false; }
 
 // ── audio: the worker hands us I2S samples, the worklet plays them ──
 // The worklet (audio-worklet.js) resamples 11025 Hz -> context rate and plays
@@ -336,7 +361,7 @@ async function boot() {
 
         // Bump ?v= on every doom-worker.js edit — worker scripts cache as hard
         // as module scripts, and a stale copy looks exactly like a bug.
-        worker = new Worker('doom-worker.js?v=6', { type: 'module' });
+        worker = new Worker('doom-worker.js?v=9', { type: 'module' });
         worker.onmessage = onWorkerMessage;
         worker.onerror = (e) => {
             setStatus('worker failed: ' + (e.message || 'load error'), 'error');
@@ -344,6 +369,7 @@ async function boot() {
         };
         send({ t: 'boot', svdXml, wad, firmware, lowDetail, saveMap }, [wad]);
         send({ t: 'hidden', hidden: document.hidden });
+        startTicking();
     } catch (e) {
         setStatus('boot failed: ' + e.message, 'error');
         console.error(e);
