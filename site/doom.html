@@ -86,9 +86,13 @@
 </div>
 <pre id="uart"></pre>
 
-<script src="vendor/unicorn_arm.js?v=20"></script>
+<!-- Unicorn is no longer loaded here: emulation runs in doom-worker.js, which
+     fetches and evaluates it in the worker scope with an explicit locateFile
+     (a worker has no document.currentScript for emscripten to derive the
+     .wasm path from). -->
 <!-- Bump ?v= on every doom.js edit: the module is cached hard, and a stale
-     copy looks exactly like the bug you thought you just fixed. -->
-<script type="module" src="doom.js?v=25"></script>
+     copy looks exactly like the bug you thought you just fixed. The worker
+     has its own ?v= inside doom.js. -->
+<script type="module" src="doom.js?v=26"></script>
 </body>
 </html>

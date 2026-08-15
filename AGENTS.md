@@ -1772,9 +1772,13 @@ turned out to be wrong; all numbers here are measured, not estimated
   safe budget) in 12-step bursts paced by a 40 ms interval — the rAF
   cadence. Verified: hidden-tab test freezes rAF 4 s → audio keeps flowing
   (+15750 samples ≈ 54 % of the visible rate) → rAF restored → full rate;
-  PASS. Debug handles: `window.__pump`, `window.__audioNode`,
-  `window.__audioPumpTimer`, `window.__noDrain`, `window.__noUart`,
-  `window.__audioTotal`. ABI gotcha: FRAMECOUNT/CLOCKMS are at **0x20002514 /
+  PASS. Debug handles: `window.__audioNode`, `window.__noDrain`,
+  `window.__noUart`, `window.__audioTotal`, `window.__doom`.
+  **2026-08-15: emulation moved into a Worker** (`site/doom-worker.js`);
+  `site/doom.js` is now only the UI shell, and the audio pump / rAF
+  double-driving described above is GONE — the worker steps on its own
+  timer, so `window.__pump` / `window.__audioPumpTimer` / `window.__emu`
+  no longer exist on that page (use `window.__doom`). See §17. ABI gotcha: FRAMECOUNT/CLOCKMS are at **0x20002514 /
   0x20002518** (ABI base 0x20002000 + 0x514/0x518) — reading 0x20000514
   returns a dead SRAM location (frames always 0 → clock pinned → guest
   time-waits never resolve). Known limits: Chrome throttles hidden-tab
@@ -1804,3 +1808,51 @@ turned out to be wrong; all numbers here are measured, not estimated
   drain misses the gunshots) and requires peak amplitude > 0.005. The Node
   harness sends raw 0x77 for W (unbound in-engine) — only the browser
   translates; the harness tests the engine path with arrow taps instead.
+
+---
+
+## 17. DOOM Web Worker (2026-08-15)
+
+Emulation for `doom.html` runs in `site/doom-worker.js`; `site/doom.js` is
+the UI shell. The worker owns the emulator, the stepping loop, the guest ABI
+and the framebuffer→RGBA conversion. The page keeps only what a worker
+cannot touch — canvas, keyboard, `AudioContext`/worklet, `localStorage` —
+and does one `putImageData` per frame on a transferred buffer.
+
+**It buys responsiveness, not throughput.** There is still exactly one
+emulation thread. Interleaved A/B, 45s headless runs (machine had other
+load — the ratio is the result, not the absolute numbers):
+
+| build | guest inst | rAF-gap p95 |
+|---|---|---|
+| main-thread (pre-worker) | 758–782M | 33.4ms |
+| worker, `MS_BUDGET` 28 | 668–681M | 16.8ms |
+| worker, `MS_BUDGET` 44 (shipped) | 720–724M | 16.8ms |
+
+Things that bite here:
+
+- **No `SharedArrayBuffer`.** It needs COOP/COEP headers GitHub Pages cannot
+  set, and it would buy nothing: the two WASM modules have separate linear
+  memories regardless, and Unicorn's build is single-threaded (§7).
+- **The yield between bursts must be a real timer.** `setTimeout` is clamped
+  to ~4ms once nested, which is a pure duty-cycle tax, so `MS_BUDGET` is
+  sized to absorb it (44ms work / 48ms wall = 92%, vs rAF's 96%). Replacing
+  it with a `MessageChannel` yield (~99% duty) degraded a 60s run to 760M
+  inst at MIPS 1.1 — the same class of stall §7/§16 describe. Do not
+  "optimize" it back.
+- **Unicorn cannot be `import`ed into the worker.** It is a classic
+  emscripten script that assigns a global, so the worker fetches and
+  indirect-`eval`s it, and must pass an explicit `locateFile`: there is no
+  `document.currentScript` for emscripten to derive the `.wasm` path from,
+  and it would otherwise look for it next to the worker instead of in
+  `vendor/`.
+- **Savegames are a round-trip.** Blobs live in guest EXTRAM but
+  `localStorage` is on the page, so a load request stops the stepping loop
+  (`loadPending`) until the answer arrives — the guest busy-waits on
+  `SAVEREADY`, so there is nothing to run meanwhile.
+- **Two cache-busting `?v=` values now.** `doom.js?v=` in `doom.html`, and
+  `doom-worker.js?v=` inside `doom.js`. Worker scripts cache exactly as hard
+  as module scripts. Bump the right one.
+- `window.__emu` / `window.__pump` / `window.__audioPumpTimer` are gone from
+  this page — the emulator is not on that thread. `window.__doom` exposes
+  `booted`, `paused`, `stats`, `key(code, pressed)` and `send(msg)`.
