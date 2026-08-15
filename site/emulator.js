@@ -91,6 +91,13 @@ export async function createEmulator(opts) {
         if (wasmInit) await bindings.default({ module_or_path: wasmInit });
         else await bindings.default();
     }
+    // Clear process-lifetime wasm globals before registering THIS instance's
+    // devices.  ExtDevices is a module-level list and the peripheral
+    // constructors bind by first-match, so without this a second
+    // createEmulator() in the same process silently attaches to the FIRST
+    // instance's devices (measured: a regfile seeded 0x22 read back 0x11).
+    // Older wasm bundles may not export it, hence the guard.
+    if (typeof bindings.reset_state === 'function') bindings.reset_state();
     for (const cfg of (ext_devices.spi_flash || [])) {
         add_spi_flash(cfg.peripheral, cfg.jedec_id, cfg.data, cfg.cs ?? null);
     }

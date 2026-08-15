@@ -555,3 +555,48 @@ mod audio_tests {
         assert_eq!(audio_take_capture(), Vec::<u16>::new());
     }
 }
+
+// ── process-wide state reset ────────────────────────────────────────────────
+/// Clear every process-lifetime global so a fresh emulator instance starts
+/// clean.  Without this, creating a second instance in the same process is
+/// broken in a subtle way: `ExtDevices` ACCUMULATES, and the peripheral
+/// constructors use `find_*_device(name)`, which returns the FIRST match —
+/// so instance 2 silently binds to instance 1's devices (measured: a regfile
+/// seeded 0x22 read back 0x11 from the previous instance, and rtc_test hung
+/// right after its first UART line when run after another firmware).
+///
+/// Call this BEFORE registering devices for a new instance (emulator.js does
+/// it immediately after the wasm module is ready).  It is safe to call when
+/// no instance exists — every table is lazily created.
+pub fn reset_globals() {
+    use std::sync::atomic::Ordering::Relaxed;
+    if let Some(m) = EXT_DEVICES.get() { *m.lock().unwrap() = ExtDevices::default(); }
+    if let Some(m) = SOFTWARE_SPI_CONFIGS.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = UART_OUTPUT.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = SPI_TAP_EVENTS.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = SPI_TAP_MISO.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = I2C_TAP_TX.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = I2C_TAP_RX.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = ADC_OVERRIDES.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = CAN_STAGED.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = AUDIO_SOURCE.get() { *m.lock().unwrap() = None; }
+    if let Some(m) = AUDIO_CAPTURE.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = DCMI_FRAME.get() { *m.lock().unwrap() = None; }
+    *FLASH_ERASE.lock().unwrap() = None;
+    FLASH_PROGRAMMING.store(false, Relaxed);
+    WATCHDOG_RESET.store(false, Relaxed);
+    ETH_TX_POLL.store(false, Relaxed);
+    ETH_RX_POLL.store(false, Relaxed);
+    ETH_DONE.store(0, Relaxed);
+    ETH_TX_DESC_ADDR.store(0, Relaxed);
+    ETH_RX_DESC_ADDR.store(0, Relaxed);
+    for i in 0..8 {
+        DMA_COMPLETED[i].store(false, Relaxed);
+        DMA_STREAM_IRQ[i].store(0, Relaxed);
+        DMA_STREAM_FLAGS[i].store(0, Relaxed);
+    }
+    // NOTE: deliberately NOT resetting INSTRUCTION_COUNT here — peripherals
+    // capture last_tick at construction; zeroing the global afterwards makes
+    // elapsed = now.wrapping_sub(last_tick) enormous and breaks tick logic.
+    // INSTRUCTION_COUNT.store(0, Relaxed);
+}

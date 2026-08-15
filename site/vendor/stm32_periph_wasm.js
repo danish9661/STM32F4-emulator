@@ -524,6 +524,16 @@ export function periph_write(addr, width, value) {
 }
 
 /**
+ * Clear all process-lifetime globals so a NEW emulator instance starts
+ * clean.  Must be called before registering that instance's devices.
+ * Without it, `ExtDevices` accumulates and a second instance silently binds
+ * to the FIRST instance's devices (see system::reset_globals).
+ */
+export function reset_state() {
+    wasm.reset_state();
+}
+
+/**
  * Debug: flash state summary [wel, status1, cs_state, dummy_pending, pending_program_len]
  * @param {string} peripheral
  * @returns {Uint32Array}

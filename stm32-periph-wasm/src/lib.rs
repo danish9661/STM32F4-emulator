@@ -7,6 +7,18 @@ pub mod ext_devices;
 
 use system::WasmSystem;
 
+// KNOWN BUG (diagnosed 2026-08-14, NOT yet fixed): this is a OnceLock and
+// `init()`/`init_svd()` below use `let _ = SYS.set(...)`. OnceLock accepts
+// only the FIRST value, so every later init() is SILENTLY DISCARDED and a
+// second emulator instance in the same process keeps running on the FIRST
+// instance's entire peripheral tree. That is the root cause of the
+// "one firmware per process" rule in AGENTS.md §9 / docs/components.md.
+//
+// Attempted fix (AtomicPtr to a leaked Box, so sys() can still hand out
+// &'static while being replaceable) DID fix multi-instance — blinky/rtc/
+// buzzer ran in any order in one process — but regressed test_exti and
+// test_audio, so it was reverted. Whatever the next attempt is, it must keep
+// those two green; they are the canaries.
 static SYS: OnceLock<WasmSystem> = OnceLock::new();
 
 fn sys() -> &'static WasmSystem {
@@ -124,6 +136,15 @@ pub fn dma_periph_write(addr: u32, bytes: Vec<u8>) {
         sys().p.write(&*sys(), addr + j as u32, chunk as u8, val);
         j += chunk;
     }
+}
+
+/// Clear all process-lifetime globals so a NEW emulator instance starts
+/// clean.  Must be called before registering that instance's devices.
+/// Without it, `ExtDevices` accumulates and a second instance silently binds
+/// to the FIRST instance's devices (see system::reset_globals).
+#[wasm_bindgen]
+pub fn reset_state() {
+    system::reset_globals();
 }
 
 #[wasm_bindgen]

@@ -235,6 +235,14 @@ export function periph_read(addr: number, width: number): number;
 export function periph_write(addr: number, width: number, value: number): void;
 
 /**
+ * Clear all process-lifetime globals so a NEW emulator instance starts
+ * clean.  Must be called before registering that instance's devices.
+ * Without it, `ExtDevices` accumulates and a second instance silently binds
+ * to the FIRST instance's devices (see system::reset_globals).
+ */
+export function reset_state(): void;
+
+/**
  * Debug: flash state summary [wel, status1, cs_state, dummy_pending, pending_program_len]
  */
 export function spi_flash_debug(peripheral: string): Uint32Array;
@@ -325,6 +333,7 @@ export interface InitOutput {
     readonly ltdc_get_scanline: () => number;
     readonly periph_read: (a: number, b: number) => number;
     readonly periph_write: (a: number, b: number, c: number) => void;
+    readonly reset_state: () => void;
     readonly spi_flash_debug: (a: number, b: number) => [number, number];
     readonly spi_push_miso: (a: number, b: number, c: number, d: number) => void;
     readonly spi_take_events: (a: number, b: number) => [number, number];
