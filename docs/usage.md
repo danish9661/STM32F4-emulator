@@ -193,7 +193,7 @@ window.__bindings.read32(addr)        // raw model read
 ## Using the emulator as a library (npm package)
 
 ```js
-import { createSTM32F407, createNetSim, FIRMWARES } from 'stm32f4-emulator';
+import { createSTM32F407, createNetSim, FIRMWARES } from 'stm32f4-emu';
 
 const netsim = createNetSim();                 // canned DHCP/TCP/HTTP peer
 const emu = await createSTM32F407({

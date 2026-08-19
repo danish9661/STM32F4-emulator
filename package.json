@@ -1,5 +1,5 @@
 {
-  "name": "stm32f4-emulator",
+  "name": "stm32f4-emu",
   "version": "0.1.0",
   "description": "STM32F407 emulator: Unicorn (WASM) CPU + Rust peripheral model. Runs real Cortex-M4 firmware in Node or the browser.",
   "type": "module",

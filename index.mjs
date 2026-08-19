@@ -1,4 +1,4 @@
-// stm32f4-emulator — Node API entry.
+// stm32f4-emu — Node API entry.
 // Wraps the browser/Node-universal emulator.js with the bundled assets
 // (SVD, wasm bindings, Unicorn) so Node consumers get a one-call setup.
 import { readFileSync } from 'node:fs';

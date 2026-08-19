@@ -41,7 +41,7 @@ Minimal starter components built on `pin()`/`watchPin()` — templates, not
 a full catalog:
 
 ```js
-import { LED, Button } from 'stm32f4-emulator'; // or site/components.js directly
+import { LED, Button } from 'stm32f4-emu'; // or site/components.js directly
 
 const led = new LED(emu, 'A', 5);
 led.watch((on) => console.log('LED', on ? 'ON' : 'OFF'));
@@ -53,7 +53,7 @@ btn.release();
 ```
 
 The full set: `LED`, `Button`, `Pwm`, `I2cRegisterDevice`, `Potentiometer`
-— all exported from `stm32f4-emulator` (or `site/components.js` directly).
+— all exported from `stm32f4-emu` (or `site/components.js` directly).
 
 Write your own component the same way: wrap `emu.pin()`/`emu.watchPin()`
 in a small class.

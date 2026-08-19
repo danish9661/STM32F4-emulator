@@ -13,11 +13,11 @@ Built on the official `@modelcontextprotocol/sdk` over a stdio transport.
 
 The SDK and `zod` are **optional peer dependencies** — using this package
 as an emulator library stays completely dependency-free (a plain
-`npm i stm32f4-emulator` installs exactly one package), and only the MCP
-server needs them:
+`npm i stm32f4-emu` installs exactly one package), and only the MCP
+server itself imports `@modelcontextprotocol/sdk` and `zod`.
 
 ```bash
-npm install stm32f4-emulator @modelcontextprotocol/sdk zod
+npm install stm32f4-emu @modelcontextprotocol/sdk zod
 ```
 
 Running the server without them exits with a message telling you exactly

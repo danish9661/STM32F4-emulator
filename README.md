@@ -81,12 +81,12 @@ node cli.mjs ../../eth_http/eth_http.bin 10000000 \
 
 ## Use it as a library (npm package)
 
-`npm pack` produces `stm32f4-emulator` — the full emulator as a library,
+`npm pack` produces `stm32f4-emu` — the full emulator as a library,
 with all WASM assets, the SVD register map, and the firmware binaries
 bundled:
 
 ```js
-import { createSTM32F407, createNetSim, FIRMWARES } from 'stm32f4-emulator';
+import { createSTM32F407, createNetSim, FIRMWARES } from 'stm32f4-emu';
 
 const netsim = createNetSim();                        // canned DHCP/TCP/HTTP peer
 const emu = await createSTM32F407({
@@ -195,7 +195,7 @@ firmware .bin ──► Unicorn WASM CPU ──► memory hooks
 │   ├── test_component_*.mjs Component-API tests, one firmware each (npm test)
 │   ├── test_doom.mjs        Node DOOM boot/menu/gameplay/save test
 │   └── vendor/              Browser WASM build, SVD, Unicorn
-├── index.mjs, package.json  npm package entry (stm32f4-emulator)
+├── index.mjs, package.json  npm package entry (stm32f4-emu)
 ├── mcp/                     MCP server (drive the emulator from an AI agent)
 ├── .github/workflows/       CI (Linux/Windows/macOS test matrix) + Pages deploy
 ├── tools/make_firmware.mjs  Regenerates site/firmware.js from eth_*/.bin

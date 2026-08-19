@@ -41,7 +41,7 @@ function requireSession() {
     return session;
 }
 
-const server = new McpServer({ name: 'stm32f4-emulator', version: '0.1.0' });
+const server = new McpServer({ name: 'stm32f4-emu', version: '0.1.0' });
 
 server.registerTool('list_firmwares', {
     description: 'List the firmware images bundled with the emulator that load_firmware accepts.',
