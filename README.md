@@ -1,5 +1,8 @@
-# STM32F4 Emulator
+# STM32F4 Emulator (`stm32f4-emu`)
 
+[![npm version](https://img.shields.io/npm/v/stm32f4-emu.svg)](https://www.npmjs.com/package/stm32f4-emu)
+[![npm downloads](https://img.shields.io/npm/dm/stm32f4-emu.svg)](https://www.npmjs.com/package/stm32f4-emu)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![CI](https://github.com/danish9661/stm32F4-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/danish9661/stm32F4-emulator/actions/workflows/ci.yml)
 [![Pages](https://github.com/danish9661/stm32F4-emulator/actions/workflows/pages.yml/badge.svg)](https://github.com/danish9661/stm32F4-emulator/actions/workflows/pages.yml)
 
@@ -262,12 +265,9 @@ rebuild — delete it so the vendor assets stay tracked/committed.
 - [docs/progress-and-future.md](docs/progress-and-future.md) — status,
   known limitations, roadmap.
 
-## License
+## License & Credits
 
-GPL-3.0-only. See [LICENSE](LICENSE).
-
-*This repository is a fork/continuation of
-[nviennot/stm32-emulator](https://github.com/nviennot/stm32-emulator), which
-emulated 3D-printer firmwares (Elegoo Saturn, Anycubic Mono X) in a native
-SDL app. The WASM headless emulator, network firmwares, browser demo, and npm
-package are new work built on that base.*
+- **License**: GPL-3.0-only. See [LICENSE](LICENSE).
+- **Unicorn CPU Core**: Powered by [Unicorn.js](https://github.com/AlexAltea/unicorn.js) by [Alex Altea](https://github.com/AlexAltea) (WASM/JS port of the [Unicorn Engine](https://www.unicorn-engine.org/) CPU emulator, derived from QEMU, licensed under GPLv2).
+- **Heritage**: Fork and continuation of [nviennot/stm32-emulator](https://github.com/nviennot/stm32-emulator) (native SDL 3D printer emulator by Nicolas Viennot). The headless WASM peripheral model, networking stack, browser demo, virtual components API, MCP server, and npm package are new work built on that base.
+- **DOOM**: Ported using [doomgeneric](https://github.com/ozkl/doomgeneric) by Ozkan Sezgin.
