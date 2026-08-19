@@ -388,6 +388,16 @@ pub(crate) fn fsmc_tap_data_pop(bank: usize) -> u32 {
         .unwrap_or(0)
 }
 
+// ── "this register read is coming from the DMA engine" ────────────────────
+// Set around the peripheral-side reads the DMA driver issues. A peripheral
+// register read is otherwise indistinguishable from a CPU load, but for a
+// STREAMING peripheral the difference is the whole point: the DMA drains at
+// bus rate and cannot overrun, while a CPU polling loop is far too slow and
+// does. DCMI reads it in its DR handler.
+static DMA_READ_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub fn set_dma_read_active(v: bool) { DMA_READ_ACTIVE.store(v, Ordering::Relaxed); }
+pub(crate) fn dma_read_active() -> bool { DMA_READ_ACTIVE.load(Ordering::Relaxed) }
+
 // ── DCMI frame source (JS camera sensor plumbing) ─────────────────────────
 static DCMI_FRAME: OnceLock<Mutex<Option<(u32, u32, Vec<u8>)>>> = OnceLock::new();
 pub fn dcmi_feed_frame(w: u32, h: u32, pixels: &[u8]) {
@@ -476,6 +486,15 @@ impl WasmSystem {
 
     pub fn pending_dma_count(&self) -> usize {
         self.pending_dma.borrow().len()
+    }
+
+    /// Is a queued DMA transfer aimed at a peripheral register inside
+    /// `[start, end)`? A streaming peripheral uses this to tell "the DMA is
+    /// my consumer" from "the CPU is polling me", which are very different
+    /// flow-control situations — see the DCMI tick.
+    pub fn dma_pending_for_range(&self, start: u32, end: u32) -> bool {
+        self.pending_dma.borrow().iter()
+            .any(|t| t.peripheral && t.peri_addr >= start && t.peri_addr < end)
     }
 
     pub fn take_pending_dma_transfer(&self, index: usize) -> Option<DmaTransfer> {
@@ -632,6 +651,7 @@ pub fn reset_globals() {
     if let Some(m) = AUDIO_CAPTURE.get() { m.lock().unwrap().clear(); }
     if let Some(m) = DCMI_FRAME.get() { *m.lock().unwrap() = None; }
     *FLASH_ERASE.lock().unwrap() = None;
+    DMA_READ_ACTIVE.store(false, Relaxed);
     FLASH_PROGRAMMING.store(false, Relaxed);
     WATCHDOG_RESET.store(false, Relaxed);
     ETH_TX_POLL.store(false, Relaxed);

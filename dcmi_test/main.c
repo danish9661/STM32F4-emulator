@@ -31,6 +31,21 @@
 #define RIS_FRAME (1u << 2)
 #define RIS_OVR   (1u << 3)
 
+// DMA2 stream 1 — the stream DCMI is wired to on real silicon (channel 1).
+// Stream N registers are at DMA2_BASE + 0x10 + 0x18*N.
+#define DMA2_BASE   0x40026400
+#define DMA2_S1CR   (*(volatile unsigned int *)(DMA2_BASE + 0x28))
+#define DMA2_S1NDTR (*(volatile unsigned int *)(DMA2_BASE + 0x2C))
+#define DMA2_S1PAR  (*(volatile unsigned int *)(DMA2_BASE + 0x30))
+#define DMA2_S1M0AR (*(volatile unsigned int *)(DMA2_BASE + 0x34))
+#define DMA2_S1FCR  (*(volatile unsigned int *)(DMA2_BASE + 0x3C))
+#define RCC_AHB1ENR (*(volatile unsigned int *)0x40023830)
+
+#define BIG_W 8
+#define BIG_H 4
+#define BIG_N (BIG_W * BIG_H)
+static volatile unsigned char dma_buf[BIG_N];
+
 static void uart_init(void);
 static void uart_puts(const char *s);
 static void uart_hex8(unsigned int v);
@@ -117,6 +132,61 @@ int main(void) {
         while (1);
     }
     uart_puts("DCMI ovr OK\r\n");
+
+    // ── Phase 3: the same oversized frame, captured by DMA, arrives whole ──
+    // This is how a real capture driver runs, and it is the direct contrast
+    // with phase 2: identical frame, identical FIFO, but the DMA answers
+    // each request at bus rate so nothing is dropped.
+    //
+    // ORDER MATTERS: start the capture FIRST, then enable the stream. The
+    // model queues the whole transfer when EN is written and the controller
+    // loads the frame on CAPTURE's rising edge, so arming the DMA against an
+    // idle DCMI just reads out zeroes.
+    RCC_AHB1ENR |= (1u << 22);          // DMA2 clock
+    for (int i = 0; i < BIG_N; i++) dma_buf[i] = 0;
+
+    DCMI_ICR = 0x1F;
+    DCMI_CR = 0;
+    DCMI_CR = 1;                         // CAPTURE first
+
+    DMA2_S1CR = 0;                       // disable while configuring
+    DMA2_S1NDTR = BIG_N;
+    DMA2_S1PAR = DCMI_BASE + 0x28;       // peripheral = DCMI_DR
+    DMA2_S1M0AR = (unsigned int)&dma_buf[0];
+    DMA2_S1FCR = 0x21;
+    // CHSEL=1 (bits 27:25), MINC (bit 10), PSIZE/MSIZE = byte, DIR = 00
+    // (peripheral -> memory), EN (bit 0).
+    DMA2_S1CR = (1u << 25) | (1u << 10) | 1u;
+
+    // Wait for the transfer to land. The last byte is non-zero in the test
+    // pattern, so it doubles as the completion signal.
+    int filled = 0;
+    for (unsigned int spins = 0; spins < 8000000u && !filled; spins++) {
+        if (dma_buf[BIG_N - 1] != 0) filled = 1;
+    }
+    if (!filled) {
+        uart_puts("DCMI dma timeout\r\n=== DCMI Test: FAIL ===\r\n");
+        while (1);
+    }
+
+    uart_puts("dma=");
+    for (int i = 0; i < 4; i++) uart_hex8(dma_buf[i]);
+    uart_puts("..");
+    uart_hex8(dma_buf[BIG_N - 1]);
+    uart_puts("\r\n");
+
+    // Every pixel, in order, with no gap where the FIFO would have dropped.
+    int bad = -1;
+    for (int i = 0; i < BIG_N; i++) {
+        if (dma_buf[i] != (unsigned char)(i + 1)) { bad = i; break; }
+    }
+    if (bad >= 0) {
+        uart_puts("DCMI dma FAIL at ");
+        uart_hex8((unsigned int)bad);
+        uart_puts("\r\n=== DCMI Test: FAIL ===\r\n");
+        while (1);
+    }
+    uart_puts("DCMI dma OK\r\n");
 
     uart_puts("=== DCMI Test: done ===\r\n");
     while (1);

@@ -118,6 +118,16 @@ pub fn dma_set_completed(stream_idx: u32, success: bool) {
 /// periph_read loop (one WASM call instead of size/4).
 #[wasm_bindgen]
 pub fn dma_periph_read(addr: u32, size: u32, pinc: bool, psize: u32) -> Vec<u8> {
+    // Tell streaming peripherals these reads are the DMA engine, not a CPU
+    // polling loop — DCMI serves them from the sensor rather than the 4-deep
+    // FIFO, which is what stops a DMA capture from overrunning.
+    system::set_dma_read_active(true);
+    let out = dma_periph_read_inner(addr, size, pinc, psize);
+    system::set_dma_read_active(false);
+    out
+}
+
+fn dma_periph_read_inner(addr: u32, size: u32, pinc: bool, psize: u32) -> Vec<u8> {
     let psize = psize.max(1);
     let mut out = Vec::with_capacity(size as usize);
     let mut off = 0u32;

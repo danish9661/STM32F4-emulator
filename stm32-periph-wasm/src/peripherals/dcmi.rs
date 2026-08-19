@@ -9,6 +9,12 @@ const DCMI_IRQ: i32 = 78;
 const PIXELS_PER_TICK: usize = 16;
 const FIFO_DEPTH: usize = 4;
 
+// DCMI's register block on the F407. Used to spot a DMA transfer aimed at
+// our DR — the peripheral is registered by the SVD so it does not otherwise
+// know its own base address.
+const DCMI_REGS_START: u32 = 0x5005_0000;
+const DCMI_REGS_END: u32 = 0x5005_0400;
+
 /// DCMI (Digital Camera Interface) controller. On-chip only: the pixel
 /// source is an external camera sensor fed by the JS hardware layer via
 /// `dcmi_feed_frame` — the model consumes that frame with VSYNC/LINE/FRAME
@@ -47,19 +53,16 @@ impl Dcmi {
         }
     }
 
-    fn feed_next_pixel(&mut self) {
-        let Some((w, h, data)) = &self.frame else { return };
+    /// Pull the next pixel off the sensor and advance the frame cursor,
+    /// raising LINE/FRAME as their boundaries are crossed. Returns None once
+    /// the frame is exhausted. Shared by both consumers: the FIFO path (CPU
+    /// polling) and the DMA path.
+    fn advance_pixel(&mut self) -> Option<u8> {
+        let Some((w, h, data)) = &self.frame else { return None };
         let (w, h) = (*w, *h);
-        if self.frame_y >= h { return; }
+        if self.frame_y >= h { return None; }
         let idx = (self.frame_y * w + self.frame_x) as usize;
-        if let Some(&px) = data.get(idx) {
-            if self.fifo.len() >= FIFO_DEPTH {
-                // FIFO overflow: drop the oldest, flag OVR.
-                self.fifo.remove(0);
-                self.ris |= 1 << 3;
-            }
-            self.fifo.push(px);
-        }
+        let px = data.get(idx).copied();
         self.frame_x += 1;
         if self.frame_x >= w {
             self.frame_x = 0;
@@ -75,6 +78,32 @@ impl Dcmi {
                 self.cr &= !1; // CAPTURE auto-clears, like the real part
             }
         }
+        px
+    }
+
+    fn feed_next_pixel(&mut self) {
+        if let Some(px) = self.advance_pixel() {
+            if self.fifo.len() >= FIFO_DEPTH {
+                // FIFO overflow: drop the oldest, flag OVR.
+                self.fifo.remove(0);
+                self.ris |= 1 << 3;
+            }
+            self.fifo.push(px);
+        }
+    }
+
+    /// DR read issued by the DMA engine. Drains anything already in the FIFO
+    /// first (ordering), then pulls straight off the sensor.
+    ///
+    /// It bypasses the FIFO depth rather than overrunning it because that is
+    /// what the hardware does: the DMA answers each request at bus rate, so
+    /// the FIFO never fills. The 4-deep FIFO and its OVR flag model the CPU
+    /// being too slow — which is the whole reason capture drivers use DMA.
+    fn dma_pop(&mut self) -> u32 {
+        if !self.fifo.is_empty() {
+            return self.fifo.remove(0) as u32;
+        }
+        self.advance_pixel().map(|p| p as u32).unwrap_or(0)
     }
 }
 
@@ -92,7 +121,9 @@ impl Peripheral for Dcmi {
             0x1C => self.cwstrt,
             0x20 => self.cwsiz,
             0x28 => {
-                let v = if let Some(px) = self.fifo.first().copied() {
+                let v = if crate::system::dma_read_active() {
+                    self.dma_pop()
+                } else if let Some(px) = self.fifo.first().copied() {
                     self.fifo.remove(0);
                     px as u32
                 } else {
@@ -147,6 +178,13 @@ impl Peripheral for Dcmi {
 
     fn tick(&mut self, sys: &System) {
         if self.cr & 1 == 0 { return; }
+        // If a DMA transfer is queued against our registers, the DMA is the
+        // consumer — let it pull the pixels. Streaming them into the 4-deep
+        // FIFO here first would drop all but the last four before the DMA
+        // ever ran, so a DMA capture would receive a frame that starts
+        // partway in. The DMA services the queue later in this same host
+        // step, so nothing is lost by not ticking.
+        if sys.dma_pending_for_range(DCMI_REGS_START, DCMI_REGS_END) { return; }
         if self.frame.is_none() {
             if let Some((w, h, data)) = crate::system::dcmi_frame() {
                 self.frame = Some((w, h, data));
@@ -206,6 +244,44 @@ mod tests {
         dcmi.cr = 1;
         for _ in 0..40 { Dcmi::tick(dcmi, &sys); }
         assert_eq!(dcmi.fifo.first().copied().unwrap_or(0), 0xAA + 28, "fifo tail pixel");
+        dcmi.fifo.clear();
+        crate::system::dcmi_clear();
+    }
+
+    #[test]
+    fn dma_reads_take_the_whole_frame_in_order() {
+        let _lock = DCMI_TEST_LOCK.lock().unwrap();
+        // 8x4 = 32 pixels: eight times the FIFO, so a CPU-paced drain would
+        // lose all but the last four per tick. The DMA must get all 32, in
+        // order, because it is served straight off the sensor.
+        crate::system::dcmi_feed_frame(8, 4, &(1u8..=32).collect::<Vec<u8>>());
+        let sys = crate::system::test_dummy_system();
+        let slot = sys.p.peripherals.iter().find(|s| {
+            s.peripheral.borrow_mut().as_any_mut().downcast_ref::<Dcmi>().is_some()
+        }).expect("dcmi slot");
+        let mut d = slot.peripheral.borrow_mut();
+        let dcmi = d.as_any_mut().downcast_mut::<Dcmi>().unwrap();
+        let sys2 = sys.clone();
+
+        Dcmi::write(dcmi, &sys2, 0x00, 1);   // CAPTURE rising: load the frame
+
+        crate::system::set_dma_read_active(true);
+        let got: Vec<u8> = (0..32).map(|_| Dcmi::read(dcmi, &sys2, 0x28) as u8).collect();
+        crate::system::set_dma_read_active(false);
+
+        assert_eq!(got, (1u8..=32).collect::<Vec<u8>>(), "whole frame, in order");
+        assert!(dcmi.ris & (1 << 2) != 0, "FRAME flag set");
+        assert_eq!(dcmi.ris & (1 << 3), 0, "no OVR: the DMA never overruns");
+        assert_eq!(dcmi.cr & 1, 0, "CAPTURE auto-clears at frame end");
+
+        // The CPU path is unchanged: still FIFO-limited, still overruns.
+        crate::system::dcmi_feed_frame(8, 4, &(1u8..=32).collect::<Vec<u8>>());
+        Dcmi::write(dcmi, &sys2, 0x10, 0x1F);  // clear flags
+        Dcmi::write(dcmi, &sys2, 0x00, 0);
+        Dcmi::write(dcmi, &sys2, 0x00, 1);
+        for _ in 0..4 { Dcmi::tick(dcmi, &sys2); }
+        assert!(dcmi.ris & (1 << 3) != 0, "polling still overruns the FIFO");
+
         dcmi.fifo.clear();
         crate::system::dcmi_clear();
     }

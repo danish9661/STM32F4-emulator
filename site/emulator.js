@@ -715,7 +715,7 @@ export async function createEmulator(opts) {
         }
     };
 
-    const isPeriphAddr = (a) => a >= 0x40000000 && a < 0x50000000;
+    const isPeriphAddr = (a) => (a >= 0x40000000 && a < 0xB0000000) || (a >= 0xE0000000 && a < 0xE1000000);
     const processDma = () => {
         const count = dma_get_pending_count();
         for (let i = 0; i < count; i++) {

@@ -142,7 +142,7 @@ impl Stream {
         };
 
         let peripheral = dir != Dir::MemCopy;
-        let pinc = (self.cr >> 10) & 1 != 0; // PINC: increment PA per transfer
+        let pinc = (self.cr >> 9) & 1 != 0; // PINC (bit 9): increment PA per transfer; bit 10 is MINC
         let p_size = Self::dma_size((self.cr >> 11) & 0b11);
         sys.queue_dma_transfer(DmaTransfer {
             direction: dma_dir,
