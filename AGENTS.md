@@ -419,6 +419,28 @@ Once execution is reliable, finish `test_webserver_net.mjs`:
   `mem_write`.
 - Never start emu from a hardcoded 0x08000190 — that's mid-bss-loop. Use the
   reset vector value (0x08000185).
+- **FreeRTOS interrupt pump: task-context `portYIELD()` mid-`str` PC.** In
+  `site/emulator.js` `processInterrupts`, a task that yields via a `PENDSVSET`
+  write to `0xE000ED04` is stopped by `memWriteHook` **mid-`str`**, so
+  `uc.reg_read_i32(PC)` is the **store's own address**, not the next
+  instruction. The exception frame must save the **following** instruction's
+  address (advanced by `thumbInstLen`), matching real Cortex-M (exceptions are
+  taken *after* the instruction completes). Saving the frozen PC makes the
+  resumed task re-execute the `str PENDSVSET`, re-pend PendSV, and — for the
+  highest-priority task — deadlock the whole scheduler (`TASK1`/`TASK2`/SysTick
+  never run). The `icsrYieldPc`/`deliveringIsr` plumbing in
+  `processInterrupts`/`memWriteHook` enforces this; never "simplify" it back.
+  Regression test: `site/probe_freertos.mjs` (wired into `npm test`); the
+  firmware is `freertos_test/` (TIM3 ISR → `xSemaphoreGiveFromISR(xTimSem)` →
+  `vHighTask` pends on the semaphore).
+- **The "huge MMIO hook range breaks TIM3" diagnosis was wrong.** TIM3 (and
+  other APB1 peripherals at 0x4000xxxx) ARE correctly hooked by the single
+  `[0x40000000,0xB0000000]`+`[0xE0000000,0xE1000000]` range used for BOTH
+  `mmap` and `hook_add` in `site/emulator.js`. The FreeRTOS scheduler deadlock
+  was purely the context-switch PC bug above, not the hook range. Keep the
+  single huge range — a prior split into per-region `periphHookRanges`/
+  `periphMapRanges` dropped EXTI/SYSCFG/DBGMCU and regressed `test_exti`/
+  `test_dma`/`test_rx_interrupt`.
 - After a wedged emu_start, the instance is unusable; re-create the uc and
   re-init rather than trying to recover.
 - The step throughput degrades sharply over long runs (translation cache

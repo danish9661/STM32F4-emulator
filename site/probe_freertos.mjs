@@ -82,7 +82,6 @@ const discoverTcbs = () => {
 };
 
 let tim2c0 = -1, tim2c1 = -1, tim3isr = -1, timPass = false, timFail = false;
-const UXTICKSUSP = 0x200000d8, PENDING = 0x200000b8, TOPPRI = 0x20000084;
 const gTim3IsrAddr = elfSym.g_tim3_isr, gHighAddr = HIGH;
 let maxTim3 = 0, diagDone = false;
 
@@ -98,27 +97,6 @@ try {
         if (high > maxHigh) maxHigh = high;
         const g3 = rd32(gTim3IsrAddr);
         if (g3 > maxTim3) maxTim3 = g3;
-        if (g3 > 0 && !diagDone) {
-            diagDone = true;
-            const sus = rd32(UXTICKSUSP);
-            const topPri = rd32(TOPPRI);
-            const pend = rd32(PENDING);
-            const curTCB = rd32(PCUR);
-            // ready list counts for prio 0..4 (List_t: uxNumberOfItems @ +0)
-            const counts = [];
-            for (let p = 0; p < 5; p++) counts.push(rd32(READY + 20 * p));
-            // xTimSem @ 0x20000004 is a HANDLE (pointer) to Queue_t
-            const Q = rd32(0x20000004);
-            const qMsgs = rd32(Q + 0x38);
-            const qLen = rd32(Q + 0x3c);
-            const qRxLock = rd32(Q + 0x44);
-            // vHighTask TCB @ 0x20001160: items at +4 (state) and +24 (event), pvContainer at +12 within each
-            const vhTcb = 0x20001160;
-            const vhStateCont = rd32(vhTcb + 4 + 12);
-            const vhEventCont = rd32(vhTcb + 24 + 12);
-            console.log(`[DIAG] after TIM3 ISR: g_tim3_isr=${g3} g_high=${high} uxSchedulerSuspended=${sus} uxTopReadyPriority=${topPri} pxCurrentTCB=0x${curTCB.toString(16)} readyCounts=[${counts.join(',')}]`);
-            console.log(`[DIAG] xTimSem Q=0x${Q.toString(16)} uxMessagesWaiting=${qMsgs} uxLength=${qLen} cRxLock=${qRxLock} | vHighTask stateContainer=0x${vhStateCont.toString(16)} eventContainer=0x${vhEventCont.toString(16)}`);
-        }
         discoverTcbs();
         if (tcb === TCB_T1) seen.add('TASK1');
         else if (tcb === TCB_T2) seen.add('TASK2');
@@ -132,6 +110,17 @@ try {
         if (m3) { tim3isr = parseInt(m3[1]); maxHigh = Math.max(maxHigh, parseInt(m3[2])); console.log('   [parse]', m3[0]); }
         if (u.includes('TIM TEST PASS')) timPass = true;
         if (u.includes('TIM TEST FAIL')) timFail = true;
+        // Stop early once every success marker has been observed. This only
+        // shortens the run (never converts a pass into a fail): the full
+        // scheduler + ISR -> semaphore -> context-switch path has already
+        // been exercised by the time all of these hold.
+        const tickHits = allOut.split('tick=').length - 1;
+        if (tim3isr > 0 && maxHigh > 0 && timPass && tickHits > 0 &&
+            seen.has('TASK1') && seen.has('TASK2') && seen.has('IDLE') &&
+            allOut.includes('TASK1') && allOut.includes('TASK2')) {
+            console.log(`[probe] all success markers observed at inst ${instCount}; stopping early`);
+            break;
+        }
         if (instCount % 5000000 === 0) {
             console.log(`[${instCount}] pc=0x${pc.toString(16)} tick=${tick} tcb=0x${tcb.toString(16)} uartLen=${u.length} tail=${JSON.stringify(u.slice(-60))}`);
             if (TCB_T1) console.log(`   TCBs idle=0x${TCB_IDLE.toString(16)} T1=0x${TCB_T1.toString(16)} T2=0x${TCB_T2.toString(16)}`);
@@ -150,8 +139,8 @@ try {
     process.exit(1);
 }
 const all = allOut;
-console.log('=== UART OUTPUT (last 800 chars) ===');
-console.log(all.slice(-800));
+console.log('=== UART OUTPUT (last 240 chars) ===');
+console.log(all.slice(-240));
 console.log('=== END ===');
 const t1 = (all.split('TASK1').length - 1);
 const t2 = (all.split('TASK2').length - 1);
@@ -160,20 +149,6 @@ console.log('TASK1 hits:', t1, 'TASK2 hits:', t2, 'tick= hits:', ticks, 'total c
 console.log('TCBs observed:', [...seen].join(','), 'maxTick:', maxTick, 'distinct TCBs:', tcbSet.size);
 console.log('TCB addrs: idle=0x' + TCB_IDLE.toString(16) + ' T1=0x' + TCB_T1.toString(16) + ' T2=0x' + TCB_T2.toString(16));
 console.log('TIM2 c0=', tim2c0, 'c1=', tim2c1, 'TIM3 isr=', tim3isr, 'high=', maxHigh, 'timPass=', timPass, 'timFail=', timFail);
-
-// Dump the MODEL-side TIM3 registers (not the guest RAM mirror) to confirm the
-// MMIO writes actually reached the peripheral model and it is ticking.
-try {
-    const pr = (a, n = 4) => { const v = bindings.periph_read(a, n); return v >>> 0; };
-    const cr1 = pr(0x40000400), dier = pr(0x4000040c), cnt = pr(0x40000424), arr = pr(0x4000042c);
-    const iser0 = pr(0xE000E100);
-    console.log(`[model] TIM3 cr1=0x${cr1.toString(16)} dier=0x${dier.toString(16)} cnt=0x${cnt.toString(16)} arr=0x${arr.toString(16)} NVIC_ISER0=0x${iser0.toString(16)}`);
-    // Direct model write test: does periph_write actually land for these addrs?
-    bindings.periph_write(0x4000040c, 4, 0x1234);
-    bindings.periph_write(0xE000E100, 4, 0x20000000);
-    const dier2 = pr(0x4000040c), iser2 = pr(0xE000E100);
-    console.log(`[model-direct] dier=0x${dier2.toString(16)} (wrote 0x1234) ISER0=0x${iser2.toString(16)} (wrote 0x20000000)`);
-} catch (e) { console.log('[model] dump failed:', e.message); }
 
 const okSched = t1 > 0 && t2 > 0 && ticks > 0 && seen.has('TASK1') && seen.has('TASK2') && seen.has('IDLE');
 const okTim2 = tim2c1 > tim2c0;
