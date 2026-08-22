@@ -150,11 +150,19 @@ void vTask2(void *p) {
 
 /* Highest-priority task: pends on xTimSem, which the TIM3 ISR gives.  Runs only
  * after an ISR-driven context switch (preemption), proving the NVIC -> PendSV
- * -> scheduler path.  After consuming the semaphore it re-arms TIM3 (deferred
- * interrupt) so the next overflow re-triggers the ISR. */
+ * -> scheduler path.  It arms TIM3 up front (and re-arms it after each consume)
+ * so it owns the peripheral that gates its wakeup and is self-contained: it does
+ * not depend on another task arming the timer first. */
 void vHighTask(void *p) {
     (void)p;
     uart_puts("Hhigh start\n");
+    /* Arm TIM3 before the first take so this task is self-contained. */
+    RCC_APB1ENR |= (1u << 1);                        /* TIM3 clock */
+    *(volatile uint32_t *)(TIM3_BASE + 0x28) = 0;   /* PSC = 0 */
+    *(volatile uint32_t *)(TIM3_BASE + 0x2C) = 5000;/* ARR: ~1 overflow/step */
+    *(volatile uint32_t *)(TIM3_BASE + 0x0C) = 1;   /* DIER UIE */
+    *(volatile uint32_t *)(TIM3_BASE + 0x00) = 1;   /* CR1 CEN */
+    NVIC_ISER0 |= (1u << 29);                        /* enable TIM3 IRQ (29) */
     for (;;) {
         uart_puts("Hbefore\n");
         xSemaphoreTake(xTimSem, portMAX_DELAY);
