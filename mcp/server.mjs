@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
 // MCP server exposing the STM32F407 emulator as tools an MCP client
 // (Claude Code / Claude Desktop / any MCP host) can drive: load firmware,
 // step execution, read/write UART, poke and watch GPIO pins, inject ADC
@@ -31,6 +32,25 @@ try {
 }
 
 let session = null;      // { emu, firmware, components: Map }
+
+// ── CLI surface for the bin: stm32f4-mcp --help / --version ──
+// Printed before the stdio MCP transport starts (stdout is the JSON-RPC
+// channel once running, so we must exit before connecting).
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    process.stdout.write(
+        'stm32f4-mcp — MCP server exposing the STM32F407 emulator.\n\n' +
+        'Usage: stm32f4-mcp [--help] [--version]\n\n' +
+        'Speaks MCP over stdio (JSON-RPC). Connect it from an MCP client such\n' +
+        'as Claude Code or Claude Desktop. Optional peer deps:\n' +
+        '  npm install @modelcontextprotocol/sdk zod\n'
+    );
+    process.exit(0);
+}
+if (process.argv.includes('--version') || process.argv.includes('-V')) {
+    const ver = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+    process.stdout.write(`stm32f4-mcp ${ver}\n`);
+    process.exit(0);
+}
 let componentSeq = 0;
 
 const text = (s) => ({ content: [{ type: 'text', text: typeof s === 'string' ? s : JSON.stringify(s, null, 2) }] });

@@ -5,6 +5,7 @@
   "type": "module",
   "main": "index.mjs",
   "bin": {
+    "stm32f4-emu": "./cli.mjs",
     "stm32f4-mcp": "./mcp/server.mjs"
   },
   "exports": {
@@ -20,6 +21,7 @@
   },
   "files": [
     "index.mjs",
+    "cli.mjs",
     "README.md",
     "site/emulator.js",
     "site/components.js",

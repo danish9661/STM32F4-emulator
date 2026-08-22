@@ -66,7 +66,21 @@ export async function createEmulator(opts) {
         // context restore so FreeRTOS task switches actually take effect.
         // GATED: off by default, so existing firmwares are untouched.
         freertos = false,
+        // Debug: trace every peripheral MMIO read/write to stderr (used by the
+        // `stm32f4-emu --verbose` CLI flag). Capped so a chatty firmware can't
+        // flood the terminal.
+        verbose = false,
     } = opts;
+
+    // ── firmware image validation (actionable errors on load failure) ──
+    if (!firmware || !(firmware instanceof Uint8Array) || firmware.length < 8) {
+        const len = firmware && firmware.length !== undefined ? firmware.length : typeof firmware;
+        throw new Error(
+            `firmware image is invalid (length=${len}): expected a Uint8Array of at least ` +
+            `8 bytes containing the Cortex-M vector table (initial SP + reset PC). ` +
+            `Load a compiled STM32F4 firmware image (.bin / .elf / .hex).`
+        );
+    }
 
     const {
         periph_read, periph_write, tick, tick_n, get_uart_output,
@@ -240,8 +254,25 @@ export async function createEmulator(opts) {
     // pure GC churn.  Safe to reuse: uc.mem_write copies the bytes into guest
     // memory synchronously before returning, so nothing retains the buffer.
     const rdScratch = [];
+    // ── verbose peripheral register trace (opts.verbose / --verbose) ──
+    const VERBOSE_CAP = 5000;
+    let verboseCount = 0;
+    const vtrace = (dir, addr, size, val) => {
+        if (!verbose || verboseCount >= VERBOSE_CAP) return;
+        verboseCount++;
+        if (verboseCount === VERBOSE_CAP) {
+            process.stderr.write(`[verbose] register trace capped at ${VERBOSE_CAP} accesses\n`);
+            return;
+        }
+        const a = Number(addr);
+        process.stderr.write(
+            `[reg ${dir}] 0x${a.toString(16).padStart(8, '0')}[${size}] = 0x${val.toString(16)}\n`
+        );
+    };
+
     const memReadHook = (handle, type, address, size, value, user_data) => {
         const val = periph_read(Number(address), size) >>> 0;
+        vtrace('R', address, size, val);
         let bytes = rdScratch[size];
         if (bytes === undefined) bytes = rdScratch[size] = new Uint8Array(size);
         for (let i = 0; i < size; i++) bytes[i] = (val >> (i * 8)) & 0xFF;
@@ -250,6 +281,7 @@ export async function createEmulator(opts) {
     const memWriteHook = (handle, type, address, size, value, user_data) => {
         const a = Number(address);
         periph_write(a, size, Number(value));
+        vtrace('W', a, size, Number(value));
         if (a >= 0x40023C00 && a <= 0x40023C18) syncFlashProtection(); // FLASH CR writes flip pg
         // FreeRTOS task-context yield: portYIELD() pends PendSV via an SCB ICSR
         // write (bit 28 = PENDSVSET).  Unlike the SVC-based first switch, the
@@ -334,6 +366,14 @@ export async function createEmulator(opts) {
 
     const sp_init = read32(vector_table);
     const pc_init = read32(vector_table + 4);
+    if (sp_init === 0 || pc_init === 0) {
+        throw new Error(
+            `firmware reset vector is zero (SP=0x${sp_init.toString(16)}, PC=0x${pc_init.toString(16)}). ` +
+            `The loaded image does not contain a valid Cortex-M vector table at ` +
+            `0x${vector_table.toString(16)} — ensure you loaded a compiled STM32F4 firmware, ` +
+            `not raw or empty data.`
+        );
+    }
     uc.reg_write_i32(Module.ARM_REG_SP, sp_init);
     uc.reg_write_i32(Module.ARM_REG_PC, pc_init | 1);
 

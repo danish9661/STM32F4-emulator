@@ -279,7 +279,43 @@ document is the readable summary.
     and add maintenance cost for marginal protection. Revisit only if
     `processInterrupts` is reworked or a real FreeRTOS app using those
     primitives is targeted.
-- [ ] USB CDC echo.
+ - [ ] USB CDC echo.
+
+### Delivered 2026-08-22 (CLI / DX pass)
+ - [x] **`stm32f4-emu` headless CLI** (`cli.mjs`, registered as the `stm32f4-emu`
+       `bin`): loads `.bin`/`.elf`/`.hex`, boots it, streams guest UART to
+       stdout; flags `--inst`, `--format`, `--verbose`, `--help`, `--version`.
+ - [x] **`--verbose` register trace** in `site/emulator.js` (`opts.verbose`),
+       traces peripheral MMIO R/W to stderr, capped at 5000 accesses.
+ - [x] **Actionable firmware-load errors**: empty/too-small image and zero
+       reset-vector throws with guidance; `loaders.js` ELF/HEX parse failures
+       name the expected format and likely cause.
+ - [x] **`stm32f4-mcp --help` / `--version`** for the MCP server bin.
+ - [x] **`CHANGELOG.md`** tracking releases/features.
+ - [x] **TypeScript declarations** (`index.d.ts`, `site/emulator.d.ts`) for the
+       public Node API (createEmulator / createSTM32F407 / decodeFirmware /
+       components) so TypeScript consumers get types.
+
+### Deferred / low-priority (tracked, not scheduled)
+ - [ ] **More demo firmwares** — a CAN-bus demo (exercising the two-node
+       arbitration model already in `can.rs`) and a deep-sleep / low-power
+       (STOP/WFI + RTC wakeup) demo. Useful for showcasing, but the peripheral
+       models they need are already verified by existing `can_test` /
+       `rtc_test`; the marginal emulator value is a new firmware + test
+       harness each. Revisit when a showcase gap is identified.
+ - [ ] **Wider edge-case test coverage** ("236/236" style) — the current suite
+       already guards every emulator-specific defect (FreeRTOS context switch,
+       ETH RX/TX, DMA, I2C/SPI taps, LTDC, audio, RTC). Extra cases would mostly
+       re-test *guest* library code. Low value relative to maintenance cost;
+       add only when a new bug class appears.
+ - [ ] **Website / docs polish** — landing-page copy, diagrams, more in-page
+       help. Cosmetic; do alongside the next public-facing push.
+ - [ ] **Performance work** — the MIPS ceiling is the Unicorn 2.1.4 WASM core
+       (≈20–23 MIPS headless; DOOM runs ~22–24 fps). Already optimized
+       (per-block hook, noCountHook path, minimalPolls). No further easy
+       headroom without a different CPU core; revisit only if a faster Unicorn
+       build or a native (non-WASM) binding becomes available.
+
 
 ## Verification checklist (regression)
 

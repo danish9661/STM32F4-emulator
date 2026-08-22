@@ -11,13 +11,13 @@ export function parseIntelHex(text) {
     for (let line of text.split(/\r?\n/)) {
         line = line.trim();
         if (!line) continue;
-        if (line[0] !== ':') throw new Error('not an Intel HEX record: ' + line.slice(0, 16));
+        if (line[0] !== ':') throw new Error('invalid Intel HEX: a record line must start with ":" (got "' + line.slice(0, 16) + '...") — pass a .hex file or use --format bin/elf');
         const bytes = [];
         for (let i = 1; i < line.length; i += 2) bytes.push(parseInt(line.slice(i, i + 2), 16));
         const count = bytes[0], addr = (bytes[1] << 8) | bytes[2], type = bytes[3];
         let sum = 0;
         for (const b of bytes) sum = (sum + b) & 0xFF;
-        if (sum !== 0) throw new Error('bad HEX checksum on line: ' + line.slice(0, 16));
+        if (sum !== 0) throw new Error('invalid Intel HEX: checksum mismatch on record "' + line.slice(0, 16) + '" (file may be corrupt or not Intel HEX)');
         const data = bytes.slice(4, 4 + count);
         if (type === 0x00) {
             for (let i = 0; i < count; i++) image.set(base + addr + i, data[i]);
@@ -45,10 +45,14 @@ export function parseIntelHex(text) {
 // Extracts PT_LOAD segments (flash/RAM images + preload list) and, if the
 // symtab is present, the symbol table for the symbols panel.
 export function parseElf(bytes) {
-    if (bytes.length < 52) throw new Error('file too small to be an ELF');
+    if (bytes.length < 52) throw new Error('not a valid ELF: file is only ' + bytes.length + ' bytes (an ELF needs >= 52); pass a compiled STM32F4 firmware (.elf/.bin/.hex)');
     const b = new Uint8Array(bytes);
-    if (b[0] !== 0x7F || b[1] !== 0x45 || b[2] !== 0x4C || b[3] !== 0x46) throw new Error('not an ELF file');
-    if (b[4] !== 1 || b[5] !== 1) throw new Error('only 32-bit little-endian ELF is supported');
+    if (b[0] !== 0x7F || b[1] !== 0x45 || b[2] !== 0x4C || b[3] !== 0x46)
+        throw new Error('not an ELF file (magic 0x' + (b[0].toString(16) + b[1].toString(16) + b[2].toString(16)) +
+            ', expected 7F454C46 "\\x7fELF"); pass a compiled STM32F4 firmware');
+    if (b[4] !== 1 || b[5] !== 1)
+        throw new Error('unsupported ELF: only 32-bit little-endian is supported (got ei_class=0x' + b[4].toString(16) +
+            ' ei_data=0x' + b[5].toString(16) + '); compile for an ARM Cortex-M target');
     const u32 = (o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
     const u16 = (o) => (b[o] | (b[o + 1] << 8)) >>> 0;
     const entry = u32(24);
@@ -63,7 +67,7 @@ export function parseElf(bytes) {
         if (!filesz) continue;
         segments.push({ vaddr, data: new Uint8Array(b.slice(off, off + filesz)), memsz });
     }
-    if (segments.length === 0) throw new Error('ELF has no loadable segments');
+    if (segments.length === 0) throw new Error('ELF has no PT_LOAD segments — not a linked executable firmware (expected FLASH@0x08000000 / RAM@0x20000000 segments)');
 
     const FLASH_START = 0x08000000, FLASH_END = 0x08100000;
     const RAM_START = 0x20000000, RAM_END = 0x20020000;
@@ -77,7 +81,9 @@ export function parseElf(bytes) {
             ram.set(seg.data, seg.vaddr - RAM_START);
             extraMem.push({ addr: seg.vaddr, data: seg.data });
         } else {
-            throw new Error('loadable segment at 0x' + seg.vaddr.toString(16) + ' outside FLASH/RAM');
+            throw new Error('loadable segment at 0x' + seg.vaddr.toString(16) +
+                ' is outside the STM32F407 memory map (FLASH 0x08000000-0x08100000, RAM 0x20000000-0x20020000); ' +
+                'check the linker script targets STM32F407');
         }
     }
 
