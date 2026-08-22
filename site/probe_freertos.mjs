@@ -56,8 +56,6 @@ if (!XTICK || !PCUR || !READY || !HIGH) {
     console.error('FATAL: could not resolve kernel symbols', { xTickCount: XTICK, pxCurrentTCB: PCUR, pxReadyTasksLists: READY, g_high_count: HIGH });
     process.exit(2);
 }
-console.log(`[syms] xTickCount=0x${XTICK.toString(16)} pxCurrentTCB=0x${PCUR.toString(16)} pxReadyTasksLists=0x${READY.toString(16)} g_high_count=0x${HIGH.toString(16)}`);
-
 let instCount = 0;
 const MAX = 120000000;
 let pc = 0;
@@ -105,9 +103,9 @@ try {
         tcbSet.add(tcb);
         if (tick > maxTick) maxTick = tick;
         const m2 = u.match(/TIM2 adv (-?\d+)->(-?\d+)[^\r\n]*/);
-        if (m2) { tim2c0 = parseInt(m2[1]); tim2c1 = parseInt(m2[2]); console.log('   [parse]', m2[0]); }
+        if (m2) { tim2c0 = parseInt(m2[1]); tim2c1 = parseInt(m2[2]); }
         const m3 = u.match(/TIM3 isr (-?\d+) high (-?\d+)[^\r\n]*/);
-        if (m3) { tim3isr = parseInt(m3[1]); maxHigh = Math.max(maxHigh, parseInt(m3[2])); console.log('   [parse]', m3[0]); }
+        if (m3) { tim3isr = parseInt(m3[1]); maxHigh = Math.max(maxHigh, parseInt(m3[2])); }
         if (u.includes('TIM TEST PASS')) timPass = true;
         if (u.includes('TIM TEST FAIL')) timFail = true;
         // Stop early once every success marker has been observed. This only
@@ -118,12 +116,7 @@ try {
         if (tim3isr > 0 && maxHigh > 0 && timPass && tickHits > 0 &&
             seen.has('TASK1') && seen.has('TASK2') && seen.has('IDLE') &&
             allOut.includes('TASK1') && allOut.includes('TASK2')) {
-            console.log(`[probe] all success markers observed at inst ${instCount}; stopping early`);
             break;
-        }
-        if (instCount % 5000000 === 0) {
-            console.log(`[${instCount}] pc=0x${pc.toString(16)} tick=${tick} tcb=0x${tcb.toString(16)} uartLen=${u.length} tail=${JSON.stringify(u.slice(-60))}`);
-            if (TCB_T1) console.log(`   TCBs idle=0x${TCB_IDLE.toString(16)} T1=0x${TCB_T1.toString(16)} T2=0x${TCB_T2.toString(16)}`);
         }
         // Only stop early on a hard failure; a TIM TEST PASS is just a
         // milestone — keep running so the scheduler (TASK1/TASK2/IDLE) is

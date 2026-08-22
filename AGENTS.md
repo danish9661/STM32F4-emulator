@@ -432,7 +432,12 @@ Once execution is reliable, finish `test_webserver_net.mjs`:
   `processInterrupts`/`memWriteHook` enforces this; never "simplify" it back.
   Regression test: `site/probe_freertos.mjs` (wired into `npm test`); the
   firmware is `freertos_test/` (TIM3 ISR → `xSemaphoreGiveFromISR(xTimSem)` →
-  `vHighTask` pends on the semaphore).
+  `vHighTask` pends on the semaphore). `vHighTask` **arms TIM3 itself** (it owns
+  the peripheral that gates its wakeup, so it does not depend on another task
+  arming the timer). The probe is intentionally quiet: it prints only a final
+  summary plus `PROBE PASS`/`PROBE FAIL`, and stops early once every success
+  marker is observed — all earlier `[DIAG]`/`[MODELDUMP]`/`[syms]`/`[parse]`/
+  `[N]` debug output was removed.
 - **The "huge MMIO hook range breaks TIM3" diagnosis was wrong.** TIM3 (and
   other APB1 peripherals at 0x4000xxxx) ARE correctly hooked by the single
   `[0x40000000,0xB0000000]`+`[0xE0000000,0xE1000000]` range used for BOTH
