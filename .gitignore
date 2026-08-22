@@ -4,3 +4,6 @@
 *.tgz
 # MCP server dependency tree (package-lock.json stays tracked)
 /node_modules
+
+# FreeRTOS test build artifacts (intermediate objects; the .elf/.bin are committed)
+freertos_test/**/*.o
