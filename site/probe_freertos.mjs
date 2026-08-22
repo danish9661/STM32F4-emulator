@@ -51,17 +51,20 @@ const elfSym = (() => {
 const XTICK = elfSym.xTickCount;
 const PCUR = elfSym.pxCurrentTCB;
 const READY = elfSym.pxReadyTasksLists;
-if (!XTICK || !PCUR || !READY) {
-    console.error('FATAL: could not resolve kernel symbols', { xTickCount: XTICK, pxCurrentTCB: PCUR, pxReadyTasksLists: READY });
+const HIGH = elfSym.g_high_count;
+if (!XTICK || !PCUR || !READY || !HIGH) {
+    console.error('FATAL: could not resolve kernel symbols', { xTickCount: XTICK, pxCurrentTCB: PCUR, pxReadyTasksLists: READY, g_high_count: HIGH });
     process.exit(2);
 }
-console.log(`[syms] xTickCount=0x${XTICK.toString(16)} pxCurrentTCB=0x${PCUR.toString(16)} pxReadyTasksLists=0x${READY.toString(16)}`);
+console.log(`[syms] xTickCount=0x${XTICK.toString(16)} pxCurrentTCB=0x${PCUR.toString(16)} pxReadyTasksLists=0x${READY.toString(16)} g_high_count=0x${HIGH.toString(16)}`);
 
 let instCount = 0;
-const MAX = 25000000;
+const MAX = 120000000;
 let pc = 0;
 const seen = new Set();
+const tcbSet = new Set();   // count distinct TCBs (TASK1/TASK2/IDLE/HIGH) -> proves preemption
 let maxTick = 0;
+let maxHigh = 0;
 let allOut = '';
 
 // TCBs are heap-allocated and shift between builds, so discover them from the
@@ -79,6 +82,9 @@ const discoverTcbs = () => {
 };
 
 let tim2c0 = -1, tim2c1 = -1, tim3isr = -1, timPass = false, timFail = false;
+const UXTICKSUSP = 0x200000d8, PENDING = 0x200000b8, TOPPRI = 0x20000084;
+const gTim3IsrAddr = elfSym.g_tim3_isr, gHighAddr = HIGH;
+let maxTim3 = 0, diagDone = false;
 
 try {
     for (; instCount < MAX; instCount += 250000) {
@@ -88,15 +94,42 @@ try {
         allOut += u;
         const tick = rd32(XTICK);
         const tcb = rd32(PCUR);
+        const high = rd32(HIGH);
+        if (high > maxHigh) maxHigh = high;
+        const g3 = rd32(gTim3IsrAddr);
+        if (g3 > maxTim3) maxTim3 = g3;
+        if (g3 > 0 && !diagDone) {
+            diagDone = true;
+            const sus = rd32(UXTICKSUSP);
+            const topPri = rd32(TOPPRI);
+            const pend = rd32(PENDING);
+            const curTCB = rd32(PCUR);
+            // ready list counts for prio 0..4 (List_t: uxNumberOfItems @ +0)
+            const counts = [];
+            for (let p = 0; p < 5; p++) counts.push(rd32(READY + 20 * p));
+            // xTimSem @ 0x20000004 is a HANDLE (pointer) to Queue_t
+            const Q = rd32(0x20000004);
+            const qMsgs = rd32(Q + 0x38);
+            const qLen = rd32(Q + 0x3c);
+            const qRxLock = rd32(Q + 0x44);
+            // vHighTask TCB @ 0x20001160: items at +4 (state) and +24 (event), pvContainer at +12 within each
+            const vhTcb = 0x20001160;
+            const vhStateCont = rd32(vhTcb + 4 + 12);
+            const vhEventCont = rd32(vhTcb + 24 + 12);
+            console.log(`[DIAG] after TIM3 ISR: g_tim3_isr=${g3} g_high=${high} uxSchedulerSuspended=${sus} uxTopReadyPriority=${topPri} pxCurrentTCB=0x${curTCB.toString(16)} readyCounts=[${counts.join(',')}]`);
+            console.log(`[DIAG] xTimSem Q=0x${Q.toString(16)} uxMessagesWaiting=${qMsgs} uxLength=${qLen} cRxLock=${qRxLock} | vHighTask stateContainer=0x${vhStateCont.toString(16)} eventContainer=0x${vhEventCont.toString(16)}`);
+        }
         discoverTcbs();
         if (tcb === TCB_T1) seen.add('TASK1');
         else if (tcb === TCB_T2) seen.add('TASK2');
         else if (tcb === TCB_IDLE) seen.add('IDLE');
+        else if (tcb !== 0) seen.add('HIGH');
+        tcbSet.add(tcb);
         if (tick > maxTick) maxTick = tick;
         const m2 = u.match(/TIM2 adv (-?\d+)->(-?\d+)[^\r\n]*/);
         if (m2) { tim2c0 = parseInt(m2[1]); tim2c1 = parseInt(m2[2]); console.log('   [parse]', m2[0]); }
-        const m3 = u.match(/TIM3 isr (-?\d+)[^\r\n]*/);
-        if (m3) { tim3isr = parseInt(m3[1]); console.log('   [parse]', m3[0]); }
+        const m3 = u.match(/TIM3 isr (-?\d+) high (-?\d+)[^\r\n]*/);
+        if (m3) { tim3isr = parseInt(m3[1]); maxHigh = Math.max(maxHigh, parseInt(m3[2])); console.log('   [parse]', m3[0]); }
         if (u.includes('TIM TEST PASS')) timPass = true;
         if (u.includes('TIM TEST FAIL')) timFail = true;
         if (instCount % 5000000 === 0) {
@@ -124,14 +157,29 @@ const t1 = (all.split('TASK1').length - 1);
 const t2 = (all.split('TASK2').length - 1);
 const ticks = (all.split('tick=').length - 1);
 console.log('TASK1 hits:', t1, 'TASK2 hits:', t2, 'tick= hits:', ticks, 'total chars:', all.length);
-console.log('TCBs observed:', [...seen].join(','), 'maxTick:', maxTick);
+console.log('TCBs observed:', [...seen].join(','), 'maxTick:', maxTick, 'distinct TCBs:', tcbSet.size);
 console.log('TCB addrs: idle=0x' + TCB_IDLE.toString(16) + ' T1=0x' + TCB_T1.toString(16) + ' T2=0x' + TCB_T2.toString(16));
-console.log('TIM2 c0=', tim2c0, 'c1=', tim2c1, 'TIM3 isr=', tim3isr, 'timPass=', timPass, 'timFail=', timFail);
+console.log('TIM2 c0=', tim2c0, 'c1=', tim2c1, 'TIM3 isr=', tim3isr, 'high=', maxHigh, 'timPass=', timPass, 'timFail=', timFail);
+
+// Dump the MODEL-side TIM3 registers (not the guest RAM mirror) to confirm the
+// MMIO writes actually reached the peripheral model and it is ticking.
+try {
+    const pr = (a, n = 4) => { const v = bindings.periph_read(a, n); return v >>> 0; };
+    const cr1 = pr(0x40000400), dier = pr(0x4000040c), cnt = pr(0x40000424), arr = pr(0x4000042c);
+    const iser0 = pr(0xE000E100);
+    console.log(`[model] TIM3 cr1=0x${cr1.toString(16)} dier=0x${dier.toString(16)} cnt=0x${cnt.toString(16)} arr=0x${arr.toString(16)} NVIC_ISER0=0x${iser0.toString(16)}`);
+    // Direct model write test: does periph_write actually land for these addrs?
+    bindings.periph_write(0x4000040c, 4, 0x1234);
+    bindings.periph_write(0xE000E100, 4, 0x20000000);
+    const dier2 = pr(0x4000040c), iser2 = pr(0xE000E100);
+    console.log(`[model-direct] dier=0x${dier2.toString(16)} (wrote 0x1234) ISER0=0x${iser2.toString(16)} (wrote 0x20000000)`);
+} catch (e) { console.log('[model] dump failed:', e.message); }
 
 const okSched = t1 > 0 && t2 > 0 && ticks > 0 && seen.has('TASK1') && seen.has('TASK2') && seen.has('IDLE');
 const okTim2 = tim2c1 > tim2c0;
 const okTim3 = tim3isr > 0;
-const ok = okSched && okTim2 && okTim3 && timPass && !timFail;
+const okSem = maxHigh > 0;                 // ISR -> semaphore -> ctx switch to vHighTask
+const ok = okSched && okTim2 && okTim3 && okSem && timPass && !timFail;
 console.log(ok ? 'PROBE PASS' : 'PROBE FAIL');
 emu.close();
 process.exit(ok ? 0 : 1);

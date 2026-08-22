@@ -251,6 +251,30 @@ export async function createEmulator(opts) {
         const a = Number(address);
         periph_write(a, size, Number(value));
         if (a >= 0x40023C00 && a <= 0x40023C18) syncFlashProtection(); // FLASH CR writes flip pg
+        // FreeRTOS task-context yield: portYIELD() pends PendSV via an SCB ICSR
+        // write (bit 28 = PENDSVSET).  Unlike the SVC-based first switch, the
+        // Unicorn code hook does not stop on this plain memory write, so the
+        // yielding task would keep running (re-looping) until the step budget,
+        // and the context switch (delivered once per step, after emu_start) would
+        // land while the scheduler is suspended -> vTaskSwitchContext skips it and
+        // the task spins forever.  Stop emu_start here so processInterrupts()
+        // runs the PendSV handler immediately, after xTaskResumeAll has resumed
+        // the scheduler (matching real Cortex-M, where PendSV is lowest priority
+        // and fires only after the yielding task yields cleanly).  Only for
+        // task-context yields: while delivering a guest ISR (e.g. SysTick) the
+        // flag is set and we let the ISR complete first.
+        if (freertos && !deliveringIsr && a === 0xE000ED04 && (Number(value) & 0x10000000) !== 0) {
+            // The `str PENDSVSET` is still mid-execution when this hook fires, so
+            // PC is the store's own address (e.g. 0x8001924), not the next
+            // instruction.  Real Cortex-M takes the exception AFTER the
+            // instruction completes, so the saved return address must be the
+            // following instruction.  Record the frozen PC here and let
+            // processInterrupts() advance the resume PC past the store; otherwise
+            // the yielding task re-pends PendSV on every resume and spins forever
+            // (which deadlocks the scheduler when the highest-prio task yields).
+            icsrYieldPc = uc.reg_read_i32(Module.ARM_REG_PC) >>> 0;
+            uc.emu_stop();
+        }
     };
     for (const [start, end] of periphRanges) {
         uc.hook_add(Module.HOOK_MEM_READ, memReadHook, null, start, end);
@@ -284,6 +308,15 @@ export async function createEmulator(opts) {
         const h = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint16(0, true);
         const size = (h & 0xE000) === 0xE000 ? 4 : 2; // Thumb-2 wide vs halfword
         uc.reg_write_i32(Module.ARM_REG_PC, (pc + size) | 1);
+    };
+
+    // Length in bytes of the Thumb-2 instruction at pc (2 or 4). Used to compute
+    // the exception-return address for a mid-instruction yield.
+    const thumbInstLen = (pc) => {
+        const b = uc.mem_read(BigInt(pc & ~1), 2);
+        const hw1 = (b[1] << 8) | b[0];
+        if ((hw1 & 0xE000) === 0xE000 && (hw1 & 0x1800) !== 0x0800) return 4;
+        return 2;
     };
 
     const applyFlashErase = () => {
@@ -323,6 +356,17 @@ export async function createEmulator(opts) {
     // no-context-switch case we restore from this JS copy instead of memory.
     let lastEntryRegs = null;
     let lastEntryPsp = 0;
+    // Frozen PC of a task-context `str PENDSVSET` that was stopped mid-instruction
+    // (see the memWriteHook above). 0 when not applicable. Consumed by
+    // processInterrupts() to compute the correct exception-return address.
+    let icsrYieldPc = 0;
+    // True while we are running a guest ISR inside processInterrupts().  Used so
+    // the portYIELD() trap below does NOT fire for the SysTick ISR's own
+    // PendSV pend (which must run to completion first); it only fires for
+    // task-context yields, where we must stop emu_start so the context switch
+    // is delivered before the yielding task re-loops with the scheduler
+    // suspended (which would otherwise skip the switch and leave it spinning).
+    let deliveringIsr = false;
 
     const codeHook = (handle, address, size, user_data) => {
         if (freertos) {
@@ -865,6 +909,13 @@ export async function createEmulator(opts) {
                 pc: uc.reg_read_i32(Module.ARM_REG_PC),
                 xpsr: uc.reg_read_i32(Module.ARM_REG_XPSR),
             };
+            // A task-context yield was stopped mid-`str PENDSVSET`; advance the
+            // saved return PC to the next instruction so the resumed task does not
+            // re-execute the store (which would re-pend PendSV and spin forever).
+            if (icsrYieldPc !== 0 && (threadRegs.pc >>> 0) === icsrYieldPc) {
+                threadRegs.pc = (icsrYieldPc + thumbInstLen(icsrYieldPc)) >>> 0;
+            }
+            icsrYieldPc = 0;
             uc.reg_write_i32(Module.ARM_REG_LR, 0xFFFFFFF9);
             uc.reg_write_i32(Module.ARM_REG_PC, handler_pc);
 
@@ -909,6 +960,7 @@ export async function createEmulator(opts) {
             // emulated instruction (mrs/msr PSP, isb/dsb) stops emulation and we
             // re-start at the new PC. We loop until the handler aborts on its
             // final `bx lr` (EXC_RETURN), which is the expected completion.
+            deliveringIsr = true;
             let firstRun = true;
             let guard = 0;
             while (guard++ < 4000) {
@@ -923,6 +975,8 @@ export async function createEmulator(opts) {
                     break; // handler aborted on bx lr (EXC_RETURN) — expected
                 }
             }
+            deliveringIsr = false;
+
             const savedFrame = uc.mem_read(BigInt(savedAt - 32), 32);
             const savedSv = new DataView(savedFrame.buffer, savedFrame.byteOffset, savedFrame.byteLength);
             if (freertos) {
