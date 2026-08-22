@@ -575,6 +575,18 @@ export function reset_state() {
 }
 
 /**
+ * Set a pending interrupt in the NVIC. Negative `irq` values select system
+ * exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
+ * Used by the FreeRTOS path in the JS driver, which detects `svc` in the CPU
+ * hook and synthesizes the SVC exception here instead of letting Unicorn take
+ * it natively (this WASM build cannot perform the Cortex-M exception return).
+ * @param {number} irq
+ */
+export function set_intr_pending(irq) {
+    wasm.set_intr_pending(irq);
+}
+
+/**
  * Debug: flash state summary [wel, status1, cs_state, dummy_pending, pending_program_len]
  * @param {string} peripheral
  * @returns {Uint32Array}

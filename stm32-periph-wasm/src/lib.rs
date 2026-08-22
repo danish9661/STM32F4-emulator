@@ -96,6 +96,16 @@ pub fn get_next_pending_interrupt() -> i32 {
         .unwrap_or(-255)
 }
 
+/// Set a pending interrupt in the NVIC. Negative `irq` values select system
+/// exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
+/// Used by the FreeRTOS path in the JS driver, which detects `svc` in the CPU
+/// hook and synthesizes the SVC exception here instead of letting Unicorn take
+/// it natively (this WASM build cannot perform the Cortex-M exception return).
+#[wasm_bindgen]
+pub fn set_intr_pending(irq: i32) {
+    sys().p.nvic.borrow_mut().set_intr_pending(irq);
+}
+
 #[wasm_bindgen]
 pub fn dma_get_pending_count() -> u32 {
     sys().pending_dma_count() as u32

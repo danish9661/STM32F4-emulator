@@ -161,12 +161,6 @@ impl Timer {
                 self.pwm_duty[ch] = self.ccr[ch] * 100 / (self.arr + 1);
             }
         }
-
-        self.update_interrupt(sys);
-    }
-
-    fn update_interrupt(&self, sys: &System) {
-        // UIF, CCxIF, TIF, etc. already trigger during advance
     }
 
     fn generate_update(&mut self, sys: &System) {
@@ -231,10 +225,9 @@ impl Peripheral for Timer {
             }
             0x04 => self.cr2 = value & 0x3F7F,
             0x08 => self.smcr = value & 0xFFFF,
-            0x0C => {
-                self.dier = value & 0xFFFF;
-                self.update_interrupt(sys);
-            }
+                0x0C => {
+                    self.dier = value & 0xFFFF;
+                }
             0x10 => self.sr &= value,
             0x14 => {
                 self.egr = value & 0xFF;

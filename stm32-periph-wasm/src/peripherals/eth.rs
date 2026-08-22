@@ -135,7 +135,6 @@ impl EthernetMac {
         if ais { set |= DMA_AIS; }
         if nis { set |= DMA_NIS; }
         self.dmasr = (self.dmasr & !(DMA_AIS | DMA_NIS)) | set;
-        let masked = (self.dmasr & self.dmaier) | (if (self.dmasr & (DMA_AIS | DMA_NIS)) != 0 { 0 } else { 0 });
         if (self.dmasr & self.dmaier) != 0 {
             sys.p.nvic.borrow_mut().set_intr_pending(ETH_IRQ);
         }

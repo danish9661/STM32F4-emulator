@@ -268,6 +268,15 @@ export function periph_write(addr: number, width: number, value: number): void;
 export function reset_state(): void;
 
 /**
+ * Set a pending interrupt in the NVIC. Negative `irq` values select system
+ * exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
+ * Used by the FreeRTOS path in the JS driver, which detects `svc` in the CPU
+ * hook and synthesizes the SVC exception here instead of letting Unicorn take
+ * it natively (this WASM build cannot perform the Cortex-M exception return).
+ */
+export function set_intr_pending(irq: number): void;
+
+/**
  * Debug: flash state summary [wel, status1, cs_state, dummy_pending, pending_program_len]
  */
 export function spi_flash_debug(peripheral: string): Uint32Array;
@@ -362,6 +371,7 @@ export interface InitOutput {
     readonly periph_read: (a: number, b: number) => number;
     readonly periph_write: (a: number, b: number, c: number) => void;
     readonly reset_state: () => void;
+    readonly set_intr_pending: (a: number) => void;
     readonly spi_flash_debug: (a: number, b: number) => [number, number];
     readonly spi_push_miso: (a: number, b: number, c: number, d: number) => void;
     readonly spi_take_events: (a: number, b: number) => [number, number];

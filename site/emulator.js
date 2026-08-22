@@ -58,6 +58,14 @@ export async function createEmulator(opts) {
         // write the SRAM irq_flag / rx_frame_idx / rx_frame_len globals that
         // the polling ETH firmware (eth_http) expects. Requires enable_irqs.
         irq_eth = false,
+        // FreeRTOS port: deliver the `svc` instruction (used by
+        // xPortStartScheduler to start the first task) via the model/pump
+        // instead of letting Unicorn take it natively (this WASM build cannot
+        // perform the Cortex-M exception return, so a native `svc`/bx-lr
+        // crashes). Also switches the interrupt pump to EXC_RETURN-based
+        // context restore so FreeRTOS task switches actually take effect.
+        // GATED: off by default, so existing firmwares are untouched.
+        freertos = false,
     } = opts;
 
     const {
@@ -67,7 +75,7 @@ export async function createEmulator(opts) {
         is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd,
         eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll,
         eth_is_rx_poll, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
-        get_next_pending_interrupt, uart_rx_byte,
+        get_next_pending_interrupt, set_intr_pending, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
         spi_tap, spi_take_events, spi_push_miso,
         fsmc_tap, fsmc_take_events, fsmc_push_data,
@@ -169,7 +177,10 @@ export async function createEmulator(opts) {
 
     const uc = new Module.Unicorn(
         Module.ARCH_ARM,
-        Module.MODE_THUMB | Module.MODE_LITTLE_ENDIAN
+        // MODE_MCLASS enables Cortex-M banked registers (PSP/MSP) and exception
+        // semantics that FreeRTOS relies on (its context switch does `msr psp`).
+        // Gated to the FreeRTOS path so other firmwares are untouched.
+        Module.MODE_THUMB | Module.MODE_LITTLE_ENDIAN | (freertos ? Module.MODE_MCLASS : 0)
     );
 
     const mmap = (addr, size, perms, label) => {
@@ -298,14 +309,81 @@ export async function createEmulator(opts) {
     let tickAcc = 0;
     let pollAcc = 0;
     const rxQueue = [];
+    // FreeRTOS needs the banked PSP, but this Unicorn WASM build only honors
+    // PSP register writes made *inside* emu_start (the codeHook context).
+    // Writes performed after emu_start returns (e.g. at our synthetic
+    // exception return) are silently dropped. So we keep the authoritative
+    // PSP in JS (curPSP) and flush it to the real CPU exactly once, from the
+    // next hook invocation via pendingPsp — which sticks because it runs
+    // inside emu_start, before the resumed thread executes its first insn.
+    let curPSP = 0;
+    let pendingPsp = null;
+    // Captured thread context at exception entry. The handler may clobber the
+    // PSP frame in RAM (e.g. SysTick -> vTaskIncrementTick), so for the
+    // no-context-switch case we restore from this JS copy instead of memory.
+    let lastEntryRegs = null;
+    let lastEntryPsp = 0;
 
     const codeHook = (handle, address, size, user_data) => {
+        if (freertos) {
+            // Flush the authoritative PSP to the real CPU now (this runs inside
+            // emu_start, so the write sticks, unlike one done after emu_start).
+            if (pendingPsp !== null) {
+                uc.reg_write_i32(Module.ARM_REG_PSP, pendingPsp);
+                pendingPsp = null;
+            }
+                const pc = uc.reg_read_i32(Module.ARM_REG_PC);
+                const b = uc.mem_read(BigInt(pc), 2);
+            const hw1 = (b[1] << 8) | b[0];
+            // Emulate the banked `msr PSP, Rn` / `mrs Rn, PSP` instructions,
+            // which this Unicorn WASM build cannot decode (UC_ERR_INSN_INVALID).
+            // We perform the register transfer against the JS-shadowed curPSP and
+            // advance the PC past the instruction WITHOUT stopping emulation: the
+            // handler must keep running (e.g. PendSV's first instruction is
+            // `mrs r0, PSP`, and it still needs to switch tasks afterwards).
+            if ((hw1 & 0xFFF0) === 0xF380) {
+                const b4 = uc.mem_read(BigInt(pc), 4);
+                const hw2 = (b4[3] << 8) | b4[2];
+                if ((hw2 & 0xFFF0) === 0x8800) { // msr PSP, Rn (Rn = hw1 & 0xF)
+                    const rn = hw1 & 0xF;
+                    curPSP = uc.reg_read_i32(Module.ARM_REG_R0 + rn);
+                    uc.reg_write_i32(Module.ARM_REG_PSP, curPSP); // sticks (in-hook)
+                    uc.reg_write_i32(Module.ARM_REG_PC, ((pc & ~1) + 4) | 1);
+                    uc.emu_stop();
+                    return;
+                }
+            } else if (hw1 === 0xF3EF) {
+                const b4 = uc.mem_read(BigInt(pc), 4);
+                const hw2 = (b4[3] << 8) | b4[2];
+                if ((hw2 & 0xF0FF) === 0x8009) { // mrs Rn, PSP (Rn = (hw2>>8) & 0xF)
+                    const rn = (hw2 >> 8) & 0xF;
+                    uc.reg_write_i32(Module.ARM_REG_R0 + rn, curPSP);
+                    uc.reg_write_i32(Module.ARM_REG_PC, ((pc & ~1) + 4) | 1);
+                    uc.emu_stop();
+                    return;
+                }
+            }
+            // Intercept `svc #imm` (Thumb: 0xDF00 | imm) BEFORE Unicorn
+            // executes it. Delivering the SVC exception via Unicorn natively is
+            // fatal here (it then crashes on the bx lr EXC_RETURN). Instead we
+            // synthesize the pending SVC in the model and stop; the pump below
+            // delivers vPortSVCHandler with a proper context switch.
+            if ((hw1 & 0xFF00) === 0xDF00) {
+                set_intr_pending(-5); // IRQ::SVC
+                uc.emu_stop();
+                return;
+            }
+        }
         instCount++;
         if (rxQueue.length > 0 && eth_is_rx_poll()) {
             uc.emu_stop();
             return;
         }
         if (minimalPolls) return;
+        // The FreeRTOS context-switch path feeds tick_n deterministically from
+        // step() (the per-instruction hook under-counts in this Unicorn build),
+        // so skip the hook's own tick/poll feeding for FreeRTOS.
+        if (freertos) return;
         tickAcc++;
         if (tickAcc >= tickEvery) {
             tickAcc = 0;
@@ -378,7 +456,7 @@ export async function createEmulator(opts) {
     if (noCountHook) { /* no per-block/per-inst hook: step() accounts the budget */ }
     else if (blockCounting) uc.hook_add(Module.HOOK_BLOCK, blockHook, null);
     else if (minimalPolls) uc.hook_add(Module.HOOK_CODE, codeHook, null);
-    else if (perInstHook) uc.hook_add(Module.HOOK_CODE, codeHook, null);
+    else if (perInstHook || freertos) uc.hook_add(Module.HOOK_CODE, codeHook, null);
     else uc.hook_add(Module.HOOK_BLOCK, blockHookFull, null);
 
     // ── virtual peripheral devices (JS hardware layer) ────────────────────
@@ -749,8 +827,12 @@ export async function createEmulator(opts) {
     const processInterrupts = () => {
         while (!stopRequested) {
             const irq = get_next_pending_interrupt();
+            if (process.env.FRDEBUG && irq > -100) console.log(`[PI] irq=${irq}`);
             if (irq <= -100) break;
-            const savedAt = uc.reg_read_i32(Module.ARM_REG_SP);
+            // In MCLASS mode ARM_REG_SP (id 12) is the *current* SP (== PSP in
+            // thread mode), so for the handler frame we must use the dedicated
+            // ARM_REG_MSP (the stack handlers actually run on in handler mode).
+            const savedAt = uc.reg_read_i32(Module.ARM_REG_MSP);
             const frame = new Uint8Array(32);
             const sv = new DataView(frame.buffer);
             sv.setUint32(0, uc.reg_read_i32(Module.ARM_REG_XPSR), true);
@@ -762,17 +844,132 @@ export async function createEmulator(opts) {
             sv.setUint32(24, uc.reg_read_i32(Module.ARM_REG_R1), true);
             sv.setUint32(28, uc.reg_read_i32(Module.ARM_REG_R0), true);
             uc.mem_write(BigInt(savedAt - 32), frame);
+            uc.reg_write_i32(Module.ARM_REG_MSP, savedAt - 32);
+            // Force the handler to execute on the MSP stack. This Unicorn build
+            // does not auto-switch to MSP on exception entry. ARM_REG_SP (id 12)
+            // is the *current* SP, which (with CONTROL=0x2) aliases PSP — so we
+            // must first drop to CONTROL=0 (handler mode => SP == MSP) before
+            // setting the SP, otherwise we'd clobber the thread's PSP register.
+            uc.reg_write_i32(Module.ARM_REG_CONTROL, 0x0);
             uc.reg_write_i32(Module.ARM_REG_SP, savedAt - 32);
             const handler_pc = read32(vector_table + 4 * (16 + irq));
+            // Capture the thread's live registers BEFORE we overwrite LR/PC with
+            // the synthetic handler context — these are the exception-frame values.
+            const threadRegs = {
+                r0: uc.reg_read_i32(Module.ARM_REG_R0),
+                r1: uc.reg_read_i32(Module.ARM_REG_R1),
+                r2: uc.reg_read_i32(Module.ARM_REG_R2),
+                r3: uc.reg_read_i32(Module.ARM_REG_R3),
+                r12: uc.reg_read_i32(Module.ARM_REG_R12),
+                lr: uc.reg_read_i32(Module.ARM_REG_LR),
+                pc: uc.reg_read_i32(Module.ARM_REG_PC),
+                xpsr: uc.reg_read_i32(Module.ARM_REG_XPSR),
+            };
             uc.reg_write_i32(Module.ARM_REG_LR, 0xFFFFFFF9);
             uc.reg_write_i32(Module.ARM_REG_PC, handler_pc);
-            try {
-                uc.emu_start(BigInt(handler_pc), 0n, 0n, 100000);
-            } catch (e) {
-                // handler aborted on bx lr (EXC_RETURN not supported) — expected
+
+            if (freertos) {
+                // Simulate Cortex-M exception entry onto the *thread's* PSP stack
+                // so the FreeRTOS handlers find the 8-word frame they expect
+                // (R0,R1,R2,R3,R12,LR,PC,xPSR). SVC is taken from main (which
+                // runs on MSP), so use a scratch PSP for its (handler-ignored)
+                // frame. We track PSP in JS (curPSP): Unicorn PSP writes done
+                // here (outside emu_start) do not stick.
+                // The running thread's *actual* SP changes as it push/pops
+                // (native instructions), so curPSP cannot stay in sync between
+                // exceptions. Derive the frame base from the REAL Unicorn PSP
+                // at entry time, which reflects the thread's current SP.
+                const realPsp = uc.reg_read_i32(Module.ARM_REG_PSP);
+                const psp = (irq === -5)
+                    ? 0x2001FFE0
+                    : realPsp;
+                const fb = new Uint8Array(32);
+                const fdv = new DataView(fb.buffer);
+                fdv.setUint32(0, threadRegs.r0, true);
+                fdv.setUint32(4, threadRegs.r1, true);
+                fdv.setUint32(8, threadRegs.r2, true);
+                fdv.setUint32(12, threadRegs.r3, true);
+                fdv.setUint32(16, threadRegs.r12, true);
+                fdv.setUint32(20, threadRegs.lr, true);
+                fdv.setUint32(24, threadRegs.pc, true);
+                fdv.setUint32(28, threadRegs.xpsr, true);
+                uc.mem_write(BigInt(psp - 32), fb);
+                curPSP = psp - 32;
+                lastEntryPsp = curPSP;
+                lastEntryRegs = threadRegs;
+                if (process.env.FRDEBUG) {
+                    const ew = [];
+                    for (let i = 0; i < 8; i++) ew.push(fdv.getUint32(i * 4, true).toString(16));
+                    console.log(`[ENTRY] irq=${irq} savedAt(MSP)=${savedAt.toString(16)} realPsp=${realPsp.toString(16)} psp=${psp.toString(16)} fr@=${(psp-32).toString(16)} frame=[${ew.join(',')}] entryPC=${uc.reg_read_i32(Module.ARM_REG_PC).toString(16)}`);
+                }
+            }
+
+            // Run the handler. This Unicorn WASM build cannot re-enter the code
+            // hook after a PC change within a single emu_start, so every
+            // emulated instruction (mrs/msr PSP, isb/dsb) stops emulation and we
+            // re-start at the new PC. We loop until the handler aborts on its
+            // final `bx lr` (EXC_RETURN), which is the expected completion.
+            let firstRun = true;
+            let guard = 0;
+            while (guard++ < 4000) {
+                const hpc = firstRun ? handler_pc : (uc.reg_read_i32(Module.ARM_REG_PC) | 1);
+                firstRun = false;
+                try {
+                    uc.emu_start(BigInt(hpc), 0n, 0n, 100000);
+                    // Normal return == our hook's emu_stop while emulating an
+                    // unsupported instruction; continue the handler.
+                } catch (e) {
+                    if (process.env.FRDEBUG) console.log(`[ABORT] irq=${irq} handler_pc=0x${handler_pc.toString(16)} pc=0x${(() => { try { return uc.reg_read_i32(Module.ARM_REG_PC).toString(16); } catch { return '?'; } })()} :: ${String(e).slice(0,80)}`);
+                    break; // handler aborted on bx lr (EXC_RETURN) — expected
+                }
             }
             const savedFrame = uc.mem_read(BigInt(savedAt - 32), 32);
             const savedSv = new DataView(savedFrame.buffer, savedFrame.byteOffset, savedFrame.byteLength);
+            if (freertos) {
+                // Perform the Cortex-M exception return ourselves: the frame now
+                // lives on PSP — either the original thread's frame (SysTick) or
+                // the switched-to task's frame (PendSV/SVC). Restore those
+                // registers and pop the frame (curPSP += 32). This is what makes
+                // FreeRTOS context switches actually take effect.
+                const sp = curPSP;
+                // No-context-switch case: the handler left PSP pointing at the same
+                // frame we saved at entry, but the handler (e.g. SysTick ->
+                // vTaskIncrementTick) has clobbered that RAM. Restore the saved
+                // registers from our JS capture instead. A real context switch
+                // changes PSP to a different (uncorrupted) task frame, which we
+                // restore from memory as normal.
+                const switched = (sp !== lastEntryPsp);
+                const src = switched ? null : lastEntryRegs;
+                const get = (i) => switched
+                    ? dv.getUint32(i * 4, true)
+                    : [src.r0, src.r1, src.r2, src.r3, src.r12, src.lr, src.pc, src.xpsr][i];
+                const pframe = switched ? uc.mem_read(BigInt(sp), 32) : null;
+                const dv = switched ? new DataView(pframe.buffer, pframe.byteOffset, pframe.byteLength) : null;
+                if (process.env.FRDEBUG) {
+                    const w = [];
+                    for (let i = 0; i < 8; i++) w.push(get(i).toString(16));
+                    console.log(`[RET] irq=${irq} sp=${sp.toString(16)} switched=${switched} frame=[${w.join(',')}] restPC=${get(6).toString(16)} restLR=${get(5).toString(16)} xPSR=${get(7).toString(16)}`);
+                }
+                uc.reg_write_i32(Module.ARM_REG_R0, get(0));
+                uc.reg_write_i32(Module.ARM_REG_R1, get(1));
+                uc.reg_write_i32(Module.ARM_REG_R2, get(2));
+                uc.reg_write_i32(Module.ARM_REG_R3, get(3));
+                uc.reg_write_i32(Module.ARM_REG_R12, get(4));
+                uc.reg_write_i32(Module.ARM_REG_LR, get(5));
+                uc.reg_write_i32(Module.ARM_REG_PC, get(6) | 1);
+                uc.reg_write_i32(Module.ARM_REG_XPSR, get(7));
+                curPSP = sp + 32;
+                // Sync the real CPU PSP from the next hook (writes after
+                // emu_start don't stick — see curPSP/pendingPsp note above).
+                pendingPsp = curPSP;
+                uc.reg_write_i32(Module.ARM_REG_MSP, savedAt); // restore MSP
+                uc.reg_write_i32(Module.ARM_REG_CONTROL, 0x2); // thread mode, use PSP
+                uc.reg_write_i32(Module.ARM_REG_PSP, pendingPsp); // thread's real PSP
+                if (process.env.FRDEBUG) console.log(`[RET-WRITE] irq=${irq} pendingPsp=0x${pendingPsp.toString(16)}`);
+                processDma();
+                processEth();
+                continue;
+            }
             uc.reg_write_i32(Module.ARM_REG_XPSR, savedSv.getUint32(0, true));
             uc.reg_write_i32(Module.ARM_REG_R0, savedSv.getUint32(28, true));
             uc.reg_write_i32(Module.ARM_REG_R1, savedSv.getUint32(24, true));
@@ -781,7 +978,8 @@ export async function createEmulator(opts) {
             uc.reg_write_i32(Module.ARM_REG_R12, savedSv.getUint32(12, true));
             uc.reg_write_i32(Module.ARM_REG_LR, savedSv.getUint32(8, true));
             uc.reg_write_i32(Module.ARM_REG_PC, savedSv.getUint32(4, true) | 1);
-            uc.reg_write_i32(Module.ARM_REG_SP, savedAt);
+            uc.reg_write_i32(Module.ARM_REG_MSP, savedAt);
+            uc.reg_write_i32(Module.ARM_REG_CONTROL, 0x0); // back to handler mode for next entry
             processDma();
             processEth();
         }
@@ -805,12 +1003,25 @@ export async function createEmulator(opts) {
                 } else {
                     stepThroughFlashFault();
                 }
-            } else throw e;
+            } else {
+                const pc = uc.reg_read_i32(Module.ARM_REG_PC);
+                throw new Error(`emu_start failed at pc=0x${pc.toString(16)}: ${e}`);
+            }
         }
         // With no counting hook the budget issued IS the instruction account
         // (emu_start runs to the budget unless something stops it early).
         if (noCountHook) instCount += max_inst;
-        tick();
+        if (freertos) {
+            // Feed the SysTick deterministically from the step budget. FreeRTOS
+            // has no ETH/DMA early-stops, so the full budget is the executed
+            // count; relying on the per-instruction hook (which stops re-firing
+            // after peripheral memory accesses in this Unicorn build) under-
+            // counts and slows the tick ~6x, so TASK1/TASK2 never unblock.
+            tickAcc = 0;
+            tick_n(max_inst);
+        } else {
+            tick();
+        }
         applyFlashErase();
         syncFlashProtection();
         processDma();

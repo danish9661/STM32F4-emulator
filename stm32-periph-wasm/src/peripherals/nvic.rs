@@ -7,6 +7,7 @@ const IRQ_OFFSET: i32 = 16;
 const REG_WORDS: usize = (IRQ_COUNT + 31) / 32;
 
 pub mod irq {
+    pub const SVC: i32 = -5;
     pub const PENDSV: i32 = -2;
     pub const SYSTICK: i32 = -1;
 }
