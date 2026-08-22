@@ -260,7 +260,26 @@ document is the readable summary.
       (`irq_eth` mode — no SRAM flag writes). Also fixed the RX descriptor
       format: FS/LS marker bits at 28/27 corrupted the frame-length window
       [29:16] (`len<<16` only, like real F407).
-- [ ] More firmware samples: USB CDC echo, FreeRTOS port.
+- [x] **FreeRTOS port (`freertos_test`)** — verifies the interrupt pump's
+      context-switch path end-to-end: TIM3 ISR → `xSemaphoreGiveFromISR(xTimSem)`
+      → `portYIELD_FROM_ISR` (PendSV) → scheduler context-switches to the
+      higher-priority `vHighTask`, which pends on the semaphore. `vHighTask`
+      arms TIM3 itself (self-contained). Wired as `probe_freertos.mjs`
+      regression test (wired into `npm test`); the probe is intentionally
+      quiet (final summary + `PROBE PASS`/`PROBE FAIL`). This was the
+      regression test that caught (and now guards) the mid-`str`
+      exception-return PC bug fixed in `site/emulator.js` `processInterrupts`
+      (see AGENTS.md §9).
+  - **Deeper FreeRTOS coverage — DEFERRED (not needed).** The probe already
+    exercises all three yield types (task / ISR / SysTick) plus preemption
+    and a binary-semaphore give-from-ISR, which fully guards the
+    emulator-specific defect. Inter-task queues, mutex/priority-inheritance,
+    task deletion, and a second concurrent live ISR (e.g. UART RX) would
+    mostly test *guest* FreeRTOS library code, not new emulator behavior,
+    and add maintenance cost for marginal protection. Revisit only if
+    `processInterrupts` is reworked or a real FreeRTOS app using those
+    primitives is targeted.
+- [ ] USB CDC echo.
 
 ## Verification checklist (regression)
 

@@ -446,6 +446,21 @@ Once execution is reliable, finish `test_webserver_net.mjs`:
   single huge range — a prior split into per-region `periphHookRanges`/
   `periphMapRanges` dropped EXTI/SYSCFG/DBGMCU and regressed `test_exti`/
   `test_dma`/`test_rx_interrupt`.
+- **Deeper FreeRTOS coverage is NOT needed (decision 2026-08-22).**
+  `probe_freertos.mjs` already exercises all three context-switch entry
+  points the interrupt pump handles: **task-context yield** (`vHighTask`'s
+  `xSemaphoreTake` block → resume), **ISR-context yield** (`TIM3_IRQHandler`
+  `xSemaphoreGiveFromISR` + `portYIELD_FROM_ISR`), and **SysTick-context
+  yield** (`vTaskDelay` expiry unblocks TASK1/TASK2 via the SysTick ISR's
+  own PendSV path) — plus **preemption** (HIGH/TASK1/TASK2/IDLE all
+  observed) and a **binary-semaphore give-from-ISR**. That guards the
+  specific emulator defect (mid-`str` exception-return PC). Deeper
+  primitives (inter-task queues, mutex/priority-inheritance, task deletion,
+  a second concurrent ISR) would mostly test *guest* FreeRTOS library code
+  on the emulated CPU, not new emulator behavior, and add firmware/
+  maintenance cost for marginal protection. Revisit only if `processInterrupts`
+  is reworked or a real FreeRTOS app using those primitives is targeted.
+  Recorded in `docs/progress-and-future.md` (FreeRTOS to-do).
 - After a wedged emu_start, the instance is unusable; re-create the uc and
   re-init rather than trying to recover.
 - The step throughput degrades sharply over long runs (translation cache
