@@ -139,9 +139,10 @@ impl Timer {
                 }
             }
 
-            // Output compare / PWM interrupts
+            // Output compare / PWM interrupts (only in output mode; input
+            // capture channels latch CNT on an external edge instead).
             for ch in 0..4 {
-                if self.ccer & (1 << (ch * 4)) != 0 { // CCxE
+                if self.ccs(ch) == 0 && self.ccer & (1 << (ch * 4)) != 0 { // CCxE
                     let ccr_val = self.ccr[ch];
                     if self.cnt == ccr_val {
                         // Capture/Compare match
@@ -168,6 +169,54 @@ impl Timer {
         self.sr |= 1; // UIF
         if self.dier & 1 != 0 {
             sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
+        }
+    }
+
+    /// CCxS field (input/output selection) for a capture/compare channel.
+    /// 0 = output compare; != 0 = input capture (from TIx / TRC).
+    fn ccs(&self, ch: usize) -> u32 {
+        match ch {
+            0 => (self.ccmr1 >> 0) & 0x3,
+            1 => (self.ccmr1 >> 8) & 0x3,
+            2 => (self.ccmr2 >> 0) & 0x3,
+            3 => (self.ccmr2 >> 8) & 0x3,
+            _ => 0,
+        }
+    }
+
+    fn is_input_capture(&self, ch: usize) -> bool {
+        self.ccs(ch) != 0
+    }
+
+    /// Latch the current counter into CCR[ch] on a (simulated) capture edge.
+    /// Mirrors the real TIM: on a match the counter is frozen into the
+    /// capture register, CCxIF is set, and CCxOF is set if a previous capture
+    /// was not yet serviced.
+    fn capture_trigger(&mut self, ch: usize, sys: &System) {
+        if ch >= 4 || !self.is_input_capture(ch) {
+            return;
+        }
+        if self.sr & (1 << (1 + ch)) != 0 {
+            self.sr |= 1 << (9 + ch); // CCxOF (overrun)
+        }
+        self.ccr[ch] = self.cnt & counter_mask(&self.name);
+        self.sr |= 1 << (1 + ch); // CCxIF
+        if (self.dier >> (1 + ch)) & 1 != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
+        }
+    }
+}
+
+/// Host/JS-driven capture edge: simulate a TIx edge on `name` channel `ch` and
+/// latch the live counter into its capture register (only if the channel is
+/// configured for input capture). Used by tests that have no external signal
+/// source.
+pub fn tim_inject_capture(sys: &System, name: &str, ch: u32) {
+    for slot in &sys.p.peripherals {
+        let mut b = slot.peripheral.borrow_mut();
+        let Some(t) = b.as_any_mut().downcast_mut::<Timer>() else { continue };
+        if t.name == name {
+            t.capture_trigger(ch as usize, sys);
         }
     }
 }
@@ -301,5 +350,38 @@ mod tests {
         t.tick(&sys);                  // must not panic
         assert_eq!(t.read(&sys, 0x24), 0, "CNT stays 0 when ARR==0");
         assert_ne!(t.read(&sys, 0x10) & 1, 0, "UIF set");
+    }
+
+    // Input capture: a capture edge latches the live counter into CCR, sets
+    // CCxIF, and sets CCxOF on a second edge before the first is cleared.
+    #[test]
+    fn input_capture_latches_counter() {
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Timer::new("TIM3").unwrap();
+        let t = boxed.as_any_mut().downcast_mut::<Timer>().unwrap();
+        t.write(&sys, 0x18, 0x01);     // CCMR1: CC1S = 0b01 (input capture TI1)
+        assert!(t.is_input_capture(0));
+        t.cnt = 1234;
+        t.capture_trigger(0, &sys);
+        assert_eq!(t.ccr[0], 1234, "capture latches CNT");
+        assert!(t.sr & (1 << 1) != 0, "CC1IF set on capture");
+        // Second edge without servicing -> overrun flag.
+        t.capture_trigger(0, &sys);
+        assert!(t.sr & (1 << 9) != 0, "CC1OF set on overrun");
+    }
+
+    // Output-compare channels must NOT latch on a capture trigger.
+    #[test]
+    fn output_compare_ignores_capture_trigger() {
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Timer::new("TIM3").unwrap();
+        let t = boxed.as_any_mut().downcast_mut::<Timer>().unwrap();
+        t.write(&sys, 0x18, 0x00);     // CCMR1: CC1S = 0 (output compare)
+        assert!(!t.is_input_capture(0));
+        t.cnt = 99;
+        t.ccr[0] = 0;
+        t.capture_trigger(0, &sys);
+        assert_eq!(t.ccr[0], 0, "output channel is not captured");
+        assert!(t.sr & (1 << 1) == 0, "no CC1IF for output channel");
     }
 }

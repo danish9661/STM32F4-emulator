@@ -329,6 +329,15 @@ export function tick(): void;
 export function tick_n(delta: number): void;
 
 /**
+ * Host/JS-driven TIM input-capture edge. Simulate a TIx edge on timer `name`
+ * channel `ch` and latch the live counter into its capture register (only if
+ * the channel is configured for input capture via CCxS). Mirrors
+ * `can_inject`: tests have no external signal source, so the edge is injected
+ * from the driver. `name` is e.g. "TIM3"; `ch` is 0..3.
+ */
+export function tim_inject_capture(name: string, ch: number): void;
+
+/**
  * Inject a received byte into the UART at the given peripheral base address.
  * Returns true if a peripheral was found at that address.
  */
@@ -403,6 +412,7 @@ export interface InitOutput {
     readonly spi_tap: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly tick: () => void;
     readonly tick_n: (a: number) => void;
+    readonly tim_inject_capture: (a: number, b: number, c: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;
     readonly wwdg_reset_flag: () => number;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;

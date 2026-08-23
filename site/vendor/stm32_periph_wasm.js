@@ -698,6 +698,21 @@ export function tick_n(delta) {
 }
 
 /**
+ * Host/JS-driven TIM input-capture edge. Simulate a TIx edge on timer `name`
+ * channel `ch` and latch the live counter into its capture register (only if
+ * the channel is configured for input capture via CCxS). Mirrors
+ * `can_inject`: tests have no external signal source, so the edge is injected
+ * from the driver. `name` is e.g. "TIM3"; `ch` is 0..3.
+ * @param {string} name
+ * @param {number} ch
+ */
+export function tim_inject_capture(name, ch) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.tim_inject_capture(ptr0, len0, ch);
+}
+
+/**
  * Inject a received byte into the UART at the given peripheral base address.
  * Returns true if a peripheral was found at that address.
  * @param {number} addr

@@ -113,6 +113,16 @@ pub fn can_inject(id: u32, dlc: u32, data: &[u8]) {
     crate::peripherals::can::can_inject(sys(), id, dlc, data, false, false);
 }
 
+/// Host/JS-driven TIM input-capture edge. Simulate a TIx edge on timer `name`
+/// channel `ch` and latch the live counter into its capture register (only if
+/// the channel is configured for input capture via CCxS). Mirrors
+/// `can_inject`: tests have no external signal source, so the edge is injected
+/// from the driver. `name` is e.g. "TIM3"; `ch` is 0..3.
+#[wasm_bindgen]
+pub fn tim_inject_capture(name: String, ch: u32) {
+    crate::peripherals::tim::tim_inject_capture(sys(), &name, ch);
+}
+
 /// Set a pending interrupt in the NVIC. Negative `irq` values select system
 /// exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
 /// Used by the FreeRTOS path in the JS driver, which detects `svc` in the CPU

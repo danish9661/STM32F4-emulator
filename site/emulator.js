@@ -99,7 +99,7 @@ export async function createEmulator(opts) {
         dcmi_feed_frame, dcmi_clear,
         i2c_register_slave, i2c_take_events, i2c_push_rx,
         i2c_register_regfile, i2c_regfile_get, i2c_regfile_set,
-        audio_take_capture, can_inject,
+         audio_take_capture, can_inject, tim_inject_capture,
         gpio_read_output, gpio_read_input, gpio_set_input,
         adc_set_channel_value, adc_clear_channel_value,
     } = bindings;
@@ -1207,6 +1207,7 @@ export async function createEmulator(opts) {
         // Delivered to every CAN node whose accept filters pass it. id is an
         // 11-bit standard ID; data is up to 8 bytes.
         canInject(id, dlc, data) { can_inject(id & 0x7FF, dlc & 0xF, new Uint8Array(data)); },
+        timInjectCapture(name, ch) { tim_inject_capture(name, ch & 0x3); },
         sendUartByte(b) { return uart_rx_byte(uart_addr, b & 0xFF); },
         sendUart(bytes) {
             for (const b of bytes) uart_rx_byte(uart_addr, b & 0xFF);

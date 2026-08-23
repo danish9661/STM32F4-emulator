@@ -47,6 +47,7 @@ const firmwares = [
     ['watchdog_demo', 'watchdog_demo/watchdog_demo.bin', 'watchdog_demo.bin'],
     ['wwdg_demo', 'wwdg_demo/wwdg_demo.bin', 'wwdg_demo.bin'],
     ['wwdg_window_demo', 'wwdg_window_demo/wwdg_window_demo.bin', 'wwdg_window_demo.bin'],
+    ['tim_capture_demo', 'tim_capture_demo/tim_capture_demo.bin', 'tim_capture_demo.bin'],
     ['deep_sleep_demo', 'deep_sleep_demo/deep_sleep_demo.bin', 'deep_sleep_demo.bin'],
     // doom (doomgeneric F407 port; needs doom1.wad served alongside)
     ['doom', 'doom/doom.bin', 'doom.bin'],

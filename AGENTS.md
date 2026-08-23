@@ -2047,7 +2047,30 @@ reload (fresh instance boots after a prior one), and multi-instance stress
   `site/test_wwdg_window.mjs` (WWDG window violation, **WDOG-WW-WIN PASS**),
   all wired into `npm test`. The Wwdg Rust module also has two unit tests:
   `window_violation_reset` and `ewi_fires_at_window` (EWI fires at the window
-  edge + NVIC IRQ 0 pending). `cargo test` 29/29.
+  edge + NVIC IRQ 0 pending). `cargo test` 31/31.
+
+### TIM input capture (2026-08-23)
+- The TIM model already implemented **output compare / PWM** (up/down/center
+  counting, CC match + PWM-duty tracking, UIF/CCxIF interrupts) — so the
+  `buzzer_test` JS probe was redundant, not a missing model. The genuinely
+  missing path was **input capture**: a TIx edge latching the live counter
+  into `CCR[ch]`.
+- **Model**: `tim.rs` now decodes `CCxS` (CCMR1/CCMR2) to tell input from
+  output capture; `capture_trigger(ch)` latches `CNT` into `CCR[ch]`, sets
+  `CCxIF`, and sets `CCxOF` on an overrun before the first is serviced. Output
+  channels no longer latch on a capture trigger. A host-injection entry point
+  `tim_inject_capture(name, ch)` (mirrors `can_inject`) simulates a TIx edge
+  since the emulator has no external signal source; exported to wasm and
+  `emu.timInjectCapture(name, ch)` in `emulator.js`.
+- **Firmware `tim_capture_demo/`**: configures TIM3 CH1 as input capture
+  (CCMR1 CC1S=0b01, CCER CC1E), then prints `cap=N` for each injected edge.
+  `site/test_tim_capture.mjs` injects edges and asserts the captured counter
+  values (**TIMCAP PASS**). Three Rust unit tests in `tim.rs` cover
+  latch/overrun/output-ignore.
+- Note: ADC/DAC/SDIO/FSMC are **already fully modeled** (conversion, noise/
+  triangle waveforms, FSMC bank read/write, SDIO command state) — they were
+  not stubs. The only truly-missing peripheral in that family is **QSPI**
+  (no `qspi.rs` yet).
 - **Bug fixed in this pass**: the window-violation check previously fired on
   the *enable* write too — it compared the stale pre-enable counter (0x7F)
   against `W` and tripped a false violation. Now gated on `initialized` so only
