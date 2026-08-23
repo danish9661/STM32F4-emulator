@@ -49,6 +49,14 @@ export function audio_source_remaining(): number;
 export function audio_take_capture(): Uint16Array;
 
 /**
+ * Inject a CAN frame from an external transmitter onto the shared bus. The
+ * frame is delivered to every CAN node (CAN1/CAN2) whose accept filters pass
+ * it, so the guest sees it exactly as if another node sent it. `data` is up
+ * to 8 bytes; `dlc` caps the length. Standard 11-bit frames.
+ */
+export function can_inject(id: number, dlc: number, data: Uint8Array): void;
+
+/**
  * Forget any fed frame (stop the camera).
  */
 export function dcmi_clear(): void;
@@ -335,6 +343,7 @@ export interface InitOutput {
     readonly audio_load_wav: (a: number, b: number) => [number, number];
     readonly audio_source_remaining: () => number;
     readonly audio_take_capture: () => [number, number];
+    readonly can_inject: (a: number, b: number, c: number, d: number) => void;
     readonly dcmi_clear: () => void;
     readonly dcmi_feed_frame: (a: number, b: number, c: number, d: number) => void;
     readonly dma_get_pending: (a: number) => [number, number];

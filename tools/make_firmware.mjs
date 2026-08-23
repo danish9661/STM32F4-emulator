@@ -43,6 +43,7 @@ const firmwares = [
     ['rtc_test', 'rtc_test/rtc_test.bin', 'rtc_test.bin'],
     ['can_test', 'can_test/can_test.bin', 'can_test.bin'],
     ['can_demo', 'can_demo/can_demo.bin', 'can_demo.bin'],
+    ['can_host_rx', 'can_host_rx/can_host_rx.bin', 'can_host_rx.bin'],
     ['deep_sleep_demo', 'deep_sleep_demo/deep_sleep_demo.bin', 'deep_sleep_demo.bin'],
     // doom (doomgeneric F407 port; needs doom1.wad served alongside)
     ['doom', 'doom/doom.bin', 'doom.bin'],

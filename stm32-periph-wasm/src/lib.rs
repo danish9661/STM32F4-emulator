@@ -104,6 +104,15 @@ pub fn pwr_wakeup() {
     sys().p.pwr_wakeup();
 }
 
+/// Inject a CAN frame from an external transmitter onto the shared bus. The
+/// frame is delivered to every CAN node (CAN1/CAN2) whose accept filters pass
+/// it, so the guest sees it exactly as if another node sent it. `data` is up
+/// to 8 bytes; `dlc` caps the length. Standard 11-bit frames.
+#[wasm_bindgen]
+pub fn can_inject(id: u32, dlc: u32, data: &[u8]) {
+    crate::peripherals::can::can_inject(sys(), id, dlc, data, false, false);
+}
+
 /// Set a pending interrupt in the NVIC. Negative `irq` values select system
 /// exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
 /// Used by the FreeRTOS path in the JS driver, which detects `svc` in the CPU

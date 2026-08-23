@@ -10,6 +10,7 @@ export const audio_clear: () => void;
 export const audio_load_wav: (a: number, b: number) => [number, number];
 export const audio_source_remaining: () => number;
 export const audio_take_capture: () => [number, number];
+export const can_inject: (a: number, b: number, c: number, d: number) => void;
 export const dcmi_clear: () => void;
 export const dcmi_feed_frame: (a: number, b: number, c: number, d: number) => void;
 export const dma_get_pending: (a: number) => [number, number];

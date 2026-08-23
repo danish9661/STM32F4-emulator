@@ -1973,3 +1973,17 @@ reload (fresh instance boots after a prior one), and multi-instance stress
 - Writing a multi-instance test: always `close()` each emulator (Unicorn is
   1.75 GB/instance) and run `step()` inside the drain loop — a loop that only
   calls `drainUart()` produces empty UART (the guest never executes).
+
+### CAN host-injection API (2026-08-23)
+- **Rust**: `can.rs::can_inject(sys, id, dlc, data, ext, rtr)` delivers a frame
+  from an external transmitter onto the shared bus — broadcast to every CAN
+  node (CAN1/CAN2) whose accept filters pass it, via `Can::receive_frame`.
+  Exported to wasm as `can_inject(id: u32, dlc: u32, data: &[u8])` (standard
+  11-bit frames; `ext`/`rtr` hardcoded false in the binding).
+- **emulator.js**: `emu.canInject(id, dlc, data)` → `can_inject(id & 0x7FF,
+  dlc & 0xF, new Uint8Array(data))`. Mirrors `injectFrame` (ETH) as the CAN
+  equivalent for host-driven RX demos/tests.
+- **Firmware**: `can_host_rx/` — CAN1 with pass-all filter, polls RX FIFO,
+  prints `RX id=0xNNN data=...` for each injected frame. Node test:
+  `site/test_can_inject.mjs` (asserts `RX id=0x00000123 data=HELLO!!!`). Added
+  to `tools/make_firmware.mjs` → `site/firmware.js` (36 firmwares).

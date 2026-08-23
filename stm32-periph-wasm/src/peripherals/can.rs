@@ -352,6 +352,31 @@ pub fn arbitrate_bus(sys: &System) {
     }
 }
 
+/// Inject a frame from an external transmitter onto the shared bus. Delivered
+/// to every CAN node whose accept filters pass it (real bus broadcast), so the
+/// guest's RX FIFO sees it exactly as if another node on the wire sent it.
+/// `ext` selects a 29-bit extended ID; `rtr` marks a remote-transmit frame.
+pub fn can_inject(sys: &System, id: u32, dlc: u32, data: &[u8], ext: bool, rtr: bool) {
+    let mut d = [0u8; 8];
+    let n = data.len().min(8);
+    d[..n].copy_from_slice(&data[..n]);
+    let f = CanFrame {
+        node: 0,
+        mailbox: 0,
+        id,
+        ext,
+        rtr,
+        dlc: dlc.min(8) as u8,
+        data: d,
+        loopback: false,
+    };
+    for slot in &sys.p.peripherals {
+        let mut b = slot.peripheral.borrow_mut();
+        let Some(can) = b.as_any_mut().downcast_mut::<Can>() else { continue };
+        can.receive_frame(sys, &f);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

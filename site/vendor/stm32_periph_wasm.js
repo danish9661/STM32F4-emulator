@@ -121,6 +121,21 @@ export function audio_take_capture() {
 }
 
 /**
+ * Inject a CAN frame from an external transmitter onto the shared bus. The
+ * frame is delivered to every CAN node (CAN1/CAN2) whose accept filters pass
+ * it, so the guest sees it exactly as if another node sent it. `data` is up
+ * to 8 bytes; `dlc` caps the length. Standard 11-bit frames.
+ * @param {number} id
+ * @param {number} dlc
+ * @param {Uint8Array} data
+ */
+export function can_inject(id, dlc, data) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.can_inject(id, dlc, ptr0, len0);
+}
+
+/**
  * Forget any fed frame (stop the camera).
  */
 export function dcmi_clear() {

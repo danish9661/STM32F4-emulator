@@ -57,12 +57,13 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node site/test_flow.mjs && node site/test_blinky.mjs && node site/test_rx_interrupt.mjs && node site/test_component_led.mjs && node site/test_component_button.mjs && node site/test_component_pwm.mjs && node site/test_component_i2cregfile.mjs && node site/test_component_adc.mjs && node site/test_multi_instance.mjs && node site/test_fsmc_dcmi.mjs && node site/test_fsmc.mjs && node site/test_dcmi.mjs && node site/probe_freertos.mjs && node site/test_candemo.mjs && node site/test_lowpower.mjs && node site/test_edge_cases.mjs",
+    "test": "node site/test_flow.mjs && node site/test_blinky.mjs && node site/test_rx_interrupt.mjs && node site/test_component_led.mjs && node site/test_component_button.mjs && node site/test_component_pwm.mjs && node site/test_component_i2cregfile.mjs && node site/test_component_adc.mjs && node site/test_multi_instance.mjs && node site/test_fsmc_dcmi.mjs && node site/test_fsmc.mjs && node site/test_dcmi.mjs && node site/probe_freertos.mjs   && node site/test_candemo.mjs && node site/test_lowpower.mjs && node site/test_edge_cases.mjs && node site/test_can_inject.mjs",
     "test:flow": "node site/test_flow.mjs",
     "test:blinky": "node site/test_blinky.mjs",
     "test:rx": "node site/test_rx_interrupt.mjs",
     "test:multi": "node site/test_multi_instance.mjs",
     "test:can": "node site/test_candemo.mjs",
+    "test:caninject": "node site/test_can_inject.mjs",
     "test:lowpower": "node site/test_lowpower.mjs",
     "test:edge": "node site/test_edge_cases.mjs",
     "test:fsmc": "node site/test_fsmc.mjs && node site/test_dcmi.mjs && node site/test_fsmc_dcmi.mjs",
