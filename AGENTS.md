@@ -2028,8 +2028,15 @@ reload (fresh instance boots after a prior one), and multi-instance stress
   pets it through an "alive" loop, then stops petting so it expires → MCU
   resets → reboots → reads `RCC->CSR` and prints `IWDG reset detected`.
   Note: STM32F4 `RCC_CSR` is at **offset 0x74** (0x40023874), not 0x24.
-- **Test**: `site/test_watchdog.mjs` (asserts the full pet→reset→detect cycle;
-  wired into `npm test`). Registered in `tools/make_firmware.mjs` →
-  `site/firmware.js` (37 firmwares) and the web dropdown.
-- **WWWG**: modeled (window/underflow reset, EWI interrupt pending). The demo
-  firmware focuses on IWDG; a dedicated WWDG demo is a small follow-up.
+- **Firmware `wwdg_demo/`**: starts the window watchdog with prescaler /8 and
+  window `W=0x7F` (no early-window restriction, so it behaves as a plain
+  down-counter), pets it every 2 ms through an "alive" loop, then stops
+  petting → counter underflows → MCU resets → reboots → prints
+  `WWDG reset detected` (reads `RCC->CSR` `WWDGRSTF` bit 30). The WWDG model
+  supports the full window semantics (a `W < 0x7F` rejects refreshes while
+  counter > W) plus the early-wakeup interrupt (CFR bit 9 / SR bit 0); the
+  demo exercises the reset path.
+- **Tests**: `site/test_watchdog.mjs` (IWDG, **WDOG PASS**) and
+  `site/test_wwdg.mjs` (WWDG, **WDOG-WW PASS**), both wired into `npm test`.
+  Both firmwares registered in `tools/make_firmware.mjs` → `site/firmware.js`
+  (38 firmwares) and the web dropdown.

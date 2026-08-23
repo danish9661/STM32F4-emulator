@@ -45,6 +45,7 @@ const firmwares = [
     ['can_demo', 'can_demo/can_demo.bin', 'can_demo.bin'],
     ['can_host_rx', 'can_host_rx/can_host_rx.bin', 'can_host_rx.bin'],
     ['watchdog_demo', 'watchdog_demo/watchdog_demo.bin', 'watchdog_demo.bin'],
+    ['wwdg_demo', 'wwdg_demo/wwdg_demo.bin', 'wwdg_demo.bin'],
     ['deep_sleep_demo', 'deep_sleep_demo/deep_sleep_demo.bin', 'deep_sleep_demo.bin'],
     // doom (doomgeneric F407 port; needs doom1.wad served alongside)
     ['doom', 'doom/doom.bin', 'doom.bin'],
