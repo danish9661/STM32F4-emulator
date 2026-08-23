@@ -260,6 +260,13 @@ export function periph_read(addr: number, width: number): number;
 export function periph_write(addr: number, width: number, value: number): void;
 
 /**
+ * Mark the PWR peripheral as having woken from a low-power (WFI/WFE) state.
+ * The emulator calls this when the core resumes after a sleep halt so firmware
+ * can read PWR->CSR WUF to confirm the wakeup source.
+ */
+export function pwr_wakeup(): void;
+
+/**
  * Clear all process-lifetime globals so a NEW emulator instance starts
  * clean.  Must be called before registering that instance's devices.
  * Without it, `ExtDevices` accumulates and a second instance silently binds
@@ -370,6 +377,7 @@ export interface InitOutput {
     readonly ltdc_get_scanline: () => number;
     readonly periph_read: (a: number, b: number) => number;
     readonly periph_write: (a: number, b: number, c: number) => void;
+    readonly pwr_wakeup: () => void;
     readonly reset_state: () => void;
     readonly set_intr_pending: (a: number) => void;
     readonly spi_flash_debug: (a: number, b: number) => [number, number];

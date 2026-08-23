@@ -249,6 +249,7 @@ rebuild — delete it so the vendor assets stay tracked/committed.
 
 ## Documentation
 
+- [site/about.html](site/about.html) — in-repo About page: what it is, architecture, featured firmwares, and how to use it (CLI / browser / Node API / MCP).
 - [docs/architecture.md](docs/architecture.md) — how the emulator is put
   together (CPU, peripheral model, drivers, ETH flow, interrupts).
 - [docs/peripherals.md](docs/peripherals.md) — all 33 peripherals and the

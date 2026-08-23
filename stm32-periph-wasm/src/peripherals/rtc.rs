@@ -63,7 +63,7 @@ impl Rtc {
         let alrb_enabled = self.cr & (1 << 9) != 0; // ALRBE
         if !alra_enabled && !alrb_enabled { return; }
 
-        let irq = 43; // RTC_Alarm (ALRAF, ALRBF)
+        let irq = 41; // RTC_Alarm (ALRAF, ALRBF) — F407 NVIC IRQ 41
 
         if alra_enabled && self.isr & (1 << 8) != 0 { // ALRAF already set
             if self.cr & (1 << 12) != 0 { // ALRAIE

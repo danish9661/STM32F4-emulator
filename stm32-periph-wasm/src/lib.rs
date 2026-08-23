@@ -96,6 +96,14 @@ pub fn get_next_pending_interrupt() -> i32 {
         .unwrap_or(-255)
 }
 
+/// Mark the PWR peripheral as having woken from a low-power (WFI/WFE) state.
+/// The emulator calls this when the core resumes after a sleep halt so firmware
+/// can read PWR->CSR WUF to confirm the wakeup source.
+#[wasm_bindgen]
+pub fn pwr_wakeup() {
+    sys().p.pwr_wakeup();
+}
+
 /// Set a pending interrupt in the NVIC. Negative `irq` values select system
 /// exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
 /// Used by the FreeRTOS path in the JS driver, which detects `svc` in the CPU

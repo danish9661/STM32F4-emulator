@@ -52,6 +52,7 @@ export const ltdc_get_frame_count: () => number;
 export const ltdc_get_scanline: () => number;
 export const periph_read: (a: number, b: number) => number;
 export const periph_write: (a: number, b: number, c: number) => void;
+export const pwr_wakeup: () => void;
 export const reset_state: () => void;
 export const set_intr_pending: (a: number) => void;
 export const spi_flash_debug: (a: number, b: number) => [number, number];

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="About the STM32F4 emulator: run real STM32F407 firmware in Node or the browser." />
+<title>About — STM32F4 Emulator</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --fg: #e6edf3; --dim: #8b949e; --green: #3fb950; --yellow: #d29922;
+    --red: #f85149; --cyan: #39c5cf;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.6 "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    padding: 0 0 48px;
+  }
+  header {
+    border-bottom: 1px solid var(--border); background: var(--panel);
+    padding: 18px 24px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  header h1 { margin: 0; font-size: 18px; }
+  header .tag { color: var(--dim); font-size: 13px; }
+  header nav a {
+    color: var(--cyan); text-decoration: none; margin-left: 14px; font-size: 13px;
+  }
+  header nav a:hover { text-decoration: underline; }
+  main { max-width: 920px; margin: 0 auto; padding: 24px; }
+  h2 {
+    border-left: 3px solid var(--green); padding-left: 10px; margin-top: 38px;
+    font-size: 16px;
+  }
+  h3 { color: var(--cyan); font-size: 14px; margin-top: 24px; }
+  p, li { color: var(--fg); }
+  a { color: var(--cyan); }
+  code {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 5px; font-size: 12.5px; color: var(--yellow);
+  }
+  pre {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 16px; overflow-x: auto; font-size: 12.5px; line-height: 1.5;
+  }
+  pre .c { color: var(--dim); }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel); color: var(--dim); font-weight: 600; }
+  td code { white-space: nowrap; }
+  .pill {
+    display: inline-block; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 999px; padding: 1px 10px; color: var(--dim); font-size: 12px;
+  }
+  footer { text-align: center; color: var(--dim); font-size: 12px; margin-top: 48px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>STM32F4 Emulator</h1>
+  <span class="tag">Run real STM32F407 firmware in Node or the browser</span>
+  <nav>
+    <a href="index.html">Console</a>
+    <a href="doom.html">DOOM</a>
+    <a href="about.html">About</a>
+  </nav>
+</header>
+
+<main>
+  <h2>Overview</h2>
+  <p>
+    <strong>stm32f4-emu</strong> is an emulator for the
+    <strong>STM32F407</strong> (ARM Cortex-M4) microcontroller. It runs
+    <em>real compiled firmware</em> — not a reimplementation — by pairing a
+    CPU emulator with a cycle-accurate-enough model of the on-chip
+    peripherals. You can boot a binary, watch its UART, poke GPIO and
+    registers, and drive it from scripts, a web UI, or an MCP client.
+  </p>
+  <p>
+    The two halves are connected by <strong>MMIO memory hooks</strong>: every
+    read/write the firmware makes to a peripheral register is intercepted and
+    answered by the peripheral model, so the guest sees exactly what real
+    silicon would present.
+  </p>
+
+  <h2>Architecture</h2>
+  <ul>
+    <li><strong>CPU</strong> — Unicorn 2.1.4 compiled to WASM, executing
+      Thumb-2 instructions. Reset vector, SP/PC, and exception handling follow
+      the Cortex-M programming model.</li>
+    <li><strong>Peripheral model</strong> — a Rust crate compiled to WASM via
+      <code>wasm-bindgen</code>. ~33 peripheral modules (RCC, GPIO, USART,
+      TIM, NVIC/SysTick/EXTI, ETH+DMA, I2C, SPI/I2S, CAN, LTDC, DCMI, RTC,
+      ADC, FLASH …) answer <code>periph_read</code>/<code>periph_write</code>.</li>
+    <li><strong>JS driver</strong> — registers the memory hooks, runs
+      <code>emu_start</code> in stepped batches, services ETH TX/RX, the
+      interrupt pump, and virtual devices (displays, sensors, bus taps).</li>
+  </ul>
+  <p class="pill">Memory-hook protocol: MMIO range → periph_read/write → model → value written back into guest memory.</p>
+  <p>See <a href="docs/architecture.md">docs/architecture.md</a> and
+     <a href="docs/peripherals.md">docs/peripherals.md</a> for the full design
+     and a per-peripheral implementation matrix.</p>
+
+  <h2>Featured firmwares</h2>
+  <table>
+    <tr><th>Firmware</th><th>What it shows</th></tr>
+    <tr><td><code>eth_http</code></td><td>DHCP → TCP handshake → HTTP GET/response, driven through a real gVisor network stack (or a canned netsim). The flagship networking demo.</td></tr>
+    <tr><td><code>blinky</code></td><td>Bare-metal blink + UART banner; toggles PA5 so you can watch the GPIO panel update live.</td></tr>
+    <tr><td><code>can_test</code></td><td>Two-node CAN bus: loopback TX, arbitration (lower ID wins), and filter-gated delivery.</td></tr>
+    <tr><td><code>freertos_test</code></td><td>FreeRTOS scheduler: TIM3 ISR → <code>xSemaphoreGiveFromISR</code> → PendSV context switch to a higher-priority task.</td></tr>
+    <tr><td><code>rtc_test</code></td><td>DS3231 I2C RTC: set time, read-back, temperature.</td></tr>
+    <tr><td><code>oled_test</code> / <code>tft_test</code> / <code>buzzer_test</code> / <code>audio_play_test</code></td><td>Virtual peripherals over I2C/SPI/TIM/I2S (SSD1306, ILI9341, PWM, I2S capture).</td></tr>
+    <tr><td><code>doom</code></td><td>doomgeneric F407 port — DOOM 1 shareware running in a Web Worker. Open <a href="doom.html">doom.html</a>.</td></tr>
+  </table>
+
+  <h2>How to use</h2>
+
+  <h3>Headless CLI</h3>
+  <pre><span class="c"># boot a firmware and stream its UART to stdout</span>
+node cli.mjs firmware.bin --inst 20000000
+
+<span class="c"># load an ELF, trace peripheral register accesses to stderr</span>
+node cli.mjs app.elf --verbose
+
+node cli.mjs --help      <span class="c"># usage + all flags</span>
+node cli.mjs --version   <span class="c"># version</span></pre>
+  <p>Flags: <code>--inst &lt;N&gt;</code> instruction budget,
+     <code>--format auto|bin|hex|elf</code>, <code>--verbose</code> register
+     trace, <code>--help</code>, <code>--version</code>.</p>
+
+  <h3>Browser console</h3>
+  <pre><span class="c"># from the repo root</span>
+python3 -m http.server 8123 --directory site
+<span class="c"># then open http://localhost:8123/index.html</span></pre>
+  <p>Pick a firmware preset from the dropdown, click <strong>Run</strong>, and
+     watch the UART terminal. The console also shows a live GPIO grid, key
+     peripheral registers, device panels (OLED/TFT/buzzer/RTC), and — with a
+     gateway URL — real Ethernet.</p>
+
+  <h3>Node library API</h3>
+  <pre><span class="c">// npm install stm32f4-emu  (or use the local checkout)</span>
+import { createSTM32F407 } from 'stm32f4-emu';
+import { readFileSync } from 'node:fs';
+
+const fw = new Uint8Array(readFileSync('firmware.bin'));
+const emu = await createSTM32F407({ firmware: fw });
+
+for (let i = 0; i &lt; 200; i++) {
+  emu.step(100000);                 <span class="c">// run up to 100k instructions</span>
+  const uart = emu.drainUart();
+  if (uart.length) process.stdout.write(uart.toString());
+}
+console.log('PC=', emu.read32(0x08000000 + 4).toString(16));</pre>
+  <p>Key handle methods: <code>step(n)</code>, <code>run(n)</code>,
+     <code>drainUart()</code>, <code>read32/write32/read16/write16/read8/write8</code>,
+     <code>close()</code>. TypeScript types ship in <code>index.d.ts</code>.</p>
+
+  <h3>MCP server</h3>
+  <pre><span class="c"># optional peer dep:</span>
+npm install @modelcontextprotocol/sdk zod
+npx stm32f4-mcp          <span class="c"># speaks MCP over stdio</span></pre>
+  <p>Exposes load/step/UART/pins/ADC/registers/memory/component tools to an
+     MCP client (Claude Code, Claude Desktop). See
+     <a href="docs/mcp.md">docs/mcp.md</a>.</p>
+
+  <h2>Learn more</h2>
+  <ul>
+    <li><a href="docs/usage.md">docs/usage.md</a> — CLI, browser, and library usage, config, env vars, building.</li>
+    <li><a href="docs/architecture.md">docs/architecture.md</a> — how the pieces fit together.</li>
+    <li><a href="docs/peripherals.md">docs/peripherals.md</a> — every peripheral and how complete it is.</li>
+    <li><a href="docs/components.md">docs/components.md</a> — attach virtual LEDs/buttons/sensors to pins.</li>
+    <li><a href="docs/mcp.md">docs/mcp.md</a> — drive the emulator from an LLM via MCP.</li>
+    <li><a href="CHANGELOG.md">CHANGELOG.md</a> — releases and features.</li>
+  </ul>
+
+  <footer>stm32f4-emu — Unicorn (WASM) CPU + Rust peripheral model.</footer>
+</main>
+</body>
+</html>

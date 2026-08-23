@@ -19,6 +19,13 @@ impl Pwr {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
         if name == "PWR" { Some(Box::new(Self::default())) } else { None }
     }
+
+    /// Set the wakeup flag (WUF, CSR bit 2). The emulator sets this when the
+    /// core wakes from a WFI/WFE low-power state so firmware can confirm the
+    /// wakeup source by reading PWR->CSR.
+    pub fn wakeup(&mut self) {
+        self.csr |= 1 << 2;
+    }
 }
 
 impl Peripheral for Pwr {

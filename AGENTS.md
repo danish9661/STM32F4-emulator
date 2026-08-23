@@ -1914,3 +1914,62 @@ Things that bite here:
   this page — the emulator is not on that thread. `window.__doom` exposes
   `booted`, `paused`, `stats`, `key(code, pressed)`, `send(msg)` and the
   `stopTicks()`/`startTicks()` test hooks.
+
+---
+
+## 18. Low-power model + demo firmwares (2026-08-22)
+
+### WFI/STOP low-power path (emulator-level)
+- **Model**: `stm32-periph-wasm/src/peripherals/pwr.rs` gained `wakeup()`
+  (sets `CSR` bit 2 = WUF); `Peripherals::pwr_wakeup()` (mod.rs) downcasts the
+  `0x4000_7000` slot and calls it; `lib.rs` exports `pwr_wakeup()` (wasm).
+- **RTC wakeup**: `rtc.rs` RTC alarm sets NVIC pending IRQ **41** (F407
+  `RTC_Alarm`; the model previously hardcoded 43 — wrong). The demo clears
+  RTC `ISR` bit 0 to "start" the counter (model gate in `advance_time`).
+- **emulator.js** (`lowpower` opt, default false):
+  - Forces `HOOK_CODE` (codeHook) — `blockCounting`/`minimalPolls` must NOT
+    take precedence or the WFI trap never installs. Hook-dispatch order is
+    `noCountHook` → `minimalPolls||lowpower` → `blockCounting` → `perInstHook||
+    freertos` → `blockHookFull`.
+  - codeHook detects `WFI`/`WFE` (16-bit `0xBF30`/`0xBF20`, 32-bit
+    `0xF3BF 0x8F4F`/`0x2F5F`) with `primask==0` and no pending interrupt →
+    sets `sleeping = (SCR>>2)&1 ? 2 : 1` (STOP vs SLEEP) and `emu_stop()`.
+  - `step()` top: if `sleeping`, `tick_n(WAKE_STEP=120000)`,
+    `periph_read(RTC_BASE=0x40002800,4)` (advances the virtual RTC → fires
+    alarm → NVIC pending), then if `has_pending_interrupt()` → on STOP call
+    `pwr_wakeup()` (sets WUF), clear `sleeping`, and fall through to run the
+    guest (the WFI becomes a no-op); else `instCount += WAKE_STEP; return`
+    (stay asleep). `has_pending_interrupt()` is the **non-consuming** check
+    from `lib.rs`:89 (use it for wakeup; `get_next_pending_interrupt()`
+    consumes and must NOT be used here).
+- **Browser**: `app.js` `LOWPOWER_FIRMWARES = new Set(['deep_sleep_demo'])`
+  passes `lowpower: true` to `createEmulator`.
+
+### Demo firmwares (added 2026-08-22)
+- `deep_sleep_demo/` — arms RTC alarm ~3s ahead, enters STOP via WFI, the
+  emulator halts and advances the virtual RTC until the alarm wakes it; prints
+  `WOKE FROM STOP` + `Wakeup flag (WUF) set`. Node test: `site/test_lowpower.mjs`.
+- `can_demo/` — friendly two-phase CAN showcase (single-node loopback +
+  two-node arbitration, lower ID wins, broadcast to both). Node test:
+  `site/test_candemo.mjs` (complements `can_test`/`test_can.mjs` which check
+  the raw model mechanics).
+- Both added to `tools/make_firmware.mjs` → `site/firmware.js` (35 firmwares),
+  so they appear in the browser dropdown.
+
+### Edge-case tests (`site/test_edge_cases.mjs`, item 7)
+High-value emulator-edge coverage (not guest-library re-tests): bad-image
+rejection via `loaders.js` (non-HEX, HEX checksum, truncated ELF, ELF with no
+PT_LOAD), invalid-MMIO (unmapped `0x10000000` read/write rejected), reset/
+reload (fresh instance boots after a prior one), and multi-instance stress
+(five sequential `createEmulator` instances all boot — validates
+`reset_state`). Wired into `npm test`.
+
+### Gotchas
+- The hook that detects WFI is `codeHook`; `blockCounting` (default true)
+  would install `blockHook` instead and the WFI trap would never run — so
+  `lowpower` is checked BEFORE `blockCounting` in the hook-dispatch chain.
+- RTC time only advances when `ISR` bit 0 is clear (a model gate); the
+  deep-sleep demo clears it (`RTC_ISR &= ~1u`) to "start" the counter.
+- Writing a multi-instance test: always `close()` each emulator (Unicorn is
+  1.75 GB/instance) and run `step()` inside the drain loop — a loop that only
+  calls `drainUart()` produces empty UART (the guest never executes).

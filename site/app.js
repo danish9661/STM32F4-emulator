@@ -52,6 +52,10 @@ const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehen
 // SRAM irq_flag/rx_frame_idx globals (irq_eth mode in emulator.js).
 const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test']);
 
+// Firmwares that exercise the WFI/STOP low-power path: the emulator halts the
+// core on WFI and advances the virtual RTC until an alarm/interrupt wakes it.
+const LOWPOWER_FIRMWARES = new Set(['deep_sleep_demo']);
+
 // Virtual hardware attached to the emulator per firmware: the JS device
 // layer parses the peripheral traffic and renders it (OLED fb, TFT fb,
 // buzzer freq, speaker samples). Matches emulator.js ext_devices.
@@ -257,6 +261,7 @@ const boot = async () => {
         uart_addr: image.uartAddr,
         enable_irqs: IRQ_FIRMWARES.has(image.name),
         irq_eth: IRQ_ETH_FIRMWARES.has(image.name),
+        lowpower: LOWPOWER_FIRMWARES.has(image.name),
         eth: ETH_RX_MAP[image.name],
         ext_devices: DEVICE_FIRMWARES[image.name],
         onTx: (pkt) => {

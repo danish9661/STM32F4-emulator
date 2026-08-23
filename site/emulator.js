@@ -66,6 +66,9 @@ export async function createEmulator(opts) {
         // context restore so FreeRTOS task switches actually take effect.
         // GATED: off by default, so existing firmwares are untouched.
         freertos = false,
+        // Low-power: trap WFI/WFE and halt the core until a wakeup source
+        // (e.g. RTC alarm) fires. Opt-in so default runs keep their speed.
+        lowpower = false,
         // Debug: trace every peripheral MMIO read/write to stderr (used by the
         // `stm32f4-emu --verbose` CLI flag). Capped so a chatty firmware can't
         // flood the terminal.
@@ -89,7 +92,7 @@ export async function createEmulator(opts) {
         is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd,
         eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll,
         eth_is_rx_poll, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
-        get_next_pending_interrupt, set_intr_pending, uart_rx_byte,
+        get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
         spi_tap, spi_take_events, spi_push_miso,
         fsmc_tap, fsmc_take_events, fsmc_push_data,
@@ -408,7 +411,38 @@ export async function createEmulator(opts) {
     // suspended (which would otherwise skip the switch and leave it spinning).
     let deliveringIsr = false;
 
+    // ── low-power (WFI/WFE) state ──
+    // 0 = awake, 1 = sleep (WFI with SLEEPDEEP clear), 2 = stop (deep sleep).
+    let sleeping = 0;
+    const RTC_BASE = 0x40002800;       // RTC TR at +0x00 drives time advance
+    const WAKE_STEP = 120000;          // virtual instructions advanced per step while asleep
+
     const codeHook = (handle, address, size, user_data) => {
+        if (lowpower) {
+            // Decode WFI / WFE and halt the core until a wakeup source fires.
+            // WFI is a no-op if an enabled interrupt is already pending, so we
+            // only sleep when quiescent. Handle both the 16-bit Thumb encoding
+            // (0xBF30 / 0xBF20, what GCC emits for -mthumb) and the 32-bit
+            // Thumb-2 hint (0xF3BF 0x8F4F / 0xF3BF 0x8F5F).
+            const b2 = uc.mem_read(BigInt(address), 2);
+            const hw = (b2[1] << 8) | b2[0];
+            let isWfi = false;
+            if (hw === 0xBF30 || hw === 0xBF20) isWfi = true;
+            else if (hw === 0xF3BF) {
+                const b4 = uc.mem_read(BigInt(address), 4);
+                const hw2 = (b4[3] << 8) | b4[2];
+                if (hw2 === 0x8F4F || hw2 === 0x8F5F) isWfi = true;
+            }
+            if (isWfi) {
+                const primask = uc.reg_read_i32(Module.ARM_REG_PRIMASK) & 1;
+                if (primask === 0 && !has_pending_interrupt()) {
+                    const scr = periph_read(0xE000ED10, 4);
+                    sleeping = ((scr >> 2) & 1) ? 2 : 1; // 2 = STOP (deep sleep)
+                    uc.emu_stop();
+                    return;
+                }
+            }
+        }
         if (freertos) {
             // Flush the authoritative PSP to the real CPU now (this runs inside
             // emu_start, so the write sticks, unlike one done after emu_start).
@@ -538,8 +572,8 @@ export async function createEmulator(opts) {
         }
     };
     if (noCountHook) { /* no per-block/per-inst hook: step() accounts the budget */ }
+    else if (minimalPolls || lowpower) uc.hook_add(Module.HOOK_CODE, codeHook, null);
     else if (blockCounting) uc.hook_add(Module.HOOK_BLOCK, blockHook, null);
-    else if (minimalPolls) uc.hook_add(Module.HOOK_CODE, codeHook, null);
     else if (perInstHook || freertos) uc.hook_add(Module.HOOK_CODE, codeHook, null);
     else uc.hook_add(Module.HOOK_BLOCK, blockHookFull, null);
 
@@ -1080,6 +1114,21 @@ export async function createEmulator(opts) {
     };
 
     const step = (max_inst = maxBatch) => {
+        if (sleeping) {
+            // Core is halted in WFI/WFE. Advance virtual time so wakeup sources
+            // (e.g. the RTC alarm) progress, then wake if anything is pending.
+            tick_n(WAKE_STEP);
+            periph_read(RTC_BASE, 4); // trigger RTC time advance -> may fire alarm -> NVIC
+            if (has_pending_interrupt()) {
+                if (sleeping === 2) pwr_wakeup(); // set PWR->CSR WUF on wake from STOP
+                sleeping = 0;
+                // fall through: the guest re-executes WFI, which is now a no-op
+                // because an interrupt is pending, then the ISR runs.
+            } else {
+                instCount += WAKE_STEP;
+                return { pc: uc.reg_read_i32(Module.ARM_REG_PC), stopped: false, instCount };
+            }
+        }
         processDma();
         processEth();
         syncFlashProtection();

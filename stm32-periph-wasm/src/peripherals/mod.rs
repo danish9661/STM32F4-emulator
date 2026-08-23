@@ -89,6 +89,20 @@ impl Peripherals {
             }
         }
     }
+
+    /// Mark the PWR peripheral as having woken from low-power (sets CSR WUF).
+    /// Called by the emulator when the core resumes after a WFI/WFE halt.
+    pub fn pwr_wakeup(&self) {
+        for slot in &self.peripherals {
+            if slot.start == 0x4000_7000 {
+                use crate::peripherals::pwr::Pwr;
+                if let Some(pwr) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Pwr>() {
+                    pwr.wakeup();
+                }
+                break;
+            }
+        }
+    }
 }
 
 fn extract_svd_max_offset(p: &PeripheralInfo) -> u32 {
