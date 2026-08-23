@@ -356,6 +356,38 @@ $('rxInput').addEventListener('keydown', (e) => {
     e.preventDefault();
     sendRx(e.shiftKey ? 0x0A : 0x0D);
 });
+
+// ── CAN injection (host-injected frames via emu.canInject) ─────────────────
+const setCanStatus = (msg, err) => {
+    const el = $('canStatus');
+    if (el) { el.textContent = msg; el.style.color = err ? 'var(--red)' : 'var(--dim)'; }
+};
+const injectCan = () => {
+    if (!emu) { setCanStatus('boot a CAN firmware first', true); return; }
+    const idStr = $('canId').value.trim().replace(/^0x/i, '');
+    const id = parseInt(idStr, 16);
+    if (!Number.isFinite(id) || id < 0 || id > 0x7FF) {
+        setCanStatus('CAN ID must be an 11-bit hex value (0..7FF)', true); return;
+    }
+    const toks = $('canData').value.trim().split(/\s+/).filter(Boolean);
+    if (toks.length > 8) { setCanStatus('at most 8 data bytes', true); return; }
+    const data = new Uint8Array(toks.length);
+    for (let i = 0; i < toks.length; i++) {
+        const b = parseInt(toks[i], 16);
+        if (!Number.isFinite(b) || b < 0 || b > 0xFF) {
+            setCanStatus('data bytes must be hex 00..FF', true); return;
+        }
+        data[i] = b;
+    }
+    emu.canInject(id, toks.length, data);
+    setCanStatus(`injected id=0x${id.toString(16)} dlc=${toks.length}`);
+};
+$('btnCanInject').addEventListener('click', injectCan);
+$('btnCanDemo').addEventListener('click', () => {
+    $('canId').value = '123';
+    $('canData').value = '48 45 4C 4C 4F 21 21 21';
+    injectCan();
+});
 $('btnSaveLog').addEventListener('click', () => {
     if (!uartBuf) return;
     const a = document.createElement('a');

@@ -236,6 +236,8 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
             <option value="audio_play_test">audio_play_test — I2S sine playback (speaker panel plays the samples)</option>
             <option value="rtc_test">rtc_test — DS3231 RTC time/temp over I2C1 (live clock in the RTC panel)</option>
             <option value="can_test">can_test — CAN1/CAN2 bus loopback + arbitration (2-node bus, no device panel)</option>
+            <option value="can_demo">can_demo — two-phase CAN showcase (loopback + 2-node arbitration)</option>
+            <option value="can_host_rx">can_host_rx — receives CAN frames you inject from the CAN-injection panel</option>
             <option value="test_firmware">test_firmware — TIM2/ADC dump</option>
           </optgroup>
           <optgroup label="Crypto">
@@ -329,6 +331,20 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
     <div class="panel" style="margin-bottom:12px;">
       <h2>Peripherals</h2>
       <div id="periph" class="periph"></div>
+    </div>
+    <div class="panel" style="margin-bottom:12px;">
+      <h2>CAN injection</h2>
+      <div class="sec">
+        <label for="canId">CAN ID (hex, 11-bit, e.g. 123)</label>
+        <input type="text" id="canId" value="123" spellcheck="false">
+        <label for="canData">Data (up to 8 hex bytes, space-separated, e.g. 48 45 4C 4C 4F 21 21 21 = "HELLO!!!")</label>
+        <input type="text" id="canData" value="48 45 4C 4C 4F 21 21 21" spellcheck="false">
+        <div class="row">
+          <button id="btnCanInject" class="primary">Inject CAN frame</button>
+          <button id="btnCanDemo">Inject HELLO!!!</button>
+        </div>
+        <p id="canStatus" style="color:var(--dim);">Boot <b>can_host_rx</b> (or <b>can_demo</b>) first, then inject a frame — the firmware receives it on its CAN RX FIFO and prints the ID + data. Standard 11-bit frames only.</p>
+      </div>
     </div>
     <div class="panel" style="margin-bottom:12px;">
       <h2>Symbols</h2>

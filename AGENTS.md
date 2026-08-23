@@ -1998,3 +1998,12 @@ reload (fresh instance boots after a prior one), and multi-instance stress
   the RTC alarm fires and `pwr_wakeup()` clears the halt. Without the flag the
   firmware still wakes (the CLI's codeHook calls `tick_n` which advances the
   RTC), but it spins the full instruction budget instead of halting.
+
+- **Browser UI**: `site/index.html` has a "CAN injection" sidebar panel (ID
+  hex + up to 8 hex data bytes + "Inject CAN frame" / "Inject HELLO!!!"
+  buttons); `site/app.js` wires them to `emu.canInject` (validates 11-bit ID
+  and hex bytes, shows status in `#canStatus`). `can_host_rx` and `can_demo`
+  were added to the Firmware dropdown so the feature is demoable in the page.
+  Verified by headless-Chrome CDP smoke (`/tmp/opencode/canui_smoke.mjs`):
+  boots `?fw=can_host_rx`, clicks Inject, asserts `RX id=0x00000123
+  data=HELLO!!!`.
