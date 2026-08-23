@@ -23,56 +23,54 @@ impl Wwdg {
     }
     fn tick_instructions(&self) -> u64 { 256 * self.prescaler() as u64 }
 
-    fn elapsed_ticks(&mut self) -> u32 {
+    fn early_wakeup(&mut self, sys: &System) {
+        self.sr |= 1;
+        if self.cfr & 0x200 != 0 { sys.p.nvic.borrow_mut().set_intr_pending(0); }
+    }
+
+    /// Continuous countdown driven by the virtual clock (PCLK1/4096/prescaler),
+    /// independent of CPU accesses to the WWDG registers.
+    fn tick_counter(&mut self, sys: &System) {
+        if !self.wdga_enabled() { return; }
         let now = INSTRUCTION_COUNT.load(Ordering::Relaxed);
-        if !self.initialized { self.last_tick = now; self.initialized = true; return 0; }
+        if !self.initialized { self.last_tick = now; self.initialized = true; return; }
         let elapsed = now.saturating_sub(self.last_tick);
         let ticks = elapsed / self.tick_instructions();
-        if ticks > 0 { self.last_tick = now; }
-        ticks.min(0x7F) as u32
-    }
-
-    fn decrement_counter(&mut self, sys: &System) {
-        let ticks = self.elapsed_ticks();
         if ticks == 0 { return; }
+        self.last_tick = now;
         let counter = self.cr & 0x7F;
-        if counter < ticks {
-            self.cr = (self.cr & !0x7F) | 0x3F;
-            self.sr |= 1;
-            if self.cfr & 0x200 != 0 { sys.p.nvic.borrow_mut().set_intr_pending(0); }
-            if self.wdga_enabled() { request_watchdog_reset(); }
-            return;
+        if counter < ticks as u32 {
+            self.cr = 0x7F; // clear WDGA + counter; re-enabled only when firmware re-sets it
+            self.initialized = false;
+            self.early_wakeup(sys);
+            request_watchdog_reset(2);
+        } else {
+            let new_counter = counter - ticks as u32;
+            self.cr = (self.cr & !0x7F) | new_counter;
+            if new_counter <= 0x3F && counter > 0x3F { self.early_wakeup(sys); }
         }
-        let new_counter = counter - ticks;
-        self.cr = (self.cr & !0x7F) | new_counter;
-        if new_counter <= 0x3F && counter > 0x3F {
-            self.sr |= 1;
-            if self.cfr & 0x200 != 0 { sys.p.nvic.borrow_mut().set_intr_pending(0); }
-        }
-    }
-
-    fn refresh(&mut self, value: u32) {
-        self.last_tick = INSTRUCTION_COUNT.load(Ordering::Relaxed);
-        self.initialized = true;
-        self.cr = value & 0xFF;
     }
 }
 
 impl Peripheral for Wwdg {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-    fn read(&mut self, sys: &System, offset: u32) -> u32 {
-        self.decrement_counter(sys);
+    fn tick(&mut self, sys: &System) { self.tick_counter(sys); }
+
+    fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         match offset { 0x00 => self.cr, 0x04 => self.cfr, 0x08 => self.sr, _ => 0 }
     }
 
     fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
             0x00 => {
-                self.decrement_counter(sys);
                 if value & 0x80 != 0 && self.cfr & 0x7F != 0 {
-                    if (self.cr & 0x7F) > (self.cfr & 0x7F) { request_watchdog_reset(); }
+                    // Refreshing while the counter is still above the window is
+                    // a window violation -> reset.
+                    if (self.cr & 0x7F) > (self.cfr & 0x7F) { request_watchdog_reset(2); }
                 }
-                self.refresh(value);
+                self.cr = value & 0xFF;
+                self.last_tick = INSTRUCTION_COUNT.load(Ordering::Relaxed);
+                self.initialized = true;
             }
             0x04 => self.cfr = value & 0x7FFF,
             0x08 => self.sr &= !(value & 1),

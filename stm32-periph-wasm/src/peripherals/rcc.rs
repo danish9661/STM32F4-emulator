@@ -1,4 +1,4 @@
-use crate::system::{System, instruction_count};
+use crate::system::{System, instruction_count, iwdg_reset_flag, wwdg_reset_flag, clear_watchdog_reset_flags};
 use super::Peripheral;
 
 const HSI_FREQ: u64 = 16_000_000;
@@ -165,7 +165,7 @@ impl Peripheral for Rcc {
             0x50 => self.ahb1lpenr, 0x54 => self.ahb2lpenr, 0x58 => self.ahb3lpenr,
             0x60 => self.apb1lpenr, 0x64 => self.apb2lpenr,
             0x70 => self.bdcr,
-            0x74 => self.csr,
+            0x74 => self.csr | ((iwdg_reset_flag() as u32) << 29) | ((wwdg_reset_flag() as u32) << 30),
             0x80 => self.sscg, 0x84 => self.plli2scfgr, 0x88 => self.pllsai,
             0x8C => self.dckcfgr, 0x90 => self.ckgatenr, 0x94 => self.dckcfgr2,
             _ => 0,
@@ -204,6 +204,8 @@ impl Peripheral for Rcc {
             }
             0x74 => {
                 self.csr = value & 0x0C00_003F;
+                // RMVF (bit 24): write-1-to-clear all reset-status flags.
+                if value & (1 << 24) != 0 { clear_watchdog_reset_flags(); }
                 if value & 1 != 0 { self.lsi_on_inst = self.now(); }
                 else { self.lsi_on_inst = u64::MAX; }
                 if self.lsi_on_inst != u64::MAX && self.now().wrapping_sub(self.lsi_on_inst) > 200 {

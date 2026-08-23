@@ -135,6 +135,10 @@ export function can_inject(id, dlc, data) {
     wasm.can_inject(id, dlc, ptr0, len0);
 }
 
+export function clear_watchdog_reset_flags() {
+    wasm.clear_watchdog_reset_flags();
+}
+
 /**
  * Forget any fed frame (stop the camera).
  */
@@ -543,6 +547,14 @@ export function is_watchdog_reset_requested() {
 }
 
 /**
+ * @returns {boolean}
+ */
+export function iwdg_reset_flag() {
+    const ret = wasm.iwdg_reset_flag();
+    return ret !== 0;
+}
+
+/**
  * Frames completed by the LTDC scanout since enable.
  * @returns {number}
  */
@@ -694,6 +706,14 @@ export function tick_n(delta) {
  */
 export function uart_rx_byte(addr, byte) {
     const ret = wasm.uart_rx_byte(addr, byte);
+    return ret !== 0;
+}
+
+/**
+ * @returns {boolean}
+ */
+export function wwdg_reset_flag() {
+    const ret = wasm.wwdg_reset_flag();
     return ret !== 0;
 }
 function __wbg_get_imports() {

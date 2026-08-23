@@ -19,15 +19,9 @@ impl Iwdg {
     }
     fn tick_instructions(&self) -> u64 { 128 * self.prescaler_div() }
 
-    fn elapsed_ticks(&mut self) -> u32 {
-        let now = INSTRUCTION_COUNT.load(Ordering::Relaxed);
-        let elapsed = now.saturating_sub(self.last_tick);
-        let ticks = elapsed / self.tick_instructions();
-        if ticks > 0 { self.last_tick = now; }
-        (ticks as u64).min(self.counter as u64) as u32
-    }
-
-    fn decrement_counter(&mut self) {
+    /// Continuous countdown driven by the virtual (instruction-count) clock,
+    /// like the real IWDG running off LSI independent of CPU accesses.
+    fn tick_counter(&mut self) {
         let now = INSTRUCTION_COUNT.load(Ordering::Relaxed);
         if self.sr != 0 && now.saturating_sub(self.sr_tick) >= self.tick_instructions() { self.sr = 0; }
         if !self.enabled { return; }
@@ -35,15 +29,24 @@ impl Iwdg {
         let ticks = elapsed / self.tick_instructions();
         if ticks == 0 { return; }
         self.last_tick = now;
-        if self.counter <= ticks as u32 { self.counter = 0; request_watchdog_reset(); }
-        else { self.counter -= ticks as u32; }
+        if self.counter <= ticks as u32 {
+            self.counter = 0;
+            request_watchdog_reset(1);
+            // Latch the reset and disable until the firmware re-enables (0xCCCC),
+            // so the MCU reset the JS driver performs doesn't immediately re-fire.
+            self.enabled = false;
+            self.counter = self.rlr;
+        } else {
+            self.counter -= ticks as u32;
+        }
     }
 }
 
 impl Peripheral for Iwdg {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn tick(&mut self, _sys: &System) { self.tick_counter(); }
+
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
-        self.decrement_counter();
         match offset {
             0x04 => self.pr, 0x08 => self.rlr,
             0x0C => { let sr = self.sr; self.sr = 0; sr }
@@ -52,7 +55,6 @@ impl Peripheral for Iwdg {
     }
 
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
-        self.decrement_counter();
         match offset {
             0x00 => {
                 self.kr = value;

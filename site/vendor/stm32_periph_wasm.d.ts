@@ -56,6 +56,8 @@ export function audio_take_capture(): Uint16Array;
  */
 export function can_inject(id: number, dlc: number, data: Uint8Array): void;
 
+export function clear_watchdog_reset_flags(): void;
+
 /**
  * Forget any fed frame (stop the camera).
  */
@@ -253,6 +255,8 @@ export function init_svd(svd_xml: string): void;
 
 export function is_watchdog_reset_requested(): boolean;
 
+export function iwdg_reset_flag(): boolean;
+
 /**
  * Frames completed by the LTDC scanout since enable.
  */
@@ -330,6 +334,8 @@ export function tick_n(delta: number): void;
  */
 export function uart_rx_byte(addr: number, byte: number): boolean;
 
+export function wwdg_reset_flag(): boolean;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -344,6 +350,7 @@ export interface InitOutput {
     readonly audio_source_remaining: () => number;
     readonly audio_take_capture: () => [number, number];
     readonly can_inject: (a: number, b: number, c: number, d: number) => void;
+    readonly clear_watchdog_reset_flags: () => void;
     readonly dcmi_clear: () => void;
     readonly dcmi_feed_frame: (a: number, b: number, c: number, d: number) => void;
     readonly dma_get_pending: (a: number) => [number, number];
@@ -382,6 +389,7 @@ export interface InitOutput {
     readonly init: () => void;
     readonly init_svd: (a: number, b: number) => void;
     readonly is_watchdog_reset_requested: () => number;
+    readonly iwdg_reset_flag: () => number;
     readonly ltdc_get_frame_count: () => number;
     readonly ltdc_get_scanline: () => number;
     readonly periph_read: (a: number, b: number) => number;
@@ -396,6 +404,7 @@ export interface InitOutput {
     readonly tick: () => void;
     readonly tick_n: (a: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;
+    readonly wwdg_reset_flag: () => number;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

@@ -236,6 +236,21 @@ pub fn is_watchdog_reset_requested() -> bool {
     system::is_watchdog_reset_requested()
 }
 
+#[wasm_bindgen]
+pub fn iwdg_reset_flag() -> bool {
+    system::iwdg_reset_flag()
+}
+
+#[wasm_bindgen]
+pub fn wwdg_reset_flag() -> bool {
+    system::wwdg_reset_flag()
+}
+
+#[wasm_bindgen]
+pub fn clear_watchdog_reset_flags() {
+    system::clear_watchdog_reset_flags()
+}
+
 /// Inject a received byte into the UART at the given peripheral base address.
 /// Returns true if a peripheral was found at that address.
 #[wasm_bindgen]

@@ -21,15 +21,33 @@ pub fn get_ext_devices() -> &'static Mutex<ExtDevices> {
 pub static INSTRUCTION_COUNT: AtomicU64 = AtomicU64::new(0);
 pub fn instruction_count() -> u64 { INSTRUCTION_COUNT.load(Ordering::Relaxed) }
 
-static WATCHDOG_RESET: AtomicBool = AtomicBool::new(false);
+static WATCHDOG_RESET_EVENT: AtomicBool = AtomicBool::new(false);
+// Persistent reset-cause bits, latched on watchdog expiry until the firmware
+// clears them via RCC->CSR RMVF. Bit 29 (IWDGRSTF) / bit 30 (WWDGRSTF).
+static IWDG_RESET_FLAG: AtomicBool = AtomicBool::new(false);
+static WWDG_RESET_FLAG: AtomicBool = AtomicBool::new(false);
 
 // Software SPI configs queued before init, registered after GPIO exists
 static SOFTWARE_SPI_CONFIGS: OnceLock<Mutex<Vec<(String, Option<String>, String, String, String)>>> = OnceLock::new();
 pub fn get_software_spi_configs() -> &'static Mutex<Vec<(String, Option<String>, String, String, String)>> {
     SOFTWARE_SPI_CONFIGS.get_or_init(|| Mutex::new(Vec::new()))
 }
-pub fn is_watchdog_reset_requested() -> bool { WATCHDOG_RESET.swap(false, Ordering::Acquire) }
-pub fn request_watchdog_reset() { WATCHDOG_RESET.store(true, Ordering::Release); }
+pub fn is_watchdog_reset_requested() -> bool { WATCHDOG_RESET_EVENT.swap(false, Ordering::Acquire) }
+/// Latch a watchdog reset event. cause: bit0 = IWDG, bit1 = WWDG (so a single
+/// call can set both if needed). The event flag is consumed by the JS driver
+/// (is_watchdog_reset_requested); the per-source flag persists for RCC->CSR.
+pub fn request_watchdog_reset(cause: u8) {
+    WATCHDOG_RESET_EVENT.store(true, Ordering::Release);
+    if cause & 1 != 0 { IWDG_RESET_FLAG.store(true, Ordering::Release); }
+    if cause & 2 != 0 { WWDG_RESET_FLAG.store(true, Ordering::Release); }
+}
+pub fn iwdg_reset_flag() -> bool { IWDG_RESET_FLAG.load(Ordering::Acquire) }
+pub fn wwdg_reset_flag() -> bool { WWDG_RESET_FLAG.load(Ordering::Acquire) }
+/// Clear the latched watchdog reset-cause bits (RCC->CSR RMVF write).
+pub fn clear_watchdog_reset_flags() {
+    IWDG_RESET_FLAG.store(false, Ordering::Release);
+    WWDG_RESET_FLAG.store(false, Ordering::Release);
+}
 
 // Ethernet MAC event flags
 static ETH_TX_POLL: AtomicBool = AtomicBool::new(false);
@@ -653,7 +671,7 @@ pub fn reset_globals() {
     *FLASH_ERASE.lock().unwrap() = None;
     DMA_READ_ACTIVE.store(false, Relaxed);
     FLASH_PROGRAMMING.store(false, Relaxed);
-    WATCHDOG_RESET.store(false, Relaxed);
+    WATCHDOG_RESET_EVENT.store(false, Relaxed);
     ETH_TX_POLL.store(false, Relaxed);
     ETH_RX_POLL.store(false, Relaxed);
     ETH_DONE.store(0, Relaxed);

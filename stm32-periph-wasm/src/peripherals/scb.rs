@@ -43,7 +43,9 @@ impl Scb {
             if vectkey == 0x05FA {
                 let sysreset = (value >> 2) & 1;
                 if sysreset == 1 {
-                    crate::system::request_watchdog_reset();
+                    // System reset request (AIRCR SYSRESETREQ) — reboot the
+                    // guest but don't latch a watchdog-specific cause bit.
+                    crate::system::request_watchdog_reset(0);
                 }
             }
         }

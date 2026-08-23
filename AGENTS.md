@@ -2007,3 +2007,29 @@ reload (fresh instance boots after a prior one), and multi-instance stress
   Verified by headless-Chrome CDP smoke (`/tmp/opencode/canui_smoke.mjs`):
   boots `?fw=can_host_rx`, clicks Inject, asserts `RX id=0x00000123
   data=HELLO!!!`.
+
+### Watchdog (IWDG/WWDG) — 2026-08-23
+- **Model**: `iwdg.rs` + `wwdg.rs` were already registered in the peripheral
+  map (0x40003000 / 0x40002C00). Previously they only *requested* a reset and
+  the JS driver merely stopped — the guest never actually rebooted. Fixed:
+  - The countdown now runs **continuously off the virtual (instruction-count)
+    clock** via `Peripheral::tick` (driven by `tick_n`), not only on register
+    access — so the counter reaches 0 even while the firmware is idle.
+  - On expiry `request_watchdog_reset(cause)` latches a per-source reset-cause
+    bit (`IWDG_RESET_FLAG` / `WWDG_RESET_FLAG`) and the JS driver **reboots the
+    guest to the reset vector** (SP/PC from 0x08000000/0x08000004) instead of
+    stopping, so the firmware's startup re-runs. The model also disables the
+    watchdog on fire so the reboot doesn't immediately re-trigger.
+  - `rcc.rs` now reflects the cause in `RCC->CSR`: `IWDGRSTF` (bit 29) /
+    `WWDGRSTF` (bit 30), cleared on the firmware's `RMVF` (bit 24) write.
+  - New exports `iwdg_reset_flag()`, `wwdg_reset_flag()`,
+    `clear_watchdog_reset_flags()` (cause-aware `request_watchdog_reset(u8)`).
+- **Firmware `watchdog_demo/`**: starts IWDG (prescaler /8, max reload ≈1 s),
+  pets it through an "alive" loop, then stops petting so it expires → MCU
+  resets → reboots → reads `RCC->CSR` and prints `IWDG reset detected`.
+  Note: STM32F4 `RCC_CSR` is at **offset 0x74** (0x40023874), not 0x24.
+- **Test**: `site/test_watchdog.mjs` (asserts the full pet→reset→detect cycle;
+  wired into `npm test`). Registered in `tools/make_firmware.mjs` →
+  `site/firmware.js` (37 firmwares) and the web dropdown.
+- **WWWG**: modeled (window/underflow reset, EWI interrupt pending). The demo
+  firmware focuses on IWDG; a dedicated WWDG demo is a small follow-up.

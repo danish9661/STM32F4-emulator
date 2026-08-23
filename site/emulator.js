@@ -507,7 +507,14 @@ export async function createEmulator(opts) {
             tickAcc = 0;
             tick_n(tickEvery);
             if (is_watchdog_reset_requested()) {
-                stopRequested = true;
+                // Watchdog expiry → emulate an MCU reset: jump to the reset
+                // vector so the firmware's startup re-runs (re-zeros .bss,
+                // re-copies .data). The model already latched the cause in
+                // RCC->CSR for the firmware to detect. Don't stop — the next
+                // batch resumes at the reset handler.
+                uc.reg_write_i32(Module.ARM_REG_SP, read32(0x08000000));
+                uc.reg_write_i32(Module.ARM_REG_PC, (read32(0x08000004) | 1) >>> 0);
+                tickAcc = 0; pollAcc = 0;
                 uc.emu_stop();
                 return;
             }
@@ -556,7 +563,12 @@ export async function createEmulator(opts) {
             tick_n(tickAcc);
             tickAcc = 0;
             if (is_watchdog_reset_requested()) {
-                stopRequested = true;
+                // Watchdog expiry → emulate an MCU reset (jump to the reset
+                // vector). Model latched the cause in RCC->CSR. Resume at the
+                // reset handler rather than stopping.
+                uc.reg_write_i32(Module.ARM_REG_SP, read32(0x08000000));
+                uc.reg_write_i32(Module.ARM_REG_PC, (read32(0x08000004) | 1) >>> 0);
+                tickAcc = 0; pollAcc = 0;
                 uc.emu_stop();
                 return;
             }
