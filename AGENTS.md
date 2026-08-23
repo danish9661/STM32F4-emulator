@@ -1150,6 +1150,14 @@ closed/recreated per boot (autoplay policy: created on first samples).
 `#speakerInfo`. `renderDevices()` (app.js:506) runs in the rAF loop;
 renderers are frame-cache-keyed (no repaint when nothing changed).
 `?fw=oled_test|tft_test|buzzer_test|audio_play_test` in the console page.
+Also a fixed **Peripherals** panel (`#periph`, `refreshPeriph`) showing
+ETH DMASR/MACCR, USART1 SR/BRR, RCC AHB1ENR, GPIOA ODR, and a **Memory
+Watch** panel (`#watchList`): type any hex address (+ optional label),
+Add, and it shows a live 32-bit readout each rAF; a per-row poke input
+writes a hex value via `emu.write32`. `refreshWatch()` runs in the rAF loop
+next to `refreshPeriph`. Verified by headless-Chrome CDP smoke
+(`/tmp/opencode/watch_smoke.mjs`): boots `?fw=blinky`, adds a watch on
+GPIOA ODR (0x40020014), observes it toggle `0x20`↔`0x00` as PA5 blinks.
 
 ### Firmwares (all bare-metal, same Makefile pattern as blinky/)
 - `oled_test/`: SSD1306 init sequence, text page ("F407 OLED"), empty rows,

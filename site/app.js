@@ -388,6 +388,74 @@ $('btnCanDemo').addEventListener('click', () => {
     $('canData').value = '48 45 4C 4C 4F 21 21 21';
     injectCan();
 });
+
+// ── memory watch ────────────────────────────────────────────────────────────
+const WATCH = [];
+const watchListEl = $('watchList');
+watchListEl.innerHTML = '<div class="empty">No watches yet — add an address above.</div>';
+
+const parseHex = (s) => {
+    const t = String(s).trim().replace(/^0x/i, '').replace(/[^0-9a-fA-F]/g, '');
+    if (!t) return null;
+    const v = parseInt(t, 16);
+    return Number.isFinite(v) ? v >>> 0 : null;
+};
+
+const refreshWatch = () => {
+    if (!emu) return;
+    for (const w of WATCH) {
+        try { w.valEl.textContent = hex32(emu.read32(w.addr)); }
+        catch { w.valEl.textContent = '—'; }
+    }
+};
+
+const addWatch = () => {
+    const addr = parseHex($('watchAddr').value);
+    if (addr === null) { setStatus('watch: invalid address', 'err'); return; }
+    const label = $('watchLabel').value.trim() || ('0x' + addr.toString(16));
+    const w = { addr, label, valEl: null };
+    const row = document.createElement('div');
+    row.className = 'row';
+    const lbl = document.createElement('span');
+    lbl.className = 'lbl';
+    lbl.innerHTML = `<b>${label}</b> <span style="color:var(--dim)">(${hex32(addr)})</span>`;
+    const val = document.createElement('span');
+    val.className = 'val';
+    val.textContent = '—';
+    w.valEl = val;
+    const poke = document.createElement('input');
+    poke.type = 'text'; poke.placeholder = 'poke'; poke.spellcheck = false;
+    const setBtn = document.createElement('button');
+    setBtn.textContent = 'Set';
+    setBtn.onclick = () => {
+        const v = parseHex(poke.value);
+        if (v === null) { setStatus('watch: invalid poke value', 'err'); return; }
+        try { emu.write32(addr, v); } catch { setStatus('watch: write failed', 'err'); }
+    };
+    const rm = document.createElement('button');
+    rm.className = 'rm'; rm.textContent = '×'; rm.title = 'remove';
+    rm.onclick = () => {
+        const i = WATCH.indexOf(w);
+        if (i >= 0) WATCH.splice(i, 1);
+        row.remove();
+        if (!WATCH.length) watchListEl.innerHTML = '<div class="empty">No watches yet — add an address above.</div>';
+    };
+    row.append(lbl, val, poke, setBtn, rm);
+    WATCH.push(w);
+    if (watchListEl.querySelector('.empty')) watchListEl.innerHTML = '';
+    watchListEl.appendChild(row);
+    $('watchAddr').value = ''; $('watchLabel').value = '';
+};
+
+const clearWatch = () => {
+    WATCH.length = 0;
+    watchListEl.innerHTML = '<div class="empty">No watches yet — add an address above.</div>';
+};
+
+$('btnWatchAdd').addEventListener('click', addWatch);
+$('watchAddr').addEventListener('keydown', (e) => { if (e.key === 'Enter') addWatch(); });
+$('btnWatchClear').addEventListener('click', clearWatch);
+
 $('btnSaveLog').addEventListener('click', () => {
     if (!uartBuf) return;
     const a = document.createElement('a');
@@ -417,6 +485,7 @@ const refreshStats = () => {
     $('stXpsr').textContent = regs ? hex32(regs.XPSR) : '—';
     refreshGpio();
     refreshPeriph();
+    refreshWatch();
 };
 
 // ── LTDC display sink ──────────────────────────────────────────────────────
