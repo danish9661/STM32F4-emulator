@@ -1987,3 +1987,14 @@ reload (fresh instance boots after a prior one), and multi-instance stress
   prints `RX id=0xNNN data=...` for each injected frame. Node test:
   `site/test_can_inject.mjs` (asserts `RX id=0x00000123 data=HELLO!!!`). Added
   to `tools/make_firmware.mjs` → `site/firmware.js` (36 firmwares).
+
+### CLI `--lowpower` flag (2026-08-23)
+- `cli.mjs` (the `stm32f4-emu` bin) delegates to `createEmulator`, which already
+  implements the low-power halt/wake path (`lowpower` opt). Added `-l` /
+  `--lowpower` parsing that passes `lowpower: true` through, so firmware that
+  enters STOP/SLEEP via WFI runs end-to-end from the CLI:
+  `stm32f4-emu deep_sleep_demo.bin --lowpower`. Each sleeping `step()` advances
+  the virtual RTC by `WAKE_STEP=120000` instructions (consuming budget) until
+  the RTC alarm fires and `pwr_wakeup()` clears the halt. Without the flag the
+  firmware still wakes (the CLI's codeHook calls `tick_n` which advances the
+  RTC), but it spins the full instruction budget instead of halting.

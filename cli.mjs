@@ -2,10 +2,13 @@
 // stm32f4-emu — headless CLI to load and run an STM32F4 firmware image.
 //
 //   stm32f4-emu <firmware> [--inst N] [--format auto|bin|hex|elf] [--verbose]
+//                   [--lowpower]
 //
 // Loads a .bin/.elf/.hex firmware, boots it in the emulator, and streams the
 // guest UART to stdout. Peripheral register accesses are traced to stderr when
-// --verbose is given.
+// --verbose is given. With --lowpower, the core halts on WFI/WFE and the
+// emulator advances the virtual RTC until a wakeup source (e.g. an RTC alarm)
+// fires — so firmware that enters STOP (e.g. deep_sleep_demo.bin) runs.
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -33,12 +36,14 @@ Options:
   -n, --inst <N>        instruction budget to run (default 20000000)
   -f, --format <fmt>    firmware format: auto|bin|hex|elf (default auto)
   -v, --verbose         trace peripheral register reads/writes to stderr
+  -l, --lowpower        halt on WFI/WFE and advance the virtual RTC until wakeup
   -h, --help            show this help
   -V, --version         show version
 
 Examples:
   stm32f4-emu build/firmware.bin
   stm32f4-emu app.elf --inst 5000000 --verbose
+  stm32f4-emu deep_sleep_demo.bin --lowpower
 `;
 
 function fail(msg) {
@@ -61,11 +66,13 @@ async function main() {
     let inst = 20000000;
     let format = 'auto';
     let verbose = false;
+    let lowpower = false;
     for (let i = 0; i < args.length; i++) {
         const a = args[i];
         if (a === '-h' || a === '--help') { process.stdout.write(USAGE); process.exit(0); }
         if (a === '-V' || a === '--version') { process.stdout.write(`stm32f4-emu ${pkg.version}\n`); process.exit(0); }
         if (a === '-v' || a === '--verbose') { verbose = true; continue; }
+        if (a === '-l' || a === '--lowpower') { lowpower = true; continue; }
         if (a === '-n' || a === '--inst') {
             const v = args[++i];
             inst = Number(v);
@@ -113,7 +120,7 @@ async function main() {
     try {
         emu = await createEmulator({
             firmware, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes,
-            extra_mem, verbose,
+            extra_mem, verbose, lowpower,
         });
     } catch (e) {
         fail(`emulator failed to load firmware: ${e.message}`);
