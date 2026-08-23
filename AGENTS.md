@@ -2036,7 +2036,19 @@ reload (fresh instance boots after a prior one), and multi-instance stress
   supports the full window semantics (a `W < 0x7F` rejects refreshes while
   counter > W) plus the early-wakeup interrupt (CFR bit 9 / SR bit 0); the
   demo exercises the reset path.
-- **Tests**: `site/test_watchdog.mjs` (IWDG, **WDOG PASS**) and
-  `site/test_wwdg.mjs` (WWDG, **WDOG-WW PASS**), both wired into `npm test`.
-  Both firmwares registered in `tools/make_firmware.mjs` → `site/firmware.js`
-  (38 firmwares) and the web dropdown.
+- **Firmware `wwdg_window_demo/`**: sets a *real* window `W=0x50` (early-window
+  restriction active). The alive loop polls the counter and only refreshes
+  when it has dropped into the legal window (`counter <= W`), proving correct
+  refreshes survive; then it deliberately refreshes while the counter is still
+  above `W`, triggering a **window violation** reset. On reboot prints
+  `WWDG reset detected`. Exposes both previously-untested model paths.
+- **Tests**: `site/test_watchdog.mjs` (IWDG, **WDOG PASS**),
+  `site/test_wwdg.mjs` (WWDG underflow, **WDOG-WW PASS**), and
+  `site/test_wwdg_window.mjs` (WWDG window violation, **WDOG-WW-WIN PASS**),
+  all wired into `npm test`. The Wwdg Rust module also has two unit tests:
+  `window_violation_reset` and `ewi_fires_at_window` (EWI fires at the window
+  edge + NVIC IRQ 0 pending). `cargo test` 29/29.
+- **Bug fixed in this pass**: the window-violation check previously fired on
+  the *enable* write too — it compared the stale pre-enable counter (0x7F)
+  against `W` and tripped a false violation. Now gated on `initialized` so only
+  subsequent refreshes are checked (the initial load is always allowed).

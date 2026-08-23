@@ -240,6 +240,7 @@ footer { padding: 10px 16px; color: var(--dim); font-size: 11px; border-top: 1px
             <option value="can_host_rx">can_host_rx — receives CAN frames you inject from the CAN-injection panel</option>
             <option value="watchdog_demo">watchdog_demo — IWDG pet/reset loop, detects watchdog reset via RCC->CSR</option>
             <option value="wwdg_demo">wwdg_demo — WWDG pet/reset loop, detects window-watchdog reset via RCC->CSR</option>
+            <option value="wwdg_window_demo">wwdg_window_demo — WWDG with real window W=0x50, refreshes in-window + triggers a window violation</option>
             <option value="test_firmware">test_firmware — TIM2/ADC dump</option>
           </optgroup>
           <optgroup label="Crypto">

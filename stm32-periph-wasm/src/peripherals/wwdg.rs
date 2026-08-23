@@ -63,10 +63,14 @@ impl Peripheral for Wwdg {
     fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
             0x00 => {
-                if value & 0x80 != 0 && self.cfr & 0x7F != 0 {
-                    // Refreshing while the counter is still above the window is
-                    // a window violation -> reset.
-                    if (self.cr & 0x7F) > (self.cfr & 0x7F) { request_watchdog_reset(2); }
+                if value & 0x80 != 0 {
+                    // Window violation: a refresh while the live counter is
+                    // still above the window (counter > W) resets the MCU.
+                    // The initial enable loads the counter and must not trip
+                    // this; only subsequent refreshes are gated.
+                    if self.initialized && (self.cr & 0x7F) > (self.cfr & 0x7F) {
+                        request_watchdog_reset(2);
+                    }
                 }
                 self.cr = value & 0xFF;
                 self.last_tick = INSTRUCTION_COUNT.load(Ordering::Relaxed);
@@ -76,5 +80,52 @@ impl Peripheral for Wwdg {
             0x08 => self.sr &= !(value & 1),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system::{
+        clear_watchdog_reset_flags, test_dummy_system, wwdg_reset_flag, INSTRUCTION_COUNT,
+    };
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn window_violation_reset() {
+        clear_watchdog_reset_flags();
+        let mut boxed = Wwdg::new("WWDG").unwrap();
+        let w = boxed.as_any_mut().downcast_mut::<Wwdg>().unwrap();
+        let sys = test_dummy_system();
+        // WDGTB=3, window W=0x50 (early-window restriction active).
+        w.write(&sys, 0x04, (3u32 << 7) | 0x50);
+        // Enable + reload counter to 0x7F.
+        w.write(&sys, 0x00, 0x80 | 0x7F);
+        // Refresh again immediately while counter (0x7F) is still above the
+        // window (0x50) -> window violation -> reset requested.
+        w.write(&sys, 0x00, 0x80 | 0x7F);
+        assert!(wwdg_reset_flag(), "window violation must request a WWDG reset");
+    }
+
+    #[test]
+    fn ewi_fires_at_window() {
+        clear_watchdog_reset_flags();
+        let mut boxed = Wwdg::new("WWDG").unwrap();
+        let w = boxed.as_any_mut().downcast_mut::<Wwdg>().unwrap();
+        let sys = test_dummy_system();
+        // WDGTB=3, W=0x50, EWI enabled (CFR bit 9).
+        w.write(&sys, 0x04, (3u32 << 7) | 0x50 | (1u32 << 9));
+        INSTRUCTION_COUNT.store(1_000_000, Ordering::Relaxed);
+        // Enable + reload counter to 0x7F; last_tick anchored at 1_000_000.
+        w.write(&sys, 0x00, 0x80 | 0x7F);
+        // Advance the clock far enough that the counter drops to <= 0x3F,
+        // crossing the window edge and firing the early-wakeup interrupt.
+        INSTRUCTION_COUNT.fetch_add(200_000, Ordering::Relaxed);
+        w.tick(&sys);
+        assert!(w.read(&sys, 0x08) & 1 != 0, "EWIF should be set at the window edge");
+        assert!(
+            sys.p.nvic.borrow().irq_pending(0),
+            "WWDG early-wakeup interrupt (IRQ 0) should be pending"
+        );
     }
 }
