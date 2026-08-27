@@ -8,6 +8,14 @@ import { createEmulator } from './site/emulator.js';
 import { createNetSim } from './site/netsim.js';
 import { FIRMWARES } from './site/firmware.js';
 import { LED, Button, Pwm, I2cRegisterDevice, Potentiometer } from './site/components.js';
+import { STM32F4, GPIOPin, USART, DMAStream } from './site/stm32f4.js';
+
+// Node consumers get a one-call setup that injects the bundled assets. The
+// `firmware` option is optional (defer to loadBin/loadHex/loadELF after
+// create), matching the rp2040js / avr8js ergonomics.
+STM32F4.create = (opts = {}) => STM32F4._create({
+    bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes, ...opts,
+});
 
 const require = createRequire(import.meta.url);
 const unicornFactory = require('./site/vendor/unicorn_arm.cjs');
@@ -36,4 +44,4 @@ export async function createSTM32F407(opts = {}) {
     return createEmulator({ ...opts, firmware: bin, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes });
 }
 
-export { createEmulator, createNetSim, FIRMWARES, bindings, unicornFactory, svdXml, LED, Button, Pwm, I2cRegisterDevice, Potentiometer };
+export { createEmulator, createNetSim, FIRMWARES, bindings, unicornFactory, svdXml, LED, Button, Pwm, I2cRegisterDevice, Potentiometer, STM32F4, GPIOPin, USART, DMAStream };

@@ -1220,6 +1220,30 @@ export async function createEmulator(opts) {
         },
         rxQueue,
         pin, watchPin, i2cRegfile, setAdcChannel, clearAdcChannel,
+        // ── firmware (re)load + reset (used by the STM32F4 facade) ──
+        loadImage(opts = {}) {
+            const flash = opts.flash || new Uint8Array(0);
+            if (flash.length) uc.mem_write(BigInt(vector_table), flash);
+            for (const seg of opts.extraMem || []) {
+                uc.mem_write(BigInt(seg.addr), seg.data);
+            }
+            const sp = read32(vector_table);
+            const pc = read32(vector_table + 4);
+            uc.reg_write_i32(Module.ARM_REG_SP, sp);
+            uc.reg_write_i32(Module.ARM_REG_PC, (pc | 1) >>> 0);
+            stopRequested = false;
+            sleeping = 0;
+        },
+        reset() {
+            const sp = read32(vector_table);
+            const pc = read32(vector_table + 4);
+            uc.reg_write_i32(Module.ARM_REG_SP, sp);
+            uc.reg_write_i32(Module.ARM_REG_PC, (pc | 1) >>> 0);
+            stopRequested = false;
+            sleeping = 0;
+        },
+        dmaPendingCount() { return dma_get_pending_count(); },
+        dmaSetCompleted(streamIdx, success) { dma_set_completed(streamIdx, !!success); },
         oled: oled ? { fb: oled.fb, frame: () => oled.frame } : null,
         tft: tft ? { fb: tft.fb, w: tft.w, h: tft.h, frame: () => tft.frame } : null,
         buzzer: buzzer ? { get freq() { return buzzer.freq; }, get duty() { return buzzer.duty; }, get change() { return buzzer.change; } } : null,

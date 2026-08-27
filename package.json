@@ -15,6 +15,7 @@
     "./netsim": "./site/netsim.js",
     "./firmwares": "./site/firmware.js",
     "./loaders": "./site/loaders.js",
+    "./stm32f4": "./site/stm32f4.js",
     "./vendor": "./site/vendor/stm32_periph_wasm.js",
     "./vendor/unicorn": "./site/vendor/unicorn_arm.cjs",
     "./site": "./site/index.html"
@@ -57,7 +58,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node site/test_flow.mjs && node site/test_blinky.mjs && node site/test_rx_interrupt.mjs && node site/test_component_led.mjs && node site/test_component_button.mjs && node site/test_component_pwm.mjs && node site/test_component_i2cregfile.mjs && node site/test_component_adc.mjs && node site/test_multi_instance.mjs && node site/test_fsmc_dcmi.mjs && node site/test_fsmc.mjs && node site/test_dcmi.mjs && node site/probe_freertos.mjs   && node site/test_candemo.mjs && node site/test_lowpower.mjs   && node site/test_edge_cases.mjs && node site/test_can_inject.mjs   && node site/test_watchdog.mjs   && node site/test_wwdg.mjs   && node site/test_wwdg_window.mjs && node site/test_tim_capture.mjs && node site/test_qspi.mjs && node site/test_qspi_cdp.mjs && node site/test_browser.mjs",
+    "test": "node site/test_stm32f4_api.mjs && node site/test_stm32f4_periph.mjs && node site/test_flow.mjs && node site/test_blinky.mjs && node site/test_rx_interrupt.mjs && node site/test_component_led.mjs && node site/test_component_button.mjs && node site/test_component_pwm.mjs && node site/test_component_i2cregfile.mjs && node site/test_component_adc.mjs && node site/test_multi_instance.mjs && node site/test_fsmc_dcmi.mjs && node site/test_fsmc.mjs && node site/test_dcmi.mjs && node site/probe_freertos.mjs   && node site/test_candemo.mjs && node site/test_lowpower.mjs   && node site/test_edge_cases.mjs && node site/test_can_inject.mjs   && node site/test_watchdog.mjs   && node site/test_wwdg.mjs   && node site/test_wwdg_window.mjs && node site/test_tim_capture.mjs && node site/test_qspi.mjs && node site/test_qspi_cdp.mjs && node site/test_browser.mjs",
     "test:flow": "node site/test_flow.mjs",
     "test:blinky": "node site/test_blinky.mjs",
     "test:rx": "node site/test_rx_interrupt.mjs",

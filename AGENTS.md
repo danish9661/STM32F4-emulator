@@ -2140,3 +2140,74 @@ reload (fresh instance boots after a prior one), and multi-instance stress
   the *enable* write too — it compared the stale pre-enable counter (0x7F)
   against `W` and tripped a false violation. Now gated on `initialized` so only
   subsequent refreshes are checked (the initial load is always allowed).
+
+---
+
+## 19. STM32F4 high-level facade (Wokwi-style API, 2026-08-27)
+
+A typed, rp2040js/avr8js-style wrapper over the Unicorn-based emulator, so
+firmware can be driven like a real chip (`gpio`, `usart`, `spi`, `i2c`,
+`dma`) without touching the `createEmulator`/hook plumbing.
+
+### Files
+- `site/stm32f4.js` — `STM32F4`, `GPIOPin`, `USART`, `DMAStream` classes +
+  the `parseSpi`/`parseI2c` helpers. Pure JS; zero runtime overhead (every
+  call delegates to the underlying `emu`).
+- `index.mjs` — re-exports `STM32F4, GPIOPin, USART, DMAStream` and binds
+  `STM32F4.create` to the resolved Node assets
+  (`bindings`/`unicorn`/`svdXml`/`wasmInit` from the local `vendor/`).
+- `package.json` — `"./stm32f4"` export → `site/stm32f4.js`.
+- Tests: `site/test_stm32f4_api.mjs` (facade + GPIO/USART) and
+  `site/test_stm32f4_periph.mjs` (Wokwi SPI/I2C), both wired into `npm test`.
+
+### Usage
+```js
+import { STM32F4, decodeFirmware } from 'stm32f4-emu'; // or the local path
+const mcu = await STM32F4.create({
+  // optional firmware (else loadBin/loadHex/loadELF before execute)
+  firmware: /* Uint8Array flash */,
+  spi: [{ peripheral: 'SPI2', cs: 'PB12', dc: 'PB11', onTransfer: (ch, tx, rx) => {...} }],
+  i2c: [{ peripheral: 'I2C1', address: 0x3C,
+          onStart: (addr, isRead) => {}, onWrite: (b) => {}, onStop: () => {} }],
+});
+mcu.mcu.gpio.pin('PA5').on('change', (level) => console.log('LED', level));
+mcu.usart.onData = (bytes) => process.stdout.write(bytes);   // Buffer
+mcu.usart1.sendData('hi');                                  // alias of usart
+mcu.execute(1_000_000);                                     // run N cycles
+mcu.reset(); mcu.close();
+```
+- Firmware loading: `loadBin(bytes, base?)`, `loadHex(text)`, `loadELF(bytes)`.
+  Each writes flash (and any ELF/Intel-Hex RAM segments) and resets SP/PC from
+  the loaded vector table. A non-zero `PLACEHOLDER_VECTOR` (SP=0x20000000,
+  PC=0x08000185) is used when no firmware is given so `createEmulator`'s
+  reset-vector check passes; the real firmware replaces it.
+- `execute(cycles)` runs the engine and drains UART into `usart.onData` as a
+  `Buffer` (the emulator returns a **string**, so iterate `charCodeAt`).
+- `read32/write32`, `getRegisters()`, `stop()`, `reset()`, `close()` delegate.
+
+### Wokwi-style virtual peripherals
+Built on the EXISTING bus taps — **no Rust change**:
+- `mcu.spi` — declared via the `spi:[{peripheral, cs?, dc?, onTransfer?, onByte?}]`
+  create option. `onTransfer(ch, tx, rx)` fires at CS deassert; `onByte(ch, byte,
+  pushMiso, dc)` per byte. `mcu.spi.pushMiso(peripheral, bytes)` injects MISO.
+- `mcu.i2c` — `i2c:[{peripheral, address, onStart?, onWrite?, onRead?, onStop?}]`.
+  `mcu.i2c.pushRx(peripheral, bytes)` pre-supplies master-read responses.
+- Why declared at `create()`: the Rust Spi/I2c peripheral snapshots its
+  device list once at `init_svd()` (see `emulator.js` line ~172), so the taps
+  are registered *before* init via `ext_devices.spiDevices`/`i2cDevices`.
+
+### Event-stream gotchas (the two bugs that bit us)
+1. **State must persist across `parseSpi`/`parseI2c` calls.** The model drains
+   the event queue once per `step`, so a single CS-active SPI transfer (or one
+   I2C START..STOP) is usually split across several handler invocations. The
+   transfer state therefore lives on `spec._st`, NOT in local variables —
+   locals reset to zero every call and the transfer never completes.
+2. **Edge encoding (Rust is authoritative; the §13 doc is WRONG):** CS/START
+   edges have bit31 set and **bit30 = 1 means asserted/START**, 0 means
+   deasserted/STOP. Start a transfer on bit30-set, finish on bit30-clear.
+3. **I2C address byte is not in the stream.** The model pushes only START/STOP
+   edges + master-*written* data bytes; the address+R/W byte is consumed
+   internally and never reaches the tap. So `onStart(addr)` is called with the
+   device's *configured* `address`, not a value parsed from the wire, and read
+   transactions (which emit no master-written data) are served entirely from
+   the `pushRx` queue. Master reads are NOT delivered as `onWrite` events.
