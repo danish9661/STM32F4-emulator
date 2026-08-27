@@ -73,6 +73,7 @@ const DEVICE_FIRMWARES = {
     buzzer_test: { buzzer: { tim: 'TIM2' } },
     audio_play_test: { speaker: true },
     rtc_test: { rtc: { i2c: 'I2C1', addr: 0x68, init: RTC_INIT } },
+    qspi_test: { qspi: [{ peripheral: 'QUADSPI', size: 256 }] },
 };
 
 // ── status + UART ──────────────────────────────────────────────────────────

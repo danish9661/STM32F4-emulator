@@ -89,7 +89,7 @@ export async function createEmulator(opts) {
         periph_read, periph_write, tick, tick_n, get_uart_output,
         dma_get_pending_count, dma_get_pending, dma_set_completed,
         dma_periph_read, dma_periph_write,
-        is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd,
+        is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, qspi_register_flash, init_svd,
         eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll,
         eth_is_rx_poll, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
         get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, uart_rx_byte,
@@ -130,6 +130,12 @@ export async function createEmulator(opts) {
     }
     for (const cfg of (ext_devices.i2c_eeprom || [])) {
         add_i2c_eeprom(cfg.peripheral, cfg.address, cfg.data);
+    }
+    // QSPI flash backend. MUST run before init_svd(): the QUADSPI peripheral
+    // binds its flash image at construction time (Qspi::new clones the global
+    // QSPI_FLASH), so the backend must be registered first.
+    for (const cfg of (ext_devices.qspi || [])) {
+        qspi_register_flash(cfg.peripheral || 'QUADSPI', new Uint8Array(cfg.data || new Uint8Array(cfg.size || 256)));
     }
     // Register-file I2C devices (DS3231 RTC). init is a &[u8] snapshot of the
     // register file: BCD time regs 0x00-0x06, temp MSB/LSB 0x11/0x12. The

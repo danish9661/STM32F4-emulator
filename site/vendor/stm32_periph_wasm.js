@@ -601,6 +601,22 @@ export function pwr_wakeup() {
 }
 
 /**
+ * Register an external QSPI flash image for the named QUADSPI peripheral.
+ * Must be called before init(): the model binds its flash backend once at
+ * construction and never rescans. `data` is the raw flash contents (e.g. a
+ * W25Q-style image); indirect read/write transfers are serviced from it.
+ * @param {string} name
+ * @param {Uint8Array} data
+ */
+export function qspi_register_flash(name, data) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    wasm.qspi_register_flash(ptr0, len0, ptr1, len1);
+}
+
+/**
  * Clear all process-lifetime globals so a NEW emulator instance starts
  * clean.  Must be called before registering that instance's devices.
  * Without it, `ExtDevices` accumulates and a second instance silently binds

@@ -5,7 +5,7 @@ const require = createRequire(import.meta.url);
 const yaml = require('js-yaml');
 const path = require('path');
 import * as periph from './stm32_periph_wasm.js';
-const { periph_read, periph_write, tick, tick_n, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, dma_periph_read, dma_periph_write, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte, eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll, eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done, eth_signal_rx_poll } = periph;
+const { periph_read, periph_write, tick, tick_n, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, dma_periph_read, dma_periph_write, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, qspi_register_flash, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte, eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll, eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done, eth_signal_rx_poll } = periph;
 
 const parseHex = (v) => typeof v === 'number' ? v : parseInt(v, 16);
 
@@ -59,6 +59,17 @@ async function main() {
 
         const svdPath = path.resolve(config._devices_dir, config.cpu?.svd || 'stm32f407.svd');
         const svdXml = readFileSync(svdPath, 'utf8');
+
+        // QSPI flash must be registered BEFORE init_svd: the QUADSPI peripheral
+        // binds its flash backend at construction time.
+        if (config.devices && config.devices.qspi) {
+            for (const d of config.devices.qspi) {
+                const data = d.file ? readFileSync(path.resolve(config._devices_dir, d.file)) : new Uint8Array(d.size || 256);
+                qspi_register_flash(d.peripheral || 'QUADSPI', data);
+                console.log(`Loaded QSPI flash (${data.length} bytes)`);
+            }
+        }
+
         init_svd(svdXml);
 
         // Patches
@@ -97,6 +108,22 @@ async function main() {
 
         const svdPath = new URL('../../monox/stm32f407.svd', import.meta.url);
         const svdXml = readFileSync(svdPath, 'utf8');
+
+        // QSPI flash must be registered BEFORE init_svd: the QUADSPI peripheral
+        // binds its flash backend at construction time. For a qspi firmware we
+        // use an adjacent qspi_flash.bin if present, else a default 256-byte
+        // (blank) image so the indirect write/read round-trip still works.
+        if (firmwarePath.toLowerCase().includes('qspi')) {
+            try {
+                const data = readFileSync(`${fwDir}/qspi_flash.bin`);
+                qspi_register_flash('QUADSPI', data);
+                console.log(`Loaded QSPI flash: ${fwDir}/qspi_flash.bin (${data.length} bytes)`);
+            } catch (_) {
+                qspi_register_flash('QUADSPI', new Uint8Array(256));
+                console.log('Loaded default 256-byte QSPI flash');
+            }
+        }
+
         init_svd(svdXml);
 
         vector_table = 0x08000000;
@@ -175,6 +202,9 @@ async function main() {
                     add_spi_flash(d.peripheral, parseHex(d.jedec_id), data, d.cs ?? null);
                 } else if (type === 'usart_probe') {
                     uartAddr = parseHex(d.peripheral.match(/[0-9a-fA-F]+/)?.[0]) ? parseInt(d.peripheral, 16) : (PERIPH_ADDR[d.peripheral] || uartAddr);
+                } else if (type === 'qspi') {
+                    const data = d.file ? readFileSync(path.resolve(config._devices_dir, d.file)) : new Uint8Array(d.size || 256);
+                    qspi_register_flash(d.peripheral || 'QUADSPI', data);
                 }
             }
         }

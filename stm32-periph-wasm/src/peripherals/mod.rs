@@ -31,6 +31,7 @@ pub mod dbgmcu;
 pub mod cryp;
 pub mod hash;
 pub mod eth;
+pub mod qspi;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -47,6 +48,7 @@ use dbgmcu::Dbgmcu;
 use cryp::Cryp;
 use hash::Hash;
 use eth::EthernetMac;
+use qspi::Qspi;
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
@@ -238,6 +240,7 @@ impl Peripherals {
                 .or_else(|| Hash::new(name))
                 .or_else(|| Dbgmcu::new(name))
                 .or_else(|| EthernetMac::new(name))
+                .or_else(|| Qspi::new(name))
             ;
 
             if let Some(peri) = peri {
@@ -246,6 +249,16 @@ impl Peripherals {
                     peripheral: RefCell::new(peri),
                 });
             }
+        }
+
+        // QUADSPI is absent from the F407 SVD; register it explicitly at its
+        // conventional base so SVD-based init also models it.
+        if let Some(p) = Qspi::new("QUADSPI") {
+            peripherals.peripherals.push(PeripheralSlot {
+                start: 0xA000_1000,
+                end: 0xA000_1400,
+                peripheral: RefCell::new(p),
+            });
         }
 
         peripherals.wire_spi_flash_cs_callbacks();
@@ -306,6 +319,9 @@ impl Peripherals {
             (0x4002_8700, "Ethernet_PTP"),
             (0x4002_9000, "Ethernet_DMA"),
             (0x5005_0000, "DCMI"),
+            // QUADSPI is not in the F407 SVD (the F4 family lacks it), but we
+            // model it anyway at its conventional base for completeness.
+            (0xA000_1000, "QUADSPI"),
             (0xE000_E000, "NVIC"), (0xE000_E010, "SysTick"), (0xE000_ED00, "SCB"),
             (0xE004_2000, "DBGMCU"),
         ];
@@ -349,6 +365,7 @@ impl Peripherals {
                 .or_else(|| Hash::new(name))
                 .or_else(|| Dbgmcu::new(name))
                 .or_else(|| EthernetMac::new(name))
+                .or_else(|| Qspi::new(name))
             ;
 
             if let Some(p) = p {

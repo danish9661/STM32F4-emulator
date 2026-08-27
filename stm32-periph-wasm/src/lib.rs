@@ -550,6 +550,17 @@ pub fn i2c_regfile_set(peripheral: &str, offset: usize, value: u8) {
     }
 }
 
+// ── QSPI external flash (JS-provided image) ───────────────────────────────
+
+/// Register an external QSPI flash image for the named QUADSPI peripheral.
+/// Must be called before init(): the model binds its flash backend once at
+/// construction and never rescans. `data` is the raw flash contents (e.g. a
+/// W25Q-style image); indirect read/write transfers are serviced from it.
+#[wasm_bindgen]
+pub fn qspi_register_flash(name: &str, data: &[u8]) {
+    crate::peripherals::qspi::qspi_register_flash(name, data);
+}
+
 // ── FSMC bank taps (JS memory-mapped device) ───────────────────────────────
 
 /// Register a protocol-agnostic tap on an FSMC memory bank (0 = BANK1, the

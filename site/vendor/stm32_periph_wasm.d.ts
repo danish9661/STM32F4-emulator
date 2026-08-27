@@ -279,6 +279,14 @@ export function periph_write(addr: number, width: number, value: number): void;
 export function pwr_wakeup(): void;
 
 /**
+ * Register an external QSPI flash image for the named QUADSPI peripheral.
+ * Must be called before init(): the model binds its flash backend once at
+ * construction and never rescans. `data` is the raw flash contents (e.g. a
+ * W25Q-style image); indirect read/write transfers are serviced from it.
+ */
+export function qspi_register_flash(name: string, data: Uint8Array): void;
+
+/**
  * Clear all process-lifetime globals so a NEW emulator instance starts
  * clean.  Must be called before registering that instance's devices.
  * Without it, `ExtDevices` accumulates and a second instance silently binds
@@ -404,6 +412,7 @@ export interface InitOutput {
     readonly periph_read: (a: number, b: number) => number;
     readonly periph_write: (a: number, b: number, c: number) => void;
     readonly pwr_wakeup: () => void;
+    readonly qspi_register_flash: (a: number, b: number, c: number, d: number) => void;
     readonly reset_state: () => void;
     readonly set_intr_pending: (a: number) => void;
     readonly spi_flash_debug: (a: number, b: number) => [number, number];

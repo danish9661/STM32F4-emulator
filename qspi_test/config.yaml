@@ -1,0 +1,15 @@
+cpu:
+  svd: ../monox/stm32f407.svd
+  vector_table: 0x08000000
+regions:
+  - name: ROM
+    start: 0x08000000
+    load: qspi_test.bin
+    size: 0x100000
+  - name: RAM
+    start: 0x20000000
+    size: 0x20000
+devices:
+  qspi:
+    - peripheral: QUADSPI
+      size: 256

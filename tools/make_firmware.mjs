@@ -49,6 +49,8 @@ const firmwares = [
     ['wwdg_window_demo', 'wwdg_window_demo/wwdg_window_demo.bin', 'wwdg_window_demo.bin'],
     ['tim_capture_demo', 'tim_capture_demo/tim_capture_demo.bin', 'tim_capture_demo.bin'],
     ['deep_sleep_demo', 'deep_sleep_demo/deep_sleep_demo.bin', 'deep_sleep_demo.bin'],
+    // QSPI indirect read/write round-trip
+    ['qspi_test', 'qspi_test/qspi_test.bin', 'qspi_test.bin'],
     // doom (doomgeneric F407 port; needs doom1.wad served alongside)
     ['doom', 'doom/doom.bin', 'doom.bin'],
 ];

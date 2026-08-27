@@ -2077,8 +2077,65 @@ reload (fresh instance boots after a prior one), and multi-instance stress
   latch/overrun/output-ignore.
 - Note: ADC/DAC/SDIO/FSMC are **already fully modeled** (conversion, noise/
   triangle waveforms, FSMC bank read/write, SDIO command state) — they were
-  not stubs. The only truly-missing peripheral in that family is **QSPI**
-  (no `qspi.rs` yet).
+  not stubs. **QSPI** was the last gap: it is now modeled in `qspi.rs`
+  (QUADSPI register set at `0xA000_1000`; functional indirect read/write to an
+  optional external flash backend via `qspi_register_flash(name, data)`, plus
+  `BUSY`/`TC`/`FT` flag handling; 6 Rust unit tests in `qspi.rs`). The F407
+  SVD has no QSPI block, so it is registered explicitly in both `new_wasm`
+  and `from_svd` rather than via the SVD map.
+- **`qspi_test/` firmware** (bare-metal, same Makefile pattern as `blinky`):
+  drives the QUADSPI registers directly (no F4 QSPI HAL exists) — indirect
+  write then read of four 32-bit words round-tripped through a driver-
+  registered flash image, printing `QSPI OK` / `QSPI FAIL`. Built with the
+  Arduino-provided xpack gcc (`make -C qspi_test`, `TOOLCHAIN` env override).
+  `node site/test_qspi.mjs` registers a 256-byte flash via
+  `bindings.qspi_register_flash('QUADSPI', ...)` *before* `createEmulator`
+  and asserts the `QSPI OK` marker (wired into `npm test`).
+- **QSPI is fully wired end-to-end (2026-08-23):**
+  - `stm32-periph-wasm/pkg/cli.mjs` registers the QSPI flash before
+    `init_svd` in **both** positional mode (auto-enabled when the firmware
+    path contains `qspi` → loads `qspi_flash.bin` if present else a default
+    256-byte image) and config mode (`config.devices.qspi`), and supports a
+    `qspi` device type in the config `devices` loop. Verified:
+    `node cli.mjs ../../qspi_test/qspi_test.bin 2000000` and
+    `node cli.mjs --config=../../qspi_test/config.yaml 2000000` both print
+    `QSPI OK`.
+  - **Browser demo:** `site/vendor` was rebuilt (`wasm-pack build --release
+    --target web --out-dir ../site/vendor`, then `unicorn_arm.{js,cjs}` +
+    `stm32f407.svd` restored and `vendor/.gitignore` removed). `qspi_test`
+    is in `site/firmware.js` (regenerated via `tools/make_firmware.mjs`,
+    now 41 firmwares), selectable in `site/index.html` (`?fw=qspi_test`),
+    mapped in `app.js` `DEVICE_FIRMWARES` (`qspi: [{ peripheral: 'QUADSPI',
+    size: 256 }]`), and `site/emulator.js` registers the flash via
+    `qspi_register_flash` *before* `init_svd` (Qspi::new clones the backend
+    at construction).
+  - **CDP smoke promoted into `npm test`:** `site/test_qspi_cdp.mjs` boots
+    `?fw=qspi_test` in headless Chrome (driven over the DevTools Protocol)
+    and asserts `QSPI OK` appears on the UART. Run standalone with
+    `npm run test:qspi:browser` (needs `google-chrome` or `CHROME_BIN` +
+    `python3`); it is the final step of `npm test`. The page-level debugger
+    socket must be used (list `/json`, connect to the `page` target), not
+    the browser-level one.
+  - **Reusable CDP harness + broader browser coverage:** `site/cdp_smoke.mjs`
+    exports `runCdpSmoke({ fw, markers, failMarkers, timeoutMs })` (spins up
+    `python3 -m http.server site/`, launches headless Chrome, connects to the
+    page-level debugger socket, navigates to `?fw=<preset>`, polls `#uart`
+    for any marker). `site/test_browser.mjs` runs it over **10 presets** and is
+    the **last step of `npm test`** (standalone: `npm run test:browser`). The
+    markers are chosen to prove the *peripheral itself ran*, not just that the
+    firmware booted:
+    - `blinky` → `LED=ON`, `eth_http` → `TCP connected`,
+      `oled_test` → `OLED draw done`, `tft_test` → `TFT fill done`,
+      `ltdc_test` → `LTDC pixels OK`,
+    - `can_test` → `CAN loopback OK` (fail: `CAN Test: FAIL`),
+      `watchdog_demo` → `IWDG reset detected`,
+      `rtc_test` → `RTC verify OK` (fail: `RTC verify FAIL`),
+      `audio_play_test` → `I2S1 TX sine 256 samples`,
+      `deep_sleep_demo` → `WOKE FROM STOP`.
+    `deep_sleep_demo` was also added to the `site/index.html` firmware
+    dropdown (it was in `firmware.js` but missing an `<option>`, which made
+    the auto-boot resolve `fwSelect.value=''` and crash). True in-browser
+    regression coverage for the demo, not just the node path.
 - **Bug fixed in this pass**: the window-violation check previously fired on
   the *enable* write too — it compared the stale pre-enable counter (0x7F)
   against `W` and tripped a false violation. Now gated on `initialized` so only
