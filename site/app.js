@@ -7,6 +7,7 @@ import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
 import { FIRMWARES } from './firmware.js';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
+import { createRemoteEmulator } from './remote-emu.js';
 
 const $ = (id) => document.getElementById(id);
 const uartEl = $('uart'), statusEl = $('statusText'), dotEl = $('dot');
@@ -230,6 +231,12 @@ const setBusy = (busy) => {
     for (const id of ['btnRun', 'btnStop', 'btnReset']) $(id).disabled = !busy;
 };
 
+// Remote bridge mode: when ?bridge=ws://… is set, the emulator runs in Node
+// and the browser is a thin UI over WebSocket.  bridgeUrl is null in local
+// mode (the default).
+const params = new URLSearchParams(location.search);
+const bridgeUrl = params.get('bridge');
+
 const boot = async () => {
     const id = ++session;
     running = false;
@@ -247,41 +254,76 @@ const boot = async () => {
     t0 = lastT = performance.now(); lastInst = 0;
     $('stFw').textContent = image.name;
 
-    const svdXml = await fetch('vendor/stm32f407.svd').then((r) => r.text());
-    if (id !== session) return;
+    if (bridgeUrl) {
+        // ── remote mode: Node runs the emulator, browser is a thin client ──
+        netsim = null;
+        gw.tx = 0; gw.rx = 0;
+        try {
+            emu = await createRemoteEmulator(bridgeUrl, {
+                onTx: (pkt) => {
+                    addFrame('tx', pkt);
+                    if (gw.connected && gw.ws) {
+                        gw.tx++;
+                        refreshGwLabel();
+                        try { gw.ws.send(pkt); } catch (e) {}
+                    } else if (netsim) {
+                        for (const reply of netsim.onTx(pkt)) {
+                            addFrame('rx', reply);
+                            emu.injectFrame(reply);
+                        }
+                    }
+                },
+                onStopped: () => {
+                    running = false;
+                    $('btnRun').textContent = 'Run';
+                    setStatus('stopped', 'stop');
+                },
+            });
+            if (id !== session) { emu.close(); return; }
+            // Send the firmware image to the Node bridge.
+            await emu.loadImage(fw);
+        } catch (e) {
+            setStatus('bridge error: ' + e.message, 'err');
+            return;
+        }
+    } else {
+        // ── local mode: WASM runs in the browser (default) ──
+        const svdXml = await fetch('vendor/stm32f407.svd').then((r) => r.text());
+        if (id !== session) return;
 
-    netsim = gw.connected ? null : createNetSim();
-    gw.tx = 0; gw.rx = 0;
-    if (gw.connected) setGwStatus(true, gwLabel());
-    emu = await createEmulator({
-        firmware: fw,
-        bindings,
-        unicorn: MUnicorn,
-        svdXml,
-        extra_mem: image.extraMem,
-        uart_addr: image.uartAddr,
-        enable_irqs: IRQ_FIRMWARES.has(image.name),
-        irq_eth: IRQ_ETH_FIRMWARES.has(image.name),
-        lowpower: LOWPOWER_FIRMWARES.has(image.name),
-        eth: ETH_RX_MAP[image.name],
-        ext_devices: DEVICE_FIRMWARES[image.name],
-        onTx: (pkt) => {
-            addFrame('tx', pkt);
-            if (gw.connected && gw.ws) {
-                gw.tx++;
-                refreshGwLabel();
-                try { gw.ws.send(pkt); } catch (e) {}
-            } else if (netsim) {
-                for (const reply of netsim.onTx(pkt)) {
-                    addFrame('rx', reply);
-                    emu.injectFrame(reply);
+        netsim = gw.connected ? null : createNetSim();
+        gw.tx = 0; gw.rx = 0;
+        if (gw.connected) setGwStatus(true, gwLabel());
+        emu = await createEmulator({
+            firmware: fw,
+            bindings,
+            unicorn: MUnicorn,
+            svdXml,
+            extra_mem: image.extraMem,
+            uart_addr: image.uartAddr,
+            enable_irqs: IRQ_FIRMWARES.has(image.name),
+            irq_eth: IRQ_ETH_FIRMWARES.has(image.name),
+            lowpower: LOWPOWER_FIRMWARES.has(image.name),
+            eth: ETH_RX_MAP[image.name],
+            ext_devices: DEVICE_FIRMWARES[image.name],
+            onTx: (pkt) => {
+                addFrame('tx', pkt);
+                if (gw.connected && gw.ws) {
+                    gw.tx++;
+                    refreshGwLabel();
+                    try { gw.ws.send(pkt); } catch (e) {}
+                } else if (netsim) {
+                    for (const reply of netsim.onTx(pkt)) {
+                        addFrame('rx', reply);
+                        emu.injectFrame(reply);
+                    }
                 }
-            }
-        },
-    });
-    if (id !== session) { emu.close(); return; }
+            },
+        });
+        if (id !== session) { emu.close(); return; }
+    }
 
-    appendUart(`── booted ${image.name} ${gw.connected ? '(gateway)' : '(netsim)'} ──\r\n`);
+    appendUart(`── booted ${image.name} ${bridgeUrl ? '(bridge ' + bridgeUrl + ')' : gw.connected ? '(gateway)' : '(netsim)'} ──\r\n`);
     window.__emu = emu;          // debug handle (CDP smoke tests)
     window.__bindings = bindings;
     running = true;
@@ -295,7 +337,7 @@ const loop = async (id) => {
     while (session === id) {
         if (!running) { await raf(); continue; }
         try {
-            const res = emu.step();
+            const res = await emu.step();
             totalInst = res.instCount;
             stepsDone++;
         } catch (e) {
@@ -402,11 +444,13 @@ const parseHex = (s) => {
     return Number.isFinite(v) ? v >>> 0 : null;
 };
 
-const refreshWatch = () => {
+const refreshWatch = async () => {
     if (!emu) return;
     for (const w of WATCH) {
-        try { w.valEl.textContent = hex32(emu.read32(w.addr)); }
-        catch { w.valEl.textContent = '—'; }
+        try {
+            const v = await emu.read32(w.addr);
+            w.valEl.textContent = hex32(v);
+        } catch { w.valEl.textContent = '—'; }
     }
 };
 
@@ -469,8 +513,13 @@ window.addEventListener('error', (e) => setStatus('error: ' + e.message, 'err'))
 window.addEventListener('unhandledrejection', (e) => setStatus('boot error: ' + String(e.reason?.message || e.reason).replace(/\s+/g, ' ').slice(0, 300), 'err'));
 
 // ── stats ──────────────────────────────────────────────────────────────────
-const refreshStats = () => {
-    const regs = emu && emu.getRegisters ? emu.getRegisters() : null;
+const refreshStats = async () => {
+    if (!emu) return;
+    let regs = null;
+    try {
+        const r = emu.getRegisters();
+        regs = r instanceof Promise ? await r : r;
+    } catch {}
     const now = performance.now();
     const dt = (now - lastT) / 1000;
     if (dt > 0.5) {
@@ -484,9 +533,9 @@ const refreshStats = () => {
     $('stPc').textContent = regs ? hex32(regs.PC) : '—';
     $('stSp').textContent = regs ? hex32(regs.SP) : '—';
     $('stXpsr').textContent = regs ? hex32(regs.XPSR) : '—';
-    refreshGpio();
-    refreshPeriph();
-    refreshWatch();
+    await refreshGpio();
+    await refreshPeriph();
+    await refreshWatch();
 };
 
 // ── LTDC display sink ──────────────────────────────────────────────────────
@@ -679,13 +728,15 @@ const buildGpio = () => {
     }
 };
 
-const refreshGpio = () => {
+const refreshGpio = async () => {
     if (!emu) return;
     buildGpio();
     for (const b of BANKS) {
         const idx = BANKS.indexOf(b);
         const base = GPIO_BASE + idx * GPIO_STRIDE;
-        const moder = emu.read32(base + 0x00), odr = emu.read32(base + 0x14), idr = emu.read32(base + 0x10);
+        const [moder, odr, idr] = await Promise.all([
+            emu.read32(base + 0x00), emu.read32(base + 0x14), emu.read32(base + 0x10),
+        ]);
         for (let p = 0; p < 16; p++) {
             const mode = (moder >> (p * 2)) & 0x3;
             const out = mode === 1;
@@ -703,14 +754,15 @@ const PERIPH_REGS = [
     ['USART1 SR', 0x40011000], ['USART1 BRR', 0x40011008],
     ['RCC AHB1ENR', 0x40023830], ['GPIOA ODR', 0x40020014],
 ];
-const refreshPeriph = () => {
+const refreshPeriph = async () => {
     if (!emu) return;
     const el = $('periph');
     el.innerHTML = '';
     for (const [name, addr] of PERIPH_REGS) {
         const div = document.createElement('div');
         div.className = 'line';
-        div.innerHTML = `<span>${name} (${hex32(addr)})</span><b>${hex32(emu.read32(addr))}</b>`;
+        const v = await emu.read32(addr);
+        div.innerHTML = `<span>${name} (${hex32(addr)})</span><b>${hex32(v)}</b>`;
         el.appendChild(div);
     }
 };
@@ -753,7 +805,6 @@ appendUart('STM32F407 console ready. Nothing is running yet.\r\n'
     + 'Pick a firmware under FIRMWARE (right) and press "Boot preset",\r\n'
     + 'or upload your own .bin/.hex/.elf/.map. Firmware output appears here.\r\n');
 
-const params = new URLSearchParams(location.search);
 const preset = params.get('fw');
 if (preset && FIRMWARES[preset]) {
     $('fwSelect').value = preset;
