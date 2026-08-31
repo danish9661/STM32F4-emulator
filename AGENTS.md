@@ -2226,7 +2226,7 @@ existing local WASM path — the bridge is opt-in via `?bridge=ws://…`.
 | File | Purpose |
 |---|---|
 | `site/ws-bridge.mjs` | Node-side WebSocket server + emulator proxy. Loads firmware, exposes STEP/READ32/WRITE32/GET_REGS/RESET/STOP, pushes UART/ETH/GPIO state to browser. CLI: `--port`, `--firmware`, `--verbose`, `--lowpower`, `--inst`. |
-| `site/remote-emu.js` | Browser-side adapter. Drop-in replacement for the local `emu` object — same `step()`/`drainUart()`/`read32()`/`write32()` API, all proxied over binary WebSocket. Stubbed device accessors (OLED/TFT/etc. run in Node, not visible to browser JS). |
+| `site/remote-emu.js` | Browser-side adapter. Drop-in replacement for the local `emu` object — same `step()`/`drainUart()`/`read32()`/`write32()` API, all proxied over binary WebSocket. Auto-reconnect with exponential backoff, ping/pong keepalive, per-request timeout, firmware re-send on reconnect. Exports `ConnectionState` enum and `createRemoteEmulator()`. |
 | `site/test_ws_bridge.mjs` | In-process smoke test (11 assertions: LOAD_IMAGE, STEP, READ32, GET_REGS, STOP round-trips). |
 
 ### Protocol (binary WebSocket, little-endian)
@@ -2246,6 +2246,7 @@ existing local WASM path — the bridge is opt-in via `?bridge=ws://…`.
 | CAN_RX | `0x21` | `[id:u16] [dlc:u8] [8B data]` | (none) |
 | UART_TX | `0x22` | `[len:u16] [bytes…]` | (none) |
 | SET_INPUT | `0x40` | `[pin_len:u8] [pin str] [level:u8]` | (none) |
+| PING | `0xFE` | (none) | PONG `[0xFF]` |
 
 **Node → Browser (pushes):**
 
@@ -2255,6 +2256,7 @@ existing local WASM path — the bridge is opt-in via `?bridge=ws://…`.
 | PUSH_ETH | `0x81` | `[len:u32] [frame bytes…]` |
 | PUSH_GPIO | `0x82` | `[bank:u8] [idr:u32] [odr:u32] [moder:u32]` |
 | STOPPED | `0x8A` | (none — unsolicited when emu halts) |
+| PONG | `0xFF` | (response to client PING) |
 
 Request IDs are monotonically increasing u32s. The bridge matches responses
 to requests by ID. PUSH_UART/PUSH_ETH/PUSH_GPIO are unsolicited (no ID).
@@ -2286,6 +2288,37 @@ LOAD_IMAGE and the bridge creates a fresh emulator for it.
 - `getRegisters()`/`read32()`/`write32()` return Promises.
 - `refreshGpio()`/`refreshPeriph()`/`refreshWatch()` are async.
 - Local mode (no `?bridge=`) is completely unchanged.
+
+### Robustness (reconnect, keepalive, timeout)
+
+The `RemoteEmu` adapter (`remote-emu.js`) handles connection failures:
+
+- **Auto-reconnect**: exponential backoff (500ms → 1s → 2s → 4s → 5s cap)
+  on connection drop. The firmware image is re-sent automatically via
+  `LOAD_IMAGE` after reconnecting, so the new emulator instance is ready
+  without manual intervention.
+- **Ping/pong keepalive**: the server sends `PING` (0xFE) every 30s; the
+  client must respond with `PONG` (0xFF). If 3 pongs are missed (90s),
+  the connection is considered dead and reconnect fires.
+- **Per-request timeout**: every request (step, read32, getRegisters, etc.)
+  has a configurable timeout (default 10s). A stuck server won't hang the
+  browser.
+- **Connection state**: `emu.connectionState` returns `'connecting'`,
+  `'connected'`, `'reconnecting'`, or `'disconnected'`. Callbacks:
+  `onDisconnect`, `onReconnect`, `onStateChanged`.
+- **Disconnect indicator**: `app.js` shows "bridge disconnected —
+  reconnecting…" in the status bar when the connection drops, and clears
+  it on reconnect.
+
+### Multi-firmware (hot-swap)
+
+In bridge mode, switching firmwares does NOT tear down the WebSocket. The
+"Boot preset" button handler checks `emu.connectionState === 'connected'`
+and, if so, sends `LOAD_IMAGE` over the existing connection instead of
+calling `boot()` (which closes and recreates the connection). The bridge
+closes the old emulator, creates a new one, and the browser resumes
+stepping. File uploads (`.bin`/`.hex`/`.elf`) still call `boot()`, which
+works but is slower (reconnects).
 
 ### npm package compatibility
 

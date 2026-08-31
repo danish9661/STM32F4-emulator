@@ -191,11 +191,36 @@ const loadElf = (bytes, name) => {
     boot();
 };
 
-$('btnBoot').addEventListener('click', () => {
+$('btnBoot').addEventListener('click', async () => {
     const fw = $('fwSelect').value;
     image = { flash: decodeB64(FIRMWARES[fw].bytes), ram: null, extraMem: [], entry: null, symbols: null, name: fw, uartAddr: uartAddrFor(fw) };
     renderSymbols(null);
-    boot();
+    // In bridge mode with an existing connection, hot-swap firmware
+    // via LOAD_IMAGE instead of tearing down the WebSocket.
+    if (bridgeUrl && emu && emu.connectionState === 'connected') {
+        running = false;
+        setBusy(false);
+        $('btnRun').textContent = 'Run';
+        setStatus('loading firmware…', 'stop');
+        uartEl.textContent = uartBuf = '';
+        framesEl.textContent = '';
+        totalInst = 0; stepsDone = 0;
+        t0 = lastT = performance.now(); lastInst = 0;
+        $('stFw').textContent = image.name;
+        try {
+            await emu.loadImage(image.flash);
+            appendUart(`── loaded ${image.name} (bridge) ──\r\n`);
+            running = true;
+            setBusy(true);
+            $('btnRun').textContent = 'Stop';
+            setStatus('running', 'run');
+            loop(session);
+        } catch (e) {
+            setStatus('bridge error: ' + e.message, 'err');
+        }
+    } else {
+        boot();
+    }
 });
 
 $('fwFile').addEventListener('change', async (e) => {
@@ -277,6 +302,16 @@ const boot = async () => {
                     running = false;
                     $('btnRun').textContent = 'Run';
                     setStatus('stopped', 'stop');
+                },
+                onDisconnect: () => {
+                    setStatus('bridge disconnected — reconnecting…', 'err');
+                },
+                onReconnect: () => {
+                    appendUart('── bridge reconnected ──\r\n');
+                    setStatus('running', 'run');
+                },
+                onStateChanged: (s) => {
+                    if (s === 'reconnecting') setStatus('bridge reconnecting…', 'stop');
                 },
             });
             if (id !== session) { emu.close(); return; }

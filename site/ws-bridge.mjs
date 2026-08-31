@@ -38,6 +38,8 @@
 //     0x93 LOAD_OK     [id:u32]
 //     0x94 REGS_RESP   [id:u32] [36 × u32 LE]
 //     0xA0 ERROR       [id:u32] [len:u16] [msg bytes…]
+//     0xFE PING        (keepalive — client sends periodically)
+//     0xFF PONG        (response to PING)
 
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -105,7 +107,7 @@ const MSG = {
     SPI_MISO: 0x30, I2C_RX: 0x31, SET_INPUT: 0x40,
     // Node → Browser
     PUSH_UART: 0x80, PUSH_ETH: 0x81, PUSH_GPIO: 0x82,
-    STOPPED: 0x8A,
+    STOPPED: 0x8A, PING: 0xFE, PONG: 0xFF,
     STEP_RESP: 0x90, READ32_RESP: 0x91, WRITE32_OK: 0x92,
     LOAD_OK: 0x93, REGS_RESP: 0x94, ERROR: 0xA0,
 };
@@ -374,6 +376,10 @@ async function handleConnection(ws) {
                     const level = buf[2 + pinLen] ? 1 : 0;
                     const pin = emu.pin(pinName);
                     if (pin) pin.setInputValue(level);
+                    break;
+                }
+                case MSG.PING: {
+                    try { ws.send(new Uint8Array([MSG.PONG])); } catch {}
                     break;
                 }
                 default:

@@ -213,6 +213,114 @@ registry.
 
 ---
 
+## WebSocket bridge (headless Node ↔ browser UI)
+
+A binary WebSocket protocol so the browser console can drive the emulator
+running headlessly in Node — all WASM execution stays in Node, the browser
+is a thin UI. Zero impact on the existing local WASM path.
+
+### Quick start
+
+```bash
+# 1. Start the bridge in Node (loads firmware, serves emulator over WS)
+node site/ws-bridge.mjs eth_http/eth_http.bin --port 8234
+
+# 2. Open the browser console with the bridge URL param
+npm run serve   # serves site/ on http://127.0.0.1:8123
+# then open: http://127.0.0.1:8123?bridge=ws://127.0.0.1:8234
+```
+
+Or use the npm script:
+
+```bash
+npm run bridge -- eth_http/eth_http.bin --port 8234
+```
+
+### What happens
+
+1. The bridge starts a WebSocket server and loads the firmware into an
+   emulator instance in Node.
+2. The browser opens the console page with `?bridge=ws://…`, which
+   creates a `RemoteEmu` adapter instead of a local WASM emulator.
+3. Every `step()`, `read32()`, `write32()`, `getRegisters()` call is
+   proxied over binary WebSocket to Node. UART/GPIO/ETH state is pushed
+   back asynchronously.
+4. The browser is a thin UI — no WASM runs in the browser at all.
+
+### Bridge CLI options
+
+```
+node site/ws-bridge.mjs [firmware] [options]
+
+Options:
+  --port <N>       WebSocket port (default 8234)
+  --firmware <f>   firmware path (.bin/.hex/.elf) — also the first positional arg
+  --verbose        trace peripheral MMIO to stderr
+  --lowpower       halt on WFI/WFE, advance virtual RTC until wakeup
+  --inst <N>       instruction budget (0 = unlimited, default)
+```
+
+### Multi-firmware (hot-swap)
+
+In bridge mode, switching firmwares does NOT tear down the WebSocket. The
+"Boot preset" button and file upload send `LOAD_IMAGE` over the existing
+connection — the bridge closes the old emulator, creates a new one, and
+the browser resumes stepping. The adapter caches the firmware image and
+re-sends it automatically on reconnect.
+
+### Reconnect & keepalive
+
+The `RemoteEmu` adapter has built-in robustness:
+
+- **Auto-reconnect**: on connection drop, reconnects with exponential
+  backoff (500ms → 1s → 2s → 4s → 5s cap). The firmware image is
+  re-sent automatically.
+- **Ping/pong**: the server sends `PING` (0xFE) every 30s; the client
+  must respond with `PONG` (0xFF). If 3 pongs are missed (90s), the
+  connection is considered dead and reconnect fires.
+- **Request timeout**: every request has a 10s timeout (configurable via
+  `requestTimeout`). A stuck server won't hang the browser.
+- **Connection state**: `emu.connectionState` is one of `'connecting'`,
+  `'connected'`, `'reconnecting'`, `'disconnected'`. Callbacks:
+  `onDisconnect`, `onReconnect`, `onStateChanged`.
+- **Disconnect indicator**: `app.js` shows "bridge disconnected —
+  reconnecting…" in the status bar when the connection drops.
+
+### Programmatic usage
+
+```js
+import { createRemoteEmulator } from 'stm32f4-emu/remote';
+
+const emu = await createRemoteEmulator('ws://127.0.0.1:8234', {
+    onDisconnect: () => console.log('bridge down'),
+    onReconnect:  () => console.log('bridge back'),
+    onTx: (frame) => { /* ETH TX frame from firmware */ },
+    onStopped:    () => console.log('emulator halted'),
+});
+
+await emu.loadImage(firmwareBytes);
+const res = await emu.step(100000);
+console.log(emu.drainUart());
+emu.close();
+```
+
+### Binary protocol (reference)
+
+All messages are binary WebSocket frames, little-endian. Request/response
+pairs use a monotonic u32 ID. Pushes are unsolicited (no ID).
+
+**Browser → Node**: STEP (0x01), STOP (0x02), RESET (0x03), LOAD_IMAGE
+(0x04), READ32 (0x10), WRITE32 (0x11), GET_REGS (0x12), ETH_RX (0x20),
+CAN_RX (0x21), UART_TX (0x22), SET_INPUT (0x40), PING (0xFE).
+
+**Node → Browser**: PUSH_UART (0x80), PUSH_ETH (0x81), PUSH_GPIO (0x82),
+STOPPED (0x8A), PONG (0xFF), STEP_RESP (0x90), READ32_RESP (0x91),
+WRITE32_OK (0x92), LOAD_OK (0x93), REGS_RESP (0x94), ERROR (0xA0).
+
+Full payload specs: AGENTS.md §20.
+
+---
+
 ## Building from source
 
 ```bash
