@@ -2211,3 +2211,86 @@ Built on the EXISTING bus taps — **no Rust change**:
    device's *configured* `address`, not a value parsed from the wire, and read
    transactions (which emit no master-written data) are served entirely from
    the `pushRx` queue. Master reads are NOT delivered as `onWrite` events.
+
+---
+
+## 20. WebSocket bridge (headless Node ↔ browser UI, 2026-08-31)
+
+A binary WebSocket protocol so the browser console (`site/app.js`) can drive
+the emulator running headlessly in Node (`site/ws-bridge.mjs`). The browser
+becomes a thin UI; all WASM execution happens in Node. Zero impact on the
+existing local WASM path — the bridge is opt-in via `?bridge=ws://…`.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `site/ws-bridge.mjs` | Node-side WebSocket server + emulator proxy. Loads firmware, exposes STEP/READ32/WRITE32/GET_REGS/RESET/STOP, pushes UART/ETH/GPIO state to browser. CLI: `--port`, `--firmware`, `--verbose`, `--lowpower`, `--inst`. |
+| `site/remote-emu.js` | Browser-side adapter. Drop-in replacement for the local `emu` object — same `step()`/`drainUart()`/`read32()`/`write32()` API, all proxied over binary WebSocket. Stubbed device accessors (OLED/TFT/etc. run in Node, not visible to browser JS). |
+| `site/test_ws_bridge.mjs` | In-process smoke test (11 assertions: LOAD_IMAGE, STEP, READ32, GET_REGS, STOP round-trips). |
+
+### Protocol (binary WebSocket, little-endian)
+
+**Browser → Node (requests):**
+
+| Type | Code | Payload | Response |
+|---|---|---|---|
+| STEP | `0x01` | `[id:u32] [max_inst:u32]` | STEP_RESP `[id] [inst_count:u32] [stopped:u8]` |
+| STOP | `0x02` | (none) | (fire-and-forget) |
+| RESET | `0x03` | (none) | (fire-and-forget) |
+| LOAD_IMAGE | `0x04` | `[id:u32] [flash_len:u32] [flash bytes…]` | LOAD_OK `[id]` or ERROR `[id] [msg]` |
+| READ32 | `0x10` | `[id:u32] [addr:u32]` | READ32_RESP `[id] [value:u32]` |
+| WRITE32 | `0x11` | `[id:u32] [addr:u32] [value:u32]` | WRITE32_OK `[id]` |
+| GET_REGS | `0x12` | `[id:u32]` | REGS_RESP `[id] [36 × u32: R0-R12,SP,LR,PC]` |
+| ETH_RX | `0x20` | `[len:u32] [frame bytes…]` | (none) |
+| CAN_RX | `0x21` | `[id:u16] [dlc:u8] [8B data]` | (none) |
+| UART_TX | `0x22` | `[len:u16] [bytes…]` | (none) |
+| SET_INPUT | `0x40` | `[pin_len:u8] [pin str] [level:u8]` | (none) |
+
+**Node → Browser (pushes):**
+
+| Type | Code | Payload |
+|---|---|---|
+| PUSH_UART | `0x80` | `[len:u16] [bytes…]` |
+| PUSH_ETH | `0x81` | `[len:u32] [frame bytes…]` |
+| PUSH_GPIO | `0x82` | `[bank:u8] [idr:u32] [odr:u32] [moder:u32]` |
+| STOPPED | `0x8A` | (none — unsolicited when emu halts) |
+
+Request IDs are monotonically increasing u32s. The bridge matches responses
+to requests by ID. PUSH_UART/PUSH_ETH/PUSH_GPIO are unsolicited (no ID).
+
+### Usage
+
+```bash
+# 1. Start the bridge in Node (serves the emulator over WS on port 8234)
+node site/ws-bridge.mjs blinky/blinky.bin
+# or with npm script:
+npm run bridge -- eth_http/eth_http.bin --port 8234
+
+# 2. Open the browser console with the bridge URL param
+# (local dev server: npm run serve → http://127.0.0.1:8123)
+open "http://127.0.0.1:8123/?bridge=ws://127.0.0.1:8234"
+```
+
+Without `?fw=`, the page boots whatever firmware the bridge was started with.
+With `?fw=blinky&bridge=ws://…`, the browser sends the firmware image over
+LOAD_IMAGE and the bridge creates a fresh emulator for it.
+
+### Integration in app.js
+
+- `?bridge=ws://…` URL param switches to remote mode.
+- `boot()` creates a `RemoteEmu` instead of local `createEmulator()`.
+- `emu.loadImage(flash)` sends the firmware to Node.
+- `emu.step()` returns a Promise (WS round-trip). `drainUart()` is
+  synchronous (buffered from PUSH_UART messages).
+- `getRegisters()`/`read32()`/`write32()` return Promises.
+- `refreshGpio()`/`refreshPeriph()`/`refreshWatch()` are async.
+- Local mode (no `?bridge=`) is completely unchanged.
+
+### npm package compatibility
+
+- `ws` is a runtime dependency (`dependencies` in package.json).
+- `ws-bridge.mjs` and `remote-emu.js` are in the `files` array.
+- Exports: `./remote` → `site/remote-emu.js`, `./ws-bridge` → `site/ws-bridge.mjs`.
+- `npm pack` includes both files; `npm run bridge` starts the server.
+- `npm run test:bridge` runs the in-process smoke test.

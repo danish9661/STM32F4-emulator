@@ -129,6 +129,29 @@ as a library stays dependency-free; only MCP users need
 `npm i @modelcontextprotocol/sdk zod`. See [docs/mcp.md](docs/mcp.md) for
 the tool reference and client config.
 
+## WebSocket bridge (headless Node ↔ browser UI)
+
+A binary WebSocket protocol so the browser console can drive the emulator
+running headlessly in Node — all WASM execution stays in Node, the browser
+is a thin UI. Zero impact on the existing local WASM path:
+
+```bash
+# 1. Start the bridge in Node (serves the emulator over WS on port 8234)
+node site/ws-bridge.mjs eth_http/eth_http.bin --port 8234
+
+# 2. Open the browser console with the bridge URL param
+open "http://127.0.0.1:8123/?bridge=ws://127.0.0.1:8234"
+```
+
+The `RemoteEmu` adapter (`site/remote-emu.js`) is a drop-in replacement
+for the local `emu` object — same `step()`/`drainUart()`/`read32()` API,
+all proxied over binary WebSocket. Device stubs (OLED/TFT/etc.) run in
+Node and are not visible to browser JS. Without `?fw=`, the page boots
+whatever firmware the bridge was started with; with `?fw=blinky&bridge=ws://…`,
+the browser sends the firmware image over the bridge.
+
+See AGENTS.md §20 for the full binary protocol reference.
+
 ## Firmwares
 
 | Firmware | What it does | Success marker |
