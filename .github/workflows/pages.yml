@@ -33,7 +33,7 @@ jobs:
         working-directory: website
 
       - name: Copy emulator console into docs build
-        run: cp -r site/* website/build/console/
+        run: mkdir -p website/build/console && cp -r site/* website/build/console/
 
       - name: Add console redirect page
         run: |
