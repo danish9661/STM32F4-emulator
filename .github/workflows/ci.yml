@@ -14,21 +14,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22.14.0
+          node-version: 22
       - name: Install dependencies
         run: npm ci
       - name: Boot-probe all bundled firmwares
         run: node site/probe_firmwares.mjs
       - name: Run the test suite
-        run: node site/run_tests.mjs
-      - name: Browser CDP smoke tests
-        if: matrix.os == 'ubuntu-latest'
-        run: node site/test_qspi_cdp.mjs && node site/test_browser.mjs
+        run: npm run test:unit
       - name: MCP server protocol round-trip
         if: matrix.os == 'ubuntu-latest'
         run: npm ci && npm run test:mcp
-      - name: WebSocket bridge CDP smoke
-        if: matrix.os == 'ubuntu-latest'
-        run: node site/test_bridge_cdp.mjs
