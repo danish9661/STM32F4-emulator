@@ -16,9 +16,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
-      - name: Install dependencies
-        run: npm ci
+          node-version: 22.22.2
+          cache: false
+      - name: Clear npm cache and reinstall
+        run: npm cache clean --force && npm ci
       - name: Boot-probe all bundled firmwares
         run: node site/probe_firmwares.mjs
       - name: Run the test suite
