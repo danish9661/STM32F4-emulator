@@ -39,6 +39,21 @@
   button:hover { background: #333; border-color: #666; }
   button:active { background: #444; }
   button[aria-pressed="true"] { background: #3a2c12; border-color: #f90; color: #fc6; }
+  /* Checkbox: dark-themed to match DOOM page */
+  input[type="checkbox"] {
+    appearance: none; -webkit-appearance: none;
+    width: 14px; height: 14px; border: 1px solid #555; border-radius: 3px;
+    background: #111; vertical-align: middle; margin: 0 4px 0 0;
+    cursor: pointer; position: relative; flex: none;
+  }
+  input[type="checkbox"]:checked {
+    background: #3a5c28; border-color: #8c8;
+  }
+  input[type="checkbox"]:checked::after {
+    content: '✓'; position: absolute; top: -1px; left: 1px;
+    color: #8c8; font-size: 11px; line-height: 1;
+  }
+  label[for="detail"], #detailLbl { cursor: pointer; }
   #screenWrap { flex: 1; min-height: 0; display: flex; justify-content: center; align-items: center;
                 background: #000; position: relative; }
   canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000;

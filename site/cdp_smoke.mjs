@@ -5,11 +5,25 @@
 // spins up a static server + Chrome, connects to the page-level debugger
 // socket, navigates, and polls the #uart textContent.
 import { spawn } from 'child_process';
-import { mkdtempSync, rmSync } from 'fs';
-import { tmpdir } from 'os';
+import { mkdtempSync, rmSync, existsSync } from 'fs';
+import { tmpdir, platform } from 'os';
 import { join } from 'path';
 
-const CHROME = process.env.CHROME_BIN || '/usr/bin/google-chrome';
+function findChrome() {
+    if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
+    const os = platform();
+    const candidates = os === 'darwin'
+        ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+        : os === 'win32'
+            ? [
+                join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Google\\Chrome\\Application\\chrome.exe'),
+                join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Google\\Chrome\\Application\\chrome.exe'),
+            ]
+            : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium-browser'];
+    for (const p of candidates) { if (existsSync(p)) return p; }
+    return 'google-chrome'; // fallback to PATH
+}
+const CHROME = findChrome();
 
 async function waitFor(pred, timeoutMs, label) {
     const t0 = Date.now();
