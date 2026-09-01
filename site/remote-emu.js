@@ -42,7 +42,7 @@ function packU32(v) {
 }
 
 function readU32(buf, off) {
-    return buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24);
+    return (buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)) >>> 0;
 }
 
 // ── connection-state enum ──────────────────────────────────────────────────

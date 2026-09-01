@@ -1,6 +1,12 @@
 // Headless-Chrome CDP smoke test for the WebSocket bridge.
-// Starts ws-bridge.mjs with blinky firmware, serves the site, opens
-// Chrome with ?fw=blinky&bridge=ws://…, and asserts UART markers appear.
+// Starts ws-bridge.mjs, serves the site, opens Chrome with
+// ?fw=blinky&bridge=ws://…, and asserts:
+//   1. UART output appears (boot round-trip)
+//   2. step() returns valid instCount (STEP round-trip)
+//   3. read32() returns correct vector SP (READ32 round-trip)
+//   4. write32() + read32() round-trips (WRITE32 round-trip)
+//   5. getRegisters() returns valid PC (GET_REGS round-trip)
+//   6. drainUart() returns data produced by step (UART push round-trip)
 // Run: node site/test_bridge_cdp.mjs   (needs google-chrome + python3)
 import { spawn } from 'child_process';
 import { mkdtempSync, rmSync } from 'fs';
@@ -141,7 +147,7 @@ try {
     }
     if (!ok && !reason) reason = 'timeout waiting for LED=ON via bridge';
 
-    // Also verify the bridge actually connected — the page should show
+    // Verify the bridge actually connected — the page should show
     // the firmware name in the status bar.
     const statusR = await send('Runtime.evaluate', {
         expression: "document.getElementById('status') ? document.getElementById('status').textContent : ''",
@@ -150,6 +156,83 @@ try {
     const statusText = (statusR && statusR.result && statusR.result.value) || '';
     if (ok && !statusText.includes('blinky')) {
         reason += ' (status bar: ' + statusText.trim() + ')';
+    }
+
+    // ── Round-trip assertions ────────────────────────────────────────────
+    // Every call below goes: browser → page JS → remote-emu → WebSocket →
+    // bridge → Node emulator → bridge → WebSocket → remote-emu → page JS.
+
+    // 1. STEP: step(100000) must return instCount > 0
+    if (ok) {
+        const r = await send('Runtime.evaluate', {
+            expression: "(async () => { const r = await window.__emu.step(100000); return JSON.stringify(r); })()",
+            awaitPromise: true, returnByValue: true,
+        });
+        const step = JSON.parse((r && r.result && r.result.value) || '{}');
+        if (!step.instCount || step.instCount <= 0) {
+            ok = false; reason = `STEP failed: instCount=${step.instCount}`;
+        }
+    }
+
+    // 2. READ32: vector table at 0x08000000 must be SP = 0x20020000
+    if (ok) {
+        const r = await send('Runtime.evaluate', {
+            expression: "(async () => window.__emu.read32(0x08000000))()",
+            awaitPromise: true, returnByValue: true,
+        });
+        const sp = r && r.result && r.result.value;
+        if (sp !== 0x20020000) {
+            ok = false; reason = `READ32 failed: SP=0x${(sp || 0).toString(16)} (expected 0x20020000)`;
+        }
+    }
+
+    // 3. WRITE32 + readback: write 0xDEADBEEF to SRAM 0x20000100, read it back
+    if (ok) {
+        const wr = await send('Runtime.evaluate', {
+            expression: "(async () => { await window.__emu.write32(0x20000100, 0xDEADBEEF); return await window.__emu.read32(0x20000100); })()",
+            awaitPromise: true, returnByValue: true,
+        });
+        const val = wr && wr.result && wr.result.value;
+        if (val !== 0xDEADBEEF) {
+            ok = false; reason = `WRITE32 failed: readback=0x${(val || 0).toString(16)} (expected 0xDEADBEEF)`;
+        }
+    }
+
+    // 4. GET_REGS: PC must be non-zero (firmware is running)
+    if (ok) {
+        const r = await send('Runtime.evaluate', {
+            expression: "(async () => { const r = await window.__emu.getRegisters(); return JSON.stringify({pc: r.PC, sp: r.SP}); })()",
+            awaitPromise: true, returnByValue: true,
+        });
+        const regs = JSON.parse((r && r.result && r.result.value) || '{}');
+        if (!regs.pc || regs.pc === 0) {
+            ok = false; reason = `GET_REGS failed: PC=0x${(regs.pc || 0).toString(16)}`;
+        }
+    }
+
+    // 5. UART push: drainUart() after step must return new data
+    if (ok) {
+        const uartBefore = await send('Runtime.evaluate', {
+            expression: "document.getElementById('uart') ? document.getElementById('uart').textContent.length : 0",
+            returnByValue: true,
+        });
+        const lenBefore = (uartBefore && uartBefore.result && uartBefore.result.value) || 0;
+
+        // Step more to produce output
+        await send('Runtime.evaluate', {
+            expression: "(async () => window.__emu.step(200000))()",
+            awaitPromise: true,
+        });
+        await new Promise((r) => setTimeout(r, 500)); // let UI update
+
+        const uartAfter = await send('Runtime.evaluate', {
+            expression: "document.getElementById('uart') ? document.getElementById('uart').textContent.length : 0",
+            returnByValue: true,
+        });
+        const lenAfter = (uartAfter && uartAfter.result && uartAfter.result.value) || 0;
+        if (lenAfter <= lenBefore) {
+            ok = false; reason = `UART push failed: len ${lenBefore}→${lenAfter} (no new data after step)`;
+        }
     }
 
 } catch (e) {
