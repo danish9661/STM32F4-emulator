@@ -20,12 +20,19 @@ const CASES = [
 ];
 
 let failed = 0;
+let skipped = 0;
 for (const c of CASES) {
     const { ok, reason, pageErrors } = await runCdpSmoke(c);
+    if (reason.includes('skipped')) {
+        console.log(`[SKIP] ${c.label} — ${reason}`);
+        skipped++;
+        continue;
+    }
     console.log(`[${ok ? 'PASS' : 'FAIL'}] ${c.label} — ${reason}`);
     if (!ok) {
         failed++;
         if (pageErrors.length) console.log('   page errors:', pageErrors.slice(0, 5).join(' | '));
     }
 }
+if (skipped && !failed) console.log(`\n${skipped} browser tests skipped (chrome/python not available)`);
 process.exitCode = failed ? 1 : 0;

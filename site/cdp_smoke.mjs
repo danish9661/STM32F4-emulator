@@ -4,7 +4,7 @@
 // Requires google-chrome (or CHROME_BIN) + python3. Thin wrapper over CDP:
 // spins up a static server + Chrome, connects to the page-level debugger
 // socket, navigates, and polls the #uart textContent.
-import { spawn } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
 import { mkdtempSync, rmSync, existsSync } from 'fs';
 import { tmpdir, platform } from 'os';
 import { join } from 'path';
@@ -34,8 +34,21 @@ async function waitFor(pred, timeoutMs, label) {
     return false;
 }
 
+function findPython() {
+    for (const cmd of ['python3', 'python']) {
+        try { execFileSync(cmd, ['--version'], { stdio: 'ignore' }); return cmd; } catch {}
+    }
+    return null;
+}
+
 export async function runCdpSmoke({ fw, markers, failMarkers = [], timeoutMs = 60000, httpPort = 8137, cdpPort = 9337 }) {
-    const http = spawn('python3', ['-m', 'http.server', String(httpPort), '--directory', 'site'], { stdio: 'ignore' });
+    const python = findPython();
+    if (!python) return { ok: false, reason: 'python not found (skipped)', pageErrors: [] };
+    // Quick check that Chrome is actually reachable before starting the test
+    try { execFileSync(CHROME, ['--version'], { stdio: 'ignore', timeout: 5000 }); } catch {
+        return { ok: false, reason: 'chrome not found at ' + CHROME + ' (skipped)', pageErrors: [] };
+    }
+    const http = spawn(python, ['-m', 'http.server', String(httpPort), '--directory', 'site'], { stdio: 'ignore' });
     const userData = mkdtempSync(join(tmpdir(), 'cdp-smoke-'));
     const chrome = spawn(CHROME, [
         '--headless=new', '--remote-debugging-port=' + cdpPort,
