@@ -91,7 +91,7 @@
     "prepack": "node tools/make_firmware.mjs"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "^8.21.3"
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -107,9 +107,7 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "playwright": "^1.62.1",
     "zod": "^3.25 || ^4.0"
-  },
-  "dependencies": {
-    "ws": "^8.21.3"
   }
 }

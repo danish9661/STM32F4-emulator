@@ -7,3 +7,8 @@
 
 # FreeRTOS test build artifacts (intermediate objects; the .elf/.bin are committed)
 freertos_test/**/*.o
+
+# Docs site
+/website/node_modules
+/website/build
+/website/.docusaurus

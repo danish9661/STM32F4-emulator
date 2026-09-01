@@ -11,6 +11,10 @@ const firmwares = [
     ['eth_test', 'eth_test/eth_test.bin', 'eth_test.bin'],
     // bare-metal demos
     ['blinky', 'blinky/blinky.bin', 'blinky.bin'],
+    // demo firmwares (new peripheral showcases)
+    ['adc_demo', 'adc_demo/adc_demo.bin', 'adc_demo.bin'],
+    ['dac_demo', 'dac_demo/dac_demo.bin', 'dac_demo.bin'],
+    ['pwm_demo', 'pwm_demo/pwm_demo.bin', 'pwm_demo.bin'],
     // test binaries (boot + print on UART; see site/probe_firmwares.mjs)
     ['hal_test', 'hal_test/hal_test.ino.bin', 'hal_test.ino.bin'],
     ['crypto_test', 'crypto_test/build/crypto_test.ino.bin', 'crypto_test.ino.bin'],

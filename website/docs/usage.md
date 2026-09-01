@@ -1,0 +1,349 @@
+---
+sidebar_position: 2
+title: Usage
+description: How to run the emulator from the CLI (Node.js) and the browser console.
+---
+
+# Usage: CLI and browser
+
+Two ways to drive the emulator: the Node CLI (`cli.mjs`) for headless runs,
+soaks, and CI, and the browser console (`site/`) for interactive demos.
+
+---
+
+## CLI (Node, headless)
+
+### Prerequisites
+
+- Node 22+.
+- The WASM bindings + Unicorn in `stm32-periph-wasm/pkg/` (committed; only
+   rebuild if you change the Rust model — see [Building](#building-from-source)).
+- For gateway runs: the built gateway `openhw-local-gateway/openhw-gw`
+  (build with `cd openhw-local-gateway && go build -mod=vendor -o openhw-gw .`),
+  and (for eth_http) an HTTP server at 127.0.0.1:8092 that the firmware
+  will GET. `scripts/verify_ethernet.sh` starts one itself.
+
+### Quick start
+
+```bash
+cd stm32-periph-wasm/pkg
+
+# 1) netsim-free quick run: just boots the firmware and runs 10M instructions
+node cli.mjs ../../eth_http/eth_http.bin 10000000
+
+# 2) full gateway run (real gVisor network; needs :8092 HTTP server up)
+node cli.mjs ../../eth_http/eth_http.bin 10000000 \
+  --gateway --config=../../eth_http/config.yaml
+
+# 3) connect to an ALREADY RUNNING gateway process (external, no spawn)
+node cli.mjs ../../eth_http/eth_http.bin 10000000 \
+  --connect --config=../../eth_http/config.yaml
+```
+
+### Arguments
+
+| Argument | Meaning |
+|---|---|
+| `<firmware.bin>` | firmware binary (positional). In config mode the config's `load:` file wins |
+| `[max_instructions]` | instruction budget (default 1_000_000; env `MAX_INST`) |
+| `--config=<path>` | YAML config: SVD, memory regions, load file, devices, patches. Repeatable |
+| `--gateway` | spawn and connect the local `openhw-gw` gateway (real gVisor stack) |
+| `--connect` | connect to an external gateway (driver cannot kill it; uses `RESET` control messages) |
+| `--regs` | dump register state (env `SHOW_REGS=1`) |
+| `--uart=<addr>` | USART base address (default 0x40011000; env `UART_ADDR`) |
+
+### Config file (`eth_http/config.yaml` pattern)
+
+```yaml
+cpu:
+  svd: ../saturn/stm32f407.svd     # register map
+  vector_table: 0x08000000
+regions:
+  - name: ROM
+    start: 0x08000000
+    load: eth_http.bin            # firmware (path relative to the yaml)
+    size: 0x100000
+  - name: RAM
+    start: 0x20000000
+    size: 0x20000
+devices:
+  usprt_probe:
+    - peripheral: USART1          # wire the usart-probe ext device
+```
+
+### Environment variables
+
+| Env | Default | Effect |
+|---|---|---|
+| `MAX_BATCH` | 20000 | instructions per `emu_start` (must stay < ~40k — Unicorn WASM wedge, see progress-and-future.md) |
+| `MAX_INST` | 1M | instruction budget when the positional arg is omitted |
+| `TICK_EVERY` | 5000 | tick_n()/watchdog/interrupt check interval (instructions) |
+| `POLL_EVERY` | 1000 | DMA/ETH poll check interval (instructions) |
+| `GW_RESTART` | 0 | 1 = restart gateway per round (legacy) |
+| `GW_PATH` | repo-relative | path to the `openhw-gw` binary |
+| `RX_HEX` | 0 | 1 = dump first 64 B of each injected RX frame |
+| `DBG_TX` / `DBG_RX` | 0 | 1 = trace TX/RX frames |
+| `DBG_FLAG` / `DBG_IRQF` / `DBG_PC` / `DBG_GW` / `DBG_DMA` | 0 | diagnostics (flag writes, ISR state, PC trace, gateway events, DMA regs) |
+| `SOAK_STATS` | 0 | 1 = print soak stats at the end |
+| `UART_ADDR` | 0x40011000 | USART base for TX/RX injection |
+| `SHOW_REGS` | 0 | 1 = dump registers |
+
+### Other firmwares
+
+```bash
+node cli.mjs ../../eth_dhcp/eth_dhcp.bin 10000000 --gateway --config=../../eth_dhcp/config.yaml
+node cli.mjs ../../eth_test/eth_test.bin  10000000 --gateway --config=../../eth_test/config.yaml
+node cli.mjs ../../blinky/blinky.bin 10000000
+```
+
+Watch for the success markers: `TCP connected` / `=== HTTP <len>b ===`
+(eth_http), `DHCP SUCCESS` (eth_dhcp), `ETH Test: done` (eth_test).
+
+### Regression script
+
+```bash
+scripts/verify_ethernet.sh [max_inst]   # all 3 firmwares + HTTP server, exit 0 = pass
+```
+
+---
+
+## Browser (site/, interactive)
+
+### Run locally
+
+```bash
+python3 -m http.server 8123 --directory site
+# open http://127.0.0.1:8123
+```
+
+`file://` will NOT work — the SVD and WASM are fetched at runtime.
+
+Or in the repo root: `npm run serve`.
+
+### Deployed demo
+
+https://danish9661.github.io/stm32F4-emulator/ (GitHub Pages, CI-deployed).
+
+### What you get
+
+- **Preset dropdown** — 31 bundled firmwares. Auto-boot with
+  `?fw=eth_http`, `?fw=blinky`, `?fw=crypto_test`, … (or `?fw=<name>`
+  for any preset).
+- **UART terminal** — firmware TX scrolls here; the input box sends bytes
+  to the emulated USART (RX works — verified end-to-end). HTML spec strips
+  CR/LF from `<input>`, so newline-terminated RX firmwares
+  (`rx_interrupt_test`, `rx_crypto_test`) need the newline sent via the
+  debug handle: `window.__emu.sendUart([...bytes, 10])` from the devtools
+  console.
+- **Custom firmware upload** — `.bin`, Intel `.hex`, `.elf` (RAM segments
+  preloaded; symbols from symtab), and `.map` files (symbols only).
+- **Run / Stop / Reset** — Reset sends the gateway `RESET` control message
+  when connected.
+- **Gateway URL field** — WebSocket to `ws://host:port/api/network-gateway`
+  (real gVisor stack). Connected: all TX frames go to the real network and
+  RX frames are injected from it. Disconnected: canned `netsim` fallback.
+  NOTE: GitHub Pages is https, which blocks plain `ws://` — use a locally
+  served page for gateway mode.
+- **GPIO pin grid** (banks A–E) — live MODER/ODR/IDR readout; the blinky
+  preset's PA5 toggles visibly.
+- **Key peripheral registers** — ETH DMASR/MACCR, USART1 SR, RCC AHB1ENR.
+- **Packet viewer** — see TX frames the firmware emits.
+
+### DOOM page (`site/doom.html`)
+
+A second page (linked from the console's header/footer) that runs DOOM 1
+shareware on the emulated F407 — `site/doom1.wad` (4.2 MB) is loaded into
+8 MB of `extra_mem` by the driver, and the guest renders the CMAP256
+framebuffer to a 640×400 canvas at ~24 MIPS / ~24 FPS with audio (I2S
+mixer → AudioWorklet, 11025 Hz).
+
+- **Controls**: move W/S/A/D + arrows · strafe Shift · fire Ctrl · use
+  Space · menu Enter/Esc · save F2 (menu) / F6 (quick-save) · load F3
+  (menu) / F9 (quick-load, then 'y' to confirm).
+- **Save/load**: the firmware stages savegames to EXTRAM (0xC0080000,
+  2 slots × 256 KB) and `doom.js` mirrors them to
+  `localStorage['doom-save-0'|'doom-save-1']` — saves survive page
+  reloads, and `saveMap` is restored at boot so the load menus show them.
+- Terminal: the UART box under the screen shows the guest's boot prints
+  and save/load confirmations (`SAVE ok slot=0 bytes=…`, `LOAD ok …`).
+- Node regression: `node site/test_doom.mjs` (boot → menu → E1M1 →
+  quick-save flow).
+
+### Browser debug handles
+
+`app.js` exposes `window.__emu` / `window.__bindings` for automation
+(e.g. headless-Chrome CDP drivers). Useful entries:
+
+```js
+window.__emu.sendUart(bytes)          // inject UART RX bytes
+window.__emu.step(maxInst)            // run one step
+window.__emu.drainUart()              // pull TX output
+window.__emu.injectFrame(bytes)       // inject an Ethernet frame
+window.__emu.getRegisters()           // { R0..R12, SP, LR, PC, XPSR }
+window.__emu.close()                  // tear down
+window.__bindings.read32(addr)        // raw model read
+```
+
+### Browser smoke tests (Node drivers, headless Chrome)
+
+- `/tmp/opencode/site_smoke.mjs` — CDP driver for the console page
+  (boots a preset, asserts banner + a round).
+- `/tmp/opencode/rx_smoke.mjs` — sends UART bytes via `window.__emu
+  .sendUart([...])` and asserts the interrupt-driven CRC output.
+- The same page logic is unit-tested in Node without a browser:
+  `node site/test_flow.mjs`, `node site/test_blinky.mjs`,
+  `node site/test_rx_interrupt.mjs`.
+
+---
+
+## Using the emulator as a library (npm package)
+
+```js
+import { createSTM32F407, createNetSim, FIRMWARES } from 'stm32f4-emu';
+
+const netsim = createNetSim();                 // canned DHCP/TCP/HTTP peer
+const emu = await createSTM32F407({
+    firmware: FIRMWARES.eth_http.bytes,        // or any STM32F4 firmware blob
+    onTx: (frame) => {
+        for (const reply of netsim.onTx(frame)) emu.injectFrame(reply);
+    },
+});
+emu.step(100000);
+console.log(emu.drainUart());
+emu.close();
+```
+
+`npm pack` produces the tarball (16 files, ~1.2 MB); install from the
+tarball to consume it. The package is **not yet published** to the npm
+registry.
+
+---
+
+## WebSocket bridge (headless Node ↔ browser UI)
+
+A binary WebSocket protocol so the browser console can drive the emulator
+running headlessly in Node — all WASM execution stays in Node, the browser
+is a thin UI. Zero impact on the existing local WASM path.
+
+### Quick start
+
+```bash
+# 1. Start the bridge in Node (loads firmware, serves emulator over WS)
+node site/ws-bridge.mjs eth_http/eth_http.bin --port 8234
+
+# 2. Open the browser console with the bridge URL param
+npm run serve   # serves site/ on http://127.0.0.1:8123
+# then open: http://127.0.0.1:8123?bridge=ws://127.0.0.1:8234
+```
+
+Or use the npm script:
+
+```bash
+npm run bridge -- eth_http/eth_http.bin --port 8234
+```
+
+### What happens
+
+1. The bridge starts a WebSocket server and loads the firmware into an
+   emulator instance in Node.
+2. The browser opens the console page with `?bridge=ws://…`, which
+   creates a `RemoteEmu` adapter instead of a local WASM emulator.
+3. Every `step()`, `read32()`, `write32()`, `getRegisters()` call is
+   proxied over binary WebSocket to Node. UART/GPIO/ETH state is pushed
+   back asynchronously.
+4. The browser is a thin UI — no WASM runs in the browser at all.
+
+### Bridge CLI options
+
+```
+node site/ws-bridge.mjs [firmware] [options]
+
+Options:
+  --port <N>       WebSocket port (default 8234)
+  --firmware <f>   firmware path (.bin/.hex/.elf) — also the first positional arg
+  --verbose        trace peripheral MMIO to stderr
+  --lowpower       halt on WFI/WFE, advance virtual RTC until wakeup
+  --inst <N>       instruction budget (0 = unlimited, default)
+```
+
+### Multi-firmware (hot-swap)
+
+In bridge mode, switching firmwares does NOT tear down the WebSocket. The
+"Boot preset" button and file upload send `LOAD_IMAGE` over the existing
+connection — the bridge closes the old emulator, creates a new one, and
+the browser resumes stepping. The adapter caches the firmware image and
+re-sends it automatically on reconnect.
+
+### Reconnect & keepalive
+
+The `RemoteEmu` adapter has built-in robustness:
+
+- **Auto-reconnect**: on connection drop, reconnects with exponential
+  backoff (500ms → 1s → 2s → 4s → 5s cap). The firmware image is
+  re-sent automatically.
+- **Ping/pong**: the server sends `PING` (0xFE) every 30s; the client
+  must respond with `PONG` (0xFF). If 3 pongs are missed (90s), the
+  connection is considered dead and reconnect fires.
+- **Request timeout**: every request has a 10s timeout (configurable via
+  `requestTimeout`). A stuck server won't hang the browser.
+- **Connection state**: `emu.connectionState` is one of `'connecting'`,
+  `'connected'`, `'reconnecting'`, `'disconnected'`. Callbacks:
+  `onDisconnect`, `onReconnect`, `onStateChanged`.
+- **Disconnect indicator**: `app.js` shows "bridge disconnected —
+  reconnecting…" in the status bar when the connection drops.
+
+### Programmatic usage
+
+```js
+import { createRemoteEmulator } from 'stm32f4-emu/remote';
+
+const emu = await createRemoteEmulator('ws://127.0.0.1:8234', {
+    onDisconnect: () => console.log('bridge down'),
+    onReconnect:  () => console.log('bridge back'),
+    onTx: (frame) => { /* ETH TX frame from firmware */ },
+    onStopped:    () => console.log('emulator halted'),
+});
+
+await emu.loadImage(firmwareBytes);
+const res = await emu.step(100000);
+console.log(emu.drainUart());
+emu.close();
+```
+
+### Binary protocol (reference)
+
+All messages are binary WebSocket frames, little-endian. Request/response
+pairs use a monotonic u32 ID. Pushes are unsolicited (no ID).
+
+**Browser → Node**: STEP (0x01), STOP (0x02), RESET (0x03), LOAD_IMAGE
+(0x04), READ32 (0x10), WRITE32 (0x11), GET_REGS (0x12), ETH_RX (0x20),
+CAN_RX (0x21), UART_TX (0x22), SET_INPUT (0x40), PING (0xFE).
+
+**Node → Browser**: PUSH_UART (0x80), PUSH_ETH (0x81), PUSH_GPIO (0x82),
+STOPPED (0x8A), PONG (0xFF), STEP_RESP (0x90), READ32_RESP (0x91),
+WRITE32_OK (0x92), LOAD_OK (0x93), REGS_RESP (0x94), ERROR (0xA0).
+
+Full payload specs: AGENTS.md §20.
+
+---
+
+## Building from source
+
+```bash
+# Rust peripheral model
+cd stm32-periph-wasm
+wasm-pack build --release --target nodejs            # Node (pkg/)
+wasm-pack build --release --target web --out-dir ../site/vendor   # browser
+rm -f ../site/vendor/.gitignore                      # wasm-pack writes '*'
+
+# firmware (bare-metal Makefiles, toolchain from the Arduino core)
+TOOLCHAIN="$HOME/.arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/arm-none-eabi-" \
+  make -C eth_http          # also eth_dhcp, eth_test, blinky, ...
+
+# gateway
+cd openhw-local-gateway && go build -mod=vendor -o openhw-gw .
+```
+
+Full detail: [architecture.md](architecture.md), [peripherals.md](peripherals.md),
+[benchmarks.md](benchmarks.md), [progress-and-future.md](progress-and-future.md),
+AGENTS.md.

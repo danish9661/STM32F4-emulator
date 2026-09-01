@@ -19,10 +19,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install docs dependencies
+        run: npm ci
+        working-directory: website
+
+      - name: Build docs
+        run: npm run build
+        working-directory: website
+
+      - name: Copy emulator console into docs build
+        run: cp -r site/* website/build/console/
+
+      - name: Add console redirect page
+        run: |
+          cat > website/build/console/index.html << 'REDIRECT'
+          <!DOCTYPE html>
+          <html><head><meta charset="utf-8"><title>Redirecting...</title>
+          <script>window.location.replace(window.location.pathname.replace(/\/console\/?$/,'/'));</script>
+          </head><body><p>If not redirected, <a href="../">click here</a>.</p></body></html>
+          REDIRECT
+
       - uses: actions/configure-pages@v5
         with:
           enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: website/build
       - uses: actions/deploy-pages@v4
