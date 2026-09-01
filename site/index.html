@@ -281,6 +281,80 @@ button:disabled { opacity: 0.4; cursor: default; transform: none !important; box
   appearance: none;
 }
 .sec input[type=file] { width: 100%; font: inherit; font-size: 12px; color: var(--dim); }
+.sec input[type=file]::-webkit-file-upload-button {
+  background: rgba(255,255,255,0.06); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 5px 12px; font: 500 12px/1 'Inter', sans-serif; cursor: pointer;
+  transition: all 0.15s ease; margin-right: 8px;
+}
+.sec input[type=file]::-webkit-file-upload-button:hover {
+  background: rgba(255,255,255,0.1); border-color: var(--border-bright);
+}
+input[type=checkbox] {
+  appearance: none; -webkit-appearance: none;
+  width: 16px; height: 16px; border-radius: 4px;
+  background: rgba(255,255,255,0.06); border: 1px solid var(--border);
+  cursor: pointer; position: relative; vertical-align: middle;
+  transition: all 0.15s ease; flex-shrink: 0;
+}
+input[type=checkbox]:checked {
+  background: var(--green); border-color: var(--green);
+}
+input[type=checkbox]:checked::after {
+  content: ''; position: absolute; left: 4px; top: 1px;
+  width: 5px; height: 9px; border: solid #fff; border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* ── Custom select dropdown ───────────────────────────────────────── */
+.custom-select {
+  position: relative; width: 100%;
+}
+.custom-select-trigger {
+  width: 100%; background: rgba(255,255,255,0.04); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 7px 32px 7px 10px; font: 500 12px/1.4 'Inter', sans-serif;
+  cursor: pointer; display: flex; align-items: center;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  position: relative; user-select: none;
+}
+.custom-select-trigger::after {
+  content: ''; position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  width: 0; height: 0;
+  border-left: 5px solid transparent; border-right: 5px solid transparent;
+  border-top: 5px solid var(--dim);
+}
+.custom-select-trigger:hover, .custom-select.open .custom-select-trigger {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(96,165,250,0.15);
+}
+.custom-select.open .custom-select-trigger::after {
+  transform: translateY(-50%) rotate(180deg);
+}
+.custom-select-dropdown {
+  display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+  background: #141a26; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5); z-index: 1000;
+  max-height: 320px; overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+}
+.custom-select-dropdown::-webkit-scrollbar { width: 6px; }
+.custom-select-dropdown::-webkit-scrollbar-track { background: transparent; }
+.custom-select-dropdown::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.custom-select.open .custom-select-dropdown { display: block; }
+.custom-select-group-label {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--green); padding: 8px 12px 4px;
+  background: rgba(52,211,153,0.05); border-top: 1px solid var(--border);
+}
+.custom-select-group-label:first-child { border-top: none; }
+.custom-select-option {
+  padding: 7px 12px; font: 500 12px/1.4 'Inter', sans-serif;
+  color: var(--fg); cursor: pointer; transition: background 0.1s ease;
+  display: block;
+}
+.custom-select-option:hover { background: rgba(96,165,250,0.1); }
+.custom-select-option.selected { background: rgba(52,211,153,0.12); color: var(--green); }
 .sec p { color: var(--dim); font-size: 11px; margin: 0; line-height: 1.5; }
 .sec p b { color: var(--fg); font-weight: 600; }
 .row { display: flex; gap: 8px; }
@@ -394,7 +468,7 @@ canvas {
       <button id="btnReset">Reset</button>
       <button id="btnClear">Clear log</button>
       <button id="btnSaveLog">Save log</button>
-      <label style="color:var(--dim);font-size:12px;margin-left:auto;display:flex;align-items:center;gap:6px;">
+      <label style="color:var(--dim);font-size:12px;margin-left:auto;display:flex;align-items:center;gap:6px;cursor:pointer;">
         <input type="checkbox" id="chkAuto" checked> autoscroll
       </label>
     </div>
@@ -407,59 +481,64 @@ canvas {
     <div class="panel" style="margin-bottom:12px;">
       <h2>Firmware</h2>
       <div class="sec">
-        <select id="fwSelect">
-          <optgroup label="Network">
-            <option value="eth_http">eth_http — web client (DHCP+TCP+HTTP)</option>
-            <option value="eth_dhcp">eth_dhcp — DHCP loop</option>
-            <option value="eth_test">eth_test — raw ETH TX test</option>
-          </optgroup>
-          <optgroup label="Bare-metal demo">
-            <option value="blinky">blinky — LED blinker, no network</option>
-            <option value="adc_demo">adc_demo — ADC voltmeter on PA0 (reads analog, prints voltage)</option>
-            <option value="dac_demo">dac_demo — DAC sine wave on PA4 (64-point lookup, TIM6 triggered)</option>
-            <option value="pwm_demo">pwm_demo — PWM LED breathing on PA0+PA6 (TIM2/TIM3, triangle wave)</option>
-            <option value="blink_serial">blink_serial — UART4 + blink loop</option>
-            <option value="timer_test">timer_test — TIM tick 1s prints</option>
-            <option value="arduino_test">arduino_test — Arduino core OK + ADC</option>
-            <option value="hal_test">hal_test — HAL init + SysTick</option>
-          </optgroup>
-          <optgroup label="Peripheral tests">
-            <option value="periph_test">periph_test — RCC/GPIO checks</option>
-            <option value="new_periph_test">new_periph_test — PWR/FSMC regs</option>
-            <option value="deep_periph_test">deep_periph_test — deep reg r/w</option>
-            <option value="comprehensive_test">comprehensive_test — EXTI/DMA/USART</option>
-            <option value="eth_irq_test">eth_irq_test — interrupt-driven Ethernet</option>
-            <option value="edge_test">edge_test — DMA edge cases</option>
-            <option value="i2s_sai_test">i2s_sai_test — I2S audio test</option>
-            <option value="spi_tft_test">spi_tft_test — SPI TFT LCD test</option>
-            <option value="audio_test">audio_test — I2S DMA WAV play + capture</option>
-            <option value="ltdc_test">ltdc_test — LTDC scanout gradient (draws in the display panel)</option>
-            <option value="oled_test">oled_test — SSD1306 OLED over I2C (draws in the OLED panel)</option>
-            <option value="tft_test">tft_test — ILI9341 TFT over SPI (draws in the TFT panel)</option>
-            <option value="buzzer_test">buzzer_test — TIM2 PWM melody (live frequency in the buzzer panel)</option>
-            <option value="audio_play_test">audio_play_test — I2S sine playback (speaker panel plays the samples)</option>
-            <option value="rtc_test">rtc_test — DS3231 RTC time/temp over I2C1 (live clock in the RTC panel)</option>
-            <option value="can_test">can_test — CAN1/CAN2 bus loopback + arbitration (2-node bus, no device panel)</option>
-            <option value="can_demo">can_demo — two-phase CAN showcase (loopback + 2-node arbitration)</option>
-            <option value="can_host_rx">can_host_rx — receives CAN frames you inject from the CAN-injection panel</option>
-            <option value="watchdog_demo">watchdog_demo — IWDG pet/reset loop, detects watchdog reset via RCC->CSR</option>
-            <option value="wwdg_demo">wwdg_demo — WWDG pet/reset loop, detects window-watchdog reset via RCC->CSR</option>
-            <option value="wwdg_window_demo">wwdg_window_demo — WWDG with real window W=0x50, refreshes in-window + triggers a window violation</option>
-            <option value="tim_capture_demo">tim_capture_demo — TIM3 CH1 input capture, latches injected edges into CCR1</option>
-            <option value="qspi_test">qspi_test — QUADSPI indirect read/write round-trip</option>
-            <option value="deep_sleep_demo">deep_sleep_demo — WFI/STOP + RTC-alarm wakeup (low-power)</option>
-            <option value="test_firmware">test_firmware — TIM2/ADC dump</option>
-          </optgroup>
-          <optgroup label="Crypto">
-            <option value="crypto_test">crypto_test — AES-128 ECB/CBC</option>
-            <option value="crypto_deep_test">crypto_deep_test — AES CTR deep</option>
-            <option value="rx_crypto_test">rx_crypto_test — RX interrupt + CRC</option>
-          </optgroup>
-          <optgroup label="UART echo (needs input)">
-            <option value="echo_test">echo_test — UART echo server</option>
-            <option value="rx_interrupt_test">rx_interrupt_test — RX interrupt</option>
-          </optgroup>
-        </select>
+        <div class="custom-select" id="fwSelectWrap">
+          <div class="custom-select-trigger" id="fwSelectTrigger">eth_http — web client (DHCP+TCP+HTTP)</div>
+          <div class="custom-select-dropdown" id="fwDropdown">
+            <div class="custom-select-group-label">Network</div>
+            <div class="custom-select-option selected" data-value="eth_http">eth_http — web client (DHCP+TCP+HTTP)</div>
+            <div class="custom-select-option" data-value="eth_dhcp">eth_dhcp — DHCP loop</div>
+            <div class="custom-select-option" data-value="eth_test">eth_test — raw ETH TX test</div>
+            <div class="custom-select-group-label">Bare-metal demo</div>
+            <div class="custom-select-option" data-value="blinky">blinky — LED blinker, no network</div>
+            <div class="custom-select-option" data-value="adc_demo">adc_demo — ADC voltmeter on PA0</div>
+            <div class="custom-select-option" data-value="dac_demo">dac_demo — DAC sine wave on PA4</div>
+            <div class="custom-select-option" data-value="pwm_demo">pwm_demo — PWM LED breathing on PA0+PA6</div>
+            <div class="custom-select-option" data-value="blink_serial">blink_serial — UART4 + blink loop</div>
+            <div class="custom-select-option" data-value="timer_test">timer_test — TIM tick 1s prints</div>
+            <div class="custom-select-option" data-value="arduino_test">arduino_test — Arduino core OK + ADC</div>
+            <div class="custom-select-option" data-value="hal_test">hal_test — HAL init + SysTick</div>
+            <div class="custom-select-group-label">Peripheral tests</div>
+            <div class="custom-select-option" data-value="periph_test">periph_test — RCC/GPIO checks</div>
+            <div class="custom-select-option" data-value="new_periph_test">new_periph_test — PWR/FSMC regs</div>
+            <div class="custom-select-option" data-value="deep_periph_test">deep_periph_test — deep reg r/w</div>
+            <div class="custom-select-option" data-value="comprehensive_test">comprehensive_test — EXTI/DMA/USART</div>
+            <div class="custom-select-option" data-value="eth_irq_test">eth_irq_test — interrupt-driven Ethernet</div>
+            <div class="custom-select-option" data-value="edge_test">edge_test — DMA edge cases</div>
+            <div class="custom-select-option" data-value="i2s_sai_test">i2s_sai_test — I2S audio test</div>
+            <div class="custom-select-option" data-value="spi_tft_test">spi_tft_test — SPI TFT LCD test</div>
+            <div class="custom-select-option" data-value="audio_test">audio_test — I2S DMA WAV play + capture</div>
+            <div class="custom-select-option" data-value="ltdc_test">ltdc_test — LTDC scanout gradient</div>
+            <div class="custom-select-option" data-value="oled_test">oled_test — SSD1306 OLED over I2C</div>
+            <div class="custom-select-option" data-value="tft_test">tft_test — ILI9341 TFT over SPI</div>
+            <div class="custom-select-option" data-value="buzzer_test">buzzer_test — TIM2 PWM melody</div>
+            <div class="custom-select-option" data-value="audio_play_test">audio_play_test — I2S sine playback</div>
+            <div class="custom-select-option" data-value="rtc_test">rtc_test — DS3231 RTC time/temp over I2C1</div>
+            <div class="custom-select-option" data-value="can_test">can_test — CAN1/CAN2 bus loopback + arbitration</div>
+            <div class="custom-select-option" data-value="can_demo">can_demo — two-phase CAN showcase</div>
+            <div class="custom-select-option" data-value="can_host_rx">can_host_rx — receives CAN frames you inject</div>
+            <div class="custom-select-option" data-value="watchdog_demo">watchdog_demo — IWDG pet/reset loop</div>
+            <div class="custom-select-option" data-value="wwdg_demo">wwdg_demo — WWDG pet/reset loop</div>
+            <div class="custom-select-option" data-value="wwdg_window_demo">wwdg_window_demo — WWDG with real window</div>
+            <div class="custom-select-option" data-value="tim_capture_demo">tim_capture_demo — TIM3 CH1 input capture</div>
+            <div class="custom-select-option" data-value="qspi_test">qspi_test — QUADSPI read/write round-trip</div>
+            <div class="custom-select-option" data-value="deep_sleep_demo">deep_sleep_demo — WFI/STOP + RTC-alarm wakeup</div>
+            <div class="custom-select-option" data-value="test_firmware">test_firmware — TIM2/ADC dump</div>
+            <div class="custom-select-group-label">Crypto</div>
+            <div class="custom-select-option" data-value="crypto_test">crypto_test — AES-128 ECB/CBC</div>
+            <div class="custom-select-option" data-value="crypto_deep_test">crypto_deep_test — AES CTR deep</div>
+            <div class="custom-select-option" data-value="rx_crypto_test">rx_crypto_test — RX interrupt + CRC</div>
+            <div class="custom-select-group-label">UART echo (needs input)</div>
+            <div class="custom-select-option" data-value="echo_test">echo_test — UART echo server</div>
+            <div class="custom-select-option" data-value="rx_interrupt_test">rx_interrupt_test — RX interrupt</div>
+    </div>
+    <select id="fwSelect" hidden>
+      <option value="eth_http">eth_http</option><option value="eth_dhcp">eth_dhcp</option><option value="eth_test">eth_test</option>
+      <option value="blinky">blinky</option><option value="adc_demo">adc_demo</option><option value="dac_demo">dac_demo</option><option value="pwm_demo">pwm_demo</option><option value="blink_serial">blink_serial</option><option value="timer_test">timer_test</option><option value="arduino_test">arduino_test</option><option value="hal_test">hal_test</option>
+      <option value="periph_test">periph_test</option><option value="new_periph_test">new_periph_test</option><option value="deep_periph_test">deep_periph_test</option><option value="comprehensive_test">comprehensive_test</option><option value="eth_irq_test">eth_irq_test</option><option value="edge_test">edge_test</option><option value="i2s_sai_test">i2s_sai_test</option><option value="spi_tft_test">spi_tft_test</option><option value="audio_test">audio_test</option><option value="ltdc_test">ltdc_test</option><option value="oled_test">oled_test</option><option value="tft_test">tft_test</option><option value="buzzer_test">buzzer_test</option><option value="audio_play_test">audio_play_test</option><option value="rtc_test">rtc_test</option><option value="can_test">can_test</option><option value="can_demo">can_demo</option><option value="can_host_rx">can_host_rx</option><option value="watchdog_demo">watchdog_demo</option><option value="wwdg_demo">wwdg_demo</option><option value="wwdg_window_demo">wwdg_window_demo</option><option value="tim_capture_demo">tim_capture_demo</option><option value="qspi_test">qspi_test</option><option value="deep_sleep_demo">deep_sleep_demo</option><option value="test_firmware">test_firmware</option>
+      <option value="crypto_test">crypto_test</option><option value="crypto_deep_test">crypto_deep_test</option><option value="rx_crypto_test">rx_crypto_test</option>
+      <option value="echo_test">echo_test</option><option value="rx_interrupt_test">rx_interrupt_test</option>
+    </select>
+        </div>
         <button id="btnBoot" class="primary" style="width:100%;">Boot preset</button>
         <input type="file" id="fwFile" accept=".bin,.hex,.elf,.map">
         <p id="fwHint">Load a custom firmware: <b>.bin</b> (raw flash), <b>.hex</b> (Intel HEX), <b>.elf</b> (loadable segments + symbols), or a <b>.map</b> file for the symbol table only. Firmware files boot immediately. Nothing runs until you press <b>Boot preset</b> or load a file.</p>
@@ -589,6 +668,44 @@ canvas {
 
 <script src="vendor/unicorn_arm.js"></script>
 <script type="module" src="app.js"></script>
+<script>
+// Custom firmware dropdown (replaces native <select>)
+(() => {
+  const wrap = document.getElementById('fwSelectWrap');
+  const trigger = document.getElementById('fwSelectTrigger');
+  const dropdown = document.getElementById('fwDropdown');
+  const hiddenSelect = document.getElementById('fwSelect');
+  const options = dropdown.querySelectorAll('.custom-select-option');
+
+  function selectOption(opt) {
+    options.forEach(o => o.classList.remove('selected'));
+    opt.classList.add('selected');
+    trigger.textContent = opt.textContent;
+    hiddenSelect.value = opt.dataset.value;
+    wrap.classList.remove('open');
+  }
+
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    wrap.classList.toggle('open');
+  });
+
+  options.forEach(opt => {
+    opt.addEventListener('click', (e) => {
+      e.stopPropagation();
+      selectOption(opt);
+    });
+  });
+
+  document.addEventListener('click', () => wrap.classList.remove('open'));
+
+  // Expose setter so app.js can still set firmware programmatically
+  window.__setFwSelect = (val) => {
+    const opt = dropdown.querySelector('[data-value="' + val + '"]');
+    if (opt) selectOption(opt);
+  };
+})();
+</script>
 <script>
 // Collapsible sidebar panels (progressive enhancement — app.js owns the
 // contents, this only toggles a class).  Device panels start collapsed

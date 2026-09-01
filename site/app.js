@@ -842,6 +842,7 @@ appendUart('STM32F407 console ready. Nothing is running yet.\r\n'
 
 const preset = params.get('fw');
 if (preset && FIRMWARES[preset]) {
-    $('fwSelect').value = preset;
+    if (window.__setFwSelect) window.__setFwSelect(preset);
+    else $('fwSelect').value = preset;
     $('btnBoot').click();
 }
