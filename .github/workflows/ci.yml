@@ -22,7 +22,13 @@ jobs:
       - name: Boot-probe all bundled firmwares
         run: node site/probe_firmwares.mjs
       - name: Run the test suite
-        run: npm test
+        run: npm run test:unit
+      # CDP browser tests need Chrome + python3. They are flaky on
+      # non-Linux runners (Chrome/python paths differ), so run only on
+      # ubuntu where both are guaranteed pre-installed.
+      - name: Browser CDP smoke tests
+        if: matrix.os == 'ubuntu-latest'
+        run: node site/test_qspi_cdp.mjs && node site/test_browser.mjs
       # The MCP server's deps are optional peer deps, so they need an
       # explicit install; the emulator library and the suite above stay
       # dependency-free. Linux-only: the server is platform-agnostic and
