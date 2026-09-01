@@ -4,7 +4,7 @@
 const config = {
   title: 'STM32F4 Emulator',
   tagline: 'Real Cortex-M4 firmware on an emulated MCU — Unicorn CPU + Rust peripherals, all WebAssembly',
-  favicon: 'img/favicon.ico',
+  favicon: 'img/favicon.svg',
 
   url: 'https://danish9661.github.io',
   baseUrl: '/stm32F4-emulator/',
@@ -57,7 +57,7 @@ const config = {
             label: 'Documentation',
           },
           {
-            href: 'https://danish9661.github.io/stm32F4-emulator/',
+            href: '/stm32F4-emulator/console/',
             label: 'Live Demo',
             position: 'left',
           },
@@ -95,8 +95,8 @@ const config = {
           {
             title: 'More',
             items: [
-              { label: 'Live Demo', href: 'https://danish9661.github.io/stm32F4-emulator/' },
-              { label: 'DOOM', href: 'https://danish9661.github.io/stm32F4-emulator/doom.html' },
+              { label: 'Live Demo', href: '/stm32F4-emulator/console/' },
+              { label: 'DOOM', href: '/stm32F4-emulator/console/doom.html' },
             ],
           },
         ],

@@ -20,7 +20,7 @@ function HomepageHeader() {
           </Link>
           <Link
             className="button button--outline button--lg"
-            href="https://danish9661.github.io/stm32F4-emulator/"
+            href="/stm32F4-emulator/console/"
             style={{marginLeft: '1rem', borderColor: 'white', color: 'white'}}>
             Live Demo
           </Link>

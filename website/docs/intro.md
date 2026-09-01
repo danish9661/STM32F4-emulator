@@ -46,7 +46,7 @@ The same firmware binaries that run here also run on real F407 hardware.
 
 ### Browser (zero install)
 
-1. Open the [live demo](https://danish9661.github.io/stm32F4-emulator/)
+1. Open the [live demo](/stm32F4-emulator/console/)
 2. Select a firmware preset (e.g., `blinky` for LED blink, `eth_http` for networking)
 3. Click **Boot preset**
 4. Watch the UART terminal output
@@ -121,5 +121,5 @@ See [Architecture](./architecture.md) for the full breakdown.
 
 - [GitHub Repository](https://github.com/danish9661/stm32F4-emulator)
 - [npm Package](https://www.npmjs.com/package/stm32f4-emu)
-- [Live Demo](https://danish9661.github.io/stm32F4-emulator/)
-- [DOOM](https://danish9661.github.io/stm32F4-emulator/doom.html)
+- [Live Demo](/stm32F4-emulator/console/)
+- [DOOM](/stm32F4-emulator/console/doom.html)
