@@ -107,8 +107,9 @@ export async function createRemoteEmulator(url, opts = {}) {
     }
 
     // ── WebSocket setup ─────────────────────────────────────────────────
-    function handleMessage(data) {
-        const buf = new Uint8Array(data);
+    function handleMessage(evt) {
+        const raw = evt.data || evt;
+        const buf = new Uint8Array(raw instanceof ArrayBuffer ? raw : raw.buffer || raw);
         if (buf.length < 1) return;
         const type = buf[0];
 

@@ -75,6 +75,10 @@ npm run serve                  # then open http://127.0.0.1:8123
 # node end-to-end flow test (boot -> DHCP -> TCP -> HTTP, 2 rounds)
 npm test                       # == node site/test_flow.mjs
 
+# websocket bridge: headless Node serves the emulator, browser is a thin UI
+npm run bridge -- blinky/blinky.bin --port 8234
+# then open http://127.0.0.1:8123?bridge=ws://127.0.0.1:8234
+
 # gateway-backed run: firmware talks to a REAL network stack (gVisor)
 cd stm32-periph-wasm/pkg
 node cli.mjs ../../eth_http/eth_http.bin 10000000 \

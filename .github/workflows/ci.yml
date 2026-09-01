@@ -28,3 +28,6 @@ jobs:
       - name: MCP server protocol round-trip
         if: matrix.os == 'ubuntu-latest'
         run: npm ci && npm run test:mcp
+      - name: WebSocket bridge CDP smoke
+        if: matrix.os == 'ubuntu-latest'
+        run: node site/test_bridge_cdp.mjs
