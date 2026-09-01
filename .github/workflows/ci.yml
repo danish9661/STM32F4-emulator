@@ -21,8 +21,52 @@ jobs:
         run: npm ci
       - name: Boot-probe all bundled firmwares
         run: node site/probe_firmwares.mjs
+      - name: Diagnose: check environment
+        shell: bash
+        run: node --version && ls -la node_modules/ws/index.js node_modules/ws/package.json 2>&1 || echo "ws not found" && ls site/vendor/stm32_periph_wasm_bg.wasm 2>&1
       - name: Run the test suite
-        run: npm run test:unit
+        shell: bash
+        run: |
+          tests=(
+            "site/test_stm32f4_api.mjs"
+            "site/test_stm32f4_periph.mjs"
+            "site/test_ws_bridge.mjs"
+            "site/test_flow.mjs"
+            "site/test_blinky.mjs"
+            "site/test_rx_interrupt.mjs"
+            "site/test_component_led.mjs"
+            "site/test_component_button.mjs"
+            "site/test_component_pwm.mjs"
+            "site/test_component_i2cregfile.mjs"
+            "site/test_component_adc.mjs"
+            "site/test_multi_instance.mjs"
+            "site/test_fsmc_dcmi.mjs"
+            "site/test_fsmc.mjs"
+            "site/test_dcmi.mjs"
+            "site/probe_freertos.mjs"
+            "site/test_candemo.mjs"
+            "site/test_lowpower.mjs"
+            "site/test_edge_cases.mjs"
+            "site/test_can_inject.mjs"
+            "site/test_watchdog.mjs"
+            "site/test_wwdg.mjs"
+            "site/test_wwdg_window.mjs"
+            "site/test_tim_capture.mjs"
+            "site/test_qspi.mjs"
+          )
+          failed=0
+          for t in "${tests[@]}"; do
+            echo ">>> $t"
+            if node "$t"; then
+              echo "<<< OK"
+            else
+              echo "<<< FAILED (exit $?)"
+              failed=$((failed+1))
+            fi
+          done
+          echo ""
+          echo "Summary: $failed failures out of ${#tests[@]} tests"
+          exit $failed
       # CDP browser tests need Chrome + python3. They are flaky on
       # non-Linux runners (Chrome/python paths differ), so run only on
       # ubuntu where both are guaranteed pre-installed.
