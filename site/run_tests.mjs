@@ -1,7 +1,9 @@
 // Run each test individually so failures don't break the chain.
 // Usage: node site/run_tests.mjs [--filter substring]
-import { execFileSync } from 'child_process';
-import { fileURLToPath } from 'url';
+import { spawn } from 'child_process';
+import { writeSync } from 'fs';
+
+const log = (msg) => { writeSync(1, msg + '\n'); };
 
 const ALL_TESTS = [
     'site/test_stm32f4_api.mjs',
@@ -38,21 +40,38 @@ const filter = process.argv.includes('--filter')
 const tests = filter ? ALL_TESTS.filter(t => t.includes(filter)) : ALL_TESTS;
 let passed = 0, failed = 0;
 
+function runTest(testFile) {
+    return new Promise((resolve) => {
+        const child = spawn('node', [testFile], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stdout = '', stderr = '';
+        child.stdout.on('data', (d) => { stdout += d; process.stdout.write(d); });
+        child.stderr.on('data', (d) => { stderr += d; process.stderr.write(d); });
+        const timer = setTimeout(() => { child.kill('SIGKILL'); }, 180_000);
+        child.on('close', (code) => {
+            clearTimeout(timer);
+            resolve({ code, stdout, stderr });
+        });
+        child.on('error', (e) => {
+            clearTimeout(timer);
+            resolve({ code: -1, stdout, stderr: e.message });
+        });
+    });
+}
+
 for (const t of tests) {
-    process.stdout.write(`>>> ${t} ... `);
-    try {
-        execFileSync('node', [t], { stdio: 'pipe', timeout: 180_000 });
-        console.log('OK');
+    log(`\n========== ${t} ==========`);
+    const { code, stdout, stderr } = await runTest(t);
+    if (code === 0) {
+        log(`>>> PASS: ${t}`);
         passed++;
-    } catch (e) {
-        const out = (e.stdout || '').toString().split('\n').filter(Boolean).slice(-3).join('\n');
-        const err = (e.stderr || '').toString().split('\n').filter(Boolean).slice(-3).join('\n');
-        console.log(`FAIL (exit ${e.status})`);
-        if (out) console.log(`  stdout: ${out}`);
-        if (err) console.log(`  stderr: ${err}`);
+    } else {
+        log(`>>> FAIL: ${t} (exit ${code})`);
+        const tail = (stdout + stderr).split('\n').filter(Boolean).slice(-10).join('\n');
+        if (tail) log(`  Last lines:\n${tail}`);
         failed++;
     }
 }
 
-console.log(`\nResults: ${passed} passed, ${failed} failed out of ${tests.length} tests`);
-process.exitCode = failed;
+log(`\n========================================`);
+log(`Results: ${passed} passed, ${failed} failed out of ${tests.length} tests`);
+process.exitCode = failed ? 1 : 0;
