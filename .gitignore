@@ -12,3 +12,5 @@ freertos_test/**/*.o
 /website/node_modules
 /website/build
 /website/.docusaurus
+no/
+tmp_test2.mjs
