@@ -52,6 +52,18 @@ const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test']);
 // core on WFI and advances the virtual RTC until an alarm/interrupt wakes it.
 const LOWPOWER_FIRMWARES = new Set(['deep_sleep_demo']);
 
+// Firmwares that can run hookless (no WASM->JS crossing per block).
+// These have no ETH/DMA/IRQ dependency — they only need CPU + GPIO/TIM/etc.
+// Using noCountHook (+ minimalPolls) gives +10% and honest instCount vs
+// blockCounting's 1.39× over-report. ETH/IRQ/lowpower keep polling.
+const NO_COUNT_FIRMWARES = new Set([
+  'blinky', 'rtc_test', 'oled_test', 'tft_test', 'buzzer_test',
+  'audio_test', 'audio_play_test', 'ltdc_test', 'tim_capture_demo',
+  'qspi_test', 'watchdog_demo', 'wwdg_demo', 'wwdg_window_demo',
+  'fsmc_test', 'dcmi_test', 'spi_tft_test', 'adc_demo', 'dac_demo', 'pwm_demo',
+  'can_test', 'can_demo', 'can_host_rx', 'crypto_test', 'hash_test',
+]);
+
 // Virtual hardware attached to the emulator per firmware: the JS device
 // layer parses the peripheral traffic and renders it (OLED fb, TFT fb,
 // buzzer freq, speaker samples). Matches emulator.js ext_devices.
@@ -324,6 +336,7 @@ const boot = async () => {
         netsim = gw.connected ? null : createNetSim();
         gw.tx = 0; gw.rx = 0;
         if (gw.connected) setGwStatus(true, gwLabel());
+        const useNoCount = NO_COUNT_FIRMWARES.has(image.name) && !IRQ_FIRMWARES.has(image.name) && !LOWPOWER_FIRMWARES.has(image.name);
         emu = await createEmulator({
             firmware: fw,
             bindings,
@@ -334,6 +347,8 @@ const boot = async () => {
             enable_irqs: IRQ_FIRMWARES.has(image.name),
             irq_eth: IRQ_ETH_FIRMWARES.has(image.name),
             lowpower: LOWPOWER_FIRMWARES.has(image.name),
+            minimalPolls: useNoCount,
+            noCountHook: useNoCount,
             eth: ETH_RX_MAP[image.name],
             ext_devices: DEVICE_FIRMWARES[image.name],
             onTx: (pkt) => {
