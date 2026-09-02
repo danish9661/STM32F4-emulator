@@ -32,6 +32,7 @@ static SOFTWARE_SPI_CONFIGS: OnceLock<Mutex<Vec<(String, Option<String>, String,
 pub fn get_software_spi_configs() -> &'static Mutex<Vec<(String, Option<String>, String, String, String)>> {
     SOFTWARE_SPI_CONFIGS.get_or_init(|| Mutex::new(Vec::new()))
 }
+pub fn get_sys_for_cpu() -> &'static WasmSystem { crate::sys() }
 pub fn is_watchdog_reset_requested() -> bool { WATCHDOG_RESET_EVENT.swap(false, Ordering::Acquire) }
 /// Latch a watchdog reset event. cause: bit0 = IWDG, bit1 = WWDG (so a single
 /// call can set both if needed). The event flag is consumed by the JS driver

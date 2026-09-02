@@ -73,6 +73,7 @@ export async function createEmulator(opts) {
         // `stm32f4-emu --verbose` CLI flag). Capped so a chatty firmware can't
         // flood the terminal.
         verbose = false,
+        cpu_backend = 'unicorn',
     } = opts;
 
     // ── firmware image validation (actionable errors on load failure) ──
@@ -197,6 +198,24 @@ export async function createEmulator(opts) {
     // call — see the SYS comment in stm32-periph-wasm/src/lib.rs.)
     if (svdXml) init_svd(svdXml);
     else bindings.init();
+
+    if (cpu_backend === 'wasm' && typeof bindings.WasmCpu === 'function') {
+        const sp0 = (firmware[0] | (firmware[1] << 8) | (firmware[2] << 16) | (firmware[3] << 24)) >>> 0;
+        const pc0 = (firmware[4] | (firmware[5] << 8) | (firmware[6] << 16) | (firmware[7] << 24)) >>> 0;
+        if (sp0 === 0 || pc0 === 0) throw new Error(`WasmCpu: invalid vector table sp=${sp0.toString(16)} pc=${pc0.toString(16)}`);
+        const cpu = new bindings.WasmCpu(sp0, pc0 | 1, flash_size, ram_size);
+        cpu.load_firmware(firmware, vector_table);
+        for (const seg of extra_mem) cpu.load_firmware(seg.data, seg.addr);
+        let instCount = 0;
+        return {
+            uc: { mem_read: (a,s)=>{ const v=cpu.read32(Number(a)); const b=new Uint8Array(s); for(let i=0;i<s;i++) b[i]=(v>>(i*8))&0xFF; return b; }, mem_write: (a,d)=>{ for(let i=0;i<d.length;i+=4){ const v=d[i]|(d[i+1]<<8)|(d[i+2]<<16)|(d[i+3]<<24); cpu.write32(Number(a)+i, v>>>0); } }, reg_read_i32: (r)=> r===15?cpu.get_pc():r===13?cpu.get_sp():cpu.get_regs()[r] },
+            read32: (a)=> cpu.read32(a)>>>0, write32: (a,v)=> cpu.write32(a, v>>>0),
+            getRegisters: ()=>{ const r=cpu.get_regs(); return {R0:r[0],R1:r[1],R2:r[2],R3:r[3],R4:r[4],R5:r[5],R6:r[6],R7:r[7],R8:r[8],R9:r[9],R10:r[10],R11:r[11],R12:r[12],SP:r[13],LR:r[14],PC:r[15],XPSR:0}; },
+            step: (n=100000)=>{ const c=cpu.step(n); instCount+=c; try{ bindings.tick_n(c); }catch{} return {instCount, stopped:false, pc:cpu.get_pc()}; },
+            drainUart: ()=>{ try{ return bindings.get_uart_output(); }catch{ return ''; } },
+            injectFrame: ()=>{}, canInject: ()=>{}, sendUart: ()=>{}, pin: ()=>({setInputValue:()=>{}}), close: ()=>{}, reset: ()=>{}, oled:null, tft:null, buzzer:null, rtc:null,
+        };
+    }
 
     const uc = new Module.Unicorn(
         Module.ARCH_ARM,

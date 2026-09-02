@@ -1,6 +1,19 @@
 /* tslint:disable */
 /* eslint-disable */
 
+export class WasmCpu {
+    free(): void;
+    [Symbol.dispose](): void;
+    get_pc(): number;
+    get_regs(): Uint32Array;
+    get_sp(): number;
+    load_firmware(data: Uint8Array, base: number): void;
+    constructor(sp: number, pc: number, flash_size: number, ram_size: number);
+    read32(addr: number): number;
+    step(budget: number): number;
+    write32(addr: number, v: number): void;
+}
+
 /**
  * Remove a channel override, reverting it to the synthetic default.
  */
@@ -357,6 +370,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly __wbg_wasmcpu_free: (a: number, b: number) => void;
     readonly adc_clear_channel_value: (a: number, b: number, c: number) => void;
     readonly adc_set_channel_value: (a: number, b: number, c: number, d: number) => void;
     readonly add_i2c_eeprom: (a: number, b: number, c: number, d: number, e: number) => void;
@@ -423,6 +437,14 @@ export interface InitOutput {
     readonly tick_n: (a: number) => void;
     readonly tim_inject_capture: (a: number, b: number, c: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;
+    readonly wasmcpu_get_pc: (a: number) => number;
+    readonly wasmcpu_get_regs: (a: number, b: number) => void;
+    readonly wasmcpu_get_sp: (a: number) => number;
+    readonly wasmcpu_load_firmware: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmcpu_new: (a: number, b: number, c: number, d: number) => number;
+    readonly wasmcpu_read32: (a: number, b: number) => number;
+    readonly wasmcpu_step: (a: number, b: number) => number;
+    readonly wasmcpu_write32: (a: number, b: number, c: number) => void;
     readonly wwdg_reset_flag: () => number;
     readonly __wbindgen_export: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export2: (a: number, b: number) => number;

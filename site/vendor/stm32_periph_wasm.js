@@ -1,5 +1,93 @@
 /* @ts-self-types="./stm32_periph_wasm.d.ts" */
 
+export class WasmCpu {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmCpuFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmcpu_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get_pc() {
+        const ret = wasm.wasmcpu_get_pc(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {Uint32Array}
+     */
+    get_regs() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.wasmcpu_get_regs(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v1 = getArrayU32FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export(r0, r1 * 4, 4);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * @returns {number}
+     */
+    get_sp() {
+        const ret = wasm.wasmcpu_get_sp(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {Uint8Array} data
+     * @param {number} base
+     */
+    load_firmware(data, base) {
+        const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmcpu_load_firmware(this.__wbg_ptr, ptr0, len0, base);
+    }
+    /**
+     * @param {number} sp
+     * @param {number} pc
+     * @param {number} flash_size
+     * @param {number} ram_size
+     */
+    constructor(sp, pc, flash_size, ram_size) {
+        const ret = wasm.wasmcpu_new(sp, pc, flash_size, ram_size);
+        this.__wbg_ptr = ret;
+        WasmCpuFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @param {number} addr
+     * @returns {number}
+     */
+    read32(addr) {
+        const ret = wasm.wasmcpu_read32(this.__wbg_ptr, addr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {number} budget
+     * @returns {number}
+     */
+    step(budget) {
+        const ret = wasm.wasmcpu_step(this.__wbg_ptr, budget);
+        return ret >>> 0;
+    }
+    /**
+     * @param {number} addr
+     * @param {number} v
+     */
+    write32(addr, v) {
+        wasm.wasmcpu_write32(this.__wbg_ptr, addr, v);
+    }
+}
+if (Symbol.dispose) WasmCpu.prototype[Symbol.dispose] = WasmCpu.prototype.free;
+
 /**
  * Remove a channel override, reverting it to the synthetic default.
  * @param {string} peripheral
@@ -817,6 +905,9 @@ export function wwdg_reset_flag() {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg___wbindgen_throw_344f42d3211c4765: function(arg0, arg1) {
+            throw new Error(getStringFromWasm0(arg0, arg1));
+        },
         __wbg_error_a6fa202b58aa1cd3: function(arg0, arg1) {
             let deferred0_0;
             let deferred0_1;
@@ -853,6 +944,10 @@ function __wbg_get_imports() {
         "./stm32_periph_wasm_bg.js": import0,
     };
 }
+
+const WasmCpuFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmcpu_free(ptr, 1));
 
 function addHeapObject(obj) {
     if (heap_next === heap.length) heap.push(heap.length + 1);

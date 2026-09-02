@@ -1,6 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const __wbg_wasmcpu_free: (a: number, b: number) => void;
 export const adc_clear_channel_value: (a: number, b: number, c: number) => void;
 export const adc_set_channel_value: (a: number, b: number, c: number, d: number) => void;
 export const add_i2c_eeprom: (a: number, b: number, c: number, d: number, e: number) => void;
@@ -67,6 +68,14 @@ export const tick: () => void;
 export const tick_n: (a: number) => void;
 export const tim_inject_capture: (a: number, b: number, c: number) => void;
 export const uart_rx_byte: (a: number, b: number) => number;
+export const wasmcpu_get_pc: (a: number) => number;
+export const wasmcpu_get_regs: (a: number, b: number) => void;
+export const wasmcpu_get_sp: (a: number) => number;
+export const wasmcpu_load_firmware: (a: number, b: number, c: number, d: number) => void;
+export const wasmcpu_new: (a: number, b: number, c: number, d: number) => number;
+export const wasmcpu_read32: (a: number, b: number) => number;
+export const wasmcpu_step: (a: number, b: number) => number;
+export const wasmcpu_write32: (a: number, b: number, c: number) => void;
 export const wwdg_reset_flag: () => number;
 export const __wbindgen_export: (a: number, b: number, c: number) => void;
 export const __wbindgen_export2: (a: number, b: number) => number;

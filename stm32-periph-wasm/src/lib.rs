@@ -4,6 +4,7 @@ use wasm_bindgen::prelude::*;
 mod system;
 pub mod peripherals;
 pub mod ext_devices;
+pub mod cpu;
 
 use system::WasmSystem;
 
@@ -29,7 +30,7 @@ use system::WasmSystem;
 // canaries for this code.
 static SYS: AtomicPtr<WasmSystem> = AtomicPtr::new(std::ptr::null_mut());
 
-fn sys() -> &'static WasmSystem {
+pub(crate) fn sys() -> &'static WasmSystem {
     let p = SYS.load(Ordering::Acquire);
     assert!(!p.is_null(), "WasmSystem not initialized");
     // SAFETY: p came from Box::into_raw in set_sys and is never freed.
@@ -610,4 +611,20 @@ pub fn dcmi_feed_frame(w: u32, h: u32, pixels: &[u8]) {
 #[wasm_bindgen]
 pub fn dcmi_clear() {
     system::dcmi_clear();
+}
+
+use cpu::{Cpu, mem::{FlatMemory, Memory}};
+#[wasm_bindgen]
+pub struct WasmCpu { cpu: Cpu, mem: FlatMemory }
+#[wasm_bindgen]
+impl WasmCpu {
+    #[wasm_bindgen(constructor)]
+    pub fn new(sp: u32, pc: u32, flash_size: u32, ram_size: u32) -> Self { Self { cpu: Cpu::new(sp, pc), mem: FlatMemory::new(flash_size as usize, ram_size as usize) } }
+    pub fn load_firmware(&mut self, data: &[u8], base: u32) { for (i,&b) in data.iter().enumerate(){ self.mem.write8(base.wrapping_add(i as u32), b); } }
+    pub fn read32(&self, addr: u32) -> u32 { self.mem.read32(addr) }
+    pub fn write32(&mut self, addr: u32, v: u32) { self.mem.write32(addr, v) }
+    pub fn get_pc(&self) -> u32 { self.cpu.regs.r[15] }
+    pub fn get_sp(&self) -> u32 { self.cpu.regs.r[13] }
+    pub fn get_regs(&self) -> Vec<u32> { self.cpu.regs.r.to_vec() }
+    pub fn step(&mut self, budget: u32) -> u32 { let (done,_)=self.cpu.run(sys(), &mut self.mem, budget); done }
 }
