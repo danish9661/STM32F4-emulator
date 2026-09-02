@@ -238,8 +238,13 @@ export async function createEmulator(opts) {
         uc.mem_write(BigInt(seg.addr), seg.data);
     }
 
+    // Was [0x40000000,0xB0000000] 1.75GB — keep hook but only mmap what is used.
+    // Split to avoid 1.75GB WASM heap after 4 boots (AGENTS §11), but keep
+    // 0x40000000-0x51000000 continuous to avoid gap faults (hal_test stray).
     const periphRanges = [
-        [0x40000000, 0xB0000000],
+        [0x40000000, 0x51000000],
+        [0x60000000, 0x62000000],
+        [0xA0000000, 0xA2000000],
         [0xE0000000, 0xE1000000],
     ];
     for (const [start, end] of periphRanges) {

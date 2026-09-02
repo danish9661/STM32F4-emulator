@@ -6,7 +6,7 @@
  * @param {number} channel
  */
 export function adc_clear_channel_value(peripheral, channel) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
     wasm.adc_clear_channel_value(ptr0, len0, channel);
 }
@@ -22,7 +22,7 @@ export function adc_clear_channel_value(peripheral, channel) {
  * @param {number} value
  */
 export function adc_set_channel_value(peripheral, channel, value) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
     wasm.adc_set_channel_value(ptr0, len0, channel, value);
 }
@@ -33,9 +33,9 @@ export function adc_set_channel_value(peripheral, channel, value) {
  * @param {Uint8Array} data
  */
 export function add_i2c_eeprom(peripheral, address, data) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const ptr1 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
     const len1 = WASM_VECTOR_LEN;
     wasm.add_i2c_eeprom(ptr0, len0, address, ptr1, len1);
 }
@@ -49,15 +49,15 @@ export function add_i2c_eeprom(peripheral, address, data) {
  * @param {string} mosi
  */
 export function add_software_spi(name, cs, clk, miso, mosi) {
-    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
-    var ptr1 = isLikeNone(cs) ? 0 : passStringToWasm0(cs, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    var ptr1 = isLikeNone(cs) ? 0 : passStringToWasm0(cs, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     var len1 = WASM_VECTOR_LEN;
-    const ptr2 = passStringToWasm0(clk, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr2 = passStringToWasm0(clk, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len2 = WASM_VECTOR_LEN;
-    const ptr3 = passStringToWasm0(miso, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr3 = passStringToWasm0(miso, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len3 = WASM_VECTOR_LEN;
-    const ptr4 = passStringToWasm0(mosi, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr4 = passStringToWasm0(mosi, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len4 = WASM_VECTOR_LEN;
     wasm.add_software_spi(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4);
 }
@@ -70,11 +70,11 @@ export function add_software_spi(name, cs, clk, miso, mosi) {
  * @param {string | null} [cs]
  */
 export function add_spi_flash(peripheral, jedec_id, data, cs) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const ptr1 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
     const len1 = WASM_VECTOR_LEN;
-    var ptr2 = isLikeNone(cs) ? 0 : passStringToWasm0(cs, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    var ptr2 = isLikeNone(cs) ? 0 : passStringToWasm0(cs, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     var len2 = WASM_VECTOR_LEN;
     wasm.add_spi_flash(ptr0, len0, jedec_id, ptr1, len1, ptr2, len2);
 }
@@ -92,11 +92,18 @@ export function audio_clear() {
  * @param {Uint8Array} bytes
  */
 export function audio_load_wav(bytes) {
-    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.audio_load_wav(ptr0, len0);
-    if (ret[1]) {
-        throw takeFromExternrefTable0(ret[0]);
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.audio_load_wav(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        if (r1) {
+            throw takeObject(r0);
+        }
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
     }
 }
 
@@ -114,10 +121,17 @@ export function audio_source_remaining() {
  * @returns {Uint16Array}
  */
 export function audio_take_capture() {
-    const ret = wasm.audio_take_capture();
-    var v1 = getArrayU16FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 2, 2);
-    return v1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.audio_take_capture(retptr);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU16FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 2, 2);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
 }
 
 /**
@@ -130,7 +144,7 @@ export function audio_take_capture() {
  * @param {Uint8Array} data
  */
 export function can_inject(id, dlc, data) {
-    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
     const len0 = WASM_VECTOR_LEN;
     wasm.can_inject(id, dlc, ptr0, len0);
 }
@@ -154,7 +168,7 @@ export function dcmi_clear() {
  * @param {Uint8Array} pixels
  */
 export function dcmi_feed_frame(w, h, pixels) {
-    const ptr0 = passArray8ToWasm0(pixels, wasm.__wbindgen_malloc);
+    const ptr0 = passArray8ToWasm0(pixels, wasm.__wbindgen_export2);
     const len0 = WASM_VECTOR_LEN;
     wasm.dcmi_feed_frame(w, h, ptr0, len0);
 }
@@ -164,10 +178,17 @@ export function dcmi_feed_frame(w, h, pixels) {
  * @returns {Uint32Array}
  */
 export function dma_get_pending(index) {
-    const ret = wasm.dma_get_pending(index);
-    var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-    return v1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.dma_get_pending(retptr, index);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU32FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 4, 4);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
 }
 
 /**
@@ -189,10 +210,17 @@ export function dma_get_pending_count() {
  * @returns {Uint8Array}
  */
 export function dma_periph_read(addr, size, pinc, psize) {
-    const ret = wasm.dma_periph_read(addr, size, pinc, psize);
-    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.dma_periph_read(retptr, addr, size, pinc, psize);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
 }
 
 /**
@@ -203,7 +231,7 @@ export function dma_periph_read(addr, size, pinc, psize) {
  * @param {Uint8Array} bytes
  */
 export function dma_periph_write(addr, bytes) {
-    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_export2);
     const len0 = WASM_VECTOR_LEN;
     wasm.dma_periph_write(addr, ptr0, len0);
 }
@@ -322,10 +350,17 @@ export function flash_is_programming() {
  * @returns {Uint32Array}
  */
 export function flash_take_erase() {
-    const ret = wasm.flash_take_erase();
-    var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-    return v1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.flash_take_erase(retptr);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU32FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 4, 4);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
 }
 
 /**
@@ -335,7 +370,7 @@ export function flash_take_erase() {
  * @param {Uint32Array} values
  */
 export function fsmc_push_data(bank, values) {
-    const ptr0 = passArray32ToWasm0(values, wasm.__wbindgen_malloc);
+    const ptr0 = passArray32ToWasm0(values, wasm.__wbindgen_export2);
     const len0 = WASM_VECTOR_LEN;
     wasm.fsmc_push_data(bank, ptr0, len0);
 }
@@ -347,10 +382,17 @@ export function fsmc_push_data(bank, values) {
  * @returns {Uint32Array}
  */
 export function fsmc_take_events(bank) {
-    const ret = wasm.fsmc_take_events(bank);
-    var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-    return v1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.fsmc_take_events(retptr, bank);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU32FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 4, 4);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
 }
 
 /**
@@ -385,12 +427,16 @@ export function get_uart_output() {
     let deferred1_0;
     let deferred1_1;
     try {
-        const ret = wasm.get_uart_output();
-        deferred1_0 = ret[0];
-        deferred1_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.get_uart_output(retptr);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred1_0 = r0;
+        deferred1_1 = r1;
+        return getStringFromWasm0(r0, r1);
     } finally {
-        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export(deferred1_0, deferred1_1, 1);
     }
 }
 
@@ -438,9 +484,9 @@ export function has_pending_interrupt() {
  * @param {Uint8Array} bytes
  */
 export function i2c_push_rx(peripheral, bytes) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const ptr1 = passArray8ToWasm0(bytes, wasm.__wbindgen_export2);
     const len1 = WASM_VECTOR_LEN;
     wasm.i2c_push_rx(ptr0, len0, ptr1, len1);
 }
@@ -452,7 +498,7 @@ export function i2c_push_rx(peripheral, bytes) {
  * @returns {number}
  */
 export function i2c_regfile_get(peripheral, offset) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.i2c_regfile_get(ptr0, len0, offset);
     return ret;
@@ -466,7 +512,7 @@ export function i2c_regfile_get(peripheral, offset) {
  * @param {number} value
  */
 export function i2c_regfile_set(peripheral, offset, value) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
     wasm.i2c_regfile_set(ptr0, len0, offset, value);
 }
@@ -482,9 +528,9 @@ export function i2c_regfile_set(peripheral, offset, value) {
  * @param {Uint8Array} init
  */
 export function i2c_register_regfile(peripheral, address, size, init) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(init, wasm.__wbindgen_malloc);
+    const ptr1 = passArray8ToWasm0(init, wasm.__wbindgen_export2);
     const len1 = WASM_VECTOR_LEN;
     wasm.i2c_register_regfile(ptr0, len0, address, size, ptr1, len1);
 }
@@ -498,7 +544,7 @@ export function i2c_register_regfile(peripheral, address, size, init) {
  * @param {number} address
  */
 export function i2c_register_slave(peripheral, address) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
     wasm.i2c_register_slave(ptr0, len0, address);
 }
@@ -511,12 +557,19 @@ export function i2c_register_slave(peripheral, address) {
  * @returns {Uint32Array}
  */
 export function i2c_take_events(peripheral) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.i2c_take_events(ptr0, len0);
-    var v2 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-    return v2;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.i2c_take_events(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU32FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 4, 4);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
 }
 
 /**
@@ -533,7 +586,7 @@ export function init() {
  * @param {string} svd_xml
  */
 export function init_svd(svd_xml) {
-    const ptr0 = passStringToWasm0(svd_xml, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(svd_xml, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
     wasm.init_svd(ptr0, len0);
 }
@@ -609,9 +662,9 @@ export function pwr_wakeup() {
  * @param {Uint8Array} data
  */
 export function qspi_register_flash(name, data) {
-    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const ptr1 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
     const len1 = WASM_VECTOR_LEN;
     wasm.qspi_register_flash(ptr0, len0, ptr1, len1);
 }
@@ -644,12 +697,19 @@ export function set_intr_pending(irq) {
  * @returns {Uint32Array}
  */
 export function spi_flash_debug(peripheral) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.spi_flash_debug(ptr0, len0);
-    var v2 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-    return v2;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.spi_flash_debug(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU32FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 4, 4);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
 }
 
 /**
@@ -658,9 +718,9 @@ export function spi_flash_debug(peripheral) {
  * @param {Uint8Array} bytes
  */
 export function spi_push_miso(peripheral, bytes) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const ptr1 = passArray8ToWasm0(bytes, wasm.__wbindgen_export2);
     const len1 = WASM_VECTOR_LEN;
     wasm.spi_push_miso(ptr0, len0, ptr1, len1);
 }
@@ -671,12 +731,19 @@ export function spi_push_miso(peripheral, bytes) {
  * @returns {Uint32Array}
  */
 export function spi_take_events(peripheral) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.spi_take_events(ptr0, len0);
-    var v2 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-    return v2;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.spi_take_events(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU32FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 4, 4);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
 }
 
 /**
@@ -690,11 +757,11 @@ export function spi_take_events(peripheral) {
  * @param {string | null} [dc]
  */
 export function spi_tap(peripheral, cs, dc) {
-    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
-    var ptr1 = isLikeNone(cs) ? 0 : passStringToWasm0(cs, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    var ptr1 = isLikeNone(cs) ? 0 : passStringToWasm0(cs, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     var len1 = WASM_VECTOR_LEN;
-    var ptr2 = isLikeNone(dc) ? 0 : passStringToWasm0(dc, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    var ptr2 = isLikeNone(dc) ? 0 : passStringToWasm0(dc, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     var len2 = WASM_VECTOR_LEN;
     wasm.spi_tap(ptr0, len0, ptr1, len1, ptr2, len2);
 }
@@ -723,7 +790,7 @@ export function tick_n(delta) {
  * @param {number} ch
  */
 export function tim_inject_capture(name, ch) {
-    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
     wasm.tim_inject_capture(ptr0, len0, ch);
 }
@@ -758,16 +825,16 @@ function __wbg_get_imports() {
                 deferred0_1 = arg1;
                 console.error(getStringFromWasm0(arg0, arg1));
             } finally {
-                wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
+                wasm.__wbindgen_export(deferred0_0, deferred0_1, 1);
             }
         },
         __wbg_new_227d7c05414eb861: function() {
             const ret = new Error();
-            return ret;
+            return addHeapObject(ret);
         },
         __wbg_stack_3b0d974bbf31e44f: function(arg0, arg1) {
-            const ret = arg1.stack;
-            const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ret = getObject(arg1).stack;
+            const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len1 = WASM_VECTOR_LEN;
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
@@ -775,22 +842,31 @@ function __wbg_get_imports() {
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
-            return ret;
+            return addHeapObject(ret);
         },
-        __wbindgen_init_externref_table: function() {
-            const table = wasm.__wbindgen_externrefs;
-            const offset = table.grow(4);
-            table.set(0, undefined);
-            table.set(offset + 0, undefined);
-            table.set(offset + 1, null);
-            table.set(offset + 2, true);
-            table.set(offset + 3, false);
+        __wbindgen_object_drop_ref: function(arg0) {
+            takeObject(arg0);
         },
     };
     return {
         __proto__: null,
         "./stm32_periph_wasm_bg.js": import0,
     };
+}
+
+function addHeapObject(obj) {
+    if (heap_next === heap.length) heap.push(heap.length + 1);
+    const idx = heap_next;
+    heap_next = heap[idx];
+
+    heap[idx] = obj;
+    return idx;
+}
+
+function dropObject(idx) {
+    if (idx < 1028) return;
+    heap[idx] = heap_next;
+    heap_next = idx;
 }
 
 function getArrayU16FromWasm0(ptr, len) {
@@ -843,6 +919,13 @@ function getUint8ArrayMemory0() {
     }
     return cachedUint8ArrayMemory0;
 }
+
+function getObject(idx) { return heap[idx]; }
+
+let heap = new Array(1024).fill(undefined);
+heap.push(undefined, null, true, false);
+
+let heap_next = heap.length;
 
 function isLikeNone(x) {
     return x === undefined || x === null;
@@ -899,10 +982,10 @@ function passStringToWasm0(arg, malloc, realloc) {
     return ptr;
 }
 
-function takeFromExternrefTable0(idx) {
-    const value = wasm.__wbindgen_externrefs.get(idx);
-    wasm.__externref_table_dealloc(idx);
-    return value;
+function takeObject(idx) {
+    const ret = getObject(idx);
+    dropObject(idx);
+    return ret;
 }
 
 let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
@@ -943,7 +1026,6 @@ function __wbg_finalize_init(instance, module) {
     cachedUint16ArrayMemory0 = null;
     cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
-    wasm.__wbindgen_start();
     return wasm;
 }
 

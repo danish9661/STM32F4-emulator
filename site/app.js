@@ -14,9 +14,11 @@ const uartEl = $('uart'), statusEl = $('statusText'), dotEl = $('dot');
 const framesEl = $('frames');
 
 const decodeB64 = (b64) => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+const HEX_TABLE = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
 const hex = (arr, n = 32) => {
     let s = '';
-    for (let i = 0; i < Math.min(arr.length, n); i++) s += arr[i].toString(16).padStart(2, '0') + ' ';
+    const len = Math.min(arr.length, n);
+    for (let i = 0; i < len; i++) s += HEX_TABLE[arr[i]] + ' ';
     if (arr.length > n) s += '…';
     return s.trim();
 };
@@ -90,10 +92,25 @@ const setStatus = (text, cls) => {
     dotEl.className = 'dot ' + cls;
 };
 
+let uartChunks = [], uartLen = 0;
 const appendUart = (chunk) => {
     if (!chunk) return;
-    uartBuf += chunk;
-    if (uartBuf.length > 200000) uartBuf = uartBuf.slice(-200000);
+    uartChunks.push(chunk);
+    uartLen += chunk.length;
+    // Keep last 200k chars without repeatedly copying 200k string (old: uartBuf+=chunk; slice)
+    while (uartLen > 200000) {
+        const first = uartChunks[0];
+        const excess = uartLen - 200000;
+        if (first.length <= excess) {
+            uartLen -= first.length;
+            uartChunks.shift();
+        } else {
+            uartChunks[0] = first.slice(excess);
+            uartLen = 200000;
+            break;
+        }
+    }
+    uartBuf = uartChunks.join('');
     const wasAtBottom = uartEl.scrollTop + uartEl.clientHeight >= uartEl.scrollHeight - 8;
     uartEl.textContent = uartBuf;
     if (wasAtBottom && $('chkAuto').checked) uartEl.scrollTop = uartEl.scrollHeight;
@@ -209,7 +226,7 @@ $('btnBoot').addEventListener('click', async () => {
         setBusy(false);
         $('btnRun').textContent = 'Run';
         setStatus('loading firmware…', 'stop');
-        uartEl.textContent = uartBuf = '';
+        uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0;
         framesEl.textContent = '';
         totalInst = 0; stepsDone = 0;
         t0 = lastT = performance.now(); lastInst = 0;
@@ -280,7 +297,7 @@ const boot = async () => {
     if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; audioQueued = 0; }
 
     const fw = image.flash;
-    uartEl.textContent = uartBuf = '';
+    uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0;
     framesEl.textContent = '';
     totalInst = 0; stepsDone = 0;
     t0 = lastT = performance.now(); lastInst = 0;
@@ -424,7 +441,7 @@ $('btnReset').addEventListener('click', () => {
     }
     if (image) boot();
 });
-$('btnClear').addEventListener('click', () => { uartEl.textContent = uartBuf = ''; });
+$('btnClear').addEventListener('click', () => { uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0; });
 $('btnGw').addEventListener('click', connectGateway);
 
 const sendRx = (term) => {
