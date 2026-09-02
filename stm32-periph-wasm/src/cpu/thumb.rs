@@ -38,6 +38,18 @@ pub fn exec32(cpu:&mut Cpu,_sys:&WasmSystem,mem:&mut dyn Memory,op1:u16,op2:u16,
         let off=(s<<24)|(i1<<23)|(i2<<22)|(imm10<<12)|(imm11<<1); let off=sx(off,25);
         cpu.regs.r[14]=(pc+4)|1; cpu.regs.r[15]=pc.wrapping_add(4).wrapping_add(off)|1; return true;
     }
+    if (op1&0xF800)==0xF000 && (op2&0xD000)==0x8000{
+        let s=((op1>>10)&1)as u32; let imm10=(op1&0x3FF)as u32; let imm11=(op2&0x7FF)as u32; let j1=(op2>>13)&1; let j2=(op2>>11)&1;
+        let i1=(j1 as u32 ^ s ^1); let i2=(j2 as u32 ^ s ^1);
+        let off=(s<<24)|(i1<<23)|(i2<<22)|(imm10<<12)|(imm11<<1); let off=sx(off,25);
+        cpu.regs.r[15]=pc.wrapping_add(4).wrapping_add(off)|1; return true;
+    }
+    if (op1&0xFFF0)==0xFBB0 && (op2&0xF0F0)==0xF3F0{
+        let rn=(op1&0xF)as usize; let rd=((op2>>8)&0xF)as usize; let rm=(op2&0xF)as usize;
+        let a=cpu.regs.r[rn]; let b=cpu.regs.r[rm];
+        cpu.regs.r[rd]= if b==0 {0} else {a/b};
+        cpu.regs.r[15]=pc.wrapping_add(4)|1; return true;
+    }
     // MOVW 0xF240 — movw rd, #imm16
     if (op1&0xFBF0)==0xF240 {
         let rd=((op2>>8)&0xF)as usize;
@@ -60,13 +72,15 @@ pub fn exec32(cpu:&mut Cpu,_sys:&WasmSystem,mem:&mut dyn Memory,op1:u16,op2:u16,
         cpu.regs.r[rd]= (cpu.regs.r[rd] & 0x0000FFFF) | (imm16<<16);
         cpu.regs.r[15]=pc.wrapping_add(4)|1; return true;
     }
-    // LDR.W / STR.W 0xF8xx
-    if (op1&0xFF70)==0xF8D0 || (op1&0xFF70)==0xF850 {
-        let rt=((op2>>8)&0xF)as usize; let rn=((op1>>0)&0xF)as usize;
-        let imm12=op2&0xFFF;
-        let addr=cpu.regs.r[rn].wrapping_add(imm12 as u32);
-        if (op1&0x0010)!=0 { cpu.regs.r[rt]=mem.read32(addr); } else { mem.write32(addr,cpu.regs.r[rt]); }
-        // Handle writeback if needed (not for now, just advance)
+    // LDR.W / STR.W 0xF8xx — handles f8df d008 (ldr.w sp, [pc, #8]) etc.
+    if (op1 & 0xFE00) == 0xF800 {
+        let rt=((op2>>8)&0xF)as usize; let rn=(op1 & 0xF)as usize;
+        let imm12 = op2 & 0x0FFF;
+        let is_load = (op1 & 0x0010) != 0;
+        // PC-relative has special base (pc+4 &~3)
+        let base = if rn == 15 { (pc + 4) & !3 } else { cpu.regs.r[rn] };
+        let addr = if (op1 & 0x0200) != 0 { base.wrapping_add(imm12 as u32) } else { base.wrapping_sub(imm12 as u32) };
+        if is_load { cpu.regs.r[rt]=mem.read32(addr); } else { mem.write32(addr,cpu.regs.r[rt]); }
         cpu.regs.r[15]=pc.wrapping_add(4)|1; return true;
     }
     // Fallback: advance
