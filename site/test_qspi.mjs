@@ -5,18 +5,14 @@
 // Usage: node site/test_qspi.mjs  (exit 0 = PASS)
 import { readFileSync } from 'fs';
 import { createRequire } from 'module';
-import * as bindings from '../stm32-periph-wasm/pkg/stm32_periph_wasm.js';
+import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 
 const require = createRequire(import.meta.url);
-const unicornFactory = require('../stm32-periph-wasm/pkg/unicorn_arm.cjs');
+const unicornFactory = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('../monox/stm32f407.svd', import.meta.url), 'utf8');
-const wasmBytes = new Uint8Array(readFileSync(new URL('../stm32-periph-wasm/pkg/stm32_periph_wasm_bg.wasm', import.meta.url)));
+const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../qspi_test/qspi_test.bin', import.meta.url)));
-
-// Register a 256-byte flash backend BEFORE the model constructs its QSPI
-// peripheral (it binds the flash at init time).
-bindings.qspi_register_flash('QUADSPI', new Uint8Array(256));
 
 const emu = await createEmulator({
     firmware,
@@ -24,6 +20,7 @@ const emu = await createEmulator({
     unicorn: unicornFactory,
     svdXml,
     wasmInit: wasmBytes,
+    ext_devices: { qspi: [{ peripheral: 'QUADSPI', size: 256 }] },
 });
 
 const uart = [];
