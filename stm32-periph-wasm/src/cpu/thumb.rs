@@ -31,12 +31,44 @@ pub fn exec16(cpu:&mut Cpu,_sys:&WasmSystem,mem:&mut dyn Memory,op:u16,pc:u32)->
     if (op&0xF500)==0xB100{ let imm=(((op>>3)&0x1F)as u32*2)|(((op>>2)&1)as u32*64); let rn=(op&7)as usize; let taken=if (op&0x800)==0{cpu.regs.r[rn]==0}else{cpu.regs.r[rn]!=0}; if taken{cpu.regs.r[15]=pc.wrapping_add(2).wrapping_add(imm)|1;}else{cpu.regs.r[15]=pc.wrapping_add(2)|1;} return true; }
     false
 }
-pub fn exec32(cpu:&mut Cpu,_sys:&WasmSystem,_mem:&mut dyn Memory,op1:u16,op2:u16,pc:u32)->bool{
+pub fn exec32(cpu:&mut Cpu,_sys:&WasmSystem,mem:&mut dyn Memory,op1:u16,op2:u16,pc:u32)->bool{
     if (op1&0xF800)==0xF000 && (op2&0xD000)==0xD000{
         let s=((op1>>10)&1)as u32; let imm10=(op1&0x3FF)as u32; let imm11=(op2&0x7FF)as u32; let j1=(op2>>13)&1; let j2=(op2>>11)&1;
         let i1=(j1 as u32 ^ s ^1); let i2=(j2 as u32 ^ s ^1);
         let off=(s<<24)|(i1<<23)|(i2<<22)|(imm10<<12)|(imm11<<1); let off=sx(off,25);
         cpu.regs.r[14]=(pc+4)|1; cpu.regs.r[15]=pc.wrapping_add(4).wrapping_add(off)|1; return true;
     }
+    // MOVW 0xF240 — movw rd, #imm16
+    if (op1&0xFBF0)==0xF240 {
+        let rd=((op2>>8)&0xF)as usize;
+        let i = ((op1>>10)&1) as u32;
+        let imm4 = (op1 & 0x000F) as u32;
+        let imm3 = ((op2>>12)&0x7) as u32;
+        let imm8 = (op2 & 0x00FF) as u32;
+        let imm16 = (i<<11) | (imm4<<12) | (imm3<<8) | imm8;
+        cpu.regs.r[rd]= imm16;
+        cpu.regs.r[15]=pc.wrapping_add(4)|1; return true;
+    }
+    // MOVT 0xF2C0 — movt rd, #imm16
+    if (op1&0xFBF0)==0xF2C0 {
+        let rd=((op2>>8)&0xF)as usize;
+        let i = ((op1>>10)&1) as u32;
+        let imm4 = (op1 & 0x000F) as u32;
+        let imm3 = ((op2>>12)&0x7) as u32;
+        let imm8 = (op2 & 0x00FF) as u32;
+        let imm16 = (i<<11) | (imm4<<12) | (imm3<<8) | imm8;
+        cpu.regs.r[rd]= (cpu.regs.r[rd] & 0x0000FFFF) | (imm16<<16);
+        cpu.regs.r[15]=pc.wrapping_add(4)|1; return true;
+    }
+    // LDR.W / STR.W 0xF8xx
+    if (op1&0xFF70)==0xF8D0 || (op1&0xFF70)==0xF850 {
+        let rt=((op2>>8)&0xF)as usize; let rn=((op1>>0)&0xF)as usize;
+        let imm12=op2&0xFFF;
+        let addr=cpu.regs.r[rn].wrapping_add(imm12 as u32);
+        if (op1&0x0010)!=0 { cpu.regs.r[rt]=mem.read32(addr); } else { mem.write32(addr,cpu.regs.r[rt]); }
+        // Handle writeback if needed (not for now, just advance)
+        cpu.regs.r[15]=pc.wrapping_add(4)|1; return true;
+    }
+    // Fallback: advance
     cpu.regs.r[15]=pc.wrapping_add(4)|1; true
 }
