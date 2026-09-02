@@ -4,9 +4,26 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to release from'
+        required: true
+        default: 'master'
+        type: choice
+        options:
+          - master
+      version:
+        description: 'Version (x.y.z, e.g. 1.2.0)'
+        required: true
+        type: string
+      description:
+        description: 'Release notes'
+        required: false
+        default: ''
+        type: string
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -15,6 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -23,7 +42,7 @@ jobs:
       - name: Probe firmwares
         run: node site/probe_firmwares.mjs
       - name: Run test suite
-        run: npm test
+        run: npm run test:unit
       - name: Test MCP server
         run: npm run test:mcp
 
@@ -33,12 +52,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
       - name: Install dependencies
         run: npm ci
+      - name: Validate version
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if ! [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must match x.y.z (e.g. 1.2.0), got '${{ inputs.version }}'"
+            exit 1
+          fi
+      - name: Set version
+        if: github.event_name == 'workflow_dispatch'
+        run: npm version ${{ inputs.version }} --no-git-tag-version
       - name: Publish to npmjs.com
         run: npm publish --access public
         env:
@@ -50,6 +81,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -57,6 +90,16 @@ jobs:
           scope: '@${{ github.repository_owner }}'
       - name: Install dependencies
         run: npm ci
+      - name: Validate version
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if ! [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must match x.y.z (e.g. 1.2.0), got '${{ inputs.version }}'"
+            exit 1
+          fi
+      - name: Set version
+        if: github.event_name == 'workflow_dispatch'
+        run: npm version ${{ inputs.version }} --no-git-tag-version
       - name: Scope package name for GitHub Packages
         run: |
           node -e "
@@ -71,3 +114,41 @@ jobs:
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  create-release:
+    name: Create Git Tag & GitHub Release
+    if: github.event_name == 'workflow_dispatch'
+    needs: [publish-npm, publish-gpr]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+      - name: Validate version
+        run: |
+          if ! [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must match x.y.z (e.g. 1.2.0), got '${{ inputs.version }}'"
+            exit 1
+          fi
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="v${{ inputs.version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists locally"
+          else
+            git tag "$TAG"
+            echo "Created tag $TAG"
+          fi
+          git push origin "$TAG"
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: v${{ inputs.version }}
+          body: ${{ inputs.description }}
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
