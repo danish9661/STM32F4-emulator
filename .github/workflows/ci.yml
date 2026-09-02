@@ -24,38 +24,48 @@ jobs:
       - name: Run the test suite
         run: |
           set +e
-          node site/test_stm32f4_api.mjs 2>&1; echo "test_stm32f4_api.mjs: $?" > /tmp/results.txt
-          node site/test_stm32f4_periph.mjs 2>&1; echo "test_stm32f4_periph.mjs: $?" >> /tmp/results.txt
-          node site/test_ws_bridge.mjs 2>&1; echo "test_ws_bridge.mjs: $?" >> /tmp/results.txt
-          node site/test_flow.mjs 2>&1; echo "test_flow.mjs: $?" >> /tmp/results.txt
-          node site/test_blinky.mjs 2>&1; echo "test_blinky.mjs: $?" >> /tmp/results.txt
-          node site/test_can.mjs 2>&1; echo "test_can.mjs: $?" >> /tmp/results.txt
-          node site/test_audio.mjs 2>&1; echo "test_audio.mjs: $?" >> /tmp/results.txt
-          node site/test_ltdc.mjs 2>&1; echo "test_ltdc.mjs: $?" >> /tmp/results.txt
-          node site/test_dma.mjs 2>&1; echo "test_dma.mjs: $?" >> /tmp/results.txt
-          node site/test_exti.mjs 2>&1; echo "test_exti.mjs: $?" >> /tmp/results.txt
-          node site/test_flash.mjs 2>&1; echo "test_flash.mjs: $?" >> /tmp/results.txt
-          node site/test_eth_irq.mjs 2>&1; echo "test_eth_irq.mjs: $?" >> /tmp/results.txt
-          node site/test_rx_interrupt.mjs 2>&1; echo "test_rx_interrupt.mjs: $?" >> /tmp/results.txt
-          node site/test_spi_flash.mjs 2>&1; echo "test_spi_flash.mjs: $?" >> /tmp/results.txt
-          node site/test_oled.mjs 2>&1; echo "test_oled.mjs: $?" >> /tmp/results.txt
-          node site/test_tft.mjs 2>&1; echo "test_tft.mjs: $?" >> /tmp/results.txt
-          node site/test_buzzer.mjs 2>&1; echo "test_buzzer.mjs: $?" >> /tmp/results.txt
-          node site/test_audio_play.mjs 2>&1; echo "test_audio_play.mjs: $?" >> /tmp/results.txt
-          node site/test_rtc.mjs 2>&1; echo "test_rtc.mjs: $?" >> /tmp/results.txt
-          node site/test_lowpower.mjs 2>&1; echo "test_lowpower.mjs: $?" >> /tmp/results.txt
-          node site/test_candemo.mjs 2>&1; echo "test_candemo.mjs: $?" >> /tmp/results.txt
-          node site/test_can_inject.mjs 2>&1; echo "test_can_inject.mjs: $?" >> /tmp/results.txt
-          node site/test_tim_capture.mjs 2>&1; echo "test_tim_capture.mjs: $?" >> /tmp/results.txt
-          node site/test_qspi.mjs 2>&1; echo "test_qspi.mjs: $?" >> /tmp/results.txt
-          node site/test_edge_cases.mjs 2>&1; echo "test_edge_cases.mjs: $?" >> /tmp/results.txt
+          mkdir -p /tmp/ci-logs
+          run_one() { echo "=== $1 ==="; node "site/$1" 2>&1 | tee "/tmp/ci-logs/$1.log"; echo "$1: ${PIPESTATUS[0]}" >> /tmp/results.txt; echo "--- exit ${PIPESTATUS[0]} for $1 ---"; }
+          : > /tmp/results.txt
+          for t in test_stm32f4_api.mjs test_stm32f4_periph.mjs test_ws_bridge.mjs test_flow.mjs test_blinky.mjs test_can.mjs test_audio.mjs test_ltdc.mjs test_dma.mjs test_exti.mjs test_flash.mjs test_eth_irq.mjs test_rx_interrupt.mjs test_spi_flash.mjs test_oled.mjs test_tft.mjs test_buzzer.mjs test_audio_play.mjs test_rtc.mjs test_lowpower.mjs test_candemo.mjs test_can_inject.mjs test_tim_capture.mjs test_qspi.mjs test_edge_cases.mjs; do run_one "$t"; done
           cat /tmp/results.txt
+          mkdir -p /tmp/ci-debug
+          cp /tmp/results.txt /tmp/ci-debug/results-${{ matrix.os }}.txt
+          # also save full per-test logs
+          echo "=== results ===" > /tmp/ci-debug/full-${{ matrix.os }}.txt
+          cat /tmp/results.txt >> /tmp/ci-debug/full-${{ matrix.os }}.txt
           if grep -v ': 0$' /tmp/results.txt | grep -q ':'; then
-            echo "FAILURES DETECTED:"
-            grep -v ': 0$' /tmp/results.txt
-            exit 1
+            echo "FAILURES DETECTED:"; grep -v ': 0$' /tmp/results.txt
+            echo "FAIL" > /tmp/ci-debug/status-${{ matrix.os }}.txt
+          else
+            echo "ALL TESTS PASSED"
+            echo "PASS" > /tmp/ci-debug/status-${{ matrix.os }}.txt
+            exit 0
           fi
-          echo "ALL TESTS PASSED"
+          exit 1
+      - name: Publish CI debug (always)
+        if: always()
+        run: |
+          echo "===== results ====="
+          cat /tmp/results.txt 2>&1 || true
+          echo "===== per-test logs (tail 80 each) ====="
+          for f in /tmp/ci-logs/*.log; do echo "--- $f ---"; tail -n 80 "$f" 2>&1 || true; echo; done
+          echo "===== node info ====="
+          node --version; npm --version; ls site/vendor/*.wasm 2>&1 | head
+          # also feed summary so it shows in GitHub UI
+          {
+            echo "### Test results (${{ matrix.os }})"
+            echo '```'
+            cat /tmp/results.txt 2>&1 || true
+            echo '```'
+            echo "#### Failing logs (tail)"
+            for f in /tmp/ci-logs/*.log; do
+              if grep -q "FAIL\|Error\|fail" "$f" 2>/dev/null; then
+                echo "**$f**"
+                echo '```'; tail -n 60 "$f"; echo '```'
+              fi
+            done
+          } >> $GITHUB_STEP_SUMMARY 2>&1 || true
       - name: MCP server protocol round-trip
         if: matrix.os == 'ubuntu-latest'
         run: npm ci && npm run test:mcp
