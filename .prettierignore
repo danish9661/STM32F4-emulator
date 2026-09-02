@@ -1,0 +1,6 @@
+site/vendor/
+stm32-periph-wasm/pkg/
+stm32-periph-wasm/target/
+node_modules/
+website/build/
+website/.docusaurus/

@@ -1,6 +1,6 @@
 {
   "name": "stm32f4-emu",
-  "version": "0.1.0",
+  "version": "1.0.1",
   "description": "STM32F407 emulator: Unicorn (WASM) CPU + Rust peripheral model. Runs real Cortex-M4 firmware in Node or the browser.",
   "type": "module",
   "main": "index.mjs",
@@ -9,6 +9,7 @@
     "stm32f4-mcp": "./mcp/server.mjs",
     "stm32f4-bridge": "./site/ws-bridge.mjs"
   },
+  "types": "index.d.ts",
   "exports": {
     ".": "./index.mjs",
     "./components": "./site/components.js",
@@ -20,24 +21,28 @@
     "./vendor": "./site/vendor/stm32_periph_wasm.js",
     "./vendor/unicorn": "./site/vendor/unicorn_arm.cjs",
     "./remote": "./site/remote-emu.js",
-    "./ws-bridge": "./site/ws-bridge.mjs",
-    "./site": "./site/index.html"
+    "./ws-bridge": "./site/ws-bridge.mjs"
   },
   "files": [
     "index.mjs",
+    "index.d.ts",
     "cli.mjs",
     "README.md",
+    "LICENSE",
     "site/emulator.js",
+    "site/emulator.d.ts",
+    "site/stm32f4.js",
     "site/components.js",
-    "mcp/server.mjs",
     "site/netsim.js",
     "site/firmware.js",
     "site/loaders.js",
-    "site/index.html",
-    "site/app.js",
     "site/remote-emu.js",
     "site/ws-bridge.mjs",
-    "site/vendor/"
+    "site/app.js",
+    "site/index.html",
+    "site/vendor/",
+    "mcp/server.mjs",
+    "tools/make_firmware.mjs"
   ],
   "keywords": [
     "stm32",
@@ -89,7 +94,13 @@
     "bridge": "node site/ws-bridge.mjs",
     "firmwares": "node tools/make_firmware.mjs",
     "serve": "python3 -m http.server 8123 --directory site",
-    "prepack": "node tools/make_firmware.mjs"
+    "prepack": "node tools/make_firmware.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint site mcp tools index.mjs cli.mjs",
+    "format": "prettier --check .",
+    "format:write": "prettier --write .",
+    "build:wasm": "wasm-pack build stm32-periph-wasm --target web --out-dir ../site/vendor && rm -f site/vendor/.gitignore && cp stm32-periph-wasm/pkg/unicorn_arm.cjs site/vendor/ 2>/dev/null || true; cp stm32-periph-wasm/pkg/unicorn_arm.js site/vendor/ 2>/dev/null || true; cp monox/stm32f407.svd site/vendor/ 2>/dev/null || true",
+    "build:wasm:node": "wasm-pack build stm32-periph-wasm --target nodejs --out-dir pkg"
   },
   "dependencies": {
     "ws": "^8.21.3"
@@ -109,6 +120,9 @@
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "playwright": "^1.62.1",
-    "zod": "^3.25 || ^4.0"
+    "zod": "^3.25 || ^4.0",
+    "typescript": "^5.6.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.0.0"
   }
 }

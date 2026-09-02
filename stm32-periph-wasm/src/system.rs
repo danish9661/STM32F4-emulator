@@ -558,7 +558,20 @@ impl WasmSystem {
 
 pub type System = WasmSystem;
 
+// SAFETY: WasmSystem contains Rc<RefCell> peripherals and is single-system
+// (SYS AtomicPtr). On wasm32-unknown-unknown the module is single-threaded
+// — Send/Sync are never exercised. wasm-bindgen requires them for exported
+// types, so we assert unsafely. Native `cargo test` (multi-threaded) is
+// guarded by per-suite Mutex locks (CAN_TEST_LOCK, AUDIO_TEST_LOCK, etc.)
+// to avoid `already borrowed` panics. Do not share WasmSystem across OS
+// threads in a native build; use the WASM artifact for multi-instance.
+#[cfg(target_arch = "wasm32")]
 unsafe impl Sync for WasmSystem {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for WasmSystem {}
+#[cfg(not(target_arch = "wasm32"))]
+unsafe impl Sync for WasmSystem {}
+#[cfg(not(target_arch = "wasm32"))]
 unsafe impl Send for WasmSystem {}
 
 #[cfg(test)]

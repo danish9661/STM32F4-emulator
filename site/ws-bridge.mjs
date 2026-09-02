@@ -135,6 +135,21 @@ function encodeError(id, msg) {
     return encodeResp(MSG.ERROR, id, new Uint8Array([enc.length & 0xFF, (enc.length >> 8) & 0xFF]), enc);
 }
 
+// ── Security helpers ────────────────────────────────────────────────────
+const MAX_FLASH_LEN = 1 << 20; // 1 MB
+const MAX_ETH_LEN = 2048;
+const MAX_UART_LEN = 4096;
+const MAX_SPI_LEN = 4096;
+const MAX_I2C_LEN = 4096;
+function isAllowedAddr(addr) {
+    if (addr >= 0x08000000 && addr < 0x08100000) return true;
+    if (addr >= 0x20000000 && addr < 0x20040000) return true;
+    if (addr >= 0x40000000 && addr < 0xB0000000) return true;
+    if (addr >= 0xE0000000 && addr < 0xE1000000) return true;
+    if (addr >= 0xB8000000 && addr < 0xC8000000) return true; // WAD / EXTRAM (doom)
+    return false;
+}
+
 // ── UART drain → push to browser ───────────────────────────────────────────
 let uartDrainTimer = null;
 function scheduleUartDrain(ws, emu) {
@@ -278,6 +293,10 @@ async function handleConnection(ws) {
                 case MSG.LOAD_IMAGE: {
                     const id = u32LE(buf, 1);
                     const flashLen = u32LE(buf, 5);
+                    if (flashLen > MAX_FLASH_LEN || 9 + flashLen > buf.length) {
+                        try { ws.send(encodeError(id, `flashLen ${flashLen} exceeds limit or buffer`)); } catch {}
+                        break;
+                    }
                     const flash = new Uint8Array(buf.buffer, buf.byteOffset + 9, flashLen);
                     // Close old emulator
                     if (emu) { try { emu.close(); } catch {} emu = null; }
@@ -308,6 +327,10 @@ async function handleConnection(ws) {
                     if (!emu) { ws.send(encodeError(u32LE(buf, 1), 'no firmware loaded')); break; }
                     const id = u32LE(buf, 1);
                     const addr = u32LE(buf, 5);
+                    if (!isAllowedAddr(addr)) {
+                        try { ws.send(encodeError(id, `address 0x${addr.toString(16)} not allowed`)); } catch {}
+                        break;
+                    }
                     try {
                         const v = emu.read32(addr);
                         try { ws.send(encodeResp(MSG.READ32_RESP, id, packU32LE(v))); } catch {}
@@ -321,6 +344,10 @@ async function handleConnection(ws) {
                     const id = u32LE(buf, 1);
                     const addr = u32LE(buf, 5);
                     const value = u32LE(buf, 9);
+                    if (!isAllowedAddr(addr)) {
+                        try { ws.send(encodeError(id, `address 0x${addr.toString(16)} not allowed`)); } catch {}
+                        break;
+                    }
                     try {
                         emu.write32(addr, value);
                         try { ws.send(encodeResp(MSG.WRITE32_OK, id, new Uint8Array(4))); } catch {}
@@ -350,6 +377,7 @@ async function handleConnection(ws) {
                 case MSG.ETH_RX: {
                     if (!emu) break;
                     const len = u32LE(buf, 1);
+                    if (len > MAX_ETH_LEN || 5 + len > buf.length) break;
                     const frame = new Uint8Array(buf.buffer, buf.byteOffset + 5, len);
                     emu.injectFrame(frame);
                     break;
@@ -365,6 +393,7 @@ async function handleConnection(ws) {
                 case MSG.UART_TX: {
                     if (!emu) break;
                     const len = u16LE(buf, 1);
+                    if (len > MAX_UART_LEN || 3 + len > buf.length) break;
                     const bytes = buf.slice(3, 3 + len);
                     emu.sendUart(bytes);
                     break;
@@ -372,10 +401,33 @@ async function handleConnection(ws) {
                 case MSG.SET_INPUT: {
                     if (!emu) break;
                     const pinLen = buf[1];
+                    if (pinLen > 8 || 2 + pinLen >= buf.length) break;
                     const pinName = buf.slice(2, 2 + pinLen).toString('ascii');
                     const level = buf[2 + pinLen] ? 1 : 0;
                     const pin = emu.pin(pinName);
                     if (pin) pin.setInputValue(level);
+                    break;
+                }
+                case MSG.SPI_MISO: {
+                    if (!emu) break;
+                    const periphLen = buf[1];
+                    if (periphLen > 16 || 2 + periphLen + 2 > buf.length) break;
+                    const periph = buf.slice(2, 2 + periphLen).toString('ascii');
+                    const len = u16LE(buf, 2 + periphLen);
+                    if (len > MAX_SPI_LEN || 4 + periphLen + len > buf.length) break;
+                    const bytes = buf.slice(4 + periphLen, 4 + periphLen + len);
+                    emu.spiPushMiso?.(periph, bytes);
+                    break;
+                }
+                case MSG.I2C_RX: {
+                    if (!emu) break;
+                    const periphLen = buf[1];
+                    if (periphLen > 16 || 2 + periphLen + 2 > buf.length) break;
+                    const periph = buf.slice(2, 2 + periphLen).toString('ascii');
+                    const len = u16LE(buf, 2 + periphLen);
+                    if (len > MAX_I2C_LEN || 4 + periphLen + len > buf.length) break;
+                    const bytes = buf.slice(4 + periphLen, 4 + periphLen + len);
+                    emu.i2cPushRx?.(periph, bytes);
                     break;
                 }
                 case MSG.PING: {
@@ -392,14 +444,41 @@ async function handleConnection(ws) {
 }
 
 // ── WebSocket server ────────────────────────────────────────────────────────
-const wss = new WebSocketServer({ port });
+const wss = new WebSocketServer({
+    port,
+    // Basic origin check — bridge is local-only. Allow localhost/127.0.0.1/file://
+    // and non-browser clients (no Origin header). Reject other origins.
+    verifyClient: (info, cb) => {
+        const origin = info.origin || info.req.headers.origin || '';
+        if (!origin || origin === 'null') return cb(true);
+        try {
+            const u = new URL(origin);
+            if (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1') return cb(true);
+            // Allow GitHub Pages https origin for the hosted console when user explicitly connects
+            if (u.hostname.endsWith('github.io')) return cb(true);
+        } catch {}
+        console.warn(`ws-bridge: rejecting origin ${origin}`);
+        cb(false, 403, 'Origin not allowed');
+    },
+});
 console.log(`ws-bridge listening on ws://127.0.0.1:${port}`);
 if (firmwarePath) console.log(`  firmware: ${firmwarePath}`);
 console.log('  waiting for browser connections…');
 
 wss.on('connection', (ws, req) => {
     const ip = req.socket.remoteAddress;
-    console.log(`ws-bridge: client connected from ${ip}`);
+    console.log(`ws-bridge: client connected from ${ip} origin=${req.headers.origin||'none'}`);
+    // Simple per-IP rate limit: 100 msgs/sec
+    let msgCount = 0, windowStart = Date.now();
+    const origEmit = ws.emit.bind(ws);
+    ws.on('message', () => {
+        const now = Date.now();
+        if (now - windowStart > 1000) { windowStart = now; msgCount = 0; }
+        if (++msgCount > 200) {
+            console.warn(`ws-bridge: rate limit exceeded for ${ip}, closing`);
+            try { ws.close(1008, 'rate limit'); } catch {}
+        }
+    });
     handleConnection(ws);
     ws.on('close', () => console.log(`ws-bridge: client disconnected`));
 });

@@ -24,13 +24,12 @@ const svdXml = readFileSync(new URL('./site/vendor/stm32f407.svd', import.meta.u
 const wasmBytes = new Uint8Array(readFileSync(new URL('./site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 
 // Decode a base64-encoded firmware from FIRMWARES.
+// Uses single-pass Uint8Array.from for fewer allocations than manual loop.
 export function decodeFirmware(key) {
     const fw = FIRMWARES[key];
     if (!fw) throw new Error(`unknown firmware '${key}' (have: ${Object.keys(FIRMWARES).join(', ')})`);
     const bin = atob(fw.bytes);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
+    return Uint8Array.from(bin, c => c.charCodeAt(0));
 }
 
 // Convenience: create an emulator with the bundled STM32F407 assets.

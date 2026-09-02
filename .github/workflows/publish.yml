@@ -25,6 +25,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write # for npm provenance
 
 jobs:
   test:
@@ -71,7 +72,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: npm version ${{ inputs.version }} --no-git-tag-version
       - name: Publish to npmjs.com
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -144,7 +145,7 @@ jobs:
           fi
           git push origin "$TAG"
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.2.1 # pin: 4637b1d21c1fd4dd6a676367595afa3c2a0002a4
         with:
           tag_name: v${{ inputs.version }}
           name: v${{ inputs.version }}

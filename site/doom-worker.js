@@ -121,6 +121,10 @@ const status = (text, cls) => post({ t: 'status', text, cls });
 // locateFile: emscripten derives the .wasm path from document.currentScript,
 // which does not exist here, and would otherwise look for the wasm next to
 // this worker instead of in vendor/.
+// SECURITY: vendor/unicorn_arm.js is a vendored, version-pinned artifact
+// (alexaltea/unicorn.js 2.1.4). If you update it, bump ?v= and verify SRI:
+//   openssl dgst -sha384 -binary vendor/unicorn_arm.js | openssl base64 -A
+// and add <meta integrity> if served with CSP.
 async function loadUnicorn() {
     const url = new URL('vendor/unicorn_arm.js?v=20', self.location.href);
     const src = await (await fetch(url)).text();

@@ -13,12 +13,7 @@ const $ = (id) => document.getElementById(id);
 const uartEl = $('uart'), statusEl = $('statusText'), dotEl = $('dot');
 const framesEl = $('frames');
 
-const decodeB64 = (b64) => {
-    const bin = atob(b64);
-    const u = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
-    return u;
-};
+const decodeB64 = (b64) => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
 const hex = (arr, n = 32) => {
     let s = '';
     for (let i = 0; i < Math.min(arr.length, n); i++) s += arr[i].toString(16).padStart(2, '0') + ' ';
@@ -382,8 +377,8 @@ const loop = async (id) => {
             return;
         }
         appendUart(emu.drainUart());
-        refreshStats();
-        renderLtdc();
+        await refreshStats();
+        await renderLtdc();
         renderDevices();
         await raf();
     }
@@ -584,18 +579,22 @@ let ltdcCtx = ltdcCanvas.getContext('2d');
 let ltdcCacheKey = '';
 let ltdcOff = document.createElement('canvas');
 
-const renderLtdc = () => {
+const renderLtdc = async () => {
     if (!emu || !ltdcCanvas.width) return;
     try {
-        const gcr = emu.read32(LTDC + 0x18);
-        const l1cr = emu.read32(LTDC + 0x84);
-        if (!(gcr & 1) || !(l1cr & 1)) { ltdcInfo.textContent = 'scanout idle'; return; }
-        const pf = emu.read32(LTDC + 0x94) & 7;
-        const cfbar = emu.read32(LTDC + 0xAC) >>> 0;
-        const cfblr = emu.read32(LTDC + 0xB0) >>> 0;
-        const cfblnr = emu.read32(LTDC + 0xB4) & 0x7FF;
-        const whpcr = emu.read32(LTDC + 0x88) >>> 0;
-        const wvpcr = emu.read32(LTDC + 0x8C) >>> 0;
+        const [gcr, l1cr, pfRaw, cfbarRaw, cfblrRaw, cfblnrRaw, whpcrRaw, wvpcrRaw] = await Promise.all([
+            emu.read32(LTDC + 0x18), emu.read32(LTDC + 0x84), emu.read32(LTDC + 0x94),
+            emu.read32(LTDC + 0xAC), emu.read32(LTDC + 0xB0), emu.read32(LTDC + 0xB4),
+            emu.read32(LTDC + 0x88), emu.read32(LTDC + 0x8C),
+        ]);
+        const gcrV = gcr >>> 0, l1crV = l1cr >>> 0;
+        if (!(gcrV & 1) || !(l1crV & 1)) { ltdcInfo.textContent = 'scanout idle'; return; }
+        const pf = pfRaw & 7;
+        const cfbar = cfbarRaw >>> 0;
+        const cfblr = cfblrRaw >>> 0;
+        const cfblnr = cfblnrRaw & 0x7FF;
+        const whpcr = whpcrRaw >>> 0;
+        const wvpcr = wvpcrRaw >>> 0;
         const bpp = pf === 2 ? 2 : 4;
         const lineBytes = Math.min(cfblr & 0x1FFF, 640 * bpp);
         const w = Math.min((((whpcr & 0xFFF) + 1) || (lineBytes / bpp)) | 0, 640);
@@ -609,6 +608,11 @@ const renderLtdc = () => {
         const key = pf + ':' + w + 'x' + lines + ':' + cfbar + ':' + pitch + ':' + (bindings.ltdc_get_frame_count ? bindings.ltdc_get_frame_count() : 0);
         if (key === ltdcCacheKey) return;
         ltdcCacheKey = key;
+        // Bridge mode has no direct uc.mem_read — skip framebuffer blit
+        if (!emu.uc || typeof emu.uc.mem_read !== 'function') {
+            ltdcInfo.textContent = `layer0 ${w}×${lines} ${pf === 2 ? 'RGB565' : 'ARGB8888'} @ ${hex32(cfbar)} (bridge — no fb read)`;
+            return;
+        }
         // Read (only the used width bytes per line — the model guest RAM is
         // byte-exact, so no opacity/color-key handling beyond the format).
         const rowBytes = Math.min(w * bpp, pitch || w * bpp);

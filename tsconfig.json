@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "allowJs": true,
+    "checkJs": false,
+    "strict": false,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["index.mjs", "site/**/*.js", "site/**/*.mjs", "tools/**/*.mjs"],
+  "exclude": ["site/vendor/**", "mcp/**", "node_modules/**", "stm32-periph-wasm/**", "website/**"]
+}
