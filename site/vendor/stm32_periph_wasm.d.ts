@@ -4,14 +4,38 @@
 export class WasmCpu {
     free(): void;
     [Symbol.dispose](): void;
+    fault_len(): number;
+    /**
+     * Packed fault detail: op1 | op2<<16 | len<<... (see fault_op2/fault_len).
+     */
+    fault_op1(): number;
+    fault_op2(): number;
+    /**
+     * Fault program counter, or 0xFFFF_FFFF when running clean.
+     */
+    fault_pc(): number;
     get_pc(): number;
+    get_primask(): number;
     get_regs(): Uint32Array;
     get_sp(): number;
+    get_xpsr(): number;
+    /**
+     * Load firmware bytes (writes through flash protection).
+     */
     load_firmware(data: Uint8Array, base: number): void;
+    /**
+     * Last unmapped-memory access address, or 0xFFFF_FFFF when none.
+     */
+    mem_fault(): number;
+    mem_read(addr: number, len: number): Uint8Array;
+    mem_write(addr: number, data: Uint8Array): void;
     constructor(sp: number, pc: number, flash_size: number, ram_size: number);
     read32(addr: number): number;
+    read8(addr: number): number;
+    reset_cpu(sp: number, pc: number): void;
     step(budget: number): number;
     write32(addr: number, v: number): void;
+    write8(addr: number, v: number): void;
 }
 
 /**
@@ -437,14 +461,26 @@ export interface InitOutput {
     readonly tick_n: (a: number) => void;
     readonly tim_inject_capture: (a: number, b: number, c: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;
+    readonly wasmcpu_fault_len: (a: number) => number;
+    readonly wasmcpu_fault_op1: (a: number) => number;
+    readonly wasmcpu_fault_op2: (a: number) => number;
+    readonly wasmcpu_fault_pc: (a: number) => number;
     readonly wasmcpu_get_pc: (a: number) => number;
+    readonly wasmcpu_get_primask: (a: number) => number;
     readonly wasmcpu_get_regs: (a: number, b: number) => void;
     readonly wasmcpu_get_sp: (a: number) => number;
+    readonly wasmcpu_get_xpsr: (a: number) => number;
     readonly wasmcpu_load_firmware: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmcpu_mem_fault: (a: number) => number;
+    readonly wasmcpu_mem_read: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmcpu_mem_write: (a: number, b: number, c: number, d: number) => void;
     readonly wasmcpu_new: (a: number, b: number, c: number, d: number) => number;
     readonly wasmcpu_read32: (a: number, b: number) => number;
+    readonly wasmcpu_read8: (a: number, b: number) => number;
+    readonly wasmcpu_reset_cpu: (a: number, b: number, c: number) => void;
     readonly wasmcpu_step: (a: number, b: number) => number;
     readonly wasmcpu_write32: (a: number, b: number, c: number) => void;
+    readonly wasmcpu_write8: (a: number, b: number, c: number) => void;
     readonly wwdg_reset_flag: () => number;
     readonly __wbindgen_export: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export2: (a: number, b: number) => number;

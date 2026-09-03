@@ -101,7 +101,8 @@
     "format:write": "prettier --write .",
     "build:wasm": "wasm-pack build stm32-periph-wasm --target web --out-dir ../site/vendor && rm -f site/vendor/.gitignore && cp stm32-periph-wasm/pkg/unicorn_arm.cjs site/vendor/ 2>/dev/null || true; cp stm32-periph-wasm/pkg/unicorn_arm.js site/vendor/ 2>/dev/null || true; cp monox/stm32f407.svd site/vendor/ 2>/dev/null || true; command -v wasm-opt >/dev/null 2>&1 && wasm-opt -O3 site/vendor/stm32_periph_wasm_bg.wasm -o site/vendor/stm32_periph_wasm_bg.wasm || echo 'wasm-opt not found, skipping'",
     "build:wasm:node": "wasm-pack build stm32-periph-wasm --target nodejs --out-dir pkg",
-    "build:wasm:opt": "wasm-opt -O3 site/vendor/stm32_periph_wasm_bg.wasm -o site/vendor/stm32_periph_wasm_bg.wasm && wasm-opt -O3 site/vendor/unicorn_arm.cjs -o site/vendor/unicorn_arm.cjs 2>/dev/null || true"
+    "build:wasm:opt": "wasm-opt -O3 site/vendor/stm32_periph_wasm_bg.wasm -o site/vendor/stm32_periph_wasm_bg.wasm && wasm-opt -O3 site/vendor/unicorn_arm.cjs -o site/vendor/unicorn_arm.cjs 2>/dev/null || true",
+    "test:wasm": "node site/test_wasm_cpu.mjs && node site/test_flow_wasm.mjs && node site/test_audio_wasm.mjs && node site/test_wasm_multi.mjs"
   },
   "dependencies": {
     "ws": "^8.21.3"

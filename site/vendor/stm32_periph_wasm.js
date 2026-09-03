@@ -14,8 +14,45 @@ export class WasmCpu {
     /**
      * @returns {number}
      */
+    fault_len() {
+        const ret = wasm.wasmcpu_fault_len(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Packed fault detail: op1 | op2<<16 | len<<... (see fault_op2/fault_len).
+     * @returns {number}
+     */
+    fault_op1() {
+        const ret = wasm.wasmcpu_fault_op1(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    fault_op2() {
+        const ret = wasm.wasmcpu_fault_op2(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Fault program counter, or 0xFFFF_FFFF when running clean.
+     * @returns {number}
+     */
+    fault_pc() {
+        const ret = wasm.wasmcpu_fault_pc(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
     get_pc() {
         const ret = wasm.wasmcpu_get_pc(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get_primask() {
+        const ret = wasm.wasmcpu_get_primask(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -42,6 +79,14 @@ export class WasmCpu {
         return ret >>> 0;
     }
     /**
+     * @returns {number}
+     */
+    get_xpsr() {
+        const ret = wasm.wasmcpu_get_xpsr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Load firmware bytes (writes through flash protection).
      * @param {Uint8Array} data
      * @param {number} base
      */
@@ -49,6 +94,41 @@ export class WasmCpu {
         const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         wasm.wasmcpu_load_firmware(this.__wbg_ptr, ptr0, len0, base);
+    }
+    /**
+     * Last unmapped-memory access address, or 0xFFFF_FFFF when none.
+     * @returns {number}
+     */
+    mem_fault() {
+        const ret = wasm.wasmcpu_mem_fault(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {number} addr
+     * @param {number} len
+     * @returns {Uint8Array}
+     */
+    mem_read(addr, len) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.wasmcpu_mem_read(retptr, this.__wbg_ptr, addr, len);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v1 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export(r0, r1 * 1, 1);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * @param {number} addr
+     * @param {Uint8Array} data
+     */
+    mem_write(addr, data) {
+        const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmcpu_mem_write(this.__wbg_ptr, addr, ptr0, len0);
     }
     /**
      * @param {number} sp
@@ -71,6 +151,21 @@ export class WasmCpu {
         return ret >>> 0;
     }
     /**
+     * @param {number} addr
+     * @returns {number}
+     */
+    read8(addr) {
+        const ret = wasm.wasmcpu_read8(this.__wbg_ptr, addr);
+        return ret;
+    }
+    /**
+     * @param {number} sp
+     * @param {number} pc
+     */
+    reset_cpu(sp, pc) {
+        wasm.wasmcpu_reset_cpu(this.__wbg_ptr, sp, pc);
+    }
+    /**
      * @param {number} budget
      * @returns {number}
      */
@@ -84,6 +179,13 @@ export class WasmCpu {
      */
     write32(addr, v) {
         wasm.wasmcpu_write32(this.__wbg_ptr, addr, v);
+    }
+    /**
+     * @param {number} addr
+     * @param {number} v
+     */
+    write8(addr, v) {
+        wasm.wasmcpu_write8(this.__wbg_ptr, addr, v);
     }
 }
 if (Symbol.dispose) WasmCpu.prototype[Symbol.dispose] = WasmCpu.prototype.free;

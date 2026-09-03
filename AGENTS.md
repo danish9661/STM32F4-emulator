@@ -2327,3 +2327,86 @@ works but is slower (reconnects).
 - Exports: `./remote` → `site/remote-emu.js`, `./ws-bridge` → `site/ws-bridge.mjs`.
 - `npm pack` includes both files; `npm run bridge` starts the server.
 - `npm run test:bridge` runs the in-process smoke test.
+
+---
+
+## 21. WASM-native Thumb-2 CPU (`cpu='wasm'` backend, 2026-09-03)
+
+A pure-Rust Cortex-M4 interpreter (`stm32-periph-wasm/src/cpu/`) that runs
+firmware WITHOUT Unicorn, behind the `cpu_backend: 'wasm'` opt of
+`createEmulator`. Status: boots blinky/eth_http/eth_test/can_test/hal_test/
+audio (DMA+I2S)/exti/rtc to markers, and runs eth_http DHCP→TCP→HTTP
+end-to-end (2 rounds, `npm run test:wasm`). ~20x faster than Unicorn on
+compute (~50 MIPS vs ~2-3). DOOM boots to engine init but halts in
+`R_InitTextures` (`W_CacheLumpNum: 403602`, deterministic) — open, see below.
+
+### Files
+- `stm32-periph-wasm/src/cpu/thumb.rs` (~1700 lines) — the decoder. Every
+  encoding verified against `arm-none-eabi-as`/`objdump` output for repo
+  firmware (probes in /tmp/opencode: `t32.s`, `it*.s`, `dsp.s`, `br.s`,
+  `strd.s`, `bcc*.s`, `ext.s`, `ldrd.s`, `it2/it3.s`). Key rules:
+  - Data-proc op nibble `X=(op1>>5)&0xF` maps `{0:AND,1:BIC,2:ORR,3:MVN,
+    4:EOR,8:ADD,10:ADC,11:SBC,13:SUB,14:RSB}` uniformly across F
+    (modified-imm) and EA/EB (shifted-reg); `S=op1[4]`, `Rn=op1&0xF`.
+  - `ThumbExpandImm` per ARM ARM (rotation uses `'1':imm12[6:0]` by
+    `imm12[11:7]`; replication cases for `[11:10]==00`).
+  - IT: slot j>=2 uses `cond` iff mask bit (5-j) equals cond bit 0
+    (GAS-verified: identical patterns assemble to different masks per cond).
+    `n = 4 - trailing_zeros(mask)`.
+  - BL op2 is `0xFxxx` (not `0xDxxx`); B.W/Bcc.W share `op2[15:14]==10`
+    with `op2[12]` selecting; B.W is 25-bit `S:I1:I2:imm10:imm11` with
+    J-inversion, Bcc.W is 21-bit `S:J1:J2:imm6:imm11` with J direct.
+  - 16-bit LDR/STR-reg class is `op[11:9]` (3 bits), not `op[15:12]`.
+  - F8 T2 (`c>=8`) is always imm12; T3 (`c<8`) is imm8-P/U/W except c=4/5
+    with `op2[11]==0` which is register-offset.
+  - LDRD/STRD select is `(op1&0x0E40)==0x0840` (bit6 set) vs LDM/STM
+    `0x0800`; `Rt=op2[15:12]`, `Rt2=op2[11:8]` (GAS-verified, was swapped).
+  - FA shifts: value=Rn(op1), amount=Rm(op2)&0xFF (was swapped).
+  - CBZ offset is `imm6*2 + op[9]*64`, base pc+4 (was `op[2]`).
+  - 16-bit B/B.cond/CBZ use pc+4 base (was pc+2).
+  - F3 must precede the F-bucket with exact gates (else `ubfx` decodes as
+    RSB, `bgt.w`/`MSR` collide); F3AF needs `op2==0x8000`.
+  - EA/EB op1 `0xEB00` bit11=1 (an `& 0x0800 == 0` guard silently dropped
+    all of EB — removed).
+  - SMLAxy/SMULxy/SMLAD/SMULW (FB op 1/2/3) per GAS layouts.
+- `stm32-periph-wasm/src/cpu/mem.rs` — `FlatMemory` (flash + SRAM + auto-
+  extending extra regions for EXTRAM/WAD) + `load()` that writes through
+  flash protection (the old `write8` path silently dropped firmware!).
+  Peripheral accesses are single width-correct model calls (a byte-split
+  RMW emitted 4 UART chars per store — observed).
+- `stm32-periph-wasm/src/cpu/mod.rs` — `Cpu` + `CpuFault` (loud halts with
+  pc/op, never silent wrongness) + `deliver_irqs` gate (default false, so
+  polling firmware runs full budgets like the Unicorn path).
+- `stm32-periph-wasm/src/cpu/tests.rs` — native boot tests (blinky;
+  eth_http DHCP incl. Offer/Ack replay from `site/testdata_offer.bin` /
+  `testdata_ack.bin`, captured via `site/save_rx.mjs`). `BOOT_LOCK`
+  serializes on the shared SYS global. `cargo test` 40/40.
+- `site/emulator.js` — `cpu_backend: 'wasm'` branch (before Unicorn
+  creation, so no Unicorn dependency at all): byte-correct `uc` shim,
+  `wProcessEth`/`wProcessDma` mirrors, `injectFrame`/`sendUart`/`pin`/
+  `takeSpeakerSamples`/`faultInfo`/`reset`, watchdog reboot. Warns (not
+  throws) for `enable_irqs`/`irq_eth`/`freertos`/`lowpower`, which need
+  exception delivery (not implemented — SVC/BKPT/RFE record faults).
+- Tests: `site/test_wasm_cpu.mjs` (blinky), `site/test_flow_wasm.mjs`
+  (netsim ETH flow), `site/test_audio_wasm.mjs` (DMA+I2S),
+  `site/test_wasm_multi.mjs` (7 firmware smoke). `npm run test:wasm`.
+- `package.json`: `test:wasm` script. `test:wasm_multi` hal_test passes on
+  wasm (and now unicorn too — earlier unicorn stall was stale-env).
+
+### Bugs fixed along the way (all verified by boot/packet traces)
+BL `0xFxxx`, SP-sub mask, hi-reg selector bits[9:8], CBZ imm, B pc+4 base,
+F3 shadowing, E9 entry mask, UXTB mask, F8 T2/imm12, EA/EB `0x0800` guard,
+FA value/amount swap, 16-bit reg-group class, STRD Rt/Rt2 swap, LDRD gate,
+CBZ `op[9]`, Bcc.W no-inversion+imm6, REV entry mask, SMLABB, LDRH-as-STRH.
+
+### Open / not supported on the wasm backend
+- **DOOM full boot**: halts in `R_InitTextures` (`patch->patch`=403602,
+  garbage texture name `AASz...` — texture array/heap misread; deterministic).
+  Boots to engine init, WAD loads, 1 framebuffer change. Needs tracing of
+  `patchlookup[SHORT(mpatch->patch)]` computation.
+- Interrupts/exceptions (SysTick/ETH IRQ pump, FreeRTOS SVC/PendSV, WFI
+  sleep, BKPT): fault loudly. Polling firmware unaffected.
+- Device parsers (OLED/TFT/buzzer/RTC/DCMI JS-side) don't run on wasm path
+  (taps register, but `processDevices` is unicorn-path-only).
+- `test_fsmc.mjs` failure on the unicorn path is pre-existing (fails on
+  clean tree too — `&&` chain in `test:unit` stops there).

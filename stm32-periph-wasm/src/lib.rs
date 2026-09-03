@@ -42,6 +42,11 @@ fn set_sys(s: WasmSystem) {
     SYS.store(Box::into_raw(Box::new(s)), Ordering::Release);
 }
 
+#[cfg(test)]
+pub(crate) fn init_svd_for_test(s: WasmSystem) {
+    set_sys(s);
+}
+
 /// Initialize the emulator with hardcoded peripheral map.
 /// Must be called after adding all ext devices (add_spi_flash, add_i2c_eeprom).
 #[wasm_bindgen]
@@ -620,11 +625,31 @@ pub struct WasmCpu { cpu: Cpu, mem: FlatMemory }
 impl WasmCpu {
     #[wasm_bindgen(constructor)]
     pub fn new(sp: u32, pc: u32, flash_size: u32, ram_size: u32) -> Self { Self { cpu: Cpu::new(sp, pc), mem: FlatMemory::new(flash_size as usize, ram_size as usize) } }
-    pub fn load_firmware(&mut self, data: &[u8], base: u32) { for (i,&b) in data.iter().enumerate(){ self.mem.write8(base.wrapping_add(i as u32), b); } }
+    /// Load firmware bytes (writes through flash protection).
+    pub fn load_firmware(&mut self, data: &[u8], base: u32) { self.mem.load(data, base); }
+    pub fn read8(&self, addr: u32) -> u8 { self.mem.read8(addr) }
+    pub fn write8(&mut self, addr: u32, v: u8) { self.mem.write8(addr, v) }
     pub fn read32(&self, addr: u32) -> u32 { self.mem.read32(addr) }
     pub fn write32(&mut self, addr: u32, v: u32) { self.mem.write32(addr, v) }
+    pub fn mem_read(&self, addr: u32, len: u32) -> Vec<u8> {
+        (0..len).map(|i| self.mem.read8(addr.wrapping_add(i))).collect()
+    }
+    pub fn mem_write(&mut self, addr: u32, data: &[u8]) {
+        for (i, &b) in data.iter().enumerate() { self.mem.write8(addr.wrapping_add(i as u32), b); }
+    }
+    pub fn reset_cpu(&mut self, sp: u32, pc: u32) { self.cpu.reset(sp, pc); }
     pub fn get_pc(&self) -> u32 { self.cpu.regs.r[15] }
     pub fn get_sp(&self) -> u32 { self.cpu.regs.r[13] }
     pub fn get_regs(&self) -> Vec<u32> { self.cpu.regs.r.to_vec() }
-    pub fn step(&mut self, budget: u32) -> u32 { let (done,_)=self.cpu.run(sys(), &mut self.mem, budget); done }
+    pub fn get_xpsr(&self) -> u32 { self.cpu.regs.xpsr }
+    pub fn get_primask(&self) -> u32 { self.cpu.regs.primask }
+    /// Fault program counter, or 0xFFFF_FFFF when running clean.
+    pub fn fault_pc(&self) -> u32 { self.cpu.fault.map(|f| f.pc).unwrap_or(0xFFFF_FFFF) }
+    /// Packed fault detail: op1 | op2<<16 | len<<... (see fault_op2/fault_len).
+    pub fn fault_op1(&self) -> u32 { self.cpu.fault.map(|f| f.op1 as u32).unwrap_or(0) }
+    pub fn fault_op2(&self) -> u32 { self.cpu.fault.map(|f| f.op2 as u32).unwrap_or(0) }
+    pub fn fault_len(&self) -> u32 { self.cpu.fault.map(|f| f.len as u32).unwrap_or(0) }
+    /// Last unmapped-memory access address, or 0xFFFF_FFFF when none.
+    pub fn mem_fault(&self) -> u32 { self.mem.bad.get().unwrap_or(0xFFFF_FFFF) }
+    pub fn step(&mut self, budget: u32) -> u32 { self.cpu.run(sys(), &mut self.mem, budget) }
 }

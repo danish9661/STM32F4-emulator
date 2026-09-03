@@ -114,7 +114,8 @@ export async function createEmulator(opts) {
         ...eth,
     };
 
-    const Module = await unicorn();
+    // NOTE: the Unicorn Module is created lazily below (unicorn backend
+    // only) so cpu_backend='wasm' never touches Unicorn at all.
     if (typeof bindings.default === 'function') {
         if (wasmInit) await bindings.default({ module_or_path: wasmInit });
         else await bindings.default();
@@ -200,23 +201,154 @@ export async function createEmulator(opts) {
     else bindings.init();
 
     if (cpu_backend === 'wasm' && typeof bindings.WasmCpu === 'function') {
+        if (enable_irqs || irq_eth || freertos || lowpower) {
+            console.warn('[wasm-cpu] enable_irqs/irq_eth/freertos/lowpower need the Unicorn backend (guest exception delivery); continuing polling-only');
+        }
         const sp0 = (firmware[0] | (firmware[1] << 8) | (firmware[2] << 16) | (firmware[3] << 24)) >>> 0;
         const pc0 = (firmware[4] | (firmware[5] << 8) | (firmware[6] << 16) | (firmware[7] << 24)) >>> 0;
         if (sp0 === 0 || pc0 === 0) throw new Error(`WasmCpu: invalid vector table sp=${sp0.toString(16)} pc=${pc0.toString(16)}`);
         const cpu = new bindings.WasmCpu(sp0, pc0 | 1, flash_size, ram_size);
         cpu.load_firmware(firmware, vector_table);
+        for (const r of extra_ram) cpu.load_firmware(new Uint8Array(r.size), r.addr);
         for (const seg of extra_mem) cpu.load_firmware(seg.data, seg.addr);
+        // Byte-correct uc shim over the wasm memory (mirrors the Unicorn
+        // uc.mem_read/mem_write used by processEth/processDma below).
+        const wuc = {
+            mem_read: (a, s) => new Uint8Array(cpu.mem_read(Number(a), Number(s))),
+            mem_write: (a, d) => cpu.mem_write(Number(a), new Uint8Array(d)),
+            reg_read_i32: (r) => r === 15 ? cpu.get_pc() : r === 13 ? cpu.get_sp() : cpu.get_regs()[r],
+        };
+        const wread32 = (a) => cpu.read32(Number(a)) >>> 0;
+        const wwrite32 = (a, v) => cpu.write32(Number(a), v >>> 0);
+        const rxQueue = [];
         let instCount = 0;
+        // Compact mirrors of processEth/processDma for the wasm memory.
+        const wProcessEth = () => {
+            if (eth_is_tx_poll()) {
+                const descAddr = eth_get_tx_desc_addr();
+                if (process.env.WASM_DBG) console.log(`[wasm-tx] poll desc=0x${descAddr.toString(16)}`);
+                if (descAddr !== 0) {
+                    const desc = wuc.mem_read(BigInt(descAddr), 8);
+                    const dv = new DataView(desc.buffer, desc.byteOffset, desc.byteLength);
+                    const tdes0 = dv.getUint32(0, true);
+                    const tdes1 = dv.getUint32(4, true);
+                    if (tdes0 & 0x80000000) {
+                        const bufAddr = tdes1 & 0xFFFFFFFC;
+                        const bufSize = tdes0 & 0x3FFF;
+                        if (process.env.WASM_DBG) console.log(`[wasm-tx] tdes0=0x${tdes0.toString(16)} buf=0x${bufAddr.toString(16)} len=${bufSize}`);
+                        if (bufAddr !== 0 && bufSize > 0 && bufSize <= 2000) {
+                            const pkt = new Uint8Array(wuc.mem_read(BigInt(bufAddr), bufSize));
+                            if (onTx) onTx(pkt, { bufAddr, len: bufSize });
+                        }
+                        const wb = new Uint8Array(4);
+                        new DataView(wb.buffer).setUint32(0, (tdes0 & ~0x80000000) | 0x20000000, true);
+                        wuc.mem_write(BigInt(descAddr), wb);
+                    }
+                }
+                eth_clear_tx_poll();
+                eth_tx_done();
+                if (!irq_eth) wwrite32(E.irqFlag, wread32(E.irqFlag) | 1);
+            }
+            if (eth_is_rx_poll() && rxQueue.length > 0) {
+                if (process.env.WASM_DBG) console.log(`[wasm-rx] inject idx=${E.rxInjectIdx} q=${rxQueue.length} poll=1`);
+                const idx = E.rxInjectIdx;
+                E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
+                const descAddr = E.rxDesc + idx * 8;
+                const bufAddr = E.rxBuf + idx * E.rxStride;
+                const frame = rxQueue.shift();
+                const len = Math.min(frame.length, E.rxStride);
+                wuc.mem_write(BigInt(bufAddr), frame.subarray(0, len));
+                const wb = new Uint8Array(4);
+                new DataView(wb.buffer).setUint32(0, len << 16, true);
+                wuc.mem_write(BigInt(descAddr), wb);
+                if (!irq_eth) {
+                    wwrite32(E.rxFrameIdx, idx);
+                    wwrite32(E.rxFrameLen, len);
+                    wwrite32(E.irqFlag, wread32(E.irqFlag) | 2);
+                }
+                eth_clear_rx_poll();
+                eth_rx_done();
+            }
+        };
+        const wIsPeriph = (a) => (a >= 0x40000000 && a < 0xB0000000) || (a >= 0xE0000000 && a < 0xE1000000);
+        const wProcessDma = () => {
+            const count = dma_get_pending_count();
+            for (let i = 0; i < count; i++) {
+                const pending = dma_get_pending(0);
+                if (pending.length < 5) continue;
+                const dir = pending[0], stream = pending[1], src = pending[2], dst = pending[3], size = pending[4];
+                const peri_addr = pending[5] || 0;
+                const peripheral = pending[6] || 0;
+                try {
+                    if (dir === 2 || !peripheral || !wIsPeriph(peri_addr)) {
+                        wuc.mem_write(BigInt(dst), wuc.mem_read(BigInt(src), size));
+                    } else if (dir === 0) {
+                        const data = dma_periph_read(peri_addr, size, (pending[7] || 0) === 1, pending[8] || 4);
+                        wuc.mem_write(BigInt(dst), data);
+                    } else {
+                        dma_periph_write(peri_addr, wuc.mem_read(BigInt(src), size));
+                    }
+                } catch (e) { /* ignore */ }
+                dma_set_completed(stream, true);
+            }
+        };
+        const parsePin = (name) => {
+            const m = /^P([A-E])([0-9]|1[0-5])$/i.exec(name || '');
+            if (!m) return null;
+            return { port: m[1].toUpperCase().charCodeAt(0) - 65, pin: parseInt(m[2], 10) };
+        };
         return {
-            uc: { mem_read: (a,s)=>{ const v=cpu.read32(Number(a)); const b=new Uint8Array(s); for(let i=0;i<s;i++) b[i]=(v>>(i*8))&0xFF; return b; }, mem_write: (a,d)=>{ for(let i=0;i<d.length;i+=4){ const v=d[i]|(d[i+1]<<8)|(d[i+2]<<16)|(d[i+3]<<24); cpu.write32(Number(a)+i, v>>>0); } }, reg_read_i32: (r)=> r===15?cpu.get_pc():r===13?cpu.get_sp():cpu.get_regs()[r] },
-            read32: (a)=> cpu.read32(a)>>>0, write32: (a,v)=> cpu.write32(a, v>>>0),
-            getRegisters: ()=>{ const r=cpu.get_regs(); return {R0:r[0],R1:r[1],R2:r[2],R3:r[3],R4:r[4],R5:r[5],R6:r[6],R7:r[7],R8:r[8],R9:r[9],R10:r[10],R11:r[11],R12:r[12],SP:r[13],LR:r[14],PC:r[15],XPSR:0}; },
-            step: (n=100000)=>{ const c=cpu.step(n); instCount+=c; try{ bindings.tick_n(c); }catch{} return {instCount, stopped:false, pc:cpu.get_pc()}; },
-            drainUart: ()=>{ try{ return bindings.get_uart_output(); }catch{ return ''; } },
-            injectFrame: ()=>{}, canInject: ()=>{}, sendUart: ()=>{}, pin: ()=>({setInputValue:()=>{}}), close: ()=>{}, reset: ()=>{}, oled:null, tft:null, buzzer:null, rtc:null,
+            uc: wuc,
+            read32: wread32, write32: wwrite32,
+            getRegisters: () => { const r = cpu.get_regs(); return { R0: r[0], R1: r[1], R2: r[2], R3: r[3], R4: r[4], R5: r[5], R6: r[6], R7: r[7], R8: r[8], R9: r[9], R10: r[10], R11: r[11], R12: r[12], SP: r[13], LR: r[14], PC: r[15], XPSR: cpu.get_xpsr() >>> 0 }; },
+            step: (n = 100000) => {
+                const c = cpu.step(n);
+                instCount += c;
+                try { tick_n(c); } catch {}
+                wProcessDma();
+                wProcessEth();
+                if (process.env.WASM_DBG && rxQueue.length > 0) console.log(`[wasm-step] pc=0x${(cpu.get_pc() >>> 0).toString(16)} rxpoll=${eth_is_rx_poll() ? 1 : 0} q=${rxQueue.length}`);
+                if (is_watchdog_reset_requested()) cpu.reset_cpu(sp0, pc0 | 1);
+                const faulted = cpu.fault_pc() !== 0xFFFFFFFF;
+                return { instCount, stopped: faulted, pc: cpu.get_pc() };
+            },
+            drainUart: () => { try { return get_uart_output(); } catch { return ''; } },
+            takeSpeakerSamples: () => {
+                // I2S TX capture drain (opt-in via ext_devices.speaker, like
+                // processSpeaker on the unicorn path). Returns Float32Array.
+                try {
+                    const u16 = audio_take_capture();
+                    const f = new Float32Array(u16.length);
+                    for (let i = 0; i < u16.length; i++) f[i] = (u16[i] / 32768);
+                    return f;
+                } catch { return new Float32Array(0); }
+            },
+            injectFrame: (frame) => { rxQueue.push(frame instanceof Uint8Array ? frame : new Uint8Array(frame)); },
+            canInject: () => {},
+            sendUart: (bytes) => {
+                const arr = typeof bytes === 'string' ? [...bytes].map((c) => c.charCodeAt(0)) : [...bytes];
+                for (const b of arr) { try { uart_rx_byte(uart_addr, b & 0xFF); } catch {} }
+            },
+            pin: (name) => {
+                const p = parsePin(name);
+                return {
+                    setInputValue: (v) => { if (p) { try { gpio_set_input(p.port, p.pin, !!v); } catch {} } },
+                    getOutputValue: () => { if (!p) return false; try { return gpio_read_output(p.port, p.pin); } catch { return false; } },
+                    getInputValue: () => { if (!p) return false; try { return gpio_read_input(p.port, p.pin); } catch { return false; } },
+                };
+            },
+            close: () => { try { cpu.free(); } catch {} },
+            reset: () => { cpu.reset_cpu(sp0, pc0 | 1); },
+            faultInfo: () => {
+                const fpc = cpu.fault_pc() >>> 0;
+                if (fpc === 0xFFFFFFFF) return null;
+                return { pc: fpc, op1: cpu.fault_op1(), op2: cpu.fault_op2(), len: cpu.fault_len() };
+            },
+            oled: null, tft: null, buzzer: null, rtc: null,
         };
     }
 
+    const Module = await unicorn();
     const uc = new Module.Unicorn(
         Module.ARCH_ARM,
         // MODE_MCLASS enables Cortex-M banked registers (PSP/MSP) and exception
