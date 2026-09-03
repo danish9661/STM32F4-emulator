@@ -201,13 +201,17 @@ export async function createEmulator(opts) {
     else bindings.init();
 
     if (cpu_backend === 'wasm' && typeof bindings.WasmCpu === 'function') {
-        if (enable_irqs || irq_eth || freertos || lowpower) {
-            console.warn('[wasm-cpu] enable_irqs/irq_eth/freertos/lowpower need the Unicorn backend (guest exception delivery); continuing polling-only');
-        }
+        // Guest exception delivery (SysTick/ETH/USART IRQs, SVC/PendSV,
+        // WFI sleep) runs inline in the Rust core — no ISR pump needed.
+        // (Unicorn needs memWriteHook+processInterrupts because it cannot
+        // do Cortex-M entry/return; here stacking is exact, so the
+        // mid-`str` PENDSVSET hazard of AGENTS.md §9 cannot occur.)
+        const wantIrqs = enable_irqs || irq_eth || freertos || lowpower;
         const sp0 = (firmware[0] | (firmware[1] << 8) | (firmware[2] << 16) | (firmware[3] << 24)) >>> 0;
         const pc0 = (firmware[4] | (firmware[5] << 8) | (firmware[6] << 16) | (firmware[7] << 24)) >>> 0;
         if (sp0 === 0 || pc0 === 0) throw new Error(`WasmCpu: invalid vector table sp=${sp0.toString(16)} pc=${pc0.toString(16)}`);
         const cpu = new bindings.WasmCpu(sp0, pc0 | 1, flash_size, ram_size);
+        if (wantIrqs && typeof cpu.set_deliver_irqs === 'function') cpu.set_deliver_irqs(true);
         cpu.load_firmware(firmware, vector_table);
         for (const r of extra_ram) cpu.load_firmware(new Uint8Array(r.size), r.addr);
         for (const seg of extra_mem) cpu.load_firmware(seg.data, seg.addr);
@@ -302,6 +306,22 @@ export async function createEmulator(opts) {
             read32: wread32, write32: wwrite32,
             getRegisters: () => { const r = cpu.get_regs(); return { R0: r[0], R1: r[1], R2: r[2], R3: r[3], R4: r[4], R5: r[5], R6: r[6], R7: r[7], R8: r[8], R9: r[9], R10: r[10], R11: r[11], R12: r[12], SP: r[13], LR: r[14], PC: r[15], XPSR: cpu.get_xpsr() >>> 0 }; },
             step: (n = 100000) => {
+                // WFI/WFE sleep: advance virtual time (which fires the RTC
+                // alarm etc.), then wake when an interrupt is pending.
+                // Mirrors the unicorn lowpower path (WAKE_STEP cadence).
+                if (typeof cpu.sleeping === 'function' && cpu.sleeping()) {
+                    try { tick_n(120000); } catch {}
+                    try { periph_read(0x40002800, 4); } catch {}
+                    if (has_pending_interrupt()) {
+                        try {
+                            if (((wread32(0xE000ED10) >>> 0) >> 2) & 1) pwr_wakeup();
+                        } catch {}
+                        try { cpu.wake(); } catch {}
+                    } else {
+                        instCount += 120000;
+                        return { instCount, stopped: false, pc: cpu.get_pc() };
+                    }
+                }
                 const c = cpu.step(n);
                 instCount += c;
                 try { tick_n(c); } catch {}

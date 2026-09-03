@@ -638,6 +638,15 @@ impl WasmCpu {
         for (i, &b) in data.iter().enumerate() { self.mem.write8(addr.wrapping_add(i as u32), b); }
     }
     pub fn reset_cpu(&mut self, sp: u32, pc: u32) { self.cpu.reset(sp, pc); }
+    /// Enable/disable inline guest exception delivery (NVIC SysTick, ETH,
+    /// USART RX, SVC, PendSV...). Off by default (polling-only, matches the
+    /// Unicorn path where pending model IRQs never stop execution).
+    pub fn set_deliver_irqs(&mut self, v: bool) { self.cpu.deliver_irqs = v; }
+    /// True while halted in WFI/WFE (low-power). The driver advances virtual
+    /// time and calls `wake()` once an interrupt is pending.
+    pub fn sleeping(&self) -> bool { self.cpu.sleeping }
+    pub fn wake(&mut self) { self.cpu.sleeping = false; }
+    pub fn get_ipsr(&self) -> u32 { self.cpu.ipsr }
     pub fn get_pc(&self) -> u32 { self.cpu.regs.r[15] }
     pub fn get_sp(&self) -> u32 { self.cpu.regs.r[13] }
     pub fn get_regs(&self) -> Vec<u32> { self.cpu.regs.r.to_vec() }

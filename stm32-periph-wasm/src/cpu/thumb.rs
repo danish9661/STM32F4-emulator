@@ -59,9 +59,23 @@ fn fault(c: &mut Cpu, pc: u32, op1: u16, op2: u16, l: u8) -> bool {
     c.fault = Some(super::CpuFault { pc, op1, op2, len: l });
     false
 }
-/// Interworking branch. Branching to ARM state (bit0 clear) is a fault on
-/// Cortex-M (no ARM state); halting loudly beats silently running garbage.
-fn branch(c: &mut Cpu, t: u32, pc: u32, op1: u16, op2: u16, l: u8) -> bool {
+/// Interworking branch. An EXC_RETURN value performs an exception return
+/// through the stacked context instead. Branching to ARM state (bit0
+/// clear, non-EXC_RETURN) is a fault on Cortex-M (no ARM state); halting
+/// loudly beats silently running garbage.
+fn branch(
+    c: &mut Cpu,
+    sys: &WasmSystem,
+    mem: &mut dyn Memory,
+    t: u32,
+    pc: u32,
+    op1: u16,
+    op2: u16,
+    l: u8,
+) -> bool {
+    if (t & 0x0FFFFFF0) == 0x0FFFFFF0 {
+        return c.exception_return(sys, mem, t, pc);
+    }
     if t & 1 == 0 {
         return fault(c, pc, op1, op2, l);
     }
@@ -227,7 +241,7 @@ fn shift_op(v: u32, typ: u32, amt: u32, ci: u32) -> (u32, u32) {
     }
 }
 
-pub fn exec16(cpu: &mut Cpu, _sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc: u32) -> bool {
+pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc: u32) -> bool {
     let o = op as u32;
     // IT predication: a not-taken instruction is still a 2-byte NOP for PC
     // purposes (and still consumes its IT slot).
@@ -431,7 +445,7 @@ pub fn exec16(cpu: &mut Cpu, _sys: &WasmSystem, mem: &mut dyn Memory, op: u16, p
             0 => {
                 let r = rr(cpu, rd, pc).wrapping_add(rr(cpu, rs, pc));
                 if rd == 15 {
-                    return branch(cpu, r, pc, op, 0, 2);
+                    return branch(cpu, sys, mem, r, pc, op, 0, 2);
                 }
                 cpu.regs.r[rd] = r;
             }
@@ -441,7 +455,7 @@ pub fn exec16(cpu: &mut Cpu, _sys: &WasmSystem, mem: &mut dyn Memory, op: u16, p
             2 => {
                 let v = rr(cpu, rs, pc);
                 if rd == 15 {
-                    return branch(cpu, v, pc, op, 0, 2);
+                    return branch(cpu, sys, mem, v, pc, op, 0, 2);
                 }
                 cpu.regs.r[rd] = v;
             }
@@ -451,7 +465,7 @@ pub fn exec16(cpu: &mut Cpu, _sys: &WasmSystem, mem: &mut dyn Memory, op: u16, p
                     // BLX reg: LR = next addr; target must stay Thumb
                     cpu.regs.r[14] = (pc + 2) | 1;
                 }
-                return branch(cpu, t, pc, op, 0, 2);
+                return branch(cpu, sys, mem, t, pc, op, 0, 2);
             }
         }
         adv(cpu, pc, 2);
@@ -619,7 +633,7 @@ pub fn exec16(cpu: &mut Cpu, _sys: &WasmSystem, mem: &mut dyn Memory, op: u16, p
         cpu.regs.r[13] = sp.wrapping_add(if topc { 4 } else { 0 });
         if topc {
             let t = mem.read32(sp);
-            return branch(cpu, t, pc, op, 0, 2);
+            return branch(cpu, sys, mem, t, pc, op, 0, 2);
         }
         adv(cpu, pc, 2);
         return true;
@@ -642,12 +656,21 @@ pub fn exec16(cpu: &mut Cpu, _sys: &WasmSystem, mem: &mut dyn Memory, op: u16, p
         adv(cpu, pc, 2);
         return true;
     }
-    // BKPT / SVC / UDF
+    // BKPT: stays a loud fault (debug breakpoints; no firmware here uses them
+    // for control flow — FreeRTOS configASSERT loops, it doesn't trap).
     if o & 0xFF00 == 0xBE00 {
         return fault(cpu, pc, op, 0, 2);
     }
+    // SVC: synchronous exception. With delivery on, take it inline (exact
+    // stacking, handler runs on MSP); otherwise loud fault (polling
+    // firmware never SVCs, so hitting one is a bug worth surfacing).
     if o & 0xFF00 == 0xDF00 {
-        return fault(cpu, pc, op, 0, 2);
+        if !cpu.deliver_irqs {
+            return fault(cpu, pc, op, 0, 2);
+        }
+        adv(cpu, pc, 2);
+        cpu.take_exception(sys, mem, -5);
+        return true;
     }
     if o & 0xFF00 == 0xDE00 {
         return fault(cpu, pc, op, 0, 2);
@@ -662,7 +685,7 @@ pub fn exec16(cpu: &mut Cpu, _sys: &WasmSystem, mem: &mut dyn Memory, op: u16, p
             rr(cpu, rn, pc) != 0
         };
         if take {
-            return branch(cpu, (pc.wrapping_add(4).wrapping_add(nz)) | 1, pc, op, 0, 2);
+            return branch(cpu, sys, mem, (pc.wrapping_add(4).wrapping_add(nz)) | 1, pc, op, 0, 2);
         }
         adv(cpu, pc, 2);
         return true;
@@ -671,6 +694,21 @@ pub fn exec16(cpu: &mut Cpu, _sys: &WasmSystem, mem: &mut dyn Memory, op: u16, p
     if o & 0xFF00 == 0xBF00 {
         if op == 0xBF00 {
             adv(cpu, pc, 2);
+            return true;
+        }
+        // WFI/WFE: with delivery on, halt until an interrupt is pending
+        // (JS advances virtual time and wakes us). The instruction is
+        // complete at halt, so on wake we resume AFTER it. Without
+        // delivery this is a plain nop (polling path).
+        if op == 0xBF30 || op == 0xBF20 {
+            adv(cpu, pc, 2);
+            if cpu.deliver_irqs {
+                // A pending interrupt with PRIMASK clear means no sleep
+                // (the exception is taken on the next run-loop iteration).
+                if !(sys.p.nvic.borrow().has_pending() && cpu.regs.primask == 0) {
+                    cpu.sleeping = true;
+                }
+            }
             return true;
         }
         // YIELD/WFE/WFI/SEV/SEVL(/other reserved hints): no-op for the
@@ -726,14 +764,14 @@ pub fn exec16(cpu: &mut Cpu, _sys: &WasmSystem, mem: &mut dyn Memory, op: u16, p
         let cc = (o >> 8) & 0xF;
         let imm = sx(((o & 0xFF) << 1) as u32, 9);
         if cond_ok(cpu, cc) {
-            return branch(cpu, (pc.wrapping_add(4).wrapping_add(imm)) | 1, pc, op, 0, 2);
+            return branch(cpu, sys, mem, (pc.wrapping_add(4).wrapping_add(imm)) | 1, pc, op, 0, 2);
         }
         adv(cpu, pc, 2);
         return true;
     }
     if o & 0xF800 == 0xE000 {
         let imm = sx(((o & 0x7FF) << 1) as u32, 12);
-        return branch(cpu, (pc.wrapping_add(4).wrapping_add(imm)) | 1, pc, op, 0, 2);
+        return branch(cpu, sys, mem, (pc.wrapping_add(4).wrapping_add(imm)) | 1, pc, op, 0, 2);
     }
     fault(cpu, pc, op, 0, 2)
 }
@@ -856,7 +894,7 @@ fn alu_op(
 
 pub fn exec32(
     cpu: &mut Cpu,
-    _sys: &WasmSystem,
+    sys: &WasmSystem,
     mem: &mut dyn Memory,
     op1: u16,
     op2: u16,
@@ -890,9 +928,10 @@ pub fn exec32(
             cpu.regs.r[rd] = match sysm {
                 0 | 1 | 2 => cpu.regs.xpsr & 0xF8000000, // APSR/IAPSR/EAPSR
                 3 => cpu.regs.xpsr,                     // XPSR
-                5 => 0,                                 // IPSR (thread mode)
+                5 => cpu.ipsr,                          // IPSR (live exception number)
                 6 | 7 => cpu.regs.xpsr & 0x0700FC00,    // EPSR/IEPSR
-                8 | 9 => cpu.regs.r[13],                // MSP/PSP (unbanked here)
+                8 => cpu.read_msp(),
+                9 => cpu.read_psp(),
                 16 => cpu.regs.primask,                 // PRIMASK
                 17 | 18 => 0,                           // FAULTMASK/BASEPRI
                 20 => cpu.regs.control,                 // CONTROL
@@ -909,10 +948,25 @@ pub fn exec32(
                 0 | 1 | 2 | 3 => {
                     cpu.regs.xpsr = (cpu.regs.xpsr & !0xF8000000) | (v & 0xF8000000)
                 }
-                8 | 9 => cpu.regs.r[13] = v,
+                8 => cpu.write_msp(v),
+                9 => cpu.write_psp(v),
                 16 => cpu.regs.primask = v & 1,
                 17 | 18 => {}
-                20 => cpu.regs.control = v & 3,
+                20 => {
+                    // MSR CONTROL: an SPSEL change switches the current stack
+                    // (hardware swaps r13 with the other bank).
+                    let v = v & 3;
+                    if (v ^ cpu.regs.control) & 2 != 0 {
+                        if v & 2 != 0 {
+                            cpu.regs.msp = cpu.regs.r[13];
+                            cpu.regs.r[13] = cpu.regs.psp;
+                        } else {
+                            cpu.regs.psp = cpu.regs.r[13];
+                            cpu.regs.r[13] = cpu.regs.msp;
+                        }
+                    }
+                    cpu.regs.control = v;
+                }
                 _ => return fault(cpu, pc, op1, op2, 4),
             }
             adv(cpu, pc, 4);
@@ -976,7 +1030,7 @@ pub fn exec32(
             let off = sx((s << 24) | (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1), 25);
             if o2 & 0x1000 != 0 {
                 // B.W unconditional
-                return branch(cpu, pc.wrapping_add(4).wrapping_add(off) | 1, pc, op1, op2, 4);
+                return branch(cpu, sys, mem, pc.wrapping_add(4).wrapping_add(off) | 1, pc, op1, op2, 4);
             }
             // Bcc.W: cond in op1[9:6]. 21-bit offset S:J1:J2:imm6:imm11:0
             // with J used DIRECTLY as the offset bits (no S inversion —
@@ -991,7 +1045,7 @@ pub fn exec32(
                 21,
             );
             if cc == 0xE || cond_ok(cpu, cc) {
-                return branch(cpu, pc.wrapping_add(4).wrapping_add(off) | 1, pc, op1, op2, 4);
+                return branch(cpu, sys, mem, pc.wrapping_add(4).wrapping_add(off) | 1, pc, op1, op2, 4);
             }
             adv(cpu, pc, 4);
             return true;
@@ -1008,7 +1062,7 @@ pub fn exec32(
                 let i2 = j2 ^ s ^ 1;
                 let off = sx((s << 24) | (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1), 25);
                 cpu.regs.r[14] = (pc + 4) | 1;
-                return branch(cpu, pc.wrapping_add(4).wrapping_add(off) | 1, pc, op1, op2, 4);
+                return branch(cpu, sys, mem, pc.wrapping_add(4).wrapping_add(off) | 1, pc, op1, op2, 4);
             }
             // BLX-imm (Exxx) targets ARM state, Cxxx/Dxxx unallocated here.
             return fault(cpu, pc, op1, op2, 4);
@@ -1068,7 +1122,7 @@ pub fn exec32(
                         // MOVS pc: exception return (not supported yet)
                         return fault(cpu, pc, op1, op2, 4);
                     }
-                    return branch(cpu, imm, pc, op1, op2, 4);
+                    return branch(cpu, sys, mem, imm, pc, op1, op2, 4);
                 }
                 cpu.regs.r[rd] = imm;
                 if s {
@@ -1092,7 +1146,7 @@ pub fn exec32(
             match alu_op(cpu, op, s, a, imm, ci, co, test) {
                 Some(r) => {
                     if rd == 15 {
-                        return branch(cpu, r, pc, op1, op2, 4);
+                        return branch(cpu, sys, mem, r, pc, op1, op2, 4);
                     }
                     cpu.regs.r[rd] = r;
                     adv(cpu, pc, 4);
@@ -1191,7 +1245,7 @@ pub fn exec32(
                 if rt == 15 {
                     // LDR pc literal already handled; imm12 LDR pc: interwork
                     let t = cpu.regs.r[15];
-                    return branch(cpu, t, pc, op1, op2, 4);
+                    return branch(cpu, sys, mem, t, pc, op1, op2, 4);
                 }
             } else {
                 let v = rr(cpu, rt, pc);
@@ -1217,7 +1271,7 @@ pub fn exec32(
                 if rt == 15 {
                     cpu.regs.r[15] = mem.read32(addr);
                     let t = cpu.regs.r[15];
-                    return branch(cpu, t, pc, op1, op2, 4);
+                    return branch(cpu, sys, mem, t, pc, op1, op2, 4);
                 }
                 cpu.regs.r[rt] = mem.read32(addr);
             } else {
@@ -1252,7 +1306,7 @@ pub fn exec32(
                 if w == 1 || p == 0 {
                     cpu.regs.r[rn] = base.wrapping_add(off);
                 }
-                return branch(cpu, v, pc, op1, op2, 4);
+                return branch(cpu, sys, mem, v, pc, op1, op2, 4);
             }
             cpu.regs.r[rt] = v;
         } else {
@@ -1624,7 +1678,7 @@ pub fn exec32(
                 if s {
                     return fault(cpu, pc, op1, op2, 4);
                 }
-                return branch(cpu, sv, pc, op1, op2, 4);
+                return branch(cpu, sys, mem, sv, pc, op1, op2, 4);
             }
             cpu.regs.r[rd] = sv;
             if s {
@@ -1649,7 +1703,7 @@ pub fn exec32(
         match alu_op(cpu, op, s, a, sv, ci, co, test) {
             Some(r) => {
                 if rd == 15 {
-                    return branch(cpu, r, pc, op1, op2, 4);
+                    return branch(cpu, sys, mem, r, pc, op1, op2, 4);
                 }
                 cpu.regs.r[rd] = r;
                 adv(cpu, pc, 4);
@@ -1671,14 +1725,14 @@ pub fn exec32(
         if (o1 & 0x0FF0) == 0x08D0 && (o2 & 0xFFF0) == 0xF000 {
             let tab = rr(cpu, rn, pc);
             let t = pc.wrapping_add(4).wrapping_add((mem.read8(tab.wrapping_add(rm_of(o2))) as u32) * 2);
-            return branch(cpu, t | 1, pc, op1, op2, 4);
+            return branch(cpu, sys, mem, t | 1, pc, op1, op2, 4);
         }
         if (o1 & 0x0FF0) == 0x08D0 && (o2 & 0xFFF0) == 0xF010 {
             let tab = rr(cpu, rn, pc);
             let t = pc
                 .wrapping_add(4)
                 .wrapping_add((mem.read16(tab.wrapping_add((rm_of(o2)) * 2)) as u32) * 2);
-            return branch(cpu, t | 1, pc, op1, op2, 4);
+            return branch(cpu, sys, mem, t | 1, pc, op1, op2, 4);
         }
         // LDREX / STREX (E8 + nibble 4/5, word form)
         if (o1 & 0x0FF0) == 0x0840 {
@@ -1740,7 +1794,7 @@ pub fn exec32(
                 cpu.regs.r[rn] = a;
             }
             if let Some(t) = newpc {
-                return branch(cpu, t, pc, op1, op2, 4);
+                return branch(cpu, sys, mem, t, pc, op1, op2, 4);
             }
             adv(cpu, pc, 4);
             return true;

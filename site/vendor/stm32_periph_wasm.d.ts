@@ -14,6 +14,7 @@ export class WasmCpu {
      * Fault program counter, or 0xFFFF_FFFF when running clean.
      */
     fault_pc(): number;
+    get_ipsr(): number;
     get_pc(): number;
     get_primask(): number;
     get_regs(): Uint32Array;
@@ -33,7 +34,19 @@ export class WasmCpu {
     read32(addr: number): number;
     read8(addr: number): number;
     reset_cpu(sp: number, pc: number): void;
+    /**
+     * Enable/disable inline guest exception delivery (NVIC SysTick, ETH,
+     * USART RX, SVC, PendSV...). Off by default (polling-only, matches the
+     * Unicorn path where pending model IRQs never stop execution).
+     */
+    set_deliver_irqs(v: boolean): void;
+    /**
+     * True while halted in WFI/WFE (low-power). The driver advances virtual
+     * time and calls `wake()` once an interrupt is pending.
+     */
+    sleeping(): boolean;
     step(budget: number): number;
+    wake(): void;
     write32(addr: number, v: number): void;
     write8(addr: number, v: number): void;
 }
@@ -465,6 +478,7 @@ export interface InitOutput {
     readonly wasmcpu_fault_op1: (a: number) => number;
     readonly wasmcpu_fault_op2: (a: number) => number;
     readonly wasmcpu_fault_pc: (a: number) => number;
+    readonly wasmcpu_get_ipsr: (a: number) => number;
     readonly wasmcpu_get_pc: (a: number) => number;
     readonly wasmcpu_get_primask: (a: number) => number;
     readonly wasmcpu_get_regs: (a: number, b: number) => void;
@@ -478,7 +492,10 @@ export interface InitOutput {
     readonly wasmcpu_read32: (a: number, b: number) => number;
     readonly wasmcpu_read8: (a: number, b: number) => number;
     readonly wasmcpu_reset_cpu: (a: number, b: number, c: number) => void;
+    readonly wasmcpu_set_deliver_irqs: (a: number, b: number) => void;
+    readonly wasmcpu_sleeping: (a: number) => number;
     readonly wasmcpu_step: (a: number, b: number) => number;
+    readonly wasmcpu_wake: (a: number) => void;
     readonly wasmcpu_write32: (a: number, b: number, c: number) => void;
     readonly wasmcpu_write8: (a: number, b: number, c: number) => void;
     readonly wwdg_reset_flag: () => number;

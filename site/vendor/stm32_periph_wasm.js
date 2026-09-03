@@ -44,6 +44,13 @@ export class WasmCpu {
     /**
      * @returns {number}
      */
+    get_ipsr() {
+        const ret = wasm.wasmcpu_get_ipsr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
     get_pc() {
         const ret = wasm.wasmcpu_get_pc(this.__wbg_ptr);
         return ret >>> 0;
@@ -166,12 +173,33 @@ export class WasmCpu {
         wasm.wasmcpu_reset_cpu(this.__wbg_ptr, sp, pc);
     }
     /**
+     * Enable/disable inline guest exception delivery (NVIC SysTick, ETH,
+     * USART RX, SVC, PendSV...). Off by default (polling-only, matches the
+     * Unicorn path where pending model IRQs never stop execution).
+     * @param {boolean} v
+     */
+    set_deliver_irqs(v) {
+        wasm.wasmcpu_set_deliver_irqs(this.__wbg_ptr, v);
+    }
+    /**
+     * True while halted in WFI/WFE (low-power). The driver advances virtual
+     * time and calls `wake()` once an interrupt is pending.
+     * @returns {boolean}
+     */
+    sleeping() {
+        const ret = wasm.wasmcpu_sleeping(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * @param {number} budget
      * @returns {number}
      */
     step(budget) {
         const ret = wasm.wasmcpu_step(this.__wbg_ptr, budget);
         return ret >>> 0;
+    }
+    wake() {
+        wasm.wasmcpu_wake(this.__wbg_ptr);
     }
     /**
      * @param {number} addr

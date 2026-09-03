@@ -176,3 +176,71 @@ fn eth_http_reaches_dhcp_discover() {
 
 
 
+
+#[test]
+fn exception_svc_roundtrip() {
+    let _g = lock_boot();
+    // Minimal image in RAM (executable here): main does SVC #0 then loops;
+    // SVC handler (vector 11) bumps a counter and returns via EXC_RETURN.
+    // Layout: vector table at 0x20000000 is NOT used (CPU vectors come from
+    // flash VTOR); instead point VTOR at RAM by writing the model SCB? The
+    // model SCB defaults VTOR=0x08000000, so install vectors in flash image.
+    let mut img = vec![0u8; 0x200];
+    // SP=0x20002000, reset PC=0x08000100
+    img[0..4].copy_from_slice(&0x20002000u32.to_le_bytes());
+    img[4..8].copy_from_slice(&0x08000100u32.to_le_bytes());
+    // SVC vector (11) -> handler at 0x08000110
+    img[11 * 4..11 * 4 + 4].copy_from_slice(&0x08000111u32.to_le_bytes());
+    // main at 0x100: svc #0 (0xDF00), then b.n loop (0xE7FE)
+    img[0x100] = 0x00;
+    img[0x101] = 0xDF;
+    img[0x102] = 0xFE;
+    img[0x103] = 0xE7;
+    // handler at 0x110: ldr r0, [pc, #8] (counter addr); ldr r1,[r0]; adds r1,#1;
+    // str r1,[r0]; bx lr. Counter at 0x130.
+    // 0x110: 4802 (ldr r0,[pc,#8] -> 0x11C); 0x112: 6801 (ldr r1,[r0]); 0x114: 3101 (adds r1,#1)
+    // 0x116: 6001 (str r1,[r0]); 0x118: 4770 (bx lr); 0x11A: bf00; 0x11C: 00 01 00 20
+    let h: [u8; 16] = [0x02, 0x48, 0x01, 0x68, 0x01, 0x31, 0x01, 0x60, 0x70, 0x47, 0x00, 0xBF, 0x00, 0x01, 0x00, 0x20];
+    img[0x110..0x120].copy_from_slice(&h);
+    // counter at 0x20001000? use RAM 0x20001000 (in 128K SRAM).
+    // patch handler literal to point there:
+    img[0x11C..0x120].copy_from_slice(&0x20001000u32.to_le_bytes());
+    let (mut cpu, mut mem) = boot(&img);
+    // VTOR is 0x08000000 by default: vectors above are in flash image ✓.
+    // SP/PC already at reset vector from boot():
+    assert_eq!(cpu.regs.r[13], 0x20002000);
+    assert_eq!(cpu.regs.r[15] & !1, 0x08000100);
+    cpu.deliver_irqs = true;
+    let sys = crate::sys();
+    cpu.run(sys, &mut mem, 10);
+    assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+    // SVC handler should have run exactly once (counter==1) and main resumed
+    // into its branch-to-self loop at 0x102.
+    assert_eq!(mem.read32(0x20001000), 1, "SVC handler did not run");
+    assert_eq!(cpu.regs.r[15] & !1, 0x08000102, "did not resume after SVC");
+    assert_eq!(cpu.ipsr, 0, "still in handler mode");
+}
+
+
+#[test]
+fn freertos_tasks_run() {
+    // Full FreeRTOS bring-up on the wasm CPU: SVC start, PendSV task
+    // switches, TIM2 ISR semaphore give, TASK1/TASK2 ticks. Guards the
+    // exception-entry/return + PSP-banking fixes (even stacked PC, CONTROL
+    // update, bank sync, post-frame PSP advance).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../freertos_test/freertos_test.bin"));
+    cpu.deliver_irqs = true;
+    let sys = crate::sys();
+    let mut uart_all = String::new();
+    for _ in 0..100 {
+        cpu.run(sys, &mut mem, 100_000);
+        crate::tick_n(100_000);
+        uart_all.push_str(&crate::system::get_uart_output().lock().unwrap().clone());
+        crate::system::get_uart_output().lock().unwrap().clear();
+        no_fault(&cpu, &mem);
+    }
+    for m in ["start scheduler", "Hhigh start", "TIM TEST PASS", "TASK1", "TASK2"] {
+        assert!(uart_all.contains(m), "missing marker {m:?}: {uart_all:?}");
+    }
+}
