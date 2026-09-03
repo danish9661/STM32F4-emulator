@@ -903,9 +903,53 @@ pub fn exec32(
     let o1 = op1 as u32;
     let o2 = op2 as u32;
     if !it_ok(cpu) {
-        adv(cpu, pc, 4);
-        return true;
-    }
+            adv(cpu, pc, 4);
+            return true;
+        }
+        // USAT / SSAT (saturate). Shares hw1 with MSR (0xF380|Rn) but o2[15]
+        // is always 0 here (imm5 lives in o2[14:10]); MSR needs o2>=0x8800,
+        // so the two are disjoint. GAS-verified: usat=F380, ssat=F300/F322.
+        if o1 & 0xFFF0 == 0xF380 && o2 < 0x8000 {
+            // USAT Rd, #sat, Rn [, LSL #sh]
+            let sat = (o2 & 0x1F) as u32;
+            let sh = ((o2 >> 10) & 0x1F) as u32;
+            let v = rr(cpu, (o1 & 0xF) as usize, pc).wrapping_shl(sh);
+            let max: u64 = if sat >= 32 { 0xFFFF_FFFF } else { (1u64 << sat) - 1 };
+            let r = (v as u64).min(max) as u32;
+            if (v as u64) > max {
+                cpu.regs.xpsr |= 0x08000000; // Q sticky
+            }
+            cpu.regs.r[((o2 >> 8) & 0xF) as usize] = r;
+            adv(cpu, pc, 4);
+            return true;
+        }
+        if o1 & 0xFFC0 == 0xF300 && o2 < 0x8000 {
+            // SSAT Rd, #sat, Rn [, LSL/ASL #sh] (sh-type is o1[5]).
+            // o2[15]==0 keeps B.W/Bcc.W/BL (op2[15]=1) falling through.
+            // Unlike USAT, the sat field encodes N-1 (GAS: ssat#8=o2:0x07,
+            // ssat#16=0x0F; usat#16=0x10 direct).
+            let sat = ((o2 & 0x1F) + 1) as u32;
+            let sh = ((o2 >> 10) & 0x1F) as u32;
+            let a = rr(cpu, (o1 & 0xF) as usize, pc);
+            let v = if (o1 >> 5) & 1 == 0 {
+                a.wrapping_shl(sh)
+            } else {
+                ((a as i32).wrapping_shr(sh.min(31))) as u32
+            };
+            let (lo, hi): (i64, i64) = if sat == 0 || sat >= 32 {
+                (i64::MIN, i64::MAX)
+            } else {
+                (-(1i64 << (sat - 1)), (1i64 << (sat - 1)) - 1)
+            };
+            let s = v as i32 as i64;
+            let r = s.clamp(lo, hi) as i32 as u32;
+            if s < lo || s > hi {
+                cpu.regs.xpsr |= 0x08000000; // Q sticky
+            }
+            cpu.regs.r[((o2 >> 8) & 0xF) as usize] = r;
+            adv(cpu, pc, 4);
+            return true;
+        }
     // ---- F3: misc (hints, barriers, MRS/MSR, bitfield) ----
     // NOTE: F3xx overlaps Bcc.W's op1 range (F000-F3FF), so this must only
     // claim exact/shape-checked F3 forms and let Bcc.W-shaped op2 fall
@@ -1084,6 +1128,24 @@ pub fn exec32(
             adv(cpu, pc, 4);
             return true;
         }
+        // ADDW / SUBW (F2 group): plain 12-bit immediate, NO ThumbExpand,
+        // no flags. GAS-verified: addw=F20x, subw=F2Ax (i-bit in o1[10]
+        // flips F2->F6, e.g. subw#4095=F6A1). Must precede modified-imm:
+        // ADDW's o1[8:5]=0 decodes as AND-imm (silently wrong), SUBW's =5
+        // faults. (ADDSW/SUBSW F3 S-variants still fault loudly.)
+        if o1 & 0xFBF0 == 0xF200 || o1 & 0xFBF0 == 0xF2A0 {
+            let sub = (o1 & 0xFBF0) == 0xF2A0;
+            let rn = (o1 & 0xF) as usize;
+            let rd = ((o2 >> 8) & 0xF) as usize;
+            let imm = (((o1 >> 10) & 1) << 11) | (((o2 >> 12) & 7) << 8) | (o2 & 0xFF);
+            cpu.regs.r[rd] = if sub {
+                rr(cpu, rn, pc).wrapping_sub(imm)
+            } else {
+                rr(cpu, rn, pc).wrapping_add(imm)
+            };
+            adv(cpu, pc, 4);
+            return true;
+        }
         // F6/F7 + data op2: SSAT/USAT/coprocessor zone (no samples) -> fault
         if o1 >= 0xF600 {
             return fault(cpu, pc, op1, op2, 4);
@@ -1258,9 +1320,15 @@ pub fn exec32(
             adv(cpu, pc, 4);
             return true;
         }
-        // T3: c<8. c 4/5 with op2[11]==0 are register-offset; else imm8-PUW.
-        if (c == 4 || c == 5) && (o2 & 0x800) == 0 {
-            if size != 4 || signed {
+        // T3: c<8. Register-offset iff op2[11:10]==00 (GAS-verified:
+        // strh [r9,r3,lsl#1]=o2:0x2013, str [r4,r7,lsl#2]=0x0027,
+        // strb [r9,r3]=0x2003, ldr [r3,r0,lsl#2]=0x4020; imm forms like
+        // str [r4],#4 (0x0B04) have [11:10]!=00). Applies to every data
+        // class (STRB/LDRB/STRH/LDRH/STR/LDR), not just words — routing
+        // only c4/5 here sent strh-reg into imm8 post-indexed writeback
+        // (r9 -= imm8 per store), which corrupted DOOM's collump pointer.
+        if (o2 & 0xC00) == 0 {
+            if signed {
                 return fault(cpu, pc, op1, op2, 4);
             }
             let rm = (o2 & 0xF) as usize;
@@ -1269,16 +1337,28 @@ pub fn exec32(
             let addr = rr(cpu, rn, pc).wrapping_add(off);
             if is_load {
                 if rt == 15 {
+                    if size != 4 {
+                        return fault(cpu, pc, op1, op2, 4);
+                    }
                     cpu.regs.r[15] = mem.read32(addr);
                     let t = cpu.regs.r[15];
                     return branch(cpu, sys, mem, t, pc, op1, op2, 4);
                 }
-                cpu.regs.r[rt] = mem.read32(addr);
+                cpu.regs.r[rt] = match size {
+                    1 => mem.read8(addr) as u32,
+                    2 => mem.read16(addr) as u32,
+                    _ => mem.read32(addr),
+                };
             } else {
                 if rt == 15 {
                     return fault(cpu, pc, op1, op2, 4);
                 }
-                mem.write32(addr, rr(cpu, rt, pc));
+                let v = rr(cpu, rt, pc);
+                match size {
+                    1 => mem.write8(addr, (v & 0xFF) as u8),
+                    2 => mem.write16(addr, (v & 0xFFFF) as u16),
+                    _ => mem.write32(addr, v),
+                }
             }
             adv(cpu, pc, 4);
             return true;
@@ -1580,6 +1660,21 @@ pub fn exec32(
                 return true;
             }
             9 => {
+                // SDIV (1111_Rd_1111_Rm op2 shape) shares op 9 with SMLAL,
+                // exactly like UDIV/UMLAL share op 11 (see arm 11 below).
+                // Missing this ran every sdiv as multiply-accumulate (the
+                // quotient came back as the dividend's high word, i.e. the
+                // dividend itself — DOOM's (10*168/10) stayed 1680).
+                if o2 & 0xF0F0 == 0xF0F0 {
+                    let b = rr(cpu, rm, pc) as i32;
+                    cpu.regs.r[rd] = if b == 0 {
+                        0
+                    } else {
+                        (rr(cpu, rn, pc) as i32).wrapping_div(b) as u32
+                    };
+                    adv(cpu, pc, 4);
+                    return true;
+                }
                 // SMLAL
                 let a = rr(cpu, rn, pc) as i32 as i64;
                 let b = rr(cpu, rm, pc) as i32 as i64;
@@ -1721,17 +1816,26 @@ pub fn exec32(
         // ---- E8/E9: LDM/STM, STRD/LDRD, LDREX/STREX, TBB/TBH ----
     } else if (o1 & 0xF000) == 0xE000 && o1 < 0xEC00 {
         let rn = (o1 & 0xF) as usize;
-        // TBB / TBH: E8D0|Rn + F000/F010 op2
+        // TBB / TBH: E8D0|Rn + F000/F010 op2. The table index is the
+        // VALUE in Rm (rr), not the register number — using the number
+        // dispatched every switch on Rm's encoding (DOOM always played
+        // demo2: tbb [pc,r3] used table[3] for any demosequence).
+        // Table base is pc+4 with NO word masking: a halfword-aligned TBB
+        // (like D_Display's at 0x1CA6) is followed immediately by its table;
+        // masking back to 0x1CA8 reads entries shifted by 2 (case 3 went to
+        // the status-bar tail instead of D_PageDrawer, so no title drew).
         if (o1 & 0x0FF0) == 0x08D0 && (o2 & 0xFFF0) == 0xF000 {
-            let tab = rr(cpu, rn, pc);
-            let t = pc.wrapping_add(4).wrapping_add((mem.read8(tab.wrapping_add(rm_of(o2))) as u32) * 2);
+            let tab = if rn == 15 { pc.wrapping_add(4) } else { rr(cpu, rn, pc) };
+            let idx = rr(cpu, rm_of(o2) as usize, pc);
+            let t = pc.wrapping_add(4).wrapping_add((mem.read8(tab.wrapping_add(idx)) as u32) * 2);
             return branch(cpu, sys, mem, t | 1, pc, op1, op2, 4);
         }
         if (o1 & 0x0FF0) == 0x08D0 && (o2 & 0xFFF0) == 0xF010 {
-            let tab = rr(cpu, rn, pc);
+            let tab = if rn == 15 { pc.wrapping_add(4) } else { rr(cpu, rn, pc) };
+            let idx = rr(cpu, rm_of(o2) as usize, pc);
             let t = pc
                 .wrapping_add(4)
-                .wrapping_add((mem.read16(tab.wrapping_add((rm_of(o2)) * 2)) as u32) * 2);
+                .wrapping_add((mem.read16(tab.wrapping_add(idx.wrapping_mul(2))) as u32) * 2);
             return branch(cpu, sys, mem, t | 1, pc, op1, op2, 4);
         }
         // LDREX / STREX (E8 + nibble 4/5, word form)

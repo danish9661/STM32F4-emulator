@@ -66,6 +66,14 @@ impl FlatMemory {
             .position(|r| addr >= r.base && (addr - r.base) < r.data.len() as u32)
     }
 
+    /// Map a zeroed extra region in bulk. `load()` builds regions byte by
+    /// byte (quadratic for megabyte images); pre-mapping makes WAD/EXTRAM
+    /// setup O(size) with a fast fill. Matches the JS driver, which zeroes
+    /// every extra_ram region at map time.
+    pub fn map_extra(&mut self, base: u32, size: usize) {
+        self.extra.push(MemRegion { base, data: vec![0; size] });
+    }
+
     /// Load `data` at `base`, writing through flash protection. Bytes landing
     /// in flash or RAM go there; bytes landing anywhere else create (or
     /// extend) an extra region, so ELF segments / WAD images just work.
