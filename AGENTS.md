@@ -2333,8 +2333,10 @@ works but is slower (reconnects).
 ## 21. WASM-native Thumb-2 CPU (`cpu='wasm'` backend, 2026-09-03)
 
 A pure-Rust Cortex-M4 interpreter (`stm32-periph-wasm/src/cpu/`) that runs
-firmware WITHOUT Unicorn, behind the `cpu_backend: 'wasm'` opt of
-`createEmulator`. Status: boots blinky/eth_http/eth_test/can_test/hal_test/
+firmware WITHOUT Unicorn. **Since 2026-09-04 it is the DEFAULT backend**
+(`cpu_backend` defaults to `'wasm'`; pass `'unicorn'` to opt back into the
+Unicorn core — `probe_freertos.mjs` (ISR pump) and `test_doom.mjs` (TCI
+guard) stay pinned there). Status: boots blinky/eth_http/eth_test/can_test/hal_test/
 audio (DMA+I2S)/exti/rtc to markers, and runs eth_http DHCP→TCP→HTTP
 end-to-end (2 rounds, `npm run test:wasm`). ~20x faster than Unicorn on
 compute (~50 MIPS vs ~2-3). DOOM: title renders, menu → New Game → E1M1
@@ -2397,7 +2399,8 @@ play + quick-save + audio, `site/test_doom_wasm.mjs` PASS (see below).
 BL `0xFxxx`, SP-sub mask, hi-reg selector bits[9:8], CBZ imm, B pc+4 base,
 F3 shadowing, E9 entry mask, UXTB mask, F8 T2/imm12, EA/EB `0x0800` guard,
 FA value/amount swap, 16-bit reg-group class, STRD Rt/Rt2 swap, LDRD gate,
-CBZ `op[9]`, Bcc.W no-inversion+imm6, REV entry mask, SMLABB, LDRH-as-STRH.
+CBZ `op[9]`, Bcc.W no-inversion+imm6, REV entry mask, SMLABB, LDRH-as-STRH,
+register-shift-by-0 is a no-op (not imm-#0-means-32).
 
 ### Exceptions + FreeRTOS + WFI on wasm (2026-09-04, branch `feature/wasm-cpu`)
 - Inline delivery (`deliver_irqs`, set via `enable_irqs`/`irq_eth`/`freertos`/
@@ -2439,7 +2442,9 @@ CBZ `op[9]`, Bcc.W no-inversion+imm6, REV entry mask, SMLABB, LDRH-as-STRH.
   breakpoints/pools. And `doom.bin` file offset == LMA-0x08000000 (flat).
 
 ### Open / not supported on the wasm backend
-- Device parsers (OLED/TFT/buzzer/RTC/DCMI JS-side) don't run on wasm path
-  (taps register, but `processDevices` is unicorn-path-only).
-- `test_fsmc.mjs` failure on the unicorn path is pre-existing (fails on
-  clean tree too — `&&` chain in `test:unit` stops there).
+- Device parsers (OLED/TFT/buzzer/RTC/DCMI JS-side) now run on BOTH backends
+  (shared device layer in `site/emulator.js`, driven per step; verified by
+  `npm run test:browser` 10/10 on the wasm default).
+- `test_fsmc.mjs` used to fail on the unicorn path (pre-existing); it passes
+  on the wasm default (the register-shift-by-0 fix cured it) and the full
+  `npm test` is green end-to-end.
