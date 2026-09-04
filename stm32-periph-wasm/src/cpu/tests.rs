@@ -328,15 +328,28 @@ fn tbb_index_by_value() {
 
 #[test]
 fn sdiv_plain_and_it() {
-    // sdiv r1,r1,r3 (FB91 F1F3): plain, IT-taken, IT-skipped.
+    // sdiv r1,r1,r3 (FB91 F1F3): plain, IT-taken, IT-skipped (sentinel kept).
     let (mut cpu, _) = run_snippet(&[0xFB91, 0xF1F3], &[(1, 1680), (3, 10)]);
     assert_eq!(cpu.regs.r[1], 168);
-    // cmp r1,#11 (NE) ; it ne (BF18 is single-T `it`, so craft ite gt=BFCC)
-    let (mut cpu, _) = run_snippet(&[0x290B, 0xBFCC, 0xFB91, 0xF1F3, 0xFB91, 0xF1F3], &[(1, 1680), (3, 10)]);
-    // cmp, it, sdiv(taken): 1680/10=168; extra sdiv runs too (168/10=16)? run all 4:
-    // steps: cmp, it, sdiv, sdiv -> 1680->168->16. Just check no fault + sane.
-    assert!(cpu.fault.is_none());
-    let _ = cpu.regs.r[1];
+    // cmp r1,#11 (NE, r1=1680) ; ite gt (BFCC) ; sdivne (taken: 168)
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    for (i, w) in [0x290Bu16, 0xBFCC, 0xFB91, 0xF1F3].iter().enumerate() {
+        mem.write16(0x20002000 + i as u32 * 2, *w);
+    }
+    cpu.regs.r[1] = 1680;
+    cpu.regs.r[3] = 10;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 4); // cmp,it,sdiv(taken) + 1 nop to consume ite slot2
+    assert_eq!(cpu.regs.r[1], 168);
+    // EQ: cmp r1,#11 (r1=11) ; ite gt ; sdivne must NOT run
+    cpu.regs.r[1] = 11;
+    cpu.regs.r[3] = 10;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 3);
+    // sdivne skipped -> r1 stays 11
+    assert_eq!(cpu.regs.r[1], 11);
 }
 
 #[test]
@@ -374,3 +387,143 @@ fn t3_reg_no_writeback() {
     assert_eq!(cpu.regs.r[9], 0x20003000);
     assert_eq!(cpu.regs.r[3], 5);
 }
+
+
+
+
+#[test]
+fn it_pred_mov_preserves() {
+    // D_PageTicker: cmp sets N=1; itt lt; movlt (taken) must preserve N
+    // so strlt (LT) also takes. Unpredicated movs still sets N/Z.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    // cmp r3,#0 (r3=-20) ; itt lt (BFBC) ; movlt r3,#1 ; strlt r3,[r2]
+    for (i, w) in [0x2B03u16, 0xBFBC, 0x2301, 0x6013].iter().enumerate() {
+        mem.write16(0x20002000 + i as u32 * 2, *w);
+    }
+    cpu.regs.r[3] = 0xFFFFFFEC;
+    cpu.regs.r[2] = 0x20003000;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 4);
+    assert_eq!(cpu.regs.r[3], 1);
+    assert_eq!(mem.read32(0x20003000), 1);
+    assert_eq!((cpu.regs.xpsr >> 31) & 1, 1, "N preserved through predicated movs");
+}
+
+#[test]
+fn bare_movs_sets_nz_preserves_c() {
+    // cmp r2,#1 (r2=-6: C=1) ; movs r0,#0 -> N=0,Z=1,C stays 1
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    for (i, w) in [0x2A01u16, 0x2000].iter().enumerate() {
+        mem.write16(0x20002000 + i as u32 * 2, *w);
+    }
+    cpu.regs.r[2] = 0xFFFFFFFA;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 2);
+    let x = cpu.regs.xpsr;
+    assert_eq!(cpu.regs.r[0], 0);
+    assert_eq!((x >> 31) & 1, 0, "N");
+    assert_eq!((x >> 30) & 1, 1, "Z");
+    assert_eq!((x >> 29) & 1, 1, "C preserved");
+}
+
+#[test]
+fn it_pred_add_preserves() {
+    // cmp r3,#0 (r3=-5, N=1) ; itt mi (BF? mask C cond MI=4: 0xBFC4) ;
+    // addmi r6,r6,r3 (taken, r6=0+5, N stays 1)
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    for (i, w) in [0x2B00u16, 0xBF44, 0x18F6].iter().enumerate() {
+        mem.write16(0x20002000 + i as u32 * 2, *w);
+    }
+    cpu.regs.r[3] = 0xFFFFFFFB;
+    cpu.regs.r[6] = 0;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 3);
+    assert_eq!(cpu.regs.r[6], 0xFFFFFFFB);
+    assert_eq!((cpu.regs.xpsr >> 31) & 1, 1, "N preserved through predicated add");
+}
+
+#[test]
+fn bare_subreg_sets_flags() {
+    // subs r3,r3,r0 (1A1B) unpredicated with equal inputs -> Z=1.
+    // Run EXACTLY 1 step: run_snippet's trailing NOPs (movs r0,r0) would
+    // clobber Z and mask the assertion.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write16(0x20002000, 0x1A1B);
+    cpu.regs.r[3] = 0x64;
+    cpu.regs.r[0] = 0x64;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    assert_eq!(cpu.regs.r[3], 0);
+    assert_eq!((cpu.regs.xpsr >> 30) & 1, 1, "Z");
+}
+
+#[test]
+fn ldrsh_reg_sx() {
+    // ldrsh.w r2,[r0,r3,lsl#2] (F930 2023): signed halfword, no writeback.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write16(0x20002000, 0xF930);
+    mem.write16(0x20002002, 0x2023);
+    mem.write16(0x20003000, 0xFF80); // -128
+    cpu.regs.r[0] = 0x20003000;
+    cpu.regs.r[3] = 0;
+    cpu.regs.r[9] = 0x20003000;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    assert_eq!(cpu.regs.r[2], 0xFFFFFF80);
+    assert_eq!(cpu.regs.r[0], 0x20003000, "no writeback to Rn");
+}
+
+#[test]
+fn cmp13_n_flag() {
+    // cmp r3,#3 with r3=1 -> N=1,Z=0,C=0,V=0 (S_Start's LE depends on N).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write16(0x20002000, 0x2B03);
+    cpu.regs.r[3] = 1;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    let x = cpu.regs.xpsr;
+    assert_eq!((x >> 31) & 1, 1, "N");
+    assert_eq!((x >> 30) & 1, 0, "Z");
+    assert_eq!((x >> 29) & 1, 0, "C");
+    assert_eq!((x >> 28) & 1, 0, "V");
+}
+
+#[test]
+fn strcasecmp_pairs() {
+    // newlib strcasecmp via doom firmware: equal-ci, differ-byte-0,
+    // differ-byte-4 (doom1 vs doom2 must differ: D_FindIWAD depends on it).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot_doom();
+    let sys = crate::sys();
+    for (i, b) in b"doom1.wad\0".iter().enumerate() { mem.write8(0x20003000 + i as u32, *b); }
+    for (i, b) in b"heretic1.wad\0".iter().enumerate() { mem.write8(0x20003100 + i as u32, *b); }
+    for (i, b) in b"DOOM1.WAD\0".iter().enumerate() { mem.write8(0x20003200 + i as u32, *b); }
+    for (i, b) in b"doom2.wad\0".iter().enumerate() { mem.write8(0x20003300 + i as u32, *b); }
+    mem.write16(0x20001000, 0xE7FE);
+    for ((a, b), want_ne) in [((0x20003000, 0x20003100), true), ((0x20003000, 0x20003200), false), ((0x20003000, 0x20003300), true)] {
+        cpu.regs.r[0] = a;
+        cpu.regs.r[1] = b;
+        cpu.regs.r[14] = 0x20001001;
+        cpu.regs.r[15] = 0x0801C30D;
+        for _ in 0..100000 {
+            cpu.run(sys, &mut mem, 1);
+            if (cpu.regs.r[15] & !1) == 0x20001000 { break; }
+            if cpu.fault.is_some() { break; }
+        }
+        let r = cpu.regs.r[0] as i32;
+        assert_eq!(r != 0, want_ne, "strcasecmp pair");
+    }
+}
+

@@ -336,10 +336,11 @@ export async function createEmulator(opts) {
             takeSpeakerSamples: () => {
                 // I2S TX capture drain (opt-in via ext_devices.speaker, like
                 // processSpeaker on the unicorn path). Returns Float32Array.
+                // Samples are signed 16-bit (same conversion as processSpeaker).
                 try {
                     const u16 = audio_take_capture();
                     const f = new Float32Array(u16.length);
-                    for (let i = 0; i < u16.length; i++) f[i] = (u16[i] / 32768);
+                    for (let i = 0; i < u16.length; i++) f[i] = (u16[i] > 0x7FFF ? u16[i] - 0x10000 : u16[i]) / 32768;
                     return f;
                 } catch { return new Float32Array(0); }
             },

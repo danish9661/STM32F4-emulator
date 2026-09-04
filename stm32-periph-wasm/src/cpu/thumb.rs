@@ -243,6 +243,8 @@ fn shift_op(v: u32, typ: u32, amt: u32, ci: u32) -> (u32, u32) {
 
 pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc: u32) -> bool {
     let o = op as u32;
+    // Snapshot predication BEFORE it_ok consumes/resets the slot.
+    cpu.it_pred = cpu.it_n > 0;
     // IT predication: a not-taken instruction is still a 2-byte NOP for PC
     // purposes (and still consumes its IT slot).
     if !it_ok(cpu) {
@@ -290,16 +292,28 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         return true;
     }
     if o & 0xFE00 == 0x1800 {
+        // ADD (register) T1 sets flags (GAS assembles `adds` here) — except
+        // predicated (in-IT), where flags are preserved (same rule as MOVS:
+        // S_Start's `addle` must not kill N before `suble`'s LE test).
         let (rd, rs, rn) = ((o & 7) as usize, ((o >> 3) & 7) as usize, ((o >> 6) & 7) as usize);
-        let r = add_flags(cpu, rr(cpu, rs, pc), rr(cpu, rn, pc), 0);
-        cpu.regs.r[rd] = r;
+        let a = rr(cpu, rs, pc);
+        let b = rr(cpu, rn, pc);
+        cpu.regs.r[rd] = a.wrapping_add(b);
+        if !cpu.it_pred {
+            let _ = add_flags(cpu, a, b, 0);
+        }
         adv(cpu, pc, 2);
         return true;
     }
     if o & 0xFE00 == 0x1A00 {
+        // SUB (register) T1 likewise (`subs`; predicated preserves).
         let (rd, rs, rn) = ((o & 7) as usize, ((o >> 3) & 7) as usize, ((o >> 6) & 7) as usize);
-        let r = sub_flags(cpu, rr(cpu, rs, pc), rr(cpu, rn, pc), 1);
-        cpu.regs.r[rd] = r;
+        let a = rr(cpu, rs, pc);
+        let b = rr(cpu, rn, pc);
+        cpu.regs.r[rd] = a.wrapping_sub(b);
+        if !cpu.it_pred {
+            let _ = sub_flags(cpu, a, b, 1);
+        }
         adv(cpu, pc, 2);
         return true;
     }
@@ -323,9 +337,14 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
     if o & 0xF800 == 0x2000 {
         let rd = ((o >> 8) & 7) as usize;
         cpu.regs.r[rd] = o & 0xFF;
-        nz(cpu, o & 0xFF);
-        // V cleared by move-immediate
-        cpu.regs.xpsr &= !0x30000000;
+        // Predicated (in-IT) T1 MOVS preserves flags (matches Unicorn and
+        // GCC's expectation: D_PageTicker's `itt lt; movlt; strlt` needs N
+        // live for strlt; clobbering it hangs the title forever). Bare movs
+        // still sets N/Z (V cleared, C preserved).
+        if !cpu.it_pred {
+            nz(cpu, o & 0xFF);
+            cpu.regs.xpsr &= !0x10000000;
+        }
         adv(cpu, pc, 2);
         return true;
     }
@@ -902,6 +921,7 @@ pub fn exec32(
 ) -> bool {
     let o1 = op1 as u32;
     let o2 = op2 as u32;
+    cpu.it_pred = cpu.it_n > 0;
     if !it_ok(cpu) {
             adv(cpu, pc, 4);
             return true;
@@ -1328,7 +1348,10 @@ pub fn exec32(
         // only c4/5 here sent strh-reg into imm8 post-indexed writeback
         // (r9 -= imm8 per store), which corrupted DOOM's collump pointer.
         if (o2 & 0xC00) == 0 {
-            if signed {
+            // Register-offset (also F9 LDRSB/LDRSH-reg, e.g. DOOM's vertex
+            // loads; same o2[11:10]==00 discriminator, GAS-verified).
+            // Signed word is unallocated (F8 word loads are unsigned).
+            if signed && size == 4 {
                 return fault(cpu, pc, op1, op2, 4);
             }
             let rm = (o2 & 0xF) as usize;
@@ -1344,9 +1367,11 @@ pub fn exec32(
                     let t = cpu.regs.r[15];
                     return branch(cpu, sys, mem, t, pc, op1, op2, 4);
                 }
-                cpu.regs.r[rt] = match size {
-                    1 => mem.read8(addr) as u32,
-                    2 => mem.read16(addr) as u32,
+                cpu.regs.r[rt] = match (size, signed) {
+                    (1, false) => mem.read8(addr) as u32,
+                    (2, false) => mem.read16(addr) as u32,
+                    (1, true) => sx(mem.read8(addr) as u32, 8),
+                    (2, true) => sx(mem.read16(addr) as u32, 16),
                     _ => mem.read32(addr),
                 };
             } else {

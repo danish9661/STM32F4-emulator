@@ -45,6 +45,12 @@ pub struct Cpu {
     pub it_mask: u8,
     pub it_n: u8,
     pub it_idx: u8,
+    /// True while executing a predicated (in-IT-block) instruction. Snapshot
+    /// at exec top before `it_ok` consumes/resets the slot: T1 MOVS/ADD-reg/
+    /// SUB-reg preserve flags when predicated (GCC/Unicorn/vanilla semantics;
+    /// e.g. D_PageTicker's `itt lt; movlt; strlt` and S_Start's `addle` need
+    /// N live for the next slot). Unpredicated behavior is unchanged.
+    pub it_pred: bool,
     /// Exception number currently executing (0 = thread mode). Mirrors IPSR.
     pub ipsr: u32,
     /// IRQ numbers of entered exceptions (for NVIC active-bit hygiene).
@@ -73,6 +79,7 @@ impl Cpu {
             it_mask: 0,
             it_n: 0,
             it_idx: 0,
+            it_pred: false,
             ipsr: 0,
             exc_stack: Vec::new(),
             it_stack: Vec::new(),
