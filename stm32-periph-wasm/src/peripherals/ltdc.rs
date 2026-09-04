@@ -35,6 +35,11 @@ pub struct Ltdc {
     scan_px: u32,
     scan_line: u32,
     scan_frame: u32,
+    /// Last INSTRUCTION_COUNT seen. Scanout is instruction-count driven
+    /// (like the timers): each tick() advances by 2px per elapsed
+    /// instruction, so batched tick_n(delta) advances correctly. A fixed
+    /// 2px-per-tick() stalls under batching (wasm steps tick_n(100k) once).
+    last_tick: u64,
 }
 
 impl Default for Ltdc {
@@ -50,6 +55,7 @@ impl Default for Ltdc {
                 lx
             },
             scan_px: 0, scan_line: 0, scan_frame: 0,
+            last_tick: crate::system::instruction_count(),
         }
     }
 }
@@ -74,29 +80,43 @@ impl Ltdc {
         if self.gcr & 1 == 0 {
             return;
         }
+        let now = crate::system::instruction_count();
+        let delta = now.wrapping_sub(self.last_tick);
+        self.last_tick = now;
+        if delta == 0 {
+            return;
+        }
         let active_w = ((self.awcr & 0xFFF) + 1) as u32;
         let hbp = ((self.bpcr & 0xFFF) + 1) as u32;
         let hspw = ((self.sscr & 0xFFF) + 1) as u32;
         let line_px = active_w + hbp + hspw + 1;
-        self.scan_px += 2; // 2 px per instruction-clock tick
-        if self.scan_px < line_px {
-            return;
-        }
-        self.scan_px = 0;
-        self.scan_line += 1;
-        if self.scan_line == (self.lipcr & 0x7FF) {
-            self.isr |= 1 << 0; // LIF
-            self.fire_interrupts(sys);
-        }
         let active_h = ((self.awcr >> 16) & 0xFFF) as u32 + 1;
         let vbp = ((self.bpcr >> 16) & 0xFFF) as u32 + 1;
         let vspw = ((self.sscr >> 16) & 0xFFF) as u32 + 1;
-        if self.scan_line >= active_h + vbp + vspw {
-            self.scan_line = 0;
-            self.scan_frame = self.scan_frame.wrapping_add(1);
-            self.isr |= 1 << 1; // F flag
-            self.fire_interrupts(sys);
+        let frame_lines = active_h + vbp + vspw;
+        // Advance 2px per elapsed instruction, carrying whole lines/frames
+        // (a 100k-instruction batch crosses many lines; the old fixed
+        // 2px-per-tick stalled under it).
+        let mut px = self.scan_px as u64 + 2 * delta.min(u64::from(u32::MAX));
+        let lip = self.lipcr & 0x7FF;
+        loop {
+            if px < u64::from(line_px) {
+                break;
+            }
+            px -= u64::from(line_px);
+            self.scan_line += 1;
+            if self.scan_line == lip {
+                self.isr |= 1 << 0; // LIF
+                self.fire_interrupts(sys);
+            }
+            if self.scan_line >= frame_lines {
+                self.scan_line = 0;
+                self.scan_frame = self.scan_frame.wrapping_add(1);
+                self.isr |= 1 << 1; // F flag
+                self.fire_interrupts(sys);
+            }
         }
+        self.scan_px = px.min(u64::from(u32::MAX)) as u32;
     }
 }
 
@@ -218,13 +238,25 @@ mod tests {
         l.ier = 0x0F;
         let sys = crate::system::test_dummy_system();
         l.gcr |= 1; // LTDCEN
-        for _ in 0..26 { l.scan_tick(&sys); }
+        for _ in 0..26 {
+            crate::system::INSTRUCTION_COUNT
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            l.scan_tick(&sys);
+        }
         assert_eq!(l.scanline(), 1);
-        for _ in 0..(26 * 9) { l.scan_tick(&sys); }
+        for _ in 0..(26 * 9) {
+            crate::system::INSTRUCTION_COUNT
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            l.scan_tick(&sys);
+        }
         assert_eq!(l.scanline(), 10);
         assert_ne!(l.isr & 1, 0, "LIF set");
         // frame end after active 20 + VBP 4 + VSPW 4 = 28 lines
-        for _ in 0..(26 * 18) { l.scan_tick(&sys); }
+        for _ in 0..(26 * 18) {
+            crate::system::INSTRUCTION_COUNT
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            l.scan_tick(&sys);
+        }
         assert_eq!(l.scanline(), 0, "scanline wraps");
         assert_ne!(l.isr & 2, 0, "F flag set");
         assert_eq!(l.frame_count(), 1);
@@ -252,7 +284,11 @@ mod tests {
         let sys = crate::system::test_dummy_system();
         assert!(!sys.p.nvic.borrow().irq_pending(LTDC_IRQ));
         l.gcr |= 1;
-        for _ in 0..(26 * 3) { l.scan_tick(&sys); }
+        for _ in 0..(26 * 3) {
+            crate::system::INSTRUCTION_COUNT
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            l.scan_tick(&sys);
+        }
         assert_ne!(l.isr & 1, 0);
         // Pending is set even without ISER (delivery is what needs enable).
         assert!(sys.p.nvic.borrow().irq_pending(LTDC_IRQ));

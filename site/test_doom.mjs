@@ -32,6 +32,7 @@ const PALETTE = ABASE + 0x110n;      // 1024 B (b,g,r,a per entry)
 
 const emu = await createEmulator({
     firmware, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes,
+    cpu_backend: 'unicorn', // pinned: the Unicorn reference run (TCI/guest-crash guard); see test_doom_wasm.mjs
     extra_ram: [
         { addr: 0xC0000000, size: 16 * 1024 * 1024 },   // .data/.bss + zone + heap
         { addr: 0xB8000000, size: 8 * 1024 * 1024 },    // WAD image

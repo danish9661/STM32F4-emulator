@@ -12,6 +12,7 @@ const firmware = new Uint8Array(readFileSync(new URL('../freertos_test/freertos_
 const emu = await createEmulator({
     firmware, bindings, unicorn: unicornFactory, svdXml,
     wasmInit: wasmBytes, enable_irqs: true, freertos: true,
+    cpu_backend: 'unicorn', // pinned: drives the Unicorn ISR pump via Module/uc regs
 });
 
 const uc = emu.uc, M = emu.Module;

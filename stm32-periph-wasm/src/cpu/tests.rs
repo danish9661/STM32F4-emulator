@@ -527,3 +527,54 @@ fn strcasecmp_pairs() {
     }
 }
 
+
+#[test]
+fn can_inject_native() {
+    let _g = lock_boot();
+    let bin = include_bytes!("../../../can_host_rx/can_host_rx.bin");
+    let sp = u32::from_le_bytes([bin[0], bin[1], bin[2], bin[3]]);
+    let pc = u32::from_le_bytes([bin[4], bin[5], bin[6], bin[7]]);
+    let sys = WasmSystem::new_svd(include_str!("../../../monox/stm32f407.svd"));
+    crate::init_svd_for_test(sys);
+    let mut cpu = Cpu::new(sp, pc | 1);
+    let mut mem = FlatMemory::new(0x100000, 0x20000);
+    mem.load(bin, 0x08000000);
+    crate::system::get_uart_output().lock().unwrap().clear();
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    for _ in 0..30 { cpu.run(sys, &mut mem, 100_000); }
+    crate::peripherals::can::can_inject(sys, 0x123, 8, b"HELLO!!!", false, false);
+    for _ in 0..30 { cpu.run(sys, &mut mem, 100_000); crate::tick_n(100_000); }
+    eprintln!("rf0r={:08x} rf1r={:08x}", mem.read32(0x40006400 + 0x1B4 - 0x40), mem.read32(0x40006400 + 0x1B4 - 0x40 + 4));
+    for f in 0..2 {
+        for sl in 0..3 {
+            let b = 0x40006400 + 0x1B0 + (f * 3 + sl) as u32 * 0x10;
+            eprintln!("fifo{f} slot{sl}: tir={:08x} tdtr={:08x} tdlr={:08x} tdhr={:08x}",
+                mem.read32(b), mem.read32(b + 8), mem.read32(b + 12), mem.read32(b + 16));
+        }
+    }
+    let rir = mem.read32(0x40006400 + 0x1B0);
+    let rdlr = mem.read32(0x40006400 + 0x1B8);
+    let rdhr = mem.read32(0x40006400 + 0x1BC);
+    eprintln!("rir={:08x} id={:03x} rdlr={:08x} rdhr={:08x}", rir, (rir >> 21) & 0x7FF, rdlr, rdhr);
+    let u = crate::system::get_uart_output().lock().unwrap().clone();
+    eprintln!("uart tail: {:?}", &u[u.len().saturating_sub(80)..]);
+}
+
+#[test]
+fn lsr_reg_zero_noop() {
+    // LSRS-reg with Rs==0 is a no-op (result + carry preserved); the
+    // immediate-#0-means-32 rule must NOT apply. DOOM's `(v >> (i*8))`
+    // nibble/byte extracts with i==0 returned 0 (patch id 0x120).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    // lsrs r2, r3, r1 (FA T2 LSR-reg: check exact encoding via GAS? use
+    // 16-bit T1 LSRS-reg: 000100_xxxx? T1 LSR-reg = 010000_0010_Rm_Rd
+    mem.write16(0x20002000, 0x408B); // lsrs r3, r1? (0100000010100011: Rm=1,Rd=3)
+    cpu.regs.r[3] = 0x12345678;
+    cpu.regs.r[1] = 0;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    assert_eq!(cpu.regs.r[3], 0x12345678);
+}

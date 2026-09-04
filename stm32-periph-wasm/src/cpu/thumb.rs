@@ -192,7 +192,14 @@ fn expand_imm(imm12: u32, carry_in: u32) -> (u32, u32) {
     }
 }
 /// Shifted-register operand. Returns (result, carry_out).
-fn shift_op(v: u32, typ: u32, amt: u32, ci: u32) -> (u32, u32) {
+/// Shifted-register operand. Returns (result, carry_out).
+/// `reg` distinguishes Rs&0xFF amounts (0 = no shift, carry preserved) from
+/// immediate #0 (LSR/ASR #0 = 32). Getting this wrong zeroes every
+/// `(x >> (i*8))` with i==0 (DOOM printed patch id 0x120 not 0x123).
+fn shift_op(v: u32, typ: u32, amt: u32, ci: u32, reg: bool) -> (u32, u32) {
+    if reg && amt == 0 {
+        return (v, ci);
+    }
     match typ {
         0 => {
             // LSL
@@ -256,7 +263,7 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         let (rd, rs) = ((o & 7) as usize, ((o >> 3) & 7) as usize);
         let im = (o >> 6) & 0x1F;
         let v = rr(cpu, rs, pc);
-        let (r, co) = shift_op(v, 0, im, carry(cpu));
+        let (r, co) = shift_op(v, 0, im, carry(cpu), false);
         cpu.regs.r[rd] = r;
         nz(cpu, r);
         cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
@@ -270,7 +277,7 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
             im = 32;
         }
         let v = rr(cpu, rs, pc);
-        let (r, co) = shift_op(v, 1, im, carry(cpu));
+        let (r, co) = shift_op(v, 1, im, carry(cpu), false);
         cpu.regs.r[rd] = r;
         nz(cpu, r);
         cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
@@ -284,7 +291,7 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
             im = 32;
         }
         let v = rr(cpu, rs, pc);
-        let (r, co) = shift_op(v, 2, im, carry(cpu));
+        let (r, co) = shift_op(v, 2, im, carry(cpu), false);
         cpu.regs.r[rd] = r;
         nz(cpu, r);
         cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
@@ -386,19 +393,19 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
                 nz(cpu, r);
             }
             2 => {
-                let (r, co) = shift_op(a, 0, b & 0xFF, carry(cpu));
+                let (r, co) = shift_op(a, 0, b & 0xFF, carry(cpu), true);
                 cpu.regs.r[rd] = r;
                 nz(cpu, r);
                 cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
             }
             3 => {
-                let (r, co) = shift_op(a, 1, b & 0xFF, carry(cpu));
+                let (r, co) = shift_op(a, 1, b & 0xFF, carry(cpu), true);
                 cpu.regs.r[rd] = r;
                 nz(cpu, r);
                 cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
             }
             4 => {
-                let (r, co) = shift_op(a, 2, b & 0xFF, carry(cpu));
+                let (r, co) = shift_op(a, 2, b & 0xFF, carry(cpu), true);
                 cpu.regs.r[rd] = r;
                 nz(cpu, r);
                 cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
@@ -412,7 +419,7 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
                 cpu.regs.r[rd] = r;
             }
             7 => {
-                let (r, co) = shift_op(a, 3, b & 0xFF, carry(cpu));
+                let (r, co) = shift_op(a, 3, b & 0xFF, carry(cpu), true);
                 cpu.regs.r[rd] = r;
                 nz(cpu, r);
                 cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
@@ -1446,7 +1453,7 @@ pub fn exec32(
                     0 => {
                         // Rd = Rn << (Rm & 0xFF): value is Rn (op1), amount Rm (op2)
                         let amt = rr(cpu, rm, pc) & 0xFF;
-                        let (r, _) = shift_op(rr(cpu, rn, pc), 0, amt, carry(cpu));
+                        let (r, _) = shift_op(rr(cpu, rn, pc), 0, amt, carry(cpu), true);
                         cpu.regs.r[rd] = r;
                         adv(cpu, pc, 4);
                         return true;
@@ -1490,7 +1497,7 @@ pub fn exec32(
                 }
                 let typ = op >> 1; // 1, 3
                 let amt = rr(cpu, rm, pc) & 0xFF;
-                let (r, _) = shift_op(rr(cpu, rn, pc), typ, amt, carry(cpu));
+                let (r, _) = shift_op(rr(cpu, rn, pc), typ, amt, carry(cpu), true);
                 cpu.regs.r[rd] = r;
                 adv(cpu, pc, 4);
                 return true;
@@ -1503,7 +1510,7 @@ pub fn exec32(
                 match (o2 >> 4) & 0xF {
                     0 => {
                         let amt = rr(cpu, rm, pc) & 0xFF;
-                        let (r, _) = shift_op(rr(cpu, rn, pc), 2, amt, carry(cpu));
+                        let (r, _) = shift_op(rr(cpu, rn, pc), 2, amt, carry(cpu), true);
                         cpu.regs.r[rd] = r;
                         adv(cpu, pc, 4);
                         return true;
@@ -1790,7 +1797,7 @@ pub fn exec32(
         let typ = (o2 >> 4) & 3;
         let amt = (((o2 >> 12) & 7) << 2) | ((o2 >> 6) & 3);
         let ci = carry(cpu);
-        let (sv, co) = shift_op(rr(cpu, rm, pc), typ, amt, ci);
+        let (sv, co) = shift_op(rr(cpu, rm, pc), typ, amt, ci, false);
         let a = rr(cpu, rn, pc);
         if op == 2 && rn == 15 {
             // MOV (register)

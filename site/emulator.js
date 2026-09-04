@@ -73,8 +73,12 @@ export async function createEmulator(opts) {
         // `stm32f4-emu --verbose` CLI flag). Capped so a chatty firmware can't
         // flood the terminal.
         verbose = false,
-        cpu_backend = 'unicorn',
+        cpu_backend = 'wasm',
     } = opts;
+
+    // Browser-safe env (Node `process` does not exist in the page; the
+    // WASM-step debug flags below would otherwise throw on every step).
+    const ENV = (typeof process !== 'undefined' && process.env) || {};
 
     // ── firmware image validation (actionable errors on load failure) ──
     if (!firmware || !(firmware instanceof Uint8Array) || firmware.length < 8) {
@@ -200,6 +204,305 @@ export async function createEmulator(opts) {
     if (svdXml) init_svd(svdXml);
     else bindings.init();
 
+    // ── shared virtual-peripheral devices (moved above the wasm branch
+    // so BOTH backends use them; the wasm step() calls processDevices()
+    // too). Register reads go through devRead32 (wread32/read32 per backend).
+    let devRead32 = null;
+    // ── virtual peripheral devices (JS hardware layer) ────────────────────
+    // Device protocols implemented in JS on top of the bus taps:
+    //  - oled:   SSD1306 128x64 over I2C (page-addressed framebuffer)
+    //  - tft:    ILI9341 240x320 RGB565 over SPI with a DC line
+    //  - buzzer: TIM PWM frequency/duty read from the modeled timer regs
+    //  - speaker:I2S TX samples drained from the model's capture FIFO
+    // Enabled per-firmware via ext_devices.{oled,tft,buzzer,speaker}.
+
+    const oled = ext_devices.oled ? {
+        w: 128, h: 64, col: 0, page: 0, cmdArg: 0, cmdLeft: 0,
+        inData: false, needControl: false,
+        fb: new Uint8Array(128 * 64), frame: 0,
+    } : null;
+    const oledI2C = ext_devices.oled ? (ext_devices.oled.i2c || 'I2C1') : null;
+    const OLED_ARG_CMDS = { 0x20: 1, 0x21: 1, 0x22: 1, 0x81: 1, 0x8D: 1, 0xA8: 1, 0xD3: 1, 0xD5: 1, 0xD9: 1, 0xDA: 1, 0xDB: 1 };
+    const processOled = () => {
+        if (!oled) return;
+        const events = i2c_take_events(oledI2C);
+        for (const ev of events) {
+            if (ev & 0x80000000) {
+                // START: the next byte is a control byte (0x00 = command
+                // group, 0x40 = data group). STOP: group ends here.
+                oled.inData = false;
+                if (ev & 0x40000000) oled.needControl = true;
+                continue;
+            }
+            const b = ev & 0xFF;
+            if (oled.needControl) {
+                oled.needControl = false;
+                if (b === 0x40) oled.inData = true;
+                continue;
+            }
+            if (oled.inData) {
+                for (let bit = 0; bit < 8; bit++) {
+                    oled.fb[(oled.page * 8 + bit) * oled.w + oled.col] = (b >> bit) & 1;
+                }
+                oled.col = (oled.col + 1) % oled.w;
+                continue;
+            }
+            if (oled.cmdLeft > 0) { oled.cmdLeft--; continue; }
+            if (b >= 0xB0 && b <= 0xB7) { oled.page = b & 0x07; continue; }
+            if (b >= 0x00 && b <= 0x0F) { oled.col = (oled.col & 0xF0) | b; continue; }
+            if (b >= 0x10 && b <= 0x1F) { oled.col = ((b & 0x0F) << 4) | (oled.col & 0x0F); continue; }
+            const n = OLED_ARG_CMDS[b];
+            if (n !== undefined) { oled.cmdLeft = n; continue; }
+            // single-byte commands (0xAE/0xAF/0x40/0xA4/0xA6/...) — no action
+        }
+        if (events.length) oled.frame++;
+    };
+
+    const tft = ext_devices.tft ? {
+        w: 240, h: 320, x0: 0, y0: 0, x1: 239, y1: 319, x: 0, y: 0,
+        mode: 'idle', cmdArg: 0, cmdLeft: 0, argBuf: [],
+        fb: new Uint8Array(240 * 320 * 2), frame: 0, pixels: 0,
+    } : null;
+    const tftSpi = ext_devices.tft ? (ext_devices.tft.spi || 'SPI2') : null;
+    const TFT_ARG_CMDS = { 0x2A: 4, 0x2B: 4, 0x36: 1, 0x3A: 1, 0xC0: 2, 0xC1: 1, 0xC5: 2, 0xC7: 1, 0xE0: 15, 0xE1: 15, 0xF6: 3, 0x35: 1, 0x53: 1 };
+    const processTft = () => {
+        if (!tft) return;
+        const events = spi_take_events(tftSpi);
+        for (const ev of events) {
+            if (ev & 0x80000000) {
+                if (ev & 0x40000000) {          // CS asserted: fresh transaction
+                    tft.mode = 'idle';
+                    tft.cmdLeft = 0;
+                }
+                continue;
+            }
+            const dc = (ev >> 29) & 1;
+            const b = ev & 0xFF;
+            if (tft.mode === 'write') {
+                tft.argBuf.push(b);
+                if (tft.argBuf.length === 2) {
+                    const px = (tft.argBuf[0] << 8) | tft.argBuf[1];
+                    const off = (tft.y * tft.w + tft.x) * 2;
+                    tft.fb[off] = tft.argBuf[0];
+                    tft.fb[off + 1] = tft.argBuf[1];
+                    tft.x++;
+                    tft.pixels++;
+                    if (tft.x > tft.x1) {
+                        tft.x = tft.x0;
+                        tft.y++;
+                        tft.frame++;
+                    }
+                    if (tft.y > tft.y1) { tft.y = tft.y0; tft.mode = 'idle'; }
+                    tft.argBuf.length = 0;
+                }
+                continue;
+            }
+            if (!dc) {                          // command byte
+                if (b === 0x2C) {
+                    tft.mode = 'write';
+                    tft.x = tft.x0;
+                    tft.y = tft.y0;
+                    tft.argBuf.length = 0;
+                    continue;
+                }
+                const n = TFT_ARG_CMDS[b];
+                if (n !== undefined) { tft.mode = 'args'; tft.cmdArg = b; tft.cmdLeft = n; tft.argBuf.length = 0; }
+                continue;
+            }
+            // data byte in args mode
+            if (tft.mode === 'args') {
+                tft.argBuf.push(b);
+                tft.cmdLeft--;
+                if (tft.cmdLeft === 0) {
+                    if (tft.cmdArg === 0x2A && tft.argBuf.length === 4) {
+                        tft.x0 = (tft.argBuf[0] << 8) | tft.argBuf[1];
+                        tft.x1 = (tft.argBuf[2] << 8) | tft.argBuf[3];
+                    } else if (tft.cmdArg === 0x2B && tft.argBuf.length === 4) {
+                        tft.y0 = (tft.argBuf[0] << 8) | tft.argBuf[1];
+                        tft.y1 = (tft.argBuf[2] << 8) | tft.argBuf[3];
+                    }
+                    tft.mode = 'idle';
+                }
+            }
+        }
+    };
+
+    const buzzer = ext_devices.buzzer ? {
+        base: ext_devices.buzzer.tim === 'TIM3' ? 0x40000400
+            : ext_devices.buzzer.tim === 'TIM4' ? 0x40000800
+            : ext_devices.buzzer.tim === 'TIM5' ? 0x40000C00
+            : 0x40000000,                        // TIM2 default
+        fclk: 84e6, freq: 0, duty: 0, change: 0,
+    } : null;
+    const processBuzzer = () => {
+        if (!buzzer || !devRead32) return;
+        const cr1 = devRead32(buzzer.base + 0x00);
+        const ccer = devRead32(buzzer.base + 0x20);
+        const psc = devRead32(buzzer.base + 0x28);
+        const arr = devRead32(buzzer.base + 0x2C);
+        const ccr = devRead32(buzzer.base + 0x34);
+        let freq = 0, duty = 0;
+        if ((cr1 & 1) && (ccer & 1) && ccr > 0 && arr > 0 && arr < 0xFFFFFF) {
+            const div = (psc + 1) * (arr + 1);
+            if (div > 0) { freq = buzzer.fclk / div; duty = ccr / (arr + 1); }
+        }
+        if (freq !== buzzer.freq || duty !== buzzer.duty) {
+            buzzer.freq = freq; buzzer.duty = duty; buzzer.change++;
+        }
+    };
+
+    const speaker = ext_devices.speaker ? { ring: [], total: 0, samples: 0 } : null;
+    const processSpeaker = () => {
+        if (!speaker) return;
+        const s = audio_take_capture();
+        if (!s || s.length === 0) return;
+        const f = new Float32Array(s.length);
+        for (let i = 0; i < s.length; i++) f[i] = (s[i] > 0x7FFF ? s[i] - 0x10000 : s[i]) / 32768;
+        speaker.ring.push(f);
+        speaker.total += f.length;
+        if (speaker.ring.length > 64) speaker.ring.shift();
+    };
+    const takeSpeakerSamples = () => {
+        if (!speaker) return new Float32Array(0);
+        let n = 0;
+        for (const f of speaker.ring) n += f.length;
+        const out = new Float32Array(n);
+        let off = 0;
+        for (const f of speaker.ring) { out.set(f, off); off += f.length; }
+        speaker.ring.length = 0;
+        return out;
+    };
+
+    // DS3231 RTC: register file behind the tap (BCD time regs 0x00-0x06,
+    // temp MSB/LSB 0x11/0x12). Read live from the modeled registers; the
+    // JS driver seeds the register file (init) and the guest writes it.
+    const rtc = ext_devices.rtc ? {
+        peri: ext_devices.rtc.i2c || 'I2C1', change: 0, time: null, temp: null,
+        lastKey: '',
+    } : null;
+    const bcd2n = (v) => ((v >> 4) * 10) + (v & 0x0F);
+    const processRtc = () => {
+        if (!rtc) return;
+        const r = (o) => i2c_regfile_get(rtc.peri, o);
+        const time = {
+            sec: bcd2n(r(0x00)), min: bcd2n(r(0x01)), hour: bcd2n(r(0x02)),
+            dow: bcd2n(r(0x03)), day: bcd2n(r(0x04)), mon: bcd2n(r(0x05)),
+            year: bcd2n(r(0x06)),
+        };
+        const tmsb = r(0x11), tlsb = r(0x12);
+        const temp = (tmsb & 0x80 ? tmsb - 0x100 : tmsb) + (tlsb >> 6) * 0.25;
+        rtc.time = time;
+        rtc.temp = temp;
+        const key = `${time.sec}:${time.min}:${time.hour}:${time.day}:${time.mon}:${time.year}:${temp}`;
+        if (key !== rtc.lastKey) { rtc.lastKey = key; rtc.change++; }
+    };
+
+    // ── Public component-attachment API (LED/Button/custom SPI/I2C
+    // devices) — built on the same GPIO shims and bus taps the oled/tft
+    // blocks above use internally, but reusable by embedder code without
+    // editing this file. See site/components.js and docs/components.md.
+    const portIndex = (port) => typeof port === 'string' ? port.toUpperCase().charCodeAt(0) - 65 : port;
+
+    // Unified pin handle: pin(port, num) (components.js / facade form) or
+    // pin('PA5') (ws-bridge form). Method set is the union both callers need.
+    const pin = (portOrName, num) => {
+        let p = portIndex(portOrName);
+        let n = num;
+        if (n === undefined && typeof portOrName === 'string') {
+            const m = /^P([A-E])([0-9]|1[0-5])$/i.exec(portOrName || '');
+            if (!m) return null;
+            p = m[1].toUpperCase().charCodeAt(0) - 65;
+            n = parseInt(m[2], 10);
+        }
+        if (p === null || p === undefined || n === undefined) return null;
+        return {
+            read: () => gpio_read_output(p, n),
+            readInput: () => gpio_read_input(p, n),
+            write: (level) => gpio_set_input(p, n, !!level),
+            setInputValue: (v) => gpio_set_input(p, n, !!v),
+            getOutputValue: () => gpio_read_output(p, n),
+            getInputValue: () => gpio_read_input(p, n),
+        };
+    };
+
+    const i2cRegfile = (peripheral) => ({
+        get: (offset) => i2c_regfile_get(peripheral, offset),
+        set: (offset, value) => i2c_regfile_set(peripheral, offset, value & 0xFF),
+    });
+
+    const setAdcChannel = (peripheral, channel, value) => adc_set_channel_value(peripheral, channel, value);
+    const clearAdcChannel = (peripheral, channel) => adc_clear_channel_value(peripheral, channel);
+
+    const gpioWatchers = [];
+    const watchPin = (port, num, callback) => {
+        const p = portIndex(port);
+        const w = { p, num, last: gpio_read_output(p, num), callback };
+        gpioWatchers.push(w);
+        return () => {
+            const i = gpioWatchers.indexOf(w);
+            if (i >= 0) gpioWatchers.splice(i, 1);
+        };
+    };
+    const processGpioWatchers = () => {
+        for (const w of gpioWatchers) {
+            const v = gpio_read_output(w.p, w.num);
+            if (v !== w.last) { w.last = v; w.callback(v); }
+        }
+    };
+
+    const processSpiDevices = () => {
+        for (const d of spiDevices) {
+            const events = spi_take_events(d.peripheral);
+            if (events.length) d.handler(events, (bytes) => spi_push_miso(d.peripheral, bytes));
+        }
+    };
+
+    const processI2cDevices = () => {
+        for (const d of i2cDevices) {
+            const events = i2c_take_events(d.peripheral);
+            if (events.length) d.handler(events, (bytes) => i2c_push_rx(d.peripheral, bytes));
+        }
+    };
+
+    // ── DCMI camera sensor (JS pixel source) ──
+    // The DCMI model consumes one fed frame with real VSYNC/LINE/FRAME/OVR
+    // semantics and drops it when fully read, so a live camera just has to
+    // keep supplying frames. Unlike the bus taps this needs no registration
+    // before init() — the frame slot is a global the model polls.
+    const camera = ext_devices.camera || null;
+    let cameraFrames = 0;
+    let cameraRunning = true;
+    const processCamera = () => {
+        if (!camera || !cameraRunning) return;
+        // `frame(n)` returns the next frame's pixels, or null/undefined to
+        // leave the current one in place (a sensor running slower than the
+        // step loop, which is the normal case).
+        const px = camera.frame ? camera.frame(cameraFrames) : camera.pixels;
+        if (!px) return;
+        dcmi_feed_frame(camera.width, camera.height,
+            px instanceof Uint8Array ? px : Uint8Array.from(px));
+        cameraFrames++;
+    };
+
+    const processFsmcDevices = () => {
+        for (const d of fsmcDevices) {
+            const events = fsmc_take_events(d.bank);
+            if (events.length) d.handler(events, (values) => fsmc_push_data(d.bank, Uint32Array.from(values)));
+        }
+    };
+
+    const processDevices = () => {
+        processOled();
+        processTft();
+        processBuzzer();
+        processSpeaker();
+        processRtc();
+        processGpioWatchers();
+        processSpiDevices();
+        processI2cDevices();
+        processFsmcDevices();
+        processCamera();
+    };
     if (cpu_backend === 'wasm' && typeof bindings.WasmCpu === 'function') {
         // Guest exception delivery (SysTick/ETH/USART IRQs, SVC/PendSV,
         // WFI sleep) runs inline in the Rust core — no ISR pump needed.
@@ -218,19 +521,37 @@ export async function createEmulator(opts) {
         // Byte-correct uc shim over the wasm memory (mirrors the Unicorn
         // uc.mem_read/mem_write used by processEth/processDma below).
         const wuc = {
-            mem_read: (a, s) => new Uint8Array(cpu.mem_read(Number(a), Number(s))),
-            mem_write: (a, d) => cpu.mem_write(Number(a), new Uint8Array(d)),
+            mem_read: (a, s) => { const aa = Number(a), ss = Number(s); wCheckMapped(aa, ss, 'read'); return new Uint8Array(cpu.mem_read(aa, ss)); },
+            mem_write: (a, d) => { const aa = Number(a), dd = new Uint8Array(d); wCheckMapped(aa, dd.length, 'write'); return cpu.mem_write(aa, dd); },
             reg_read_i32: (r) => r === 15 ? cpu.get_pc() : r === 13 ? cpu.get_sp() : cpu.get_regs()[r],
         };
         const wread32 = (a) => cpu.read32(Number(a)) >>> 0;
         const wwrite32 = (a, v) => cpu.write32(Number(a), v >>> 0);
+        devRead32 = wread32;
+        // Reject out-of-range MMIO like the Unicorn path does (the edge-case
+        // test requires mem_read/mem_write to throw, not silently drop).
+        const wMapped = (addr, len) => {
+            if (addr >= 0x08000000 && addr + len <= 0x08000000 + flash_size) return true;
+            if (addr >= 0x20000000 && addr + len <= 0x20000000 + ram_size) return true;
+            if ((addr >= 0x40000000 && addr + len <= 0xB0000000) ||
+                (addr >= 0xE0000000 && addr + len <= 0xE1000000)) return true;
+            for (const r of extra_ram) {
+                if (addr >= r.addr && addr + len <= r.addr + r.size) return true;
+            }
+            return false;
+        };
+        const wCheckMapped = (addr, len, what) => {
+            if (!wMapped(addr, len)) {
+                throw new Error(`WasmCpu: ${what} of unmapped address 0x${addr.toString(16)} (len ${len})`);
+            }
+        };
         const rxQueue = [];
         let instCount = 0;
         // Compact mirrors of processEth/processDma for the wasm memory.
         const wProcessEth = () => {
             if (eth_is_tx_poll()) {
                 const descAddr = eth_get_tx_desc_addr();
-                if (process.env.WASM_DBG) console.log(`[wasm-tx] poll desc=0x${descAddr.toString(16)}`);
+                if (ENV.WASM_DBG) console.log(`[wasm-tx] poll desc=0x${descAddr.toString(16)}`);
                 if (descAddr !== 0) {
                     const desc = wuc.mem_read(BigInt(descAddr), 8);
                     const dv = new DataView(desc.buffer, desc.byteOffset, desc.byteLength);
@@ -239,7 +560,7 @@ export async function createEmulator(opts) {
                     if (tdes0 & 0x80000000) {
                         const bufAddr = tdes1 & 0xFFFFFFFC;
                         const bufSize = tdes0 & 0x3FFF;
-                        if (process.env.WASM_DBG) console.log(`[wasm-tx] tdes0=0x${tdes0.toString(16)} buf=0x${bufAddr.toString(16)} len=${bufSize}`);
+                        if (ENV.WASM_DBG) console.log(`[wasm-tx] tdes0=0x${tdes0.toString(16)} buf=0x${bufAddr.toString(16)} len=${bufSize}`);
                         if (bufAddr !== 0 && bufSize > 0 && bufSize <= 2000) {
                             const pkt = new Uint8Array(wuc.mem_read(BigInt(bufAddr), bufSize));
                             if (onTx) onTx(pkt, { bufAddr, len: bufSize });
@@ -254,7 +575,7 @@ export async function createEmulator(opts) {
                 if (!irq_eth) wwrite32(E.irqFlag, wread32(E.irqFlag) | 1);
             }
             if (eth_is_rx_poll() && rxQueue.length > 0) {
-                if (process.env.WASM_DBG) console.log(`[wasm-rx] inject idx=${E.rxInjectIdx} q=${rxQueue.length} poll=1`);
+                if (ENV.WASM_DBG) console.log(`[wasm-rx] inject idx=${E.rxInjectIdx} q=${rxQueue.length} poll=1`);
                 const idx = E.rxInjectIdx;
                 E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
                 const descAddr = E.rxDesc + idx * 8;
@@ -296,11 +617,6 @@ export async function createEmulator(opts) {
                 dma_set_completed(stream, true);
             }
         };
-        const parsePin = (name) => {
-            const m = /^P([A-E])([0-9]|1[0-5])$/i.exec(name || '');
-            if (!m) return null;
-            return { port: m[1].toUpperCase().charCodeAt(0) - 65, pin: parseInt(m[2], 10) };
-        };
         return {
             uc: wuc,
             read32: wread32, write32: wwrite32,
@@ -327,36 +643,51 @@ export async function createEmulator(opts) {
                 try { tick_n(c); } catch {}
                 wProcessDma();
                 wProcessEth();
-                if (process.env.WASM_DBG && rxQueue.length > 0) console.log(`[wasm-step] pc=0x${(cpu.get_pc() >>> 0).toString(16)} rxpoll=${eth_is_rx_poll() ? 1 : 0} q=${rxQueue.length}`);
+                try { processDevices(); } catch {}
+                if (ENV.WASM_DBG && rxQueue.length > 0) console.log(`[wasm-step] pc=0x${(cpu.get_pc() >>> 0).toString(16)} rxpoll=${eth_is_rx_poll() ? 1 : 0} q=${rxQueue.length}`);
                 if (is_watchdog_reset_requested()) cpu.reset_cpu(sp0, pc0 | 1);
                 const faulted = cpu.fault_pc() !== 0xFFFFFFFF;
                 return { instCount, stopped: faulted, pc: cpu.get_pc() };
             },
             drainUart: () => { try { return get_uart_output(); } catch { return ''; } },
-            takeSpeakerSamples: () => {
-                // I2S TX capture drain (opt-in via ext_devices.speaker, like
-                // processSpeaker on the unicorn path). Returns Float32Array.
-                // Samples are signed 16-bit (same conversion as processSpeaker).
-                try {
-                    const u16 = audio_take_capture();
-                    const f = new Float32Array(u16.length);
-                    for (let i = 0; i < u16.length; i++) f[i] = (u16[i] > 0x7FFF ? u16[i] - 0x10000 : u16[i]) / 32768;
-                    return f;
-                } catch { return new Float32Array(0); }
-            },
             injectFrame: (frame) => { rxQueue.push(frame instanceof Uint8Array ? frame : new Uint8Array(frame)); },
-            canInject: () => {},
+            // Inject a CAN frame from an external transmitter onto the shared bus.
+            canInject: (id, dlc, data) => { can_inject(id & 0x7FF, dlc & 0xF, new Uint8Array(data)); },
+            timInjectCapture: (name, ch) => { tim_inject_capture(name, ch & 0x3); },
             sendUart: (bytes) => {
                 const arr = typeof bytes === 'string' ? [...bytes].map((c) => c.charCodeAt(0)) : [...bytes];
                 for (const b of arr) { try { uart_rx_byte(uart_addr, b & 0xFF); } catch {} }
             },
-            pin: (name) => {
-                const p = parsePin(name);
-                return {
-                    setInputValue: (v) => { if (p) { try { gpio_set_input(p.port, p.pin, !!v); } catch {} } },
-                    getOutputValue: () => { if (!p) return false; try { return gpio_read_output(p.port, p.pin); } catch { return false; } },
-                    getInputValue: () => { if (!p) return false; try { return gpio_read_input(p.port, p.pin); } catch { return false; } },
-                };
+            sendUartByte(b) { try { uart_rx_byte(uart_addr, b & 0xFF); } catch {} },
+            rxQueue,
+            pin, watchPin, i2cRegfile, setAdcChannel, clearAdcChannel,
+            takeSpeakerSamples,
+            oled: oled ? { fb: oled.fb, frame: () => oled.frame } : null,
+            tft: tft ? { fb: tft.fb, w: tft.w, h: tft.h, frame: () => tft.frame } : null,
+            buzzer: buzzer ? { get freq() { return buzzer.freq; }, get duty() { return buzzer.duty; }, get change() { return buzzer.change; } } : null,
+            rtc: rtc ? { get time() { return rtc.time; }, get temp() { return rtc.temp; }, get change() { return rtc.change; } } : null,
+            camera: {
+                feed(w, h, pixels) {
+                    dcmi_feed_frame(w, h, pixels instanceof Uint8Array ? pixels : Uint8Array.from(pixels));
+                },
+                stop() { cameraRunning = false; dcmi_clear(); },
+                start() { cameraRunning = true; },
+                get frames() { return cameraFrames; },
+            },
+            pushFsmcData(bank, values) { fsmc_push_data(bank, Uint32Array.from(values)); },
+            takeFsmcEvents(bank) { return fsmc_take_events(bank); },
+            dmaPendingCount() { return dma_get_pending_count(); },
+            dmaSetCompleted(streamIdx, success) { dma_set_completed(streamIdx, !!success); },
+            stop() { /* steps are bounded round-trips; nothing to interrupt */ },
+            loadImage(opts = {}) {
+                const flash = opts.flash || new Uint8Array(0);
+                if (flash.length) cpu.load_firmware(flash, vector_table);
+                for (const seg of opts.extraMem || []) cpu.load_firmware(seg.data, seg.addr);
+                const sp = wread32(vector_table);
+                const pc = wread32(vector_table + 4);
+                try { cpu.wake(); } catch {}
+                cpu.reset_cpu(sp, pc | 1);
+                instCount = 0;
             },
             close: () => { try { cpu.free(); } catch {} },
             reset: () => { cpu.reset_cpu(sp0, pc0 | 1); },
@@ -365,7 +696,6 @@ export async function createEmulator(opts) {
                 if (fpc === 0xFFFFFFFF) return null;
                 return { pc: fpc, op1: cpu.fault_op1(), op2: cpu.fault_op2(), len: cpu.fault_len() };
             },
-            oled: null, tft: null, buzzer: null, rtc: null,
         };
     }
 
@@ -433,6 +763,7 @@ export async function createEmulator(opts) {
         new DataView(b.buffer).setUint32(0, val >>> 0, true);
         uc.mem_write(BigInt(addr), b);
     };
+    devRead32 = read32;
 
     // Scratch buffers reused across MMIO reads.  This hook fires on EVERY
     // peripheral read, and polling firmware (ETH spinning on DMASR, USART on
@@ -772,288 +1103,6 @@ export async function createEmulator(opts) {
     else if (perInstHook || freertos) uc.hook_add(Module.HOOK_CODE, codeHook, null);
     else uc.hook_add(Module.HOOK_BLOCK, blockHookFull, null);
 
-    // ── virtual peripheral devices (JS hardware layer) ────────────────────
-    // Device protocols implemented in JS on top of the bus taps:
-    //  - oled:   SSD1306 128x64 over I2C (page-addressed framebuffer)
-    //  - tft:    ILI9341 240x320 RGB565 over SPI with a DC line
-    //  - buzzer: TIM PWM frequency/duty read from the modeled timer regs
-    //  - speaker:I2S TX samples drained from the model's capture FIFO
-    // Enabled per-firmware via ext_devices.{oled,tft,buzzer,speaker}.
-
-    const oled = ext_devices.oled ? {
-        w: 128, h: 64, col: 0, page: 0, cmdArg: 0, cmdLeft: 0,
-        inData: false, needControl: false,
-        fb: new Uint8Array(128 * 64), frame: 0,
-    } : null;
-    const oledI2C = ext_devices.oled ? (ext_devices.oled.i2c || 'I2C1') : null;
-    const OLED_ARG_CMDS = { 0x20: 1, 0x21: 1, 0x22: 1, 0x81: 1, 0x8D: 1, 0xA8: 1, 0xD3: 1, 0xD5: 1, 0xD9: 1, 0xDA: 1, 0xDB: 1 };
-    const processOled = () => {
-        if (!oled) return;
-        const events = i2c_take_events(oledI2C);
-        for (const ev of events) {
-            if (ev & 0x80000000) {
-                // START: the next byte is a control byte (0x00 = command
-                // group, 0x40 = data group). STOP: group ends here.
-                oled.inData = false;
-                if (ev & 0x40000000) oled.needControl = true;
-                continue;
-            }
-            const b = ev & 0xFF;
-            if (oled.needControl) {
-                oled.needControl = false;
-                if (b === 0x40) oled.inData = true;
-                continue;
-            }
-            if (oled.inData) {
-                for (let bit = 0; bit < 8; bit++) {
-                    oled.fb[(oled.page * 8 + bit) * oled.w + oled.col] = (b >> bit) & 1;
-                }
-                oled.col = (oled.col + 1) % oled.w;
-                continue;
-            }
-            if (oled.cmdLeft > 0) { oled.cmdLeft--; continue; }
-            if (b >= 0xB0 && b <= 0xB7) { oled.page = b & 0x07; continue; }
-            if (b >= 0x00 && b <= 0x0F) { oled.col = (oled.col & 0xF0) | b; continue; }
-            if (b >= 0x10 && b <= 0x1F) { oled.col = ((b & 0x0F) << 4) | (oled.col & 0x0F); continue; }
-            const n = OLED_ARG_CMDS[b];
-            if (n !== undefined) { oled.cmdLeft = n; continue; }
-            // single-byte commands (0xAE/0xAF/0x40/0xA4/0xA6/...) — no action
-        }
-        if (events.length) oled.frame++;
-    };
-
-    const tft = ext_devices.tft ? {
-        w: 240, h: 320, x0: 0, y0: 0, x1: 239, y1: 319, x: 0, y: 0,
-        mode: 'idle', cmdArg: 0, cmdLeft: 0, argBuf: [],
-        fb: new Uint8Array(240 * 320 * 2), frame: 0, pixels: 0,
-    } : null;
-    const tftSpi = ext_devices.tft ? (ext_devices.tft.spi || 'SPI2') : null;
-    const TFT_ARG_CMDS = { 0x2A: 4, 0x2B: 4, 0x36: 1, 0x3A: 1, 0xC0: 2, 0xC1: 1, 0xC5: 2, 0xC7: 1, 0xE0: 15, 0xE1: 15, 0xF6: 3, 0x35: 1, 0x53: 1 };
-    const processTft = () => {
-        if (!tft) return;
-        const events = spi_take_events(tftSpi);
-        for (const ev of events) {
-            if (ev & 0x80000000) {
-                if (ev & 0x40000000) {          // CS asserted: fresh transaction
-                    tft.mode = 'idle';
-                    tft.cmdLeft = 0;
-                }
-                continue;
-            }
-            const dc = (ev >> 29) & 1;
-            const b = ev & 0xFF;
-            if (tft.mode === 'write') {
-                tft.argBuf.push(b);
-                if (tft.argBuf.length === 2) {
-                    const px = (tft.argBuf[0] << 8) | tft.argBuf[1];
-                    const off = (tft.y * tft.w + tft.x) * 2;
-                    tft.fb[off] = tft.argBuf[0];
-                    tft.fb[off + 1] = tft.argBuf[1];
-                    tft.x++;
-                    tft.pixels++;
-                    if (tft.x > tft.x1) {
-                        tft.x = tft.x0;
-                        tft.y++;
-                        tft.frame++;
-                    }
-                    if (tft.y > tft.y1) { tft.y = tft.y0; tft.mode = 'idle'; }
-                    tft.argBuf.length = 0;
-                }
-                continue;
-            }
-            if (!dc) {                          // command byte
-                if (b === 0x2C) {
-                    tft.mode = 'write';
-                    tft.x = tft.x0;
-                    tft.y = tft.y0;
-                    tft.argBuf.length = 0;
-                    continue;
-                }
-                const n = TFT_ARG_CMDS[b];
-                if (n !== undefined) { tft.mode = 'args'; tft.cmdArg = b; tft.cmdLeft = n; tft.argBuf.length = 0; }
-                continue;
-            }
-            // data byte in args mode
-            if (tft.mode === 'args') {
-                tft.argBuf.push(b);
-                tft.cmdLeft--;
-                if (tft.cmdLeft === 0) {
-                    if (tft.cmdArg === 0x2A && tft.argBuf.length === 4) {
-                        tft.x0 = (tft.argBuf[0] << 8) | tft.argBuf[1];
-                        tft.x1 = (tft.argBuf[2] << 8) | tft.argBuf[3];
-                    } else if (tft.cmdArg === 0x2B && tft.argBuf.length === 4) {
-                        tft.y0 = (tft.argBuf[0] << 8) | tft.argBuf[1];
-                        tft.y1 = (tft.argBuf[2] << 8) | tft.argBuf[3];
-                    }
-                    tft.mode = 'idle';
-                }
-            }
-        }
-    };
-
-    const buzzer = ext_devices.buzzer ? {
-        base: ext_devices.buzzer.tim === 'TIM3' ? 0x40000400
-            : ext_devices.buzzer.tim === 'TIM4' ? 0x40000800
-            : ext_devices.buzzer.tim === 'TIM5' ? 0x40000C00
-            : 0x40000000,                        // TIM2 default
-        fclk: 84e6, freq: 0, duty: 0, change: 0,
-    } : null;
-    const processBuzzer = () => {
-        if (!buzzer) return;
-        const cr1 = read32(buzzer.base + 0x00);
-        const ccer = read32(buzzer.base + 0x20);
-        const psc = read32(buzzer.base + 0x28);
-        const arr = read32(buzzer.base + 0x2C);
-        const ccr = read32(buzzer.base + 0x34);
-        let freq = 0, duty = 0;
-        if ((cr1 & 1) && (ccer & 1) && ccr > 0 && arr > 0 && arr < 0xFFFFFF) {
-            const div = (psc + 1) * (arr + 1);
-            if (div > 0) { freq = buzzer.fclk / div; duty = ccr / (arr + 1); }
-        }
-        if (freq !== buzzer.freq || duty !== buzzer.duty) {
-            buzzer.freq = freq; buzzer.duty = duty; buzzer.change++;
-        }
-    };
-
-    const speaker = ext_devices.speaker ? { ring: [], total: 0, samples: 0 } : null;
-    const processSpeaker = () => {
-        if (!speaker) return;
-        const s = audio_take_capture();
-        if (!s || s.length === 0) return;
-        const f = new Float32Array(s.length);
-        for (let i = 0; i < s.length; i++) f[i] = (s[i] > 0x7FFF ? s[i] - 0x10000 : s[i]) / 32768;
-        speaker.ring.push(f);
-        speaker.total += f.length;
-        if (speaker.ring.length > 64) speaker.ring.shift();
-    };
-    const takeSpeakerSamples = () => {
-        if (!speaker) return new Float32Array(0);
-        let n = 0;
-        for (const f of speaker.ring) n += f.length;
-        const out = new Float32Array(n);
-        let off = 0;
-        for (const f of speaker.ring) { out.set(f, off); off += f.length; }
-        speaker.ring.length = 0;
-        return out;
-    };
-
-    // DS3231 RTC: register file behind the tap (BCD time regs 0x00-0x06,
-    // temp MSB/LSB 0x11/0x12). Read live from the modeled registers; the
-    // JS driver seeds the register file (init) and the guest writes it.
-    const rtc = ext_devices.rtc ? {
-        peri: ext_devices.rtc.i2c || 'I2C1', change: 0, time: null, temp: null,
-        lastKey: '',
-    } : null;
-    const bcd2n = (v) => ((v >> 4) * 10) + (v & 0x0F);
-    const processRtc = () => {
-        if (!rtc) return;
-        const r = (o) => i2c_regfile_get(rtc.peri, o);
-        const time = {
-            sec: bcd2n(r(0x00)), min: bcd2n(r(0x01)), hour: bcd2n(r(0x02)),
-            dow: bcd2n(r(0x03)), day: bcd2n(r(0x04)), mon: bcd2n(r(0x05)),
-            year: bcd2n(r(0x06)),
-        };
-        const tmsb = r(0x11), tlsb = r(0x12);
-        const temp = (tmsb & 0x80 ? tmsb - 0x100 : tmsb) + (tlsb >> 6) * 0.25;
-        rtc.time = time;
-        rtc.temp = temp;
-        const key = `${time.sec}:${time.min}:${time.hour}:${time.day}:${time.mon}:${time.year}:${temp}`;
-        if (key !== rtc.lastKey) { rtc.lastKey = key; rtc.change++; }
-    };
-
-    // ── Public component-attachment API (LED/Button/custom SPI/I2C
-    // devices) — built on the same GPIO shims and bus taps the oled/tft
-    // blocks above use internally, but reusable by embedder code without
-    // editing this file. See site/components.js and docs/components.md.
-    const portIndex = (port) => typeof port === 'string' ? port.toUpperCase().charCodeAt(0) - 65 : port;
-
-    const pin = (port, num) => {
-        const p = portIndex(port);
-        return {
-            read: () => gpio_read_output(p, num),
-            readInput: () => gpio_read_input(p, num),
-            write: (level) => gpio_set_input(p, num, !!level),
-        };
-    };
-
-    const i2cRegfile = (peripheral) => ({
-        get: (offset) => i2c_regfile_get(peripheral, offset),
-        set: (offset, value) => i2c_regfile_set(peripheral, offset, value & 0xFF),
-    });
-
-    const setAdcChannel = (peripheral, channel, value) => adc_set_channel_value(peripheral, channel, value);
-    const clearAdcChannel = (peripheral, channel) => adc_clear_channel_value(peripheral, channel);
-
-    const gpioWatchers = [];
-    const watchPin = (port, num, callback) => {
-        const p = portIndex(port);
-        const w = { p, num, last: gpio_read_output(p, num), callback };
-        gpioWatchers.push(w);
-        return () => {
-            const i = gpioWatchers.indexOf(w);
-            if (i >= 0) gpioWatchers.splice(i, 1);
-        };
-    };
-    const processGpioWatchers = () => {
-        for (const w of gpioWatchers) {
-            const v = gpio_read_output(w.p, w.num);
-            if (v !== w.last) { w.last = v; w.callback(v); }
-        }
-    };
-
-    const processSpiDevices = () => {
-        for (const d of spiDevices) {
-            const events = spi_take_events(d.peripheral);
-            if (events.length) d.handler(events, (bytes) => spi_push_miso(d.peripheral, bytes));
-        }
-    };
-
-    const processI2cDevices = () => {
-        for (const d of i2cDevices) {
-            const events = i2c_take_events(d.peripheral);
-            if (events.length) d.handler(events, (bytes) => i2c_push_rx(d.peripheral, bytes));
-        }
-    };
-
-    // ── DCMI camera sensor (JS pixel source) ──
-    // The DCMI model consumes one fed frame with real VSYNC/LINE/FRAME/OVR
-    // semantics and drops it when fully read, so a live camera just has to
-    // keep supplying frames. Unlike the bus taps this needs no registration
-    // before init() — the frame slot is a global the model polls.
-    const camera = ext_devices.camera || null;
-    let cameraFrames = 0;
-    let cameraRunning = true;
-    const processCamera = () => {
-        if (!camera || !cameraRunning) return;
-        // `frame(n)` returns the next frame's pixels, or null/undefined to
-        // leave the current one in place (a sensor running slower than the
-        // step loop, which is the normal case).
-        const px = camera.frame ? camera.frame(cameraFrames) : camera.pixels;
-        if (!px) return;
-        dcmi_feed_frame(camera.width, camera.height,
-            px instanceof Uint8Array ? px : Uint8Array.from(px));
-        cameraFrames++;
-    };
-
-    const processFsmcDevices = () => {
-        for (const d of fsmcDevices) {
-            const events = fsmc_take_events(d.bank);
-            if (events.length) d.handler(events, (values) => fsmc_push_data(d.bank, Uint32Array.from(values)));
-        }
-    };
-
-    const processDevices = () => {
-        processOled();
-        processTft();
-        processBuzzer();
-        processSpeaker();
-        processRtc();
-        processGpioWatchers();
-        processSpiDevices();
-        processI2cDevices();
-        processFsmcDevices();
-        processCamera();
-    };
 
     // ── ETH TX capture + RX injection ──
     const processEth = () => {
@@ -1140,7 +1189,7 @@ export async function createEmulator(opts) {
     const processInterrupts = () => {
         while (!stopRequested) {
             const irq = get_next_pending_interrupt();
-            if (process.env.FRDEBUG && irq > -100) console.log(`[PI] irq=${irq}`);
+            if (ENV.FRDEBUG && irq > -100) console.log(`[PI] irq=${irq}`);
             if (irq <= -100) break;
             // In MCLASS mode ARM_REG_SP (id 12) is the *current* SP (== PSP in
             // thread mode), so for the handler frame we must use the dedicated
@@ -1217,7 +1266,7 @@ export async function createEmulator(opts) {
                 curPSP = psp - 32;
                 lastEntryPsp = curPSP;
                 lastEntryRegs = threadRegs;
-                if (process.env.FRDEBUG) {
+                if (ENV.FRDEBUG) {
                     const ew = [];
                     for (let i = 0; i < 8; i++) ew.push(fdv.getUint32(i * 4, true).toString(16));
                     console.log(`[ENTRY] irq=${irq} savedAt(MSP)=${savedAt.toString(16)} realPsp=${realPsp.toString(16)} psp=${psp.toString(16)} fr@=${(psp-32).toString(16)} frame=[${ew.join(',')}] entryPC=${uc.reg_read_i32(Module.ARM_REG_PC).toString(16)}`);
@@ -1240,7 +1289,7 @@ export async function createEmulator(opts) {
                     // Normal return == our hook's emu_stop while emulating an
                     // unsupported instruction; continue the handler.
                 } catch (e) {
-                    if (process.env.FRDEBUG) console.log(`[ABORT] irq=${irq} handler_pc=0x${handler_pc.toString(16)} pc=0x${(() => { try { return uc.reg_read_i32(Module.ARM_REG_PC).toString(16); } catch { return '?'; } })()} :: ${String(e).slice(0,80)}`);
+                    if (ENV.FRDEBUG) console.log(`[ABORT] irq=${irq} handler_pc=0x${handler_pc.toString(16)} pc=0x${(() => { try { return uc.reg_read_i32(Module.ARM_REG_PC).toString(16); } catch { return '?'; } })()} :: ${String(e).slice(0,80)}`);
                     break; // handler aborted on bx lr (EXC_RETURN) — expected
                 }
             }
@@ -1268,7 +1317,7 @@ export async function createEmulator(opts) {
                     : [src.r0, src.r1, src.r2, src.r3, src.r12, src.lr, src.pc, src.xpsr][i];
                 const pframe = switched ? uc.mem_read(BigInt(sp), 32) : null;
                 const dv = switched ? new DataView(pframe.buffer, pframe.byteOffset, pframe.byteLength) : null;
-                if (process.env.FRDEBUG) {
+                if (ENV.FRDEBUG) {
                     const w = [];
                     for (let i = 0; i < 8; i++) w.push(get(i).toString(16));
                     console.log(`[RET] irq=${irq} sp=${sp.toString(16)} switched=${switched} frame=[${w.join(',')}] restPC=${get(6).toString(16)} restLR=${get(5).toString(16)} xPSR=${get(7).toString(16)}`);
@@ -1288,7 +1337,7 @@ export async function createEmulator(opts) {
                 uc.reg_write_i32(Module.ARM_REG_MSP, savedAt); // restore MSP
                 uc.reg_write_i32(Module.ARM_REG_CONTROL, 0x2); // thread mode, use PSP
                 uc.reg_write_i32(Module.ARM_REG_PSP, pendingPsp); // thread's real PSP
-                if (process.env.FRDEBUG) console.log(`[RET-WRITE] irq=${irq} pendingPsp=0x${pendingPsp.toString(16)}`);
+                if (ENV.FRDEBUG) console.log(`[RET-WRITE] irq=${irq} pendingPsp=0x${pendingPsp.toString(16)}`);
                 processDma();
                 processEth();
                 continue;
