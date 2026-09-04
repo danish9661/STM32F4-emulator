@@ -2337,8 +2337,8 @@ firmware WITHOUT Unicorn, behind the `cpu_backend: 'wasm'` opt of
 `createEmulator`. Status: boots blinky/eth_http/eth_test/can_test/hal_test/
 audio (DMA+I2S)/exti/rtc to markers, and runs eth_http DHCP→TCP→HTTP
 end-to-end (2 rounds, `npm run test:wasm`). ~20x faster than Unicorn on
-compute (~50 MIPS vs ~2-3). DOOM boots to engine init but halts in
-`R_InitTextures` (`W_CacheLumpNum: 403602`, deterministic) — open, see below.
+compute (~50 MIPS vs ~2-3). DOOM: title renders, menu → New Game → E1M1
+play + quick-save + audio, `site/test_doom_wasm.mjs` PASS (see below).
 
 ### Files
 - `stm32-periph-wasm/src/cpu/thumb.rs` (~1700 lines) — the decoder. Every
@@ -2399,13 +2399,46 @@ F3 shadowing, E9 entry mask, UXTB mask, F8 T2/imm12, EA/EB `0x0800` guard,
 FA value/amount swap, 16-bit reg-group class, STRD Rt/Rt2 swap, LDRD gate,
 CBZ `op[9]`, Bcc.W no-inversion+imm6, REV entry mask, SMLABB, LDRH-as-STRH.
 
+### Exceptions + FreeRTOS + WFI on wasm (2026-09-04, branch `feature/wasm-cpu`)
+- Inline delivery (`deliver_irqs`, set via `enable_irqs`/`irq_eth`/`freertos`/
+  `lowpower`): SVC/PendSV/SysTick entry (exact stacking, handler on MSP) +
+  `exception_return` (F9/FD; F1 faults) with PSP/MSP banking, CONTROL.SPSEL
+  coherence (return + MSR swap), post-frame PSP advance, even-stacked-PC
+  tolerance (FreeRTOS stores task entries BIC'd), per-instruction bank sync.
+- Native tests: `exception_svc_roundtrip`, `freertos_tasks_run` (SVC start,
+  PendSV switches, TIM2 ISR sem, TASK1/2 ticks); `cargo test` 55/55.
+- `site/probe_freertos_wasm.mjs`: PROBE PASS (4 TCBs; 37k batches + 3×500-inst
+  mini-samples — HIGH/TASK2 slices are ~100s of inst and fall between sparse
+  samples).
+- WFI/WFE sleeps with delivery on (RTC alarm wakes via `wake()` + `pwr_wakeup`);
+  `site/test_lowpower_wasm.mjs` (deep_sleep_demo: WOKE FROM STOP, WUF) in
+  `test:wasm`. No ISR pump needed (stacking exact, no mid-`str` hazard).
+
+### DOOM on wasm: title + menu->play (2026-09-04)
+- Decoder fixes (each silent-wrong, found by GAS + native ring traces):
+  T3 register-offset for all classes + `o2[11:10]==00` gate (strh-reg did
+  imm8 post-indexed writeback, ate collump); SDIV/SMLAL F:F select (divides
+  returned dividend; viewheight 1680); ADDW/SUBW plain imm12 (AND/fault);
+  USAT + SSAT(N-1 encoding) with Q; TBB/TBH index-by-value + unmasked base
+  (misaligned TBB read shifted table: wrong demo, no title); F9 LDRSB/H-reg
+  (P_LoadVertexes stuck); predicated T1 MOVS/ADD-reg/SUB-reg preserve flags
+  via `it_pred` snapshot (it_ok resets it_n before handlers read it; without
+  this the title never advances and E1M1 music dies) — matches Unicorn/GCC/
+  vanilla (raw-Unicorn probe: movlt preserves N, strlt takes).
+- 16-bit MOVS-imm C-preserve (`0x30000000` mask typo cleared C);
+  16-bit ADD/SUB-reg DO set flags unpredicated (GAS `adds`/`subs`; reverting
+  broke strcasecmp/title), preserve only when predicated.
+- `site/test_doom_wasm.mjs` (port of test_doom.mjs): PASS (menu, 72 frames,
+  SAVE ok slot 0, peak 0.5, 0% clip) in `test:wasm`. Speaker shim converts
+  signed (was unsigned: 57% clipped, peak 2.0).
+- Native units: tbb/sdiv(+IT taken+skipped)/usat-ssat-Q/addw-subw/t3-reg/
+  ldrsh-reg/cmp13/strcasecmp-pairs/it_pred/bare-flag counterparts;
+  `doom_title_renders` (TITLEPIC, 60k px, no fault/bad-mem).
+- Gotcha: objdump strips one leading zero (`8002004` = 0x08002004, NOT
+  0x08020004) — double-check 7-digit addresses against `nm` before trusting
+  breakpoints/pools. And `doom.bin` file offset == LMA-0x08000000 (flat).
+
 ### Open / not supported on the wasm backend
-- **DOOM full boot**: halts in `R_InitTextures` (`patch->patch`=403602,
-  garbage texture name `AASz...` — texture array/heap misread; deterministic).
-  Boots to engine init, WAD loads, 1 framebuffer change. Needs tracing of
-  `patchlookup[SHORT(mpatch->patch)]` computation.
-- Interrupts/exceptions (SysTick/ETH IRQ pump, FreeRTOS SVC/PendSV, WFI
-  sleep, BKPT): fault loudly. Polling firmware unaffected.
 - Device parsers (OLED/TFT/buzzer/RTC/DCMI JS-side) don't run on wasm path
   (taps register, but `processDevices` is unicorn-path-only).
 - `test_fsmc.mjs` failure on the unicorn path is pre-existing (fails on
