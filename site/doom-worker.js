@@ -332,11 +332,14 @@ async function boot(msg) {
     if (emu) { try { emu.close(); } catch (e) {} emu = null; }
 
     try {
-        const unicorn = await loadUnicorn();
+        // Unicorn is opt-in only (msg.cpuBackend === 'unicorn'); the default
+        // wasm backend never touches it, so skip the ~800KB fetch + compile.
+        const unicorn = msg.cpuBackend === 'unicorn' ? await loadUnicorn() : null;
         emu = await createEmulator({
             firmware: msg.firmware,
             bindings,
             unicorn,
+            cpu_backend: msg.cpuBackend || 'wasm',
             svdXml: msg.svdXml,
             extra_ram: [
                 { addr: 0xC0000000, size: 16 * 1024 * 1024 },   // .data/.bss + zone + heap
