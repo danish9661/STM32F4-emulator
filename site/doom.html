@@ -76,6 +76,9 @@
   <div id="keys"></div>
   <div class="btns">
     <label id="detailLbl" title="Low detail: renders every other column (classic low-res mode). Measured ~20% fewer guest instructions per frame (~19 -> ~24 fps)."><input type="checkbox" id="detail"> Low detail</label>
+    <span style="color:#888;font-size:12px;">CPU:</span>
+    <button id="btnCpuWasm" title="Rust Thumb-2 interpreter (default, full speed)">WASM</button>
+    <button id="btnCpuUnicorn" title="Unicorn 2.1.4 core (slower; keeps old behavior)">Unicorn</button>
     <button id="btnReset" title="Reboot the emulator and restart DOOM">Reset</button>
     <button id="btnPause" title="Pause/resume emulation">Pause</button>
     <button id="btnFull" title="Fullscreen (Esc to exit)">Fullscreen</button>

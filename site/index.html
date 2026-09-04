@@ -541,6 +541,11 @@ canvas {
     </select>
         </div>
         <button id="btnBoot" class="primary" style="width:100%;">Boot preset</button>
+        <div class="row" style="margin-top:8px;align-items:center;">
+          <span style="color:var(--dim);font-size:12px;">CPU:</span>
+          <button id="btnCpuWasm" title="Rust Thumb-2 interpreter (default, ~20x faster)">WASM</button>
+          <button id="btnCpuUnicorn" title="Unicorn 2.1.4 core (slower; keeps old behavior)">Unicorn</button>
+        </div>
         <input type="file" id="fwFile" accept=".bin,.hex,.elf,.map">
         <p id="fwHint">Load a custom firmware: <b>.bin</b> (raw flash), <b>.hex</b> (Intel HEX), <b>.elf</b> (loadable segments + symbols), or a <b>.map</b> file for the symbol table only. Firmware files boot immediately. Nothing runs until you press <b>Boot preset</b> or load a file.</p>
       </div>

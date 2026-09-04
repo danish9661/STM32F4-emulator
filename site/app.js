@@ -285,6 +285,13 @@ const setBusy = (busy) => {
 // mode (the default).
 const params = new URLSearchParams(location.search);
 const bridgeUrl = params.get('bridge');
+// CPU backend: ?cpu=unicorn opts back into the Unicorn core (for A/B
+// comparison); anything else (including absent) uses the Rust interpreter.
+let cpuBackend = params.get('cpu') === 'unicorn' ? 'unicorn' : 'wasm';
+const refreshCpuButtons = () => {
+    $('btnCpuWasm').style.fontWeight = cpuBackend === 'wasm' ? 'bold' : '';
+    $('btnCpuUnicorn').style.fontWeight = cpuBackend === 'unicorn' ? 'bold' : '';
+};
 
 const boot = async () => {
     const id = ++session;
@@ -358,6 +365,7 @@ const boot = async () => {
             firmware: fw,
             bindings,
             unicorn: MUnicorn,
+            cpu_backend: cpuBackend,
             svdXml,
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
@@ -385,7 +393,10 @@ const boot = async () => {
         if (id !== session) { emu.close(); return; }
     }
 
-    appendUart(`── booted ${image.name} ${bridgeUrl ? '(bridge ' + bridgeUrl + ')' : gw.connected ? '(gateway)' : '(netsim)'} ──\r\n`);
+    const bootTags = bridgeUrl
+        ? `(bridge ${bridgeUrl})`
+        : `(cpu: ${cpuBackend})` + (gw.connected ? ' (gateway)' : ' (netsim)');
+    appendUart(`── booted ${image.name} ${bootTags} ──\r\n`);
     window.__emu = emu;          // debug handle (CDP smoke tests)
     window.__bindings = bindings;
     running = true;
@@ -443,6 +454,9 @@ $('btnReset').addEventListener('click', () => {
 });
 $('btnClear').addEventListener('click', () => { uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0; });
 $('btnGw').addEventListener('click', connectGateway);
+$('btnCpuWasm').addEventListener('click', () => { cpuBackend = 'wasm'; refreshCpuButtons(); boot(); });
+$('btnCpuUnicorn').addEventListener('click', () => { cpuBackend = 'unicorn'; refreshCpuButtons(); boot(); });
+refreshCpuButtons();
 
 const sendRx = (term) => {
     const input = $('rxInput');

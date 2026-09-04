@@ -39,6 +39,31 @@ detailToggle.addEventListener('change', () => {
     send({ t: 'detail', lowDetail });
 });
 
+// CPU backend (?cpu=unicorn opts back into Unicorn; default is the Rust
+// interpreter). Changing it reboots, like Reset. Persisted in localStorage.
+const cpuParams = new URLSearchParams(location.search);
+let cpuBackend = cpuParams.get('cpu') === 'unicorn'
+    ? 'unicorn'
+    : (localStorage.getItem('doomCpu') || 'wasm');
+if (cpuBackend !== 'wasm' && cpuBackend !== 'unicorn') cpuBackend = 'wasm';
+const refreshCpuButtons = () => {
+    $('btnCpuWasm').style.fontWeight = cpuBackend === 'wasm' ? 'bold' : '';
+    $('btnCpuUnicorn').style.fontWeight = cpuBackend === 'unicorn' ? 'bold' : '';
+};
+$('btnCpuWasm').addEventListener('click', () => {
+    cpuBackend = 'wasm';
+    localStorage.setItem('doomCpu', 'wasm');
+    refreshCpuButtons();
+    boot();
+});
+$('btnCpuUnicorn').addEventListener('click', () => {
+    cpuBackend = 'unicorn';
+    localStorage.setItem('doomCpu', 'unicorn');
+    refreshCpuButtons();
+    boot();
+});
+refreshCpuButtons();
+
 // Doom keycodes (engine/doomkeys.h; TranslateKey is identity)
 const KEY = {
     ESC: 0x1B, ENTER: 0x0D,
@@ -367,7 +392,7 @@ async function boot() {
             setStatus('worker failed: ' + (e.message || 'load error'), 'error');
             console.error(e);
         };
-        send({ t: 'boot', svdXml, wad, firmware, lowDetail, saveMap }, [wad]);
+        send({ t: 'boot', svdXml, wad, firmware, lowDetail, saveMap, cpuBackend }, [wad]);
         send({ t: 'hidden', hidden: document.hidden });
         startTicking();
     } catch (e) {

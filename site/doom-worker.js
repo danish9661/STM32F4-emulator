@@ -339,6 +339,7 @@ async function boot(msg) {
             firmware: msg.firmware,
             bindings,
             unicorn,
+            cpu_backend: msg.cpuBackend === 'unicorn' ? 'unicorn' : 'wasm',
             cpu_backend: msg.cpuBackend || 'wasm',
             svdXml: msg.svdXml,
             extra_ram: [
