@@ -14,30 +14,18 @@
 //
 // Serve from site/ (python3 -m http.server 8123 --directory site) — the page
 // fetches the WAD + SVD + wasm at runtime (file:// won't work).
-import { FIRMWARES } from './firmware.js';
+import { FIRMWARES } from './firmware.js?v=2';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
 const ctx = canvas.getContext('2d');
 const img = ctx.createImageData(320, 200);
 
-// Low-detail render (guest ABI slot, 0=high 1=low): the engine renders every
-// other column -> measured 1145k -> 918k guest instructions per frame (-20%),
-// i.e. ~19 -> ~24 fps. Default ON for speed; toggled from the topbar.
-//
-// This MUST go through the ABI slot: the guest applies it via the engine's
-// R_SetViewSize()+R_ExecuteSetViewSize(), the only place detailshift and the
-// colfunc/spanfunc render pointers are recomputed. Writing the engine's
-// `detailLevel` global directly is a NO-OP — measured bit-identical
-// inst/frame with detailshift stuck at 0.
-let lowDetail = localStorage.getItem('doomDetail') !== '0';
-const detailToggle = $('detail');
-detailToggle.checked = lowDetail;
-detailToggle.addEventListener('change', () => {
-    lowDetail = detailToggle.checked;
-    localStorage.setItem('doomDetail', lowDetail ? '1' : '0');
-    send({ t: 'detail', lowDetail });
-});
+// Detail: always high (full 320 columns). The old topbar low-detail toggle
+// was removed — at ~65 MIPS the wasm core holds 35/35 fps at high detail,
+// and the guest applies detail only through the ABI slot
+// (R_SetViewSize()+R_ExecuteSetViewSize(); writing the engine's
+// `detailLevel` global directly is a NO-OP).
 
 // CPU backend (?cpu=unicorn opts back into Unicorn; default is the Rust
 // interpreter). Changing it reboots, like Reset. Persisted in localStorage.
@@ -98,11 +86,62 @@ const held = new Set();          // doom keycodes currently held (for the label)
 // through window.__doom instead.
 window.__audioTotal = 0;
 window.__audioNode = null;
+window.__audioState = () => (audioCtx ? audioCtx.state : 'none');
+// Event journal for bug reports: boot/audio/save milestones with timestamps.
+// Open devtools (F12) and run __doomLog() — paste it with any issue.
+const dbgLog = [];
+function dlog(kind, msg) {
+    dbgLog.push({ t: new Date().toISOString().slice(11, 23), kind, msg });
+    if (dbgLog.length > 80) dbgLog.shift();
+}
+window.__doomLog = () => dbgLog.slice();
+// Pacing telemetry for speed diagnosis: per 0.5s window, how bursts ended
+// (clamp = backlog dropped, target = stopped at wall lock, budget = ran
+// the full step budget, wall = hit the ms budget), the biggest single-burst
+// frame jump, and whether the page believed itself hidden.
+window.__pace = () => window.__lastPace || null;
+// Build stamp: type __doomVer in the console — if it doesn't print the
+// number below, the tab runs a cached copy (hard-refresh: Ctrl+Shift+R).
+window.__doomVer = 42;
+// Keys pressed before the worker boots would be eaten (nothing listens
+// yet) — the old "wait before touching anything" ritual. Instead they queue
+// here and flush on 'booted', so press ahead: the game catches up. The
+// worker gates each keyUP on guest consumption of its DOWN, so a fast
+// pre-boot tap still delivers exactly one (D,U) pair.
+const prebootQueue = [];
+function sendKey(code, pressed) {
+    if (!booted || !worker) {
+        if (prebootQueue.length < 40) prebootQueue.push({ code, pressed });
+        return;
+    }
+    send({ t: 'key', code, pressed });
+}
+function flushPrebootKeys() {
+    if (!prebootQueue.length) return;
+    const q = prebootQueue.splice(0, prebootQueue.length);
+    q.forEach((k, i) => setTimeout(() => sendKey(k.code, k.pressed), 80 * i));
+}
+// Debug/test reads of guest memory (state-gated driving for smokes).
+let readSeq = 0;
+const readPending = new Map();
 window.__doom = {
     get booted() { return booted; },
     get paused() { return paused; },
     get stats() { return lastStats; },
-    key(code, pressed) { send({ t: 'key', code, pressed }); },
+    key(code, pressed) { sendKey(code, pressed); },
+    read(addrs) {
+        return new Promise((resolve) => {
+            const id = ++readSeq;
+            readPending.set(id, resolve);
+            send({ t: 'read', id, addrs });
+            setTimeout(() => {
+                if (readPending.has(id)) {
+                    readPending.delete(id);
+                    resolve([]);
+                }
+            }, 3000);
+        });
+    },
     send: (m) => send(m),
     // Test hooks: stopping the ticks is how a hidden tab looks to the
     // worker, and is the only way to exercise its self-timed fallback
@@ -122,11 +161,22 @@ function send(msg, transfer) {
 // cadence instead of paying setTimeout's 4ms nested clamp inside the worker.
 // When this stops firing (hidden tab), the worker notices and self-drives.
 let ticking = false;
+// Coalesced presentation: the worker can post several frames per screen
+// refresh under jank (devtools open, loaded box). Blitting every one costs
+// a 256KB copy+upload each and shows frames the eye never separates —
+// instead keep only the newest and paint it here, once per rAF. Stale
+// frames are dropped unseen (their buffers just get GC'd).
+let pendingFrame = null;
 function startTicking() {
     if (ticking) return;
     ticking = true;
     const tick = () => {
         if (!worker || !ticking) { ticking = false; return; }
+        if (pendingFrame) {
+            img.data.set(pendingFrame);
+            ctx.putImageData(img, 0, 0);
+            pendingFrame = null;
+        }
         worker.postMessage({ t: 'tick' });
         requestAnimationFrame(tick);
     };
@@ -143,9 +193,23 @@ function stopTicking() { ticking = false; }
 let audioCtx = null, audioNode = null;
 
 async function initAudio() {
-    if (audioCtx) return;
+    // Resume a context that was created pre-gesture (autoplay policy left it
+    // suspended): without this, a boot-time init would stay silent forever
+    // because every later call early-returns on the non-null audioCtx.
+    if (audioCtx) {
+        if (audioCtx.state === 'suspended') {
+            try { await audioCtx.resume(); dlog('audio', 'resumed on gesture'); } catch (e) {}
+        }
+        return;
+    }
     try {
+        dlog('audio', 'creating context');
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        audioCtx.onstatechange = () => {
+            // The context can be nulled by initAudio's catch after a fatal
+            // setup failure; the (dead) handler may still fire — guard it.
+            if (audioCtx) dlog('audio', 'statechange -> ' + audioCtx.state);
+        };
         // NOTE: bump this ?v= whenever audio-worklet.js changes — the module
         // is cached hard, and a stale worklet is indistinguishable from an
         // audio bug (v20 = dynamic rate control, replacing silence+flush).
@@ -153,15 +217,23 @@ async function initAudio() {
         audioNode = new AudioWorkletNode(audioCtx, 'doom-audio');
         window.__audioNode = audioNode;
         audioNode.connect(audioCtx.destination);
+        dlog('audio', 'worklet ready, state=' + audioCtx.state);
         audioNode.port.onmessage = (e) => {
             // starved = output samples the worklet could not fill (the
             // audible crackle); rate = playback speed vs correct pitch.
-            if (e.data && e.data.stat) window.__audioStat = e.data;
+            if (e.data && e.data.stat) {
+                window.__audioStat = e.data;
+                if (e.data.stat.starved > (window.__audioStarved || 0) + 5000) {
+                    dlog('audio', 'starving, total=' + e.data.stat.starved);
+                }
+                window.__audioStarved = e.data.stat.starved;
+            }
             // 'need' (queue running low) needs no action now: the worker
             // steps on its own timer and is not throttled by this thread's
             // rAF, so there is no starvation path left for it to rescue.
         };
     } catch (e) {
+        dlog('audio', 'FAILED: ' + (e && e.message || e));
         audioCtx = null;
         audioNode = null;
     }
@@ -196,7 +268,7 @@ document.addEventListener('keydown', (e) => {
     if (!held.has(code)) {
         held.add(code);
         updateKeysLabel();
-        send({ t: 'key', code, pressed: true });
+        sendKey(code, true);
     }
 });
 document.addEventListener('keyup', (e) => {
@@ -208,23 +280,29 @@ document.addEventListener('keyup', (e) => {
     e.preventDefault();
     if (held.delete(code)) {
         updateKeysLabel();
-        send({ t: 'key', code, pressed: false });
+        sendKey(code, false);
     }
 });
 canvas.addEventListener('mousedown', () => {
     if (document.pointerLockElement !== canvas) {
-        canvas.requestPointerLock();
+        // Newer Chrome returns a promise that rejects with SecurityError if
+        // the user exited the lock moments ago — swallow it, the game works
+        // unlocked and the next click retries.
+        try {
+            const r = canvas.requestPointerLock();
+            if (r && typeof r.catch === 'function') r.catch(() => {});
+        } catch (e) {}
         return;
     }
     initAudio();
     held.add(KEY.FIRE);
     updateKeysLabel();
-    send({ t: 'key', code: KEY.FIRE, pressed: true });
+    sendKey(KEY.FIRE, true);
 });
 document.addEventListener('mouseup', () => {
     if (held.delete(KEY.FIRE)) {
         updateKeysLabel();
-        send({ t: 'key', code: KEY.FIRE, pressed: false });
+        sendKey(KEY.FIRE, false);
     }
 });
 document.addEventListener('visibilitychange', () => {
@@ -289,8 +367,7 @@ function onWorkerMessage(e) {
     const m = e.data;
     switch (m.t) {
         case 'frame':
-            img.data.set(m.rgba);
-            ctx.putImageData(img, 0, 0);
+            pendingFrame = m.rgba;   // painted by the rAF tick (see above)
             break;
         case 'uart':
             appendUart(m.text);
@@ -305,6 +382,8 @@ function onWorkerMessage(e) {
             break;
         case 'booted':
             booted = true;
+            dlog('boot', 'worker booted, WAD loaded');
+            flushPrebootKeys();
             fitCanvas();
             break;
         case 'stats':
@@ -320,13 +399,24 @@ function onWorkerMessage(e) {
             } else {
                 setStatus('running');
             }
+            // Audio state transitions, for the journal (proves audibility path).
+            const aState = audioCtx ? audioCtx.state : 'none';
+            if (aState !== window.__audioLastState) {
+                dlog('audio', 'state -> ' + aState);
+                window.__audioLastState = aState;
+            }
             // Audio health: playback rate vs correct pitch (1.00 = in tune).
             // Below 1.0 means the guest is producing audio slower than
             // realtime and the worklet is stretching to stay continuous.
             const a = window.__audioStat;
             const audioTxt = a && a.rate ? ` · audio ${a.rate.toFixed(2)}x` : '';
+            // Pacing telemetry from the worker (clamp firings, burst exit
+            // causes, max single-burst frame jump, hidden flag). Read it
+            // with __pace() when diagnosing speed issues.
+            if (m.pace) window.__lastPace = m.pace;
+            const tpsTxt = (typeof m.tps === 'number') ? ` · ${m.tps.toFixed(0)}t/s` : '';
             $('stats').textContent =
-                `MIPS: ${m.mips.toFixed(1)} · FPS: ${m.fps.toFixed(0)}/35 · drawn ${m.drawn.toFixed(0)}${audioTxt} · ${m.instM.toFixed(1)}M inst`;
+                `MIPS: ${m.mips.toFixed(1)} · FPS: ${m.fps.toFixed(0)}/35${tpsTxt} · drawn ${m.drawn.toFixed(0)}${audioTxt} · ${m.instM.toFixed(1)}M inst`;
             break;
         case 'save':
             try {
@@ -335,7 +425,8 @@ function onWorkerMessage(e) {
                     s += String.fromCharCode.apply(null, m.bytes.subarray(i, i + 0x8000));
                 }
                 localStorage.setItem('doom-save-' + m.slot, btoa(s));
-            } catch (err) { /* quota */ }
+                dlog('save', 'slot ' + m.slot + ' stored, ' + m.bytes.length + ' bytes');
+            } catch (err) { dlog('save', 'FAILED slot ' + m.slot); }
             break;
         case 'loadReq': {
             // The guest busy-waits on this, so answer immediately.
@@ -352,14 +443,27 @@ function onWorkerMessage(e) {
         }
         case 'error':
             booted = false;
+            dlog('error', m.message);
             console.error('doom worker:', m.message);
+            break;
+        case 'readResult':
+            if (readPending.has(m.id)) {
+                readPending.get(m.id)(m.vals || []);
+                readPending.delete(m.id);
+            }
             break;
     }
 }
 
 async function boot() {
     setStatus('booting…');
+    dlog('boot', 'starting, cpu=' + cpuBackend);
+    prebootQueue.length = 0;   // stale taps from a previous instance die here
     fitCanvas();
+    // Start audio at boot so scripted/headed runs (and watch-only sessions)
+    // are audible without waiting for the first keypress; with no gesture yet
+    // the context stays suspended until a keydown/mousedown resumes it.
+    initAudio();
     paused = false;
     booted = false;
     $('btnPause').textContent = 'Pause';
@@ -386,13 +490,13 @@ async function boot() {
 
         // Bump ?v= on every doom-worker.js edit — worker scripts cache as hard
         // as module scripts, and a stale copy looks exactly like a bug.
-        worker = new Worker('doom-worker.js?v=9', { type: 'module' });
+        worker = new Worker('doom-worker.js?v=16', { type: 'module' });
         worker.onmessage = onWorkerMessage;
         worker.onerror = (e) => {
             setStatus('worker failed: ' + (e.message || 'load error'), 'error');
             console.error(e);
         };
-        send({ t: 'boot', svdXml, wad, firmware, lowDetail, saveMap, cpuBackend }, [wad]);
+        send({ t: 'boot', svdXml, wad, firmware, lowDetail: false, saveMap, cpuBackend }, [wad]);
         send({ t: 'hidden', hidden: document.hidden });
         startTicking();
     } catch (e) {

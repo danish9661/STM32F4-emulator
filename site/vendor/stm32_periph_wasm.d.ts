@@ -46,6 +46,12 @@ export class WasmCpu {
      */
     sleeping(): boolean;
     step(budget: number): number;
+    take_trace(): Uint32Array;
+    /**
+     * PC-trace control for differential debugging (see cpu::trace_*).
+     */
+    trace_start(): void;
+    trace_stop(): void;
     wake(): void;
     write32(addr: number, v: number): void;
     write8(addr: number, v: number): void;
@@ -495,6 +501,9 @@ export interface InitOutput {
     readonly wasmcpu_set_deliver_irqs: (a: number, b: number) => void;
     readonly wasmcpu_sleeping: (a: number) => number;
     readonly wasmcpu_step: (a: number, b: number) => number;
+    readonly wasmcpu_take_trace: (a: number, b: number) => void;
+    readonly wasmcpu_trace_start: (a: number) => void;
+    readonly wasmcpu_trace_stop: (a: number) => void;
     readonly wasmcpu_wake: (a: number) => void;
     readonly wasmcpu_write32: (a: number, b: number, c: number) => void;
     readonly wasmcpu_write8: (a: number, b: number, c: number) => void;

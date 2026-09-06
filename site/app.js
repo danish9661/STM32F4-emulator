@@ -5,7 +5,7 @@
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
-import { FIRMWARES } from './firmware.js';
+import { FIRMWARES } from './firmware.js?v=2';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
 
@@ -48,7 +48,7 @@ const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehen
 // Interrupt-driven ETH firmware: the guest ETH_IRQHandler (run by the pump)
 // reads DMASR and scans rx_desc itself, so the driver must not write the
 // SRAM irq_flag/rx_frame_idx globals (irq_eth mode in emulator.js).
-const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test']);
+const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test', 'eth_dhcp', 'eth_test']);
 
 // Firmwares that exercise the WFI/STOP low-power path: the emulator halts the
 // core on WFI and advances the virtual RTC until an alarm/interrupt wakes it.
@@ -85,6 +85,24 @@ const DEVICE_FIRMWARES = {
     rtc_test: { rtc: { i2c: 'I2C1', addr: 0x68, init: RTC_INIT } },
     qspi_test: { qspi: [{ peripheral: 'QUADSPI', size: 256 }] },
 };
+
+// audio_test needs the same 64-sample PCM16 WAV the node harness
+// (site/test_audio.mjs) loads via audio_load_wav — without it the I2S DMA
+// reads fall back to generated audio and the firmware's checksum FAILs.
+function makeAudioTestWav() {
+    const N = 64, dataLen = N * 2;
+    const w = new Uint8Array(44 + dataLen);
+    const dv = new DataView(w.buffer);
+    const wstr = (o, s) => { for (let i = 0; i < s.length; i++) w[o + i] = s.charCodeAt(i); };
+    wstr(0, 'RIFF'); dv.setUint32(4, 36 + dataLen, true); wstr(8, 'WAVE');
+    wstr(12, 'fmt '); dv.setUint32(16, 16, true);
+    dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+    dv.setUint32(24, 44100, true); dv.setUint32(28, 44100 * 2, true);
+    dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+    wstr(36, 'data'); dv.setUint32(40, dataLen, true);
+    for (let i = 0; i < N; i++) dv.setInt16(44 + i * 2, (i * 300 + 7) & 0xFFFF, true);
+    return w;
+}
 
 // ── status + UART ──────────────────────────────────────────────────────────
 const setStatus = (text, cls) => {
@@ -391,6 +409,10 @@ const boot = async () => {
             },
         });
         if (id !== session) { emu.close(); return; }
+        // Seed the model's audio source for audio_test (see makeAudioTestWav).
+        if (image.name === 'audio_test' && bindings.audio_load_wav) {
+            try { bindings.audio_load_wav(makeAudioTestWav()); } catch (e) {}
+        }
     }
 
     const bootTags = bridgeUrl

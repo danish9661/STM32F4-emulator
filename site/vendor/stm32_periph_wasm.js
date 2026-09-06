@@ -198,6 +198,31 @@ export class WasmCpu {
         const ret = wasm.wasmcpu_step(this.__wbg_ptr, budget);
         return ret >>> 0;
     }
+    /**
+     * @returns {Uint32Array}
+     */
+    take_trace() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.wasmcpu_take_trace(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v1 = getArrayU32FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export(r0, r1 * 4, 4);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * PC-trace control for differential debugging (see cpu::trace_*).
+     */
+    trace_start() {
+        wasm.wasmcpu_trace_start(this.__wbg_ptr);
+    }
+    trace_stop() {
+        wasm.wasmcpu_trace_stop(this.__wbg_ptr);
+    }
     wake() {
         wasm.wasmcpu_wake(this.__wbg_ptr);
     }

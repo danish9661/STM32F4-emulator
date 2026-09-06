@@ -96,7 +96,7 @@ export async function createEmulator(opts) {
         dma_periph_read, dma_periph_write,
         is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, qspi_register_flash, init_svd,
         eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll,
-        eth_is_rx_poll, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
+        eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
         get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
         spi_tap, spi_take_events, spi_push_miso,
@@ -116,6 +116,40 @@ export async function createEmulator(opts) {
         rxInjectIdx: 0,                                  // desc index to inject at
         rxDescs: 4,                                      // number of RX descriptors
         ...eth,
+    };
+
+    // IRQ-mode RX delivery: the guest owns its descriptor layout, so walk its
+    // RX list from the model's poll address (DMARDLAR base) for the first
+    // DMA-owned descriptor and deliver the frame there. Falls back to the
+    // static E layout when no owned descriptor is found. The guest ISR scans
+    // the list itself, so no idx/flag bookkeeping is needed.
+    const injectRxIrq = (memWrite, memRead32, frame, len) => {
+        let listBase = 0;
+        try { listBase = eth_get_rx_desc_addr() >>> 0; } catch {}
+        if (listBase !== 0) {
+            for (let i = 0; i < 8; i++) {
+                let rdes0 = 0, rdes1 = 0;
+                try {
+                    rdes0 = memRead32(listBase + i * 8) >>> 0;
+                    rdes1 = memRead32(listBase + i * 8 + 4) >>> 0;
+                } catch { break; }
+                if ((rdes0 & 0x80000000) && rdes1 !== 0) {
+                    try {
+                        memWrite(BigInt(rdes1), frame.subarray(0, len));
+                        const wb = new Uint8Array(4);
+                        new DataView(wb.buffer).setUint32(0, len << 16, true);
+                        memWrite(BigInt(listBase + i * 8), wb);
+                        return;
+                    } catch { return; }
+                }
+            }
+        }
+        const idx = E.rxInjectIdx;
+        E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
+        memWrite(BigInt(E.rxBuf + idx * E.rxStride), frame.subarray(0, len));
+        const wb = new Uint8Array(4);
+        new DataView(wb.buffer).setUint32(0, len << 16, true);
+        memWrite(BigInt(E.rxDesc + idx * 8), wb);
     };
 
     // NOTE: the Unicorn Module is created lazily below (unicorn backend
@@ -576,20 +610,25 @@ export async function createEmulator(opts) {
             }
             if (eth_is_rx_poll() && rxQueue.length > 0) {
                 if (ENV.WASM_DBG) console.log(`[wasm-rx] inject idx=${E.rxInjectIdx} q=${rxQueue.length} poll=1`);
-                const idx = E.rxInjectIdx;
-                E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
-                const descAddr = E.rxDesc + idx * 8;
-                const bufAddr = E.rxBuf + idx * E.rxStride;
                 const frame = rxQueue.shift();
                 const len = Math.min(frame.length, E.rxStride);
-                wuc.mem_write(BigInt(bufAddr), frame.subarray(0, len));
-                const wb = new Uint8Array(4);
-                new DataView(wb.buffer).setUint32(0, len << 16, true);
-                wuc.mem_write(BigInt(descAddr), wb);
                 if (!irq_eth) {
+                    const idx = E.rxInjectIdx;
+                    E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
+                    const descAddr = E.rxDesc + idx * 8;
+                    const bufAddr = E.rxBuf + idx * E.rxStride;
+                    wuc.mem_write(BigInt(bufAddr), frame.subarray(0, len));
+                    const wb = new Uint8Array(4);
+                    new DataView(wb.buffer).setUint32(0, len << 16, true);
+                    wuc.mem_write(BigInt(descAddr), wb);
                     wwrite32(E.rxFrameIdx, idx);
                     wwrite32(E.rxFrameLen, len);
                     wwrite32(E.irqFlag, wread32(E.irqFlag) | 2);
+                } else {
+                    // IRQ-driven firmware owns its descriptor layout: walk the
+                    // guest RX list from the model's poll address for the first
+                    // DMA-owned descriptor and deliver there (its ISR scans).
+                    injectRxIrq((a, d) => wuc.mem_write(a, d), wread32, frame, len);
                 }
                 eth_clear_rx_poll();
                 eth_rx_done();
@@ -662,6 +701,9 @@ export async function createEmulator(opts) {
             rxQueue,
             pin, watchPin, i2cRegfile, setAdcChannel, clearAdcChannel,
             takeSpeakerSamples,
+            traceStart: () => { try { cpu.trace_start(); } catch {} },
+            traceStop: () => { try { cpu.trace_stop(); } catch {} },
+            takeTrace: () => { try { return cpu.take_trace(); } catch { return []; } },
             oled: oled ? { fb: oled.fb, frame: () => oled.frame } : null,
             tft: tft ? { fb: tft.fb, w: tft.w, h: tft.h, frame: () => tft.frame } : null,
             buzzer: buzzer ? { get freq() { return buzzer.freq; }, get duty() { return buzzer.duty; }, get change() { return buzzer.change; } } : null,
@@ -1131,24 +1173,26 @@ export async function createEmulator(opts) {
         }
 
         if (eth_is_rx_poll() && rxQueue.length > 0) {
-            const idx = E.rxInjectIdx;
-            E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
-            const descAddr = E.rxDesc + idx * 8;
-            const bufAddr = E.rxBuf + idx * E.rxStride;
             const frame = rxQueue.shift();
             const len = Math.min(frame.length, E.rxStride);
-            uc.mem_write(BigInt(bufAddr), frame.subarray(0, len));
-            const wb = new Uint8Array(4);
-            // Real F407: RDES0 high word = frame length [29:16], OWN cleared
-            // for CPU ownership; FS/LS live in the low status word (set by
-            // the DMA, not the driver). Writing FS/LS marker bits at 28/27
-            // would corrupt the length read by the guest ISR.
-            new DataView(wb.buffer).setUint32(0, len << 16, true);
-            uc.mem_write(BigInt(descAddr), wb);
             if (!irq_eth) {
+                const idx = E.rxInjectIdx;
+                E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
+                const descAddr = E.rxDesc + idx * 8;
+                const bufAddr = E.rxBuf + idx * E.rxStride;
+                uc.mem_write(BigInt(bufAddr), frame.subarray(0, len));
+                const wb = new Uint8Array(4);
+                // Real F407: RDES0 high word = frame length [29:16], OWN cleared
+                // for CPU ownership; FS/LS live in the low status word (set by
+                // the DMA, not the driver). Writing FS/LS marker bits at 28/27
+                // would corrupt the length read by the guest ISR.
+                new DataView(wb.buffer).setUint32(0, len << 16, true);
+                uc.mem_write(BigInt(descAddr), wb);
                 write32(E.rxFrameIdx, idx);
                 write32(E.rxFrameLen, len);
                 write32(E.irqFlag, read32(E.irqFlag) | 2);
+            } else {
+                injectRxIrq((a, d) => uc.mem_write(a, d), read32, frame, len);
             }
             eth_clear_rx_poll();
             eth_rx_done();

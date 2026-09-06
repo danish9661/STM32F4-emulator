@@ -122,25 +122,23 @@ export function createNetSim({ log = () => {} } = {}) {
             return replies;
         }
 
-        if (et === 0x0806) { // ARP: answer requests for the server IP
+        if (et === 0x0806) { // ARP: answer requests (any target IP — canned sim
+            // claims the requested address with SERVER_MAC so guest ARP never stalls)
             const a = 14;
             if (frame[a] === 0 && frame[a + 1] === 1 && frame[a + 6] === 0 && frame[a + 7] === 1) {
-                const tip = [frame[a + 24], frame[a + 25], frame[a + 26], frame[a + 27]];
-                if (tip[0] === SERVER_IP[0] && tip[1] === SERVER_IP[1] && tip[2] === SERVER_IP[2] && tip[3] === SERVER_IP[3]) {
-                    const r = new Uint8Array(42);
-                    r.set(frame.subarray(6, 12), 0);  // dst = requester MAC
-                    r.set(SERVER_MAC, 6);             // src = our MAC
-                    r[12] = 0x08; r[13] = 0x06;
-                    const p = 14;
-                    r[p] = 0; r[p + 1] = 1; r[p + 2] = 0x08; r[p + 3] = 0;
-                    r[p + 4] = 6; r[p + 5] = 4;
-                    r[p + 6] = 0; r[p + 7] = 2;        // reply
-                    r.set(SERVER_MAC, p + 8);          // sha
-                    r.set(SERVER_IP, p + 14);          // spa
-                    r.set(frame.subarray(p + 8, p + 14), p + 18); // tha = requester
-                    r.set(frame.subarray(p + 14, p + 18), p + 24); // tpa
-                    replies.push(r);
-                }
+                const r = new Uint8Array(42);
+                r.set(frame.subarray(6, 12), 0);  // dst = requester MAC
+                r.set(SERVER_MAC, 6);             // src = our MAC
+                r[12] = 0x08; r[13] = 0x06;
+                const p = 14;
+                r[p] = 0; r[p + 1] = 1; r[p + 2] = 0x08; r[p + 3] = 0;
+                r[p + 4] = 6; r[p + 5] = 4;
+                r[p + 6] = 0; r[p + 7] = 2;        // reply
+                r.set(SERVER_MAC, p + 8);          // sha
+                r.set(frame.subarray(a + 24, a + 28), p + 14); // spa = requested IP
+                r.set(frame.subarray(p + 8, p + 14), p + 18); // tha = requester
+                r.set(frame.subarray(p + 14, p + 18), p + 24); // tpa
+                replies.push(r);
             }
             return replies;
         }

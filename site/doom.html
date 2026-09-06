@@ -33,7 +33,6 @@
   #keys { color: #aaf; font-size: 12px; white-space: nowrap; flex: 1 1 0; min-width: 0;
           text-align: right; overflow: hidden; text-overflow: ellipsis; }
   .btns { display: flex; gap: 6px; align-items: center; flex: none; }
-  #detailLbl { font-size: 12px; color: #aaa; user-select: none; white-space: nowrap; }
   button { background: #222; color: #ccc; border: 1px solid #444; padding: 3px 10px;
            cursor: pointer; font: 12px monospace; border-radius: 3px; }
   button:hover { background: #333; border-color: #666; }
@@ -53,7 +52,6 @@
     content: '✓'; position: absolute; top: -1px; left: 1px;
     color: #8c8; font-size: 11px; line-height: 1;
   }
-  label[for="detail"], #detailLbl { cursor: pointer; }
   #screenWrap { flex: 1; min-height: 0; display: flex; justify-content: center; align-items: center;
                 background: #000; position: relative; }
   canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000;
@@ -75,7 +73,6 @@
   <div id="stats">MIPS: — · FPS: —</div>
   <div id="keys"></div>
   <div class="btns">
-    <label id="detailLbl" title="Low detail: renders every other column (classic low-res mode). Measured ~20% fewer guest instructions per frame (~19 -> ~24 fps)."><input type="checkbox" id="detail"> Low detail</label>
     <span style="color:#888;font-size:12px;">CPU:</span>
     <button id="btnCpuWasm" title="Rust Thumb-2 interpreter (default, full speed)">WASM</button>
     <button id="btnCpuUnicorn" title="Unicorn 2.1.4 core (slower; keeps old behavior)">Unicorn</button>
@@ -111,6 +108,6 @@
 <!-- Bump ?v= on every doom.js edit: the module is cached hard, and a stale
      copy looks exactly like the bug you thought you just fixed. The worker
      has its own ?v= inside doom.js. -->
-<script type="module" src="doom.js?v=26"></script>
+<script type="module" src="doom.js?v=42"></script>
 </body>
 </html>

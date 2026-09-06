@@ -1,5 +1,24 @@
 # AGENTS.md
 
+## 0. Working agreement (added 2026-09-06, at user request)
+
+- **Never end a turn on a bare launch.** Every background job must be an
+  end-to-end detached chain (`setsid nohup ... &` + log file) that runs to
+  a verdict file without intermediate turns: build → run → analyze →
+  branch, all inside one script.
+- **Stay on-turn with chained blocking waits** (`sleep ~110` + check,
+  repeat in the same turn, inside the ~120 s tool timeout) instead of
+  ending the turn while a result is minutes away.
+- **Scratch lives in `.pw-scratch/`** (repo-local; /tmp is quota-starved).
+  Delete PNGs/scratch that is no longer needed; keep logs + scripts.
+- **Do not touch the user's background processes** (esp32 emu etc.) and
+  never `pkill` without asking first (a stray pkill pattern once killed
+  the tool call itself).
+- **One refresh per shipped fix only**: bump `?v=` on every edited
+  served file (doom.js, worker, app.js, firmware.js) so a single
+  hard-refresh always reaches the current build; record the number in
+  `__doomVer`.
+
 This file is the working knowledge base for this repository. It documents the
 architecture, build steps, how to run the various tests, the current state of
 the webserver/network emulation effort, and exactly what is left to do.
@@ -2448,3 +2467,118 @@ register-shift-by-0 is a no-op (not imm-#0-means-32).
 - `test_fsmc.mjs` used to fail on the unicorn path (pre-existing); it passes
   on the wasm default (the register-shift-by-0 fix cured it) and the full
   `npm test` is green end-to-end.
+
+## 22. Headed-browser sweep + DOOM fixes (2026-09-04)
+
+41/41 console presets PASS live in headed Chrome (Playwright, fullscreen,
+fresh profile each launch). Harness: `/tmp/opencode/pw_sweep1.py` (21) +
+`pw_sweep2.py` (23). Relaunch the browser every 4 presets — wasm heaps
+accumulate across same-page boots (§11) and the renderer dies ~boot 6.
+
+- **eth_dhcp / eth_test need `irq_eth`** (app.js `IRQ_ETH_FIRMWARES`): their
+  `static` ETH globals sit at different SRAM addresses than eth_http's
+  hardcoded `E` layout in emulator.js, so the polling driver's SRAM
+  flag writes miss and TX stalls (`ARP TX timeout`). Both firmwares enable
+  NVIC ETH IRQ 61 + DMAIER and own an `ETH_IRQHandler`, so IRQ delivery
+  (wasm `deliver_irqs`) drives them with no layout dependency.
+- **netsim answers ARP for ANY target IP** (was: only `SERVER_IP`;
+  eth_dhcp ARPs 10.0.2.2 → infinite ARP loop). Claims the requested IP
+  with SERVER_MAC.
+- **`injectRxIrq` (emulator.js, both backends)**: irq_eth RX walks the
+  guest's RX list from the model's poll address (`eth_get_rx_desc_addr` =
+  DMARDLAR base) for the first DMA-owned descriptor and delivers there —
+  the guest ISR scans the list itself. The old code wrote every frame to
+  eth_http's `rxDesc`/`rxBuf` even in irq_eth mode, so DHCP Offers landed
+  in the wrong RAM and `eth_recv_packet` never saw them. Polling path
+  unchanged (static layout + idx rotation = the §16 anti-clobber fix).
+- **Low-detail toggle REMOVED** (doom.html/js/worker; `?v=` bumped):
+  always high detail — at ~65 MIPS the core holds 35/35 high. Booting low
+  and flipping to high live left the 3D view ~208px wide + black right bar
+  (the guest's mid-game `R_SetViewSize` re-tune doesn't fully take); that
+  path is now unreachable from the UI (worker `detail` message + firmware
+  ABI slot kept for protocol compat). The "band through menu text" seen in
+  screenshots is the authentic menu-over-attract-demo (not a defect).
+- **Clock AFTER step (worker)**: the page used to write the absolute clock
+  BEFORE each step while the guest's `DG_SleepMs` does `+=ms` during it —
+  each frame advanced game time by FRAME_MS *plus* ~15ms (~1.5x speed).
+  Overwriting after the step keeps exactly one frame-period per rendered
+  frame. Proven: `gametic +349/10s` wall. Node harness unaffected (no page
+  writer; guest `+=` self-drives).
+- **Backlog-drop (worker v12→v13)**: the wall lock never *dropped* backlog,
+  so every stall (loaded box, devtools, GC) was followed by a STEP_BUDGET-
+  limited sprint (this theory died below — the meter was lying; kept as
+  history). Fix: backlog older than ~2
+  frames is dropped (slow-mo under load, never fast-forward). Threshold 2,
+  not 1, so normal rAF phase jitter (≤1 frame) still smooths instead of
+  stuttering. `__doomVer` 37.
+- **37 was meter noise (worker v15)**: 3-minute scripted-play capture
+  (telemetry + 121 screenshots) showed FPS 37–38 episodes with **tics/s
+  34.6–35.5, `budget:0`, `jump:1`** — logic exact, no sprint, no inflation.
+  Integer frames over jittered 0.5s windows swing ±2 around true 35.0, so
+  the meter lied and there was no pacing bug left to find. FPS is now
+  smoothed over 2s (`fpsSmooth`; rest of stats stay 0.5s). `__doomVer` 41.
+- **RANGECHECK abort → clamp (firmware rebuild)**: user hit
+  `R_DrawColumn: -10 to 47 at 33` → `I_Error` → `for(;;)` hang (vanilla
+  behavior on tall close-up walls; `doomdef.h` defines RANGECHECK).
+  All 4 column renderers in `doom/engine/r_draw.c` now clip instead of
+  aborting (count recomputed, frac alignment preserved — the stale `count`
+  would overdraw). On the emulator an abort hangs the game and an
+  unclamped draw wild-writes guest memory (MMIO risk). Rebuilt
+  (`make -C doom`, `tools/make_firmware.mjs` → `firmware.js?v=2`, imported
+  as `firmware.js?v=2` in doom.js/app.js) and `test_doom_wasm.mjs` PASSes
+  (save ok, 0% clip). Dark areas render WITH detail (tech lamps/panels
+  visible) — unlit black is correct lighting, not missing draws.
+- **Lockstep wasm-vs-Unicorn** (`.pw-scratch/lockstep*.mjs`): same doom.bin
+  + WAD, no inputs (deterministic demo): 20M→150M **bit-identical**
+  (fb hash, gametic, framecount). Later diffs (same gt, ±2 fc, same
+  palette) match sampling phase (Unicorn overshoots each stepped batch by
+  a translation block), not divergence. Rust CPU exonerated as the black/
+  speed cause.
+- **Trajectory overlap (the actual verdict)**: per-tic player positions,
+  both backends: same-tic distance max 132u/mean 33u, but best-lag
+  (nearest-point-on-path) distance max 21u/mean 5u. The two cores traverse
+  THE SAME PATH time-shifted ~1-3 tics — no physics/arithmetic divergence.
+  The split is input-application timing on the Unicorn harness path
+  (stale players.cmd + shorter travel both fit application lag, and the
+  lagging side still matches demo bytes when shifted). Combined with
+  457/457 fuzz vectors + deterministic wasm replay, the Rust core is
+  cleared; remaining autopilot wobble is harness-stepping interaction,
+  invisible in play (all 41 presets + doom play/save green on both).
+- **Boot-time `initAudio` + resume** (doom.js): audio was keydown-gated, so
+  watch-only/scripted sessions stayed silent, and the `if (audioCtx) return`
+  early-return never resumed a pre-gesture (suspended) context. Now init at
+  boot; keydown/mousedown resumes if suspended. User-confirmed audible on
+  v34 (`__audioState()` = `'running'`). The earlier "error from the audio
+  device" lines were contention/starved-context cascade on a stale tab, not
+  the worklet (re-audited clean: no NaN/poison path).
+- **`window.__doom.read(addrs)` + worker `read`/`readResult`**: guest-word
+  reads for state-gated smokes (menuactive 0xC00166F8, gamestate 0xC00153AC,
+  currentMenu 0xC0016820, itemOn 0xC0016824, gametic 0xC000F350,
+  SaveDef 0xC000BBF0 — all verified against current `nm`). Fixed sleeps
+  mis-navigate (an Enter eaten mid-boot shifts the whole menu walk).
+- Playwright gotchas: Chrome steals **F6** (address-bar focus) — drive it
+  via `__doom.key(0xC0)`; UART box needs **Shift+Enter** for `\n`
+  (Enter sends `\r` — rx_crypto_test CRCs `Hello\n`, so `\r` FAILs it).
+- **Browser save names must avoid w/a/s/d** (`pw_savey` FAIL→PASS):
+  doom.js maps those DOM keys to movement codes before the raw-ASCII
+  passthrough, so typing `a` in the save slot sends strafe (0xAC), which
+  the name entry ignores (`saveCharIndex` stays 0 — diagnosed via the
+  `read` hook). Node harness sends raw 0x61 and is unaffected. In-browser,
+  name the save e.g. `qpk`. (Same reason `y` works for NIGHTMARE confirm.)
+- **Pointer-lock SecurityError** (user-reported): newer Chrome returns a
+  promise from `requestPointerLock()` that rejects if re-clicked right
+  after Esc — now swallowed with `.catch(()=>{})` (doom.js?v=30).
+- **User-side observability** (doom.js?v=31): `window.__doomLog()` journal
+  (boot/audio created+resumed+failed/state-flips/worker booted+errors/
+  save stored) + `__audioState()`/`__audioStat`/`__audioTotal`. Speed is
+  already on the stats line (`FPS: 35/35` = guest frames/sec; 35 exact).
+  Verified headless: journal shows boot→audio suspended→worker booted,
+  zero page errors.
+- **`window.__doomVer`** (v34): build stamp — if the console doesn't print
+  the current number, the tab runs a cached copy (Ctrl+Shift+R).
+- **audio_test in-browser seed** (app.js, `app.js?v=1`): the browser never
+  loaded the 64-sample WAV the node harness feeds via `audio_load_wav`,
+  so I2S DMA read fallback audio and the firmware's checksum FAILed
+  (`sum=0013F7E0` vs `93C40`) — the DMA path itself was fine (`n=64`).
+  app.js now builds the identical PCM16 WAV (`makeAudioTestWav`) and loads
+  it on `audio_test` boot; browser prints `DMA RX OK` + `TX n=16 OK`.

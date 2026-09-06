@@ -113,10 +113,19 @@ void R_DrawColumn (void)
 	return; 
 				 
 #ifdef RANGECHECK 
-    if ((unsigned)dc_x >= SCREENWIDTH
-	|| dc_yl < 0
-	|| dc_yh >= SCREENHEIGHT) 
-	I_Error ("R_DrawColumn: %i to %i at %i", dc_yl, dc_yh, dc_x); 
+    // Clamp instead of aborting: tall close-up walls legitimately produce
+    // off-screen rows (vanilla I_Errors here and hangs the game in
+    // I_Quit's place; an unclamped draw wild-writes guest memory, which on
+    // the emulator can hit MMIO). Texture alignment is preserved: frac
+    // below is computed from the clamped dc_yl, and count is recomputed.
+    if ((unsigned)dc_x >= SCREENWIDTH)
+	return;
+    if (dc_yl < 0)
+	dc_yl = 0;
+    if (dc_yh >= SCREENHEIGHT)
+	dc_yh = SCREENHEIGHT - 1;
+    if ((count = dc_yh - dc_yl) < 0)
+	return;
 #endif 
 
     // Framebuffer destination address.
@@ -221,13 +230,16 @@ void R_DrawColumnLow (void)
 	return; 
 				 
 #ifdef RANGECHECK 
-    if ((unsigned)dc_x >= SCREENWIDTH
-	|| dc_yl < 0
-	|| dc_yh >= SCREENHEIGHT)
-    {
-	
-	I_Error ("R_DrawColumn: %i to %i at %i", dc_yl, dc_yh, dc_x);
-    }
+    // Clamp instead of aborting (see R_DrawColumn): fully off-screen
+    // columns are skipped, partial ones are clipped and count recomputed.
+    if ((unsigned)dc_x >= SCREENWIDTH)
+	return;
+    if (dc_yl < 0)
+	dc_yl = 0;
+    if (dc_yh >= SCREENHEIGHT)
+	dc_yh = SCREENHEIGHT - 1;
+    if ((count = dc_yh - dc_yl) < 0)
+	return;
     //	dccount++; 
 #endif 
     // Blocky mode, need to multiply by 2.
@@ -433,14 +445,15 @@ void R_DrawTranslatedColumn (void)
 	return; 
 				 
 #ifdef RANGECHECK 
-    if ((unsigned)dc_x >= SCREENWIDTH
-	|| dc_yl < 0
-	|| dc_yh >= SCREENHEIGHT)
-    {
-	I_Error ( "R_DrawColumn: %i to %i at %i",
-		  dc_yl, dc_yh, dc_x);
-    }
-    
+    // Clamp instead of aborting (see R_DrawColumn).
+    if ((unsigned)dc_x >= SCREENWIDTH)
+	return;
+    if (dc_yl < 0)
+	dc_yl = 0;
+    if (dc_yh >= SCREENHEIGHT)
+	dc_yh = SCREENHEIGHT - 1;
+    if ((count = dc_yh - dc_yl) < 0)
+	return;
 #endif 
 
 
@@ -482,14 +495,17 @@ void R_DrawTranslatedColumnLow (void)
     x = dc_x << 1;
 				 
 #ifdef RANGECHECK 
-    if ((unsigned)x >= SCREENWIDTH
-	|| dc_yl < 0
-	|| dc_yh >= SCREENHEIGHT)
-    {
-	I_Error ( "R_DrawColumn: %i to %i at %i",
-		  dc_yl, dc_yh, x);
-    }
-    
+    // Clamp instead of aborting (see R_DrawColumn). x+1 stays in range:
+    // SCREENWIDTH is even and x is doubled, so x < SCREENWIDTH implies
+    // x+1 < SCREENWIDTH.
+    if ((unsigned)x >= SCREENWIDTH)
+	return;
+    if (dc_yl < 0)
+	dc_yl = 0;
+    if (dc_yh >= SCREENHEIGHT)
+	dc_yh = SCREENHEIGHT - 1;
+    if ((count = dc_yh - dc_yl) < 0)
+	return;
 #endif 
 
 

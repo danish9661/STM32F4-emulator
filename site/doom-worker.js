@@ -100,9 +100,22 @@ let emu = null, uc = null;
 let keyWr = 0;
 let fbAddr = 0n;
 let paused = false, booted = false, hidden = false;
-let lowDetail = true;
+let lowDetail = false;
 let instTotal = 0, framesShown = 0;
 let statLast = 0, statInst = 0, statFrames = 0, activeMs = 0;
+let fpsFrames = 0, fpsLastT = 0, fpsSmooth = 35;
+// Live tic-rate readout (same 2s smoothing): game LOGIC speed, independent
+// of the frame meter. If FPS and tics/s ever disagree, believe tics/s.
+const GAMETIC = 0xC000F350;
+let tpsTics = 0, tpsLastT = 0, tpsSmooth = 35;
+// FPS is metered over a 2s window, not the 0.5s stats cadence: with integer
+// frames over jittered half-second windows the readout swung 34-38 around
+// a true 35.0 and the phantom "37" sent everyone chasing a pacing bug that
+// never existed (game logic measured exact the whole time).
+// Pacing telemetry, reset each reportStats: how bursts end (target reached,
+// step budget exhausted, wall budget hit), clamp firings, and the largest
+// single-burst frame jump (catches wipe-iteration inflation + over-stepping).
+let paceClamp = 0, paceTarget = 0, paceBudget = 0, paceMs = 0, paceJump = 0;
 let paceWall = 0, paceFrames = -1;
 let bootClock = 0, clockMs = 0;
 // Pending load handshake: the guest busy-waits on SAVEREADY, so the answer
@@ -264,21 +277,46 @@ function loop(msBudget) {
             // wall time. While the page is HIDDEN there is nothing to render
             // and no rAF pacing to respect, so run flat out and let the
             // worklet's bounded queue keep audio continuous.
-            const target = hidden ? Infinity : paceFrames + Math.floor((t0 - paceWall) / FRAME_MS);
+            let target = hidden ? Infinity : paceFrames + Math.floor((t0 - paceWall) / FRAME_MS);
+            if (!hidden && target - frames > 2) {
+                // Never fast-forward through a backlog: any stall (loaded
+                // box, devtools open, GC pause) leaves target ahead, and
+                // chasing it sprints the game — the meter then parks at 37,
+                // the step budget running flat out. Drop backlog older than
+                // ~2 frames (a real stall, not rAF phase jitter, which stays
+                // within 1): momentary slow-motion beats fast-forward.
+                paceFrames = frames;
+                paceWall = t0;
+                target = frames;
+                paceClamp++;
+            }
+            const burstStart = frames;
             while (steps < STEP_BUDGET && performance.now() - t0 < msBudget && frames < target) {
-                // Drive the guest clock BEFORE every step: DG_GetTicksMs reads
-                // g_abi.clockMs, so I_GetTime advances even inside a single
-                // doomgeneric_Tick (the melt wipe spins on I_GetTime). The
-                // clock is DERIVED FROM FRAMECOUNT, not wall time, so guest
-                // time can never run ahead of the guest's own execution and
-                // audio production stays locked to wall 11025 samples/s.
-                clockMs = Math.max(clockMs, Math.floor(bootClock + frames * FRAME_MS) & 0xffffffff);
-                emu.write32(CLOCKMS, clockMs);
+                // Drive the guest clock AFTER every step (absolute overwrite):
+                // DG_GetTicksMs reads g_abi.clockMs, so the guest's own
+                // relative DG_SleepMs(+=ms) advances I_GetTime inside the step
+                // (the melt wipe spins on it) — but if the page wrote the
+                // absolute value BEFORE the step, each rendered frame would
+                // advance game time by FRAME_MS *plus* the guest's += (~15ms),
+                // running the game ~1.5x fast. Overwriting after keeps exactly
+                // one frame-period per rendered frame. The clock stays DERIVED
+                // FROM FRAMECOUNT, so guest time can never run ahead of the
+                // guest's own execution and audio stays locked to wall
+                // 11025 samples/s. (No page writer in the Node harness: the
+                // guest's += self-drives there, untouched.)
                 const res = emu.step();
                 instTotal = res.instCount;
                 steps++;
                 frames = emu.read32(FRAMECOUNT);
+                clockMs = Math.max(clockMs, Math.floor(bootClock + frames * FRAME_MS) & 0xffffffff);
+                emu.write32(CLOCKMS, clockMs);
             }
+            // Pacing telemetry: how did this burst end, and how far did the
+            // guest frame counter jump inside it.
+            if (frames >= target) paceTarget++;
+            else if (steps >= STEP_BUDGET) paceBudget++;
+            else paceMs++;
+            if (frames - burstStart > paceJump) paceJump = frames - burstStart;
             activeMs += performance.now() - t0;
         } catch (e) {
             status('emulator error: ' + e.message, 'error');
@@ -307,16 +345,29 @@ function reportStats() {
     // understating the real rate. `drawn` keeps the change-gated repaint
     // observable as a second number.
     const guestFrames = Number(emu.read32(FRAMECOUNT));
+    // Smoothed FPS over 2s (see the statLast declaration): kills the ±2
+    // quantization swing without touching the 0.5s cadence of the rest.
+    if (now - fpsLastT >= 2000) {
+        fpsSmooth = (guestFrames - fpsFrames) / ((now - fpsLastT) / 1000);
+        fpsFrames = guestFrames; fpsLastT = now;
+        const gt = emu.read32(GAMETIC) >>> 0;
+        tpsSmooth = (gt - tpsTics) / ((now - tpsLastT) / 1000);
+        tpsTics = gt; tpsLastT = now;
+    }
     post({
         t: 'stats',
         mips,
-        fps: (guestFrames - statFrames) / dt,
+        fps: fpsSmooth,
+        tps: tpsSmooth,
         drawn: framesShown / dt,
         instM: instTotal / 1e6,
         guestFrames,
+        pace: { clamp: paceClamp, target: paceTarget, budget: paceBudget,
+                wall: paceMs, jump: paceJump, hidden: hidden ? 1 : 0 },
     });
     statLast = now; statInst = instTotal; statFrames = guestFrames;
     activeMs = 0; framesShown = 0;
+    paceClamp = 0; paceTarget = 0; paceBudget = 0; paceMs = 0; paceJump = 0;
 }
 
 async function boot(msg) {
@@ -424,6 +475,12 @@ self.onmessage = (e) => {
             booted = false;
             if (timer !== null) { clearTimeout(timer); timer = null; }
             if (emu) { try { emu.close(); } catch (err) {} emu = null; }
+            break;
+        case 'read':
+            // Debug/test hook: read guest words for state-gated driving
+            // (menuactive/gamestate/currentMenu). Not on the hot path.
+            if (!booted || !emu) break;
+            post({ t: 'readResult', id: m.id, vals: (m.addrs || []).map((a) => emu.read32(a >>> 0) >>> 0) });
             break;
     }
 };
