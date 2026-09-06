@@ -668,6 +668,53 @@ int main(void) {
         }
     }
 
+    *(volatile uint32_t *)0x20001004u = 0x22222222u;
+    // ---- SMUAD/SMUSD (Ra==15 dual, no accumulate) + SMLAWT (top-top) +
+    // shifted SAT/PKH forms. Prior rounds only covered Ra!=15/plain/shift-0
+    // variants of these exact arms.
+    {
+        static const int32_t AV[] = {(int32_t)0x80008000, 0x7FFF7FFF, 0x1234FEDC, (int32_t)0xFFFF0001};
+        static const int32_t BV[] = {(int32_t)0x80008000, 0x7FFF7FFF, (int32_t)0xEDCBA987, 0x0002FFFE};
+        for (int i = 0; i < 4; i++) {
+            int32_t a = AV[i], b = BV[i], r;
+            *(volatile uint32_t *)(0x20001010u + (uint32_t)i * 4u) = 0xA0u + (uint32_t)i;
+            __asm__ volatile ("smuad %0, %1, %2" : "=r" (r) : "r" (a), "r" (b));
+            uart_puts("SMUAD "); uart_hex8((uint32_t)r); uart_putchar('\n');
+            __asm__ volatile ("smusd %0, %1, %2" : "=r" (r) : "r" (a), "r" (b));
+            uart_puts("SMUSD "); uart_hex8((uint32_t)r); uart_putchar('\n');
+            __asm__ volatile ("smlawt %0, %1, %2, %3" : "=r" (r) : "r" (a), "r" (b), "r" (0x11112222));
+            uart_puts("SMLAWT "); uart_hex8((uint32_t)r); uart_putchar('\n');
+            __asm__ volatile ("pkhbt %0, %1, %2, lsl #5" : "=r" (r) : "r" (a), "r" (b));
+            uart_puts("PKHS5 "); uart_hex8((uint32_t)r); uart_putchar('\n');
+            __asm__ volatile ("ssat %0, #16, %1, lsl #3" : "=r" (r) : "r" (a));
+            uart_puts("SSATSH "); uart_hex8((uint32_t)r); uart_putchar('\n');
+            __asm__ volatile ("usat %0, #12, %1, lsl #3" : "=r" (r) : "r" (a));
+            uart_puts("USATSH "); uart_hex8((uint32_t)r); uart_putchar('\n');
+        }
+    }
+    // ---- Section markers (distinguish lost-UART from skipped-code):
+    // each major section after this point stamps a known SRAM word.
+    // If unicorn is missing UART lines but HAS the stamps, its execution
+    // ran fine and output was lost (buffer cap); if stamps are missing,
+    // it skipped code (control flow).
+    *(volatile uint32_t *)0x20001000u = 0x11111111u;
+    *(volatile uint32_t *)0x20001008u = 0x33333333u;
+    // ---- Fault parity: encodings that must STOP (not silently continue)
+    // on both backends. Runs LAST (a fault ends the run by design).
+    {
+        uart_puts("=== FUZZ-FAULTS ===\n");
+        __asm__ volatile ("bkpt #0");
+        uart_puts("FAULT-MISS-BKPT\n");
+        __asm__ volatile ("svc #0");
+        uart_puts("FAULT-MISS-SVC\n");
+        __asm__ volatile (".word 0xEDD00A00");   // vldr s0, [r0] (no FPU)
+        uart_puts("FAULT-MISS-VLDR\n");
+        __asm__ volatile ("smlsld r2, r3, r4, r5"); // dual-sub long (unimpl)
+        uart_puts("FAULT-MISS-SMLSLD\n");
+        __asm__ volatile ("umaal r0, r1, r2, r3");  // unsigned long add-acc
+        uart_puts("FAULT-MISS-UMAAL\n");
+    }
+
     uart_puts("=== FUZZ-DONE ===\n");
     while (1) { }
     return 0;
