@@ -661,4 +661,8 @@ impl WasmCpu {
     /// Last unmapped-memory access address, or 0xFFFF_FFFF when none.
     pub fn mem_fault(&self) -> u32 { self.mem.bad.get().unwrap_or(0xFFFF_FFFF) }
     pub fn step(&mut self, budget: u32) -> u32 { self.cpu.run(sys(), &mut self.mem, budget) }
+    /// PC-trace control for differential debugging (see cpu::trace_*).
+    pub fn trace_start(&mut self) { cpu::trace_start(); }
+    pub fn trace_stop(&mut self) { cpu::trace_stop(); }
+    pub fn take_trace(&mut self) -> Vec<u32> { cpu::take_trace() }
 }

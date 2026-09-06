@@ -516,7 +516,10 @@ fn strcasecmp_pairs() {
         cpu.regs.r[0] = a;
         cpu.regs.r[1] = b;
         cpu.regs.r[14] = 0x20001001;
-        cpu.regs.r[15] = 0x0801C30D;
+        // strcasecmp entry — MUST match `nm doom.elf` (any firmware rebuild
+        // that changes code size shifts it; a stale value jumps mid-function
+        // and fails spuriously, looking exactly like a CPU regression).
+        cpu.regs.r[15] = 0x0801C314;
         for _ in 0..100000 {
             cpu.run(sys, &mut mem, 1);
             if (cpu.regs.r[15] & !1) == 0x20001000 { break; }

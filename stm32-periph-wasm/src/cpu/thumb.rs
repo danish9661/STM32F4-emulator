@@ -33,6 +33,17 @@ fn sx(v: u32, b: u32) -> u32 {
     let s = 32 - b;
     ((v as i32) << s >> s) as u32
 }
+/// Signed 32-bit saturate of a 64-bit value. Returns (result, saturated).
+#[inline]
+fn sat32x(w: i64) -> (i32, bool) {
+    if w > i32::MAX as i64 {
+        (i32::MAX, true)
+    } else if w < i32::MIN as i64 {
+        (i32::MIN, true)
+    } else {
+        (w as i32, false)
+    }
+}
 #[inline]
 fn ror32(v: u32, s: u32) -> u32 {
     let s = s & 31;
@@ -937,13 +948,20 @@ pub fn exec32(
         // is always 0 here (imm5 lives in o2[14:10]); MSR needs o2>=0x8800,
         // so the two are disjoint. GAS-verified: usat=F380, ssat=F300/F322.
         if o1 & 0xFFF0 == 0xF380 && o2 < 0x8000 {
-            // USAT Rd, #sat, Rn [, LSL #sh]
+            // USAT Rd, #sat, Rn [, LSL #sh]. The input is SIGNED (negatives
+            // clamp to 0) — the old code zero-extended, so USAT8(-129) came
+            // out 255 instead of 0 (fuzz-found).
             let sat = (o2 & 0x1F) as u32;
-            let sh = ((o2 >> 10) & 0x1F) as u32;
-            let v = rr(cpu, (o1 & 0xF) as usize, pc).wrapping_shl(sh);
-            let max: u64 = if sat >= 32 { 0xFFFF_FFFF } else { (1u64 << sat) - 1 };
-            let r = (v as u64).min(max) as u32;
-            if (v as u64) > max {
+            // Shift is imm3:imm2 = o2[14:12]:o2[7:6] (GAS: lsl#3=0x08C7,
+            // lsl#7=0x18C7, lsl#15=0x38C7) — NOT contiguous o2[14:10].
+            // The old contiguous read added Rd[3]/o2[10] into the amount,
+            // so any Rd>=8 shifted by garbage (SSAT16(127) came out 508).
+            let sh = (((o2 >> 12) & 0x7) << 2) | ((o2 >> 6) & 0x3);
+            let v = (rr(cpu, (o1 & 0xF) as usize, pc) as i32).wrapping_shl(sh);
+            let max: i64 = if sat >= 32 { 0xFFFF_FFFF } else { (1i64 << sat) - 1 };
+            let s = v as i64;
+            let r = s.clamp(0, max) as i32 as u32;
+            if s < 0 || s > max {
                 cpu.regs.xpsr |= 0x08000000; // Q sticky
             }
             cpu.regs.r[((o2 >> 8) & 0xF) as usize] = r;
@@ -954,9 +972,11 @@ pub fn exec32(
             // SSAT Rd, #sat, Rn [, LSL/ASL #sh] (sh-type is o1[5]).
             // o2[15]==0 keeps B.W/Bcc.W/BL (op2[15]=1) falling through.
             // Unlike USAT, the sat field encodes N-1 (GAS: ssat#8=o2:0x07,
-            // ssat#16=0x0F; usat#16=0x10 direct).
+            // ssat#16=0x0F; usat#16=0x10 direct). Shift is imm3:imm2 like
+            // USAT (see above) — the old contiguous o2[14:10] read shifted
+            // by garbage whenever Rd>=8.
             let sat = ((o2 & 0x1F) + 1) as u32;
-            let sh = ((o2 >> 10) & 0x1F) as u32;
+            let sh = (((o2 >> 12) & 0x7) << 2) | ((o2 >> 6) & 0x3);
             let a = rr(cpu, (o1 & 0xF) as usize, pc);
             let v = if (o1 >> 5) & 1 == 0 {
                 a.wrapping_shl(sh)
@@ -1582,6 +1602,51 @@ pub fn exec32(
                 adv(cpu, pc, 4);
                 return true;
             }
+            8 => {
+                // QADD/QSUB/QDADD/QDSUB (op2[7:4]: 8/A/9/B; Rd=o2[11:8] is
+                // variable — e.g. `qadd sl,r1,r0` is fa80 fa81, so gate
+                // only o2[15:12]==F). Field layout is positional like
+                // normal data-processing (Rn=op1-field, Rm=op2-field);
+                // only the assembly TEXT lists Rm first (QADD Rd, Rm, Rn),
+                // which once caused these to be computed swapped (QSUB
+                // gave Rn-Rm: fuzz-found, 0x80000002 vs 0x7FFFFFFE).
+                // Saturate + set Q on any saturation. (Fuzz-found hole.)
+                if o2 & 0xF000 != 0xF000 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                let sub = (o2 >> 4) & 0xF;
+                if sub != 8 && sub != 0xA && sub != 9 && sub != 0xB {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                let m = rr(cpu, rm, pc) as i32 as i64;
+                let n = rr(cpu, rn, pc) as i32 as i64;
+                let (w, q) = match sub {
+                    8 => {
+                        let (r, q) = sat32x(m.wrapping_add(n));
+                        (r as i64, q)
+                    }
+                    0xA => {
+                        let (r, q) = sat32x(m.wrapping_sub(n));
+                        (r as i64, q)
+                    }
+                    9 => {
+                        let (d, q1) = sat32x(n.wrapping_mul(2));
+                        let (r, q2) = sat32x(m.wrapping_add(d as i64));
+                        (r as i64, q1 || q2)
+                    }
+                    _ => {
+                        let (d, q1) = sat32x(n.wrapping_mul(2));
+                        let (r, q2) = sat32x(m.wrapping_sub(d as i64));
+                        (r as i64, q1 || q2)
+                    }
+                };
+                cpu.regs.r[rd] = w as u32;
+                if q {
+                    cpu.regs.xpsr |= 0x08000000; // Q sticky
+                }
+                adv(cpu, pc, 4);
+                return true;
+            }
             _ => return fault(cpu, pc, op1, op2, 4),
         }
         // ---- FB: multiply / divide ----
@@ -1644,6 +1709,8 @@ pub fn exec32(
             2 => {
                 // SMLAD (Ra!=15) / SMUAD (Ra==15), dual 16x16 + accumulate.
                 // Only the plain form ([7:4]==0); X/SD variants fault loudly.
+                // Q set on dual-sum OR accumulate signed overflow (this is
+                // observable: fuzz showed Unicorn setting Q where we didn't).
                 if o2 & 0xF0 != 0 {
                     return fault(cpu, pc, op1, op2, 4);
                 }
@@ -1653,12 +1720,20 @@ pub fn exec32(
                     .wrapping_mul((am & 0xFFFF) as i16 as i32);
                 let hi = ((an >> 16) as i16 as i32)
                     .wrapping_mul((am >> 16) as i16 as i32);
-                let p = lo.wrapping_add(hi);
-                cpu.regs.r[rd] = if ra == 15 {
-                    p as u32
+                let s = lo.wrapping_add(hi);
+                let mut q = (lo as i64 + hi as i64) != s as i64;
+                let r = if ra == 15 {
+                    s
                 } else {
-                    (rr(cpu, ra, pc) as i32).wrapping_add(p) as u32
+                    let acc = rr(cpu, ra, pc) as i32;
+                    let r = acc.wrapping_add(s);
+                    q |= (acc as i64 + s as i64) != r as i64;
+                    r
                 };
+                cpu.regs.r[rd] = r as u32;
+                if q {
+                    cpu.regs.xpsr |= 0x08000000; // Q sticky
+                }
                 adv(cpu, pc, 4);
                 return true;
             }
@@ -1678,6 +1753,38 @@ pub fn exec32(
                 } else {
                     rr(cpu, ra, pc).wrapping_add(p)
                 };
+                adv(cpu, pc, 4);
+                return true;
+            }
+            4 => {
+                // SMLSD (Ra!=15) / SMUSD (Ra==15): dual 16x16 SUBTRACT
+                // plus accumulate. GAS: `smlsd` assembles to op 4 (e.g.
+                // fb41 3002), NOT op 2 — the old code had no arm 4 and
+                // faulted on it (fuzz-found stall right after SMLAD).
+                // X-swapped-half variants (op2[7:4]!=0) fault loudly.
+                if o2 & 0xF0 != 0 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                let an = rr(cpu, rn, pc);
+                let am = rr(cpu, rm, pc);
+                let lo = ((an & 0xFFFF) as i16 as i32)
+                    .wrapping_mul((am & 0xFFFF) as i16 as i32);
+                let hi = ((an >> 16) as i16 as i32)
+                    .wrapping_mul((am >> 16) as i16 as i32);
+                let p = lo.wrapping_sub(hi);
+                let mut q = (lo as i64 - hi as i64) != p as i64;
+                let r = if ra == 15 {
+                    p
+                } else {
+                    let acc = rr(cpu, ra, pc) as i32;
+                    let r = acc.wrapping_add(p);
+                    q |= (acc as i64 + p as i64) != r as i64;
+                    r
+                };
+                cpu.regs.r[rd] = r as u32;
+                if q {
+                    cpu.regs.xpsr |= 0x08000000; // Q sticky
+                }
                 adv(cpu, pc, 4);
                 return true;
             }
@@ -1746,17 +1853,17 @@ pub fn exec32(
                 adv(cpu, pc, 4);
                 return true;
             }
-            13 => {
-                // SDIV or SMLAL: SDIV has the same F:F op2 shape
-                if o2 & 0xF0F0 == 0xF0F0 {
-                    let b = rr(cpu, rm, pc) as i32;
-                    cpu.regs.r[rd] = if b == 0 {
-                        0
-                    } else {
-                        (rr(cpu, rn, pc) as i32).wrapping_div(b) as u32
-                    };
-                    adv(cpu, pc, 4);
-                    return true;
+            12 => {
+                // SMLAL (plain long MAC): GAS assembles every `smlal`
+                // (including high regs, e.g. `smlal r8, lr, r1, r0` =
+                // fbc1 8e00) to op 12, which this decoder never had —
+                // it faulted LOUDLY (fuzz-found; any firmware doing a
+                // 64-bit accumulate with high regs died here). Field
+                // layout mirrors the arm-9 form (lo=o2[15:12],
+                // hi=o2[11:8]). Dual form SMLALD (op2[7:4]!=0) faults
+                // loudly — unimplemented, never silent.
+                if o2 & 0xF0 != 0 {
+                    return fault(cpu, pc, op1, op2, 4);
                 }
                 let lo = ((o2 >> 12) & 0xF) as usize;
                 let hi = ((o2 >> 8) & 0xF) as usize;
@@ -1768,6 +1875,23 @@ pub fn exec32(
                 cpu.regs.r[hi] = (p >> 32) as u32;
                 adv(cpu, pc, 4);
                 return true;
+            }
+            13 => {
+                // SDIV or SMLSLD: SDIV has the same F:F op2 shape
+                if o2 & 0xF0F0 == 0xF0F0 {
+                    let b = rr(cpu, rm, pc) as i32;
+                    cpu.regs.r[rd] = if b == 0 {
+                        0
+                    } else {
+                        (rr(cpu, rn, pc) as i32).wrapping_div(b) as u32
+                    };
+                    adv(cpu, pc, 4);
+                    return true;
+                }
+                // NOT SMLAL: op-13 non-F:F is SMLSLD (dual subtract into
+                // 64 bits). The old code silently ran it as SMLAL (adds
+                // instead of subtracts) — fault loudly instead.
+                return fault(cpu, pc, op1, op2, 4);
             }
             _ => return fault(cpu, pc, op1, op2, 4),
         }
@@ -1789,11 +1913,37 @@ pub fn exec32(
             0b0001 => 1,  // BIC
             0b0011 => 3,  // MVN/ORN
             0b0100 => 4,  // EOR
+            0b0110 => 6,  // PKHBT/PKHTB
             _ => return fault(cpu, pc, op1, op2, 4),
         };
         let rn = (o1 & 0xF) as usize;
         let rd = ((o2 >> 8) & 0xF) as usize;
         let rm = (o2 & 0xF) as usize;
+        if op == 6 {
+            // PKHBT (Tb=o2[5]==0) / PKHTB (Tb==1): the BOTTOM halfword
+            // always comes from Rn, the TOP from Rm (shifted). I.e. BT:
+            // Rd = Rn[15:0] | (Rm LSL sh)[31:16]; TB: Rd = Rn[31:16] |
+            // (Rm ASR sh)[15:0] (ASR #0 means #32). No flags affected.
+            // (First version had top/bottom sources swapped — fuzz-found
+            // against Unicorn: PKHBT(11223344,AABBCCDD) must be AABB3344.)
+            if s {
+                return fault(cpu, pc, op1, op2, 4);
+            }
+            let tb = (o2 >> 5) & 1;
+            let sh = (((o2 >> 12) & 0x7) << 2) | ((o2 >> 6) & 0x3);
+            let an = rr(cpu, rn, pc);
+            let am = rr(cpu, rm, pc);
+            let r = if tb == 0 {
+                (an & 0x0000FFFF) | (am.wrapping_shl(sh) & 0xFFFF0000)
+            } else {
+                let a = if sh == 0 { 32 } else { sh };
+                (an & 0xFFFF0000)
+                    | ((((am as i32).wrapping_shr(a.min(32)) as u32)) & 0x0000FFFF)
+            };
+            cpu.regs.r[rd] = r;
+            adv(cpu, pc, 4);
+            return true;
+        }
         let typ = (o2 >> 4) & 3;
         let amt = (((o2 >> 12) & 7) << 2) | ((o2 >> 6) & 3);
         let ci = carry(cpu);
@@ -1938,19 +2088,31 @@ pub fn exec32(
         // STRD / LDRD: same bits[11:9]==100 as LDM/STM but bit6==1
         // (complementary patterns 0x0800 vs 0x0840; GAS-verified).
         if (o1 & 0x0E40) == 0x0840 {
-            let p = o1 & 0x0100 != 0; // E9 form (pre/offset); E8 post (unsupported)
-            if !p {
-                return fault(cpu, pc, op1, op2, 4);
-            }
+            let p = o1 & 0x0100 != 0;
             let u = o1 & 0x0080 != 0;
             let w = o1 & 0x0020 != 0;
             let l = o1 & 0x0010 != 0;
+            if !p && !w {
+                return fault(cpu, pc, op1, op2, 4); // P=0,W=0: UNDEFINED
+            }
             // GAS-verified: first reg Rt = op2[15:12], second Rt2 = op2[11:8].
             let rt = ((o2 >> 12) & 0xF) as usize;
             let rt2 = ((o2 >> 8) & 0xF) as usize;
+            // LDRD/STRD imm8 is word-scaled (GAS: `ldrd [r3],#8` = op2 0x02).
             let off = (o2 & 0xFF) * 4;
             let base = rr(cpu, rn, pc);
-            let addr = if u { base.wrapping_add(off) } else { base.wrapping_sub(off) };
+            // Post-indexed (P=0, e.g. `ldrd r1,r2,[r3],#8` — used for
+            // 64-bit struct copies; faulted here before): access at the
+            // unmodified base, writeback after.
+            let addr = if p {
+                if u {
+                    base.wrapping_add(off)
+                } else {
+                    base.wrapping_sub(off)
+                }
+            } else {
+                base
+            };
             if l {
                 cpu.regs.r[rt] = mem.read32(addr);
                 cpu.regs.r[rt2] = mem.read32(addr.wrapping_add(4));
@@ -1959,7 +2121,13 @@ pub fn exec32(
                 mem.write32(addr.wrapping_add(4), rr(cpu, rt2, pc));
             }
             if w {
-                cpu.regs.r[rn] = addr;
+                cpu.regs.r[rn] = if p {
+                    addr
+                } else if u {
+                    base.wrapping_add(off)
+                } else {
+                    base.wrapping_sub(off)
+                };
             }
             adv(cpu, pc, 4);
             return true;

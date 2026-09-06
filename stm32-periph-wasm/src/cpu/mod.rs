@@ -6,6 +6,8 @@ mod tests;
 pub use regs::Regs;
 pub use mem::Memory;
 use crate::system::WasmSystem;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 /// EXC_RETURN values we support (thread mode). F1 (return to handler) is
 /// nested-interrupt territory and faults loudly for now.
@@ -13,6 +15,24 @@ pub const EXC_RETURN_MSP: u32 = 0xFFFFFFF9;
 pub const EXC_RETURN_PSP: u32 = 0xFFFFFFFD;
 pub const EXC_RETURN_HANDLER: u32 = 0xFFFFFFF1;
 
+/// PC trace for differential debugging (wasm-vs-Unicorn lockstep): when
+/// enabled, every executed instruction appends its PC. Bounded by the
+/// harness (enable late, drain early); a runaway buffer just costs memory.
+static TRACE_ON: AtomicBool = AtomicBool::new(false);
+static TRACE_BUF: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Enable PC tracing. Cheap when off (one atomic load per instruction).
+pub fn trace_start() {
+    TRACE_ON.store(true, Ordering::Relaxed);
+}
+/// Disable PC tracing (buffer keeps whatever was recorded).
+pub fn trace_stop() {
+    TRACE_ON.store(false, Ordering::Relaxed);
+}
+/// Drain and return the recorded PCs.
+pub fn take_trace() -> Vec<u32> {
+    std::mem::take(&mut TRACE_BUF.lock().unwrap())
+}
 /// The CPU stopped because of this (unknown instruction, BKPT, branch to
 /// ARM state, ...). `pc` is the faulting instruction address (without thumb
 /// bit); `op1`/`op2` are the raw halfwords; `len` is 2 or 4.
@@ -294,6 +314,9 @@ impl Cpu {
                 break;
             }
             let pc = self.regs.r[15] & !1;
+            if TRACE_ON.load(Ordering::Relaxed) {
+                TRACE_BUF.lock().unwrap().push(pc);
+            }
             let op = mem.read16(pc);
             let l = thumb::len(op);
             let ok = if l == 2 {
