@@ -2554,6 +2554,11 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
    `FADD` line; (c) post-exception the Unicorn instance is wedged at the bkpt
    (every later step re-throws — the §7 rule), so fault-phase drains stay
    empty. Harness diagnostics go to console, never into the compared buffer.
+   IT flag-setting vectors (ITF1-4, 2026-09-06): skipped SUBS/MOVS/ADDS
+   preserve NZCV + Rd, later slots see LIVE flags (ITF4 r6 = 1/5/3/7 across
+   ttt/tte/tet/tee — entry-flag evaluation would give 7/7/3/7), first mask
+   slot is always T by encoding (`ieee` rejected by GAS). FUZZ-IDENTICAL
+   543/543 with the `ITF*` mask rule in fuzzcmp.mjs.
 - **`doom_sym()` in cpu/tests.rs**: resolves test addresses from
   doom.elf's symtab at test time — hardcoded addresses rot on every
   firmware rebuild (strcasecmp moved twice).

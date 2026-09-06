@@ -521,6 +521,119 @@ int main(void) {
                 : "+r" (m) :: "r4", "cc");
             uart_puts("ITE3 "); uart_hex8(m); uart_putchar('\n');
         }
+        {
+            // ITF1: predicated SUBS that FAIL must preserve NZCV; that RUN
+            // must update. E/N pair per setup brackets both sides for every Z.
+            struct { uint32_t a, b; } fq[] = {{0,0},{0,1},{0x7FFFFFFFu,0xFFFFFFFFu},{0x80000000u,1}};
+            for (int s = 0; s < 4; s++) {
+                uint32_t f, a = fq[s].a, b = fq[s].b;
+                __asm__ volatile (
+                    "subs r4, %1, %2\n"
+                    "it eq\n subseq r5, %1, %2\n"
+                    "mrs %0, apsr\n"
+                    : "=r" (f) : "r" (a), "r" (b) : "r4", "r5", "cc");
+                uart_puts("ITF1E "); uart_hex8(f); uart_putchar('\n');
+                __asm__ volatile (
+                    "subs r4, %1, %2\n"
+                    "it ne\n subsne r5, %1, %2\n"
+                    "mrs %0, apsr\n"
+                    : "=r" (f) : "r" (a), "r" (b) : "r4", "r5", "cc");
+                uart_puts("ITF1N "); uart_hex8(f); uart_putchar('\n');
+            }
+            // ITF1M: skipped MOVS must preserve flags AND leave Rd untouched.
+            {
+                uint32_t r5v, fm;
+                __asm__ volatile (
+                    "movs r5, #0x12\n subs r4, r4\n"
+                    "it ne\n movsne r5, #0xFF000000\n"
+                    "mrs %0, apsr\n mov %1, r5\n"
+                    : "=r" (fm), "=r" (r5v) :: "r4", "r5", "cc");
+                uart_puts("ITF1M "); uart_hex8(r5v); uart_putchar(' ');
+                uart_hex8(fm); uart_putchar('\n');
+                __asm__ volatile (
+                    "movs r5, #0x12\n subs r4, #1\n"
+                    "it eq\n movseq r5, #0xFF000000\n"
+                    "mrs %0, apsr\n mov %1, r5\n"
+                    : "=r" (fm), "=r" (r5v) :: "r4", "r5", "cc");
+                uart_puts("ITF1M2 "); uart_hex8(r5v); uart_putchar(' ');
+                uart_hex8(fm); uart_putchar('\n');
+            }
+        }
+        {
+            // ITF2: later slots evaluate against LIVE flags (changed by an
+            // earlier slot in the same block), not the entry flags.
+            uint32_t r6v, f2;
+            __asm__ volatile (
+                "movs r6, #0\n subs r4, r4\n"   // Z=1
+                "ite eq\n"
+                "subseq r5, r4, #1\n"           // runs: Z->0
+                "movne r6, #0xBB\n"             // ne now true -> runs
+                "mrs %0, apsr\n mov %1, r6\n"
+                : "=r" (f2), "=r" (r6v) :: "r4", "r5", "r6", "cc");
+            uart_puts("ITF2E "); uart_hex8(r6v); uart_putchar(' ');
+            uart_hex8(f2); uart_putchar('\n');
+            __asm__ volatile (
+                "movs r6, #0\n subs r4, #1\n"   // Z=0
+                "ite eq\n"
+                "subseq r5, r4, #1\n"           // skipped: flags stay Z=0
+                "movne r6, #0xBB\n"             // runs
+                "mrs %0, apsr\n mov %1, r6\n"
+                : "=r" (f2), "=r" (r6v) :: "r4", "r5", "r6", "cc");
+            uart_puts("ITF2N "); uart_hex8(r6v); uart_putchar(' ');
+            uart_hex8(f2); uart_putchar('\n');
+        }
+        {
+            // ITF3: skipped 16-bit T1 ADDS preserves flags and Rd.
+            uint32_t r5v, f3;
+            __asm__ volatile (
+                "movs r5, #5\n subs r4, r4\n"   // Z=1
+                "it ne\n addsne r5, #1\n"       // skipped
+                "mrs %0, apsr\n mov %1, r5\n"
+                : "=r" (f3), "=r" (r5v) :: "r4", "r5", "cc");
+            uart_puts("ITF3N "); uart_hex8(r5v); uart_putchar(' ');
+            uart_hex8(f3); uart_putchar('\n');
+            __asm__ volatile (
+                "movs r5, #5\n subs r4, #1\n"   // Z=0
+                "it eq\n addseq r5, #1\n"       // skipped
+                "mrs %0, apsr\n mov %1, r5\n"
+                : "=r" (f3), "=r" (r5v) :: "r4", "r5", "cc");
+            uart_puts("ITF3E "); uart_hex8(r5v); uart_putchar(' ');
+            uart_hex8(f3); uart_putchar('\n');
+        }
+        {
+            // ITF4: mask sweep with flag-setting slot ops (Z=1 entry).
+            // orrs slots interact with live flags; r6 spread pins mask rule.
+            // (First mask slot is always T by encoding rule: ttt/tte/tet/tee.)
+            uint32_t r6v, f4;
+            __asm__ volatile (
+                "movs r6, #0\n subs r4, r4\n"
+                "ittt eq\n orrseq r6, #1\n orrseq r6, #2\n orrseq r6, #4\n"
+                "mrs %0, apsr\n mov %1, r6\n"
+                : "=r" (f4), "=r" (r6v) :: "r4", "r6", "cc");
+            uart_puts("ITF4_0 "); uart_hex8(r6v); uart_putchar(' ');
+            uart_hex8(f4); uart_putchar('\n');
+            __asm__ volatile (
+                "movs r6, #0\n subs r4, r4\n"
+                "itte eq\n orrseq r6, #1\n orrseq r6, #2\n orrsne r6, #4\n"
+                "mrs %0, apsr\n mov %1, r6\n"
+                : "=r" (f4), "=r" (r6v) :: "r4", "r6", "cc");
+            uart_puts("ITF4_1 "); uart_hex8(r6v); uart_putchar(' ');
+            uart_hex8(f4); uart_putchar('\n');
+            __asm__ volatile (
+                "movs r6, #0\n subs r4, r4\n"
+                "itet eq\n orrseq r6, #1\n orrsne r6, #2\n orrseq r6, #4\n"
+                "mrs %0, apsr\n mov %1, r6\n"
+                : "=r" (f4), "=r" (r6v) :: "r4", "r6", "cc");
+            uart_puts("ITF4_2 "); uart_hex8(r6v); uart_putchar(' ');
+            uart_hex8(f4); uart_putchar('\n');
+            __asm__ volatile (
+                "movs r6, #0\n subs r4, r4\n"
+                "itee eq\n orrseq r6, #1\n orrsne r6, #2\n orrsne r6, #4\n"
+                "mrs %0, apsr\n mov %1, r6\n"
+                : "=r" (f4), "=r" (r6v) :: "r4", "r6", "cc");
+            uart_puts("ITF4_3 "); uart_hex8(r6v); uart_putchar(' ');
+            uart_hex8(f4); uart_putchar('\n');
+        }
     }
     {
         static volatile uint32_t buf[32];
