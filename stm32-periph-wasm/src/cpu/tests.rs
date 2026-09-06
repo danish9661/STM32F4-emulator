@@ -246,6 +246,49 @@ fn freertos_tasks_run() {
 }
 
 
+/// Resolve a symbol address from doom.elf's symtab at test time, so tests
+/// never hardcode firmware addresses (any rebuild that changes code size
+/// shifts them; a stale constant jumps mid-function and fails spuriously,
+/// looking exactly like a CPU regression — this bit us on strcasecmp).
+fn doom_sym(name: &str) -> u32 {
+    let elf: &[u8] = include_bytes!("../../../doom/doom.elf");
+    let u16le = |o: usize| u16::from_le_bytes([elf[o], elf[o + 1]]) as usize;
+    let u32le = |o: usize| u32::from_le_bytes([elf[o], elf[o + 1], elf[o + 2], elf[o + 3]]);
+    let shoff = u32le(0x20) as usize;
+    let shentsize = u16le(0x2E);
+    let shnum = u16le(0x30);
+    let mut symoff = 0usize;
+    let mut symsize = 0usize;
+    let mut strtab = 0usize;
+    for i in 0..shnum {
+        let h = shoff + i * shentsize;
+        let ty = u32le(h + 4);
+        if ty == 2 {
+            // SHT_SYMTAB; sh_link = associated strtab section index
+            symoff = u32le(h + 16) as usize;
+            symsize = u32le(h + 20) as usize;
+            let link = u32le(h + 24) as usize;
+            let sh = shoff + link * shentsize;
+            strtab = u32le(sh + 16) as usize;
+            break;
+        }
+    }
+    assert!(symoff != 0 && strtab != 0, "no symtab in doom.elf");
+    let want = name.as_bytes();
+    let mut o = symoff;
+    while o + 16 <= symoff + symsize {
+        let noff = u32le(o) as usize;
+        let val = u32le(o + 4);
+        let mut ok = elf[strtab + noff..].starts_with(want);
+        ok = ok && elf[strtab + noff + want.len()] == 0;
+        if ok {
+            return val;
+        }
+        o += 16;
+    }
+    panic!("symbol {name:?} not found in doom.elf");
+}
+
 fn boot_doom() -> (Cpu, FlatMemory) {
     let doom = include_bytes!("../../../doom/doom.bin");
     let wad = include_bytes!("../../../site/doom1.wad");
@@ -516,10 +559,7 @@ fn strcasecmp_pairs() {
         cpu.regs.r[0] = a;
         cpu.regs.r[1] = b;
         cpu.regs.r[14] = 0x20001001;
-        // strcasecmp entry — MUST match `nm doom.elf` (any firmware rebuild
-        // that changes code size shifts it; a stale value jumps mid-function
-        // and fails spuriously, looking exactly like a CPU regression).
-        cpu.regs.r[15] = 0x0801C314;
+        cpu.regs.r[15] = doom_sym("strcasecmp") | 1;
         for _ in 0..100000 {
             cpu.run(sys, &mut mem, 1);
             if (cpu.regs.r[15] & !1) == 0x20001000 { break; }

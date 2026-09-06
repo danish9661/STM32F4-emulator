@@ -1016,8 +1016,11 @@ pub fn exec32(
             // MRS Rd, SYSm
             let sysm = (o2 & 0xFF) as u32;
             let rd = ((o2 >> 8) & 0xF) as usize;
-            cpu.regs.r[rd] = match sysm {
-                0 | 1 | 2 => cpu.regs.xpsr & 0xF8000000, // APSR/IAPSR/EAPSR
+                cpu.regs.r[rd] = match sysm {
+                    // MRS APSR/IAPSR/EAPSR returns NZCVQ **and GE[19:16]**
+                    // (masking to NZCVQ hid GE and made UADD8/USUB8 look
+                    // broken when only the READ was — fuzz-found).
+                    0 | 1 | 2 => cpu.regs.xpsr & 0xF80F0000,
                 3 => cpu.regs.xpsr,                     // XPSR
                 5 => cpu.ipsr,                          // IPSR (live exception number)
                 6 | 7 => cpu.regs.xpsr & 0x0700FC00,    // EPSR/IEPSR
@@ -1615,6 +1618,25 @@ pub fn exec32(
                     return fault(cpu, pc, op1, op2, 4);
                 }
                 let sub = (o2 >> 4) & 0xF;
+                if sub == 4 {
+                    // UADD8: per-byte add, GE[i] = carry out of lane i.
+                    // (Drives memchr's SIMD search via SEL below; fuzz-found
+                    // hole: faulted here.)
+                    let an = rr(cpu, rn, pc);
+                    let am = rr(cpu, rm, pc);
+                    let mut r: u32 = 0;
+                    let mut ge: u32 = 0;
+                    for i in 0..4 {
+                        let s = ((an >> (i * 8)) & 0xFF) + ((am >> (i * 8)) & 0xFF);
+                        r |= (s & 0xFF) << (i * 8);
+                        ge |= ((s >> 8) & 1) << i;
+                    }
+                    cpu.regs.r[rd] = r;
+                    cpu.regs.xpsr =
+                        (cpu.regs.xpsr & !0xF0000) | (ge << 16);
+                    adv(cpu, pc, 4);
+                    return true;
+                }
                 if sub != 8 && sub != 0xA && sub != 9 && sub != 0xB {
                     return fault(cpu, pc, op1, op2, 4);
                 }
@@ -1644,6 +1666,50 @@ pub fn exec32(
                 if q {
                     cpu.regs.xpsr |= 0x08000000; // Q sticky
                 }
+                adv(cpu, pc, 4);
+                return true;
+            }
+            10 => {
+                // SEL: per-byte select on GE (set by UADD8/USUB8 above).
+                // Rd[i] = GE[i] ? Rn[i] : Rm[i]. No flags affected.
+                // (Census-found hole: doom's memchr SIMD needs it.)
+                if (o2 & 0xF0F0) != 0xF080 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                let an = rr(cpu, rn, pc);
+                let am = rr(cpu, rm, pc);
+                let ge = (cpu.regs.xpsr >> 16) & 0xF;
+                let mut r: u32 = 0;
+                for i in 0..4 {
+                    let b = if (ge >> i) & 1 == 1 {
+                        (an >> (i * 8)) & 0xFF
+                    } else {
+                        (am >> (i * 8)) & 0xFF
+                    };
+                    r |= b << (i * 8);
+                }
+                cpu.regs.r[rd] = r;
+                adv(cpu, pc, 4);
+                return true;
+            }
+            12 => {
+                // USUB8 (op2[7:4]==4): per-byte subtract, GE[i] = NOT
+                // borrow (Rn[i] >= Rm[i]). Sibling of UADD8 above.
+                if (o2 & 0xF0F0) != 0xF040 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                let an = rr(cpu, rn, pc);
+                let am = rr(cpu, rm, pc);
+                let mut r: u32 = 0;
+                let mut ge: u32 = 0;
+                for i in 0..4 {
+                    let a = ((an >> (i * 8)) & 0xFF) as i32;
+                    let b = ((am >> (i * 8)) & 0xFF) as i32;
+                    r |= ((a.wrapping_sub(b) as u32) & 0xFF) << (i * 8);
+                    ge |= ((a >= b) as u32) << i;
+                }
+                cpu.regs.r[rd] = r;
+                cpu.regs.xpsr = (cpu.regs.xpsr & !0xF0000) | (ge << 16);
                 adv(cpu, pc, 4);
                 return true;
             }
@@ -1892,6 +1958,25 @@ pub fn exec32(
                 // 64 bits). The old code silently ran it as SMLAL (adds
                 // instead of subtracts) — fault loudly instead.
                 return fault(cpu, pc, op1, op2, 4);
+            }
+            14 => {
+                // UMLAL (plain): unsigned 64-bit accumulate. op2[7:4]==0
+                // (GAS: `umlal r0,r1,r2,r3` = fbe2 0103); UMAAL and other
+                // op-14 forms fault loudly. (Census-found hole: 3 sites in
+                // doom; unreached in all exercised paths so far.)
+                if (o2 & 0xF0) != 0 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                let lo = ((o2 >> 12) & 0xF) as usize;
+                let hi = ((o2 >> 8) & 0xF) as usize;
+                let acc = ((cpu.regs.r[hi] as u64) << 32) | cpu.regs.r[lo] as u64;
+                let p = acc.wrapping_add(
+                    (rr(cpu, rn, pc) as u64).wrapping_mul(rr(cpu, rm, pc) as u64),
+                );
+                cpu.regs.r[lo] = p as u32;
+                cpu.regs.r[hi] = (p >> 32) as u32;
+                adv(cpu, pc, 4);
+                return true;
             }
             _ => return fault(cpu, pc, op1, op2, 4),
         }

@@ -2534,6 +2534,15 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
   palette) match sampling phase (Unicorn overshoots each stepped batch by
   a translation block), not divergence. Rust CPU exonerated as the black/
   speed cause.
+- **Differential fuzz (fuzz_test/, 500/500 identical)**: fixed SMLAL-arm,
+  SMLSD-arm, SSAT/USAT shift-field (imm3:imm2, not contiguous), USAT
+  signedness, SMLAD/SMLSD-Q, PKH top/bottom swap, QADD gate+operand order,
+  LDRD post-index, UADD8/USUB8/SEL (+GE), UMLAL. MRS-APSR now returns
+  NZCVQ+GE (was dropping GE, hiding correct behavior). Census method:
+  every opcode form in all shipped `.elf`s checked against decoder arms.
+- **`doom_sym()` in cpu/tests.rs**: resolves test addresses from
+  doom.elf's symtab at test time — hardcoded addresses rot on every
+  firmware rebuild (strcasecmp moved twice).
 - **Trajectory overlap (the actual verdict)**: per-tic player positions,
   both backends: same-tic distance max 132u/mean 33u, but best-lag
   (nearest-point-on-path) distance max 21u/mean 5u. The two cores traverse

@@ -380,6 +380,37 @@ int main(void) {
             uart_puts("STB7 "); uart_hex8(words[1]); uart_putchar('\n');
         }
     }
+    // ---- Parallel UADD8/USUB8 + SEL (GE-mediated SIMD search idiom from
+    // memchr). Result AND GE-carrying APSR compared (GE drives SEL).
+    {
+        static const uint32_t AV[] = {0x11223344u, 0xFFFFFFFFu, 0x00000000u, 0x80808080u, 0x7F7F7F7Fu};
+        static const uint32_t BV[] = {0xAABBCCDDu, 0x00000001u, 0xFFFFFFFFu, 0x01010101u, 0x01010101u};
+        for (int i = 0; i < 5; i++) {
+            uint32_t a = AV[i], b = BV[i], r;
+            clear_flags();
+            __asm__ volatile ("uadd8 %0, %1, %2" : "=r" (r) : "r" (a), "r" (b));
+            uart_puts("UADD8 "); uart_hex8(r); uart_putchar(' ');
+            uart_hex8(read_apsr()); uart_putchar('\n');
+            clear_flags();
+            __asm__ volatile ("usub8 %0, %1, %2" : "=r" (r) : "r" (a), "r" (b));
+            uart_puts("USUB8 "); uart_hex8(r); uart_putchar(' ');
+            uart_hex8(read_apsr()); uart_putchar('\n');
+            __asm__ volatile ("sel %0, %1, %2" : "=r" (r) : "r" (a), "r" (b));
+            uart_puts("SEL "); uart_hex8(r); uart_putchar('\n');
+        }
+    }
+    // ---- UMLAL (unsigned 64-bit accumulate, op-14 plain form) ----
+    {
+        static const uint32_t AV[] = {0x12345678u, 0xFFFFFFFFu, 0u, 0x80000000u};
+        static const uint32_t BV[] = {0x11111111u, 0xFFFFFFFFu, 0x12345678u, 2u};
+        for (int i = 0; i < 4; i++) {
+            uint32_t lo = 0x01020304u, hi = 0x05060708u;
+            uint32_t a = AV[i], b = BV[i];
+            __asm__ volatile ("umlal %0, %1, %2, %3" : "+r" (lo), "+r" (hi) : "r" (a), "r" (b));
+            uart_puts("UMLAL "); uart_hex8(lo); uart_putchar(' ');
+            uart_hex8(hi); uart_putchar('\n');
+        }
+    }
     // ---- Memory-path x region matrix: B/H/W loads+stores to SRAM
     // (0x2000...), EXTRAM (0xC000...), and the WAD mapping (0xB800...),
     // aligned AND misaligned. A region/width-specific silent drop or
