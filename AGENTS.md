@@ -2536,10 +2536,24 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
   speed cause.
 - **Differential fuzz (fuzz_test/, 500/500 identical)**: fixed SMLAL-arm,
   SMLSD-arm, SSAT/USAT shift-field (imm3:imm2, not contiguous), USAT
-  signedness, SMLAD/SMLSD-Q, PKH top/bottom swap, QADD gate+operand order,
-  LDRD post-index, UADD8/USUB8/SEL (+GE), UMLAL. MRS-APSR now returns
-  NZCVQ+GE (was dropping GE, hiding correct behavior). Census method:
-  every opcode form in all shipped `.elf`s checked against decoder arms.
+   signedness, SMLAD/SMLSD-Q, PKH top/bottom swap, QADD gate+operand order,
+   LDRD post-index, UADD8/USUB8/SEL (+GE), UMLAL. MRS-APSR now returns
+   NZCVQ+GE (was dropping GE, hiding correct behavior). Census method:
+   every opcode form in all shipped `.elf`s checked against decoder arms.
+   Full-program differential now **FUZZ-IDENTICAL, 525/525 lines**
+   (`.pw-scratch/fuzzcmp.mjs`): all flag corners (FSUB/FADD/SBC0/ADC1, masked
+   to NZCVQ like the other APSR ops — Unicorn's real MRS leaves low-bit EPSR
+   residue `...01D3` vs our masked `...0000`), SMUAD/SMUSD/SMLAWT/PKHS5/
+   SSATSH/USATSH, stamps + iter array identical. Scares along the way, all
+   harness artifacts, not guest divergence: (a) the fault-phase `bkpt #0`
+   raises **UC_ERR_EXCEPTION (code 21)** on Unicorn instead of a clean stop —
+   expected, the fault loop treats any stop as FAULTOK; (b) a step that throws
+   strands that step's UART in the model buffer — the phase-1 catch MUST
+   `drainUart()` before giving up, else ~30 lines (SMUAD tail + FUZZ-FAULTS
+   marker) go missing and it looks like an early crash at a truncated
+   `FADD` line; (c) post-exception the Unicorn instance is wedged at the bkpt
+   (every later step re-throws — the §7 rule), so fault-phase drains stay
+   empty. Harness diagnostics go to console, never into the compared buffer.
 - **`doom_sym()` in cpu/tests.rs**: resolves test addresses from
   doom.elf's symtab at test time — hardcoded addresses rot on every
   firmware rebuild (strcasecmp moved twice).
