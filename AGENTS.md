@@ -2565,6 +2565,11 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
   all other exceptions still throw), matching the wasm `faulted ->
   stopped:true`. fuzzcmp's unicorn leg now stops with zero harness noise.
   `noCountHook` accounting skips stopped steps so the meter isn't inflated.
+- **Green board 2026-09-08 @ `3c8ffe5`** (`.pw-scratch/greenboard.sh` runs all
+  three to a verdict file): `cargo test` 57/57, `npm run test:wasm` 7/7
+  (doom 80M inst, SAVE ok slot 0, peak 0.508, 0% clip), `npm test` all green
+  incl. `test_browser` 11 passed / 0 failed. Full battery ≈ 2 min wall
+  (wasm default backend).
 - **`doom_sym()` in cpu/tests.rs**: resolves test addresses from
   doom.elf's symtab at test time — hardcoded addresses rot on every
   firmware rebuild (strcasecmp moved twice).
