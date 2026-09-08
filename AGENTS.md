@@ -2541,7 +2541,7 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
    NZCVQ+GE (was dropping GE, hiding correct behavior). Census method:
    every opcode form in all shipped `.elf`s checked against decoder arms.
    Full-program differential now **FUZZ-IDENTICAL, 525/525 lines**
-   (`.pw-scratch/fuzzcmp.mjs`): all flag corners (FSUB/FADD/SBC0/ADC1, masked
+   (`site/test_fuzz.mjs`, `npm run test:fuzz`): all flag corners (FSUB/FADD/SBC0/ADC1, masked
    to NZCVQ like the other APSR ops — Unicorn's real MRS leaves low-bit EPSR
    residue `...01D3` vs our masked `...0000`), SMUAD/SMUSD/SMLAWT/PKHS5/
    SSATSH/USATSH, stamps + iter array identical. Scares along the way, all
@@ -2558,7 +2558,7 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
    preserve NZCV + Rd, later slots see LIVE flags (ITF4 r6 = 1/5/3/7 across
    ttt/tte/tet/tee — entry-flag evaluation would give 7/7/3/7), first mask
    slot is always T by encoding (`ieee` rejected by GAS). FUZZ-IDENTICAL
-   543/543 with the `ITF*` mask rule in fuzzcmp.mjs.
+   543/543 with the `ITF*` mask rule in test_fuzz.mjs.
 - **BKPT is a clean stop on both backends (2026-09-06, emulator.js)**: the
   Unicorn path converted a BKPT fault-PC `UC_ERR_EXCEPTION` into
   `stopRequested = true` (scoped to the `0xBE00+imm8` halfword at PC/PC-2;
