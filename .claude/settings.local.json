@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(node site/test_components.mjs)"
-    ]
-  }
-}
