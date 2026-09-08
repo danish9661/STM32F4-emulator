@@ -5,12 +5,9 @@
 // read back from the framebuffer at 0x20002000.
 // Usage: node site/test_ltdc.mjs  (exit 0 = PASS)
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../ltdc_test/ltdc_test.bin', import.meta.url)));
@@ -18,7 +15,7 @@ const firmware = new Uint8Array(readFileSync(new URL('../ltdc_test/ltdc_test.bin
 const W = 64, H = 32, FB = 0x20002000;
 const pix = (x, y) => (0xFF000000 | (x << 16) | (y << 8) | (x + y)) >>> 0;
 
-const emu = await createEmulator({ firmware, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes });
+const emu = await createEmulator({ firmware, bindings, svdXml, wasmInit: wasmBytes });
 
 const uart = [];
 let framesSeen = false;

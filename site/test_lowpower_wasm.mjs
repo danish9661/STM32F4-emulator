@@ -1,14 +1,11 @@
-// Verifies low-power (WFI/STOP) on the wasm CPU backend: the
+// Verifies low-power (WFI/STOP): the
 // deep_sleep_demo firmware arms the RTC alarm, enters STOP via WFI, and the
 // Rust core halts (sleeping) until the inline-delivered RTC alarm ISR wakes
-// it (PWR->CSR WUF set). Mirrors test_lowpower.mjs (Unicorn backend).
+// it (PWR->CSR WUF set). Mirrors test_lowpower.mjs.
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../deep_sleep_demo/deep_sleep_demo.bin', import.meta.url)));
@@ -17,8 +14,8 @@ function fail(msg) { console.error('LOWPOWER-WASM FAIL: ' + msg); process.exit(1
 
 (async () => {
     const emu = await createEmulator({
-        firmware, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes,
-        lowpower: true, cpu_backend: 'wasm',
+        firmware, bindings, svdXml, wasmInit: wasmBytes,
+        lowpower: true,
     });
 
     let uart = '';

@@ -1,8 +1,8 @@
 /// <reference types="node" />
 
 // Type declarations for the STM32F407 universal emulator factory.
-// Kept intentionally pragmatic: the peripheral `bindings`/`unicorn` objects are
-// the wasm-bindgen / Unicorn WASM modules and are typed loosely.
+// Kept intentionally pragmatic: the peripheral `bindings` object is
+// the wasm-bindgen module and is typed loosely.
 
 export interface ExtraRamRegion {
   addr: number;
@@ -19,8 +19,6 @@ export interface CreateEmulatorOpts {
   firmware: Uint8Array;
   /** wasm-bindgen module (web or nodejs build). */
   bindings: any;
-  /** Async factory returning the Unicorn module. */
-  unicorn: any;
   /** SVD XML string for init_svd. */
   svdXml?: string;
   /** Optional wasm bytes for bindings.default() (Node). */
@@ -29,14 +27,6 @@ export interface CreateEmulatorOpts {
   flash_size?: number;
   ram_size?: number;
   vector_table?: number;
-
-  tickEvery?: number;
-  pollEvery?: number;
-  minimalPolls?: boolean;
-  blockCounting?: boolean;
-  noCountHook?: boolean;
-  perInstHook?: boolean;
-  maxBatch?: number;
 
   onTx?: ((frame: Uint8Array, meta: unknown) => void) | null;
   eth?: Record<string, number>;
@@ -48,8 +38,6 @@ export interface CreateEmulatorOpts {
   enable_irqs?: boolean;
   irq_eth?: boolean;
   freertos?: boolean;
-  /** Trace peripheral MMIO read/write to stderr (capped). */
-  verbose?: boolean;
 }
 
 export interface StepResult {
@@ -65,7 +53,6 @@ export interface RunResult {
 
 export interface EmulatorHandle {
   uc: any;
-  Module: any;
   step(maxInst?: number): StepResult;
   run(maxInstructions?: number): RunResult;
   drainUart(): Uint8Array;

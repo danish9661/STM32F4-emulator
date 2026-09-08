@@ -3,13 +3,10 @@
 // repeated createEmulator instances (per-instance isolation / reset).
 // Usage: node site/test_edge_cases.mjs  (exit 0 = PASS)
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 import { parseIntelHex, parseElf } from './loaders.js';
 
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const blinky = new Uint8Array(readFileSync(new URL('../blinky/blinky.bin', import.meta.url)));
@@ -18,7 +15,7 @@ let failures = 0;
 function check(cond, msg) { if (!cond) { console.error('  FAIL: ' + msg); failures++; } else { console.log('  ok: ' + msg); } }
 
 function makeEmu() {
-    return createEmulator({ firmware: new Uint8Array(blinky), bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes });
+    return createEmulator({ firmware: new Uint8Array(blinky), bindings, svdXml, wasmInit: wasmBytes });
 }
 
 // ── 1. Bad-image rejection (validates loaders.js error paths) ──────────────

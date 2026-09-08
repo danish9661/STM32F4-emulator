@@ -6,10 +6,9 @@
 // Why a worker at all: stepping the guest is a long synchronous WASM call, so
 // on the main thread every burst blocked input, layout and paint. It costs no
 // throughput (page-driven cadence, see below) but there is still exactly one
-// emulation thread — this makes the page smooth, not the guest faster. SharedArrayBuffer is deliberately NOT used: it needs
-// COOP/COEP headers GitHub Pages cannot set, and it would buy nothing here
-// (the two WASM modules have separate linear memories regardless, and
-// Unicorn's build is single-threaded — see AGENTS.md §7).
+// emulation thread. SharedArrayBuffer is deliberately NOT used: it needs
+// COOP/COEP headers GitHub Pages cannot set, and it would buy nothing since
+// the CPU and peripheral WASM modules have separate linear memories anyway.
 //
 // Bump the ?v= on the Worker() URL in doom.js whenever this file changes:
 // worker scripts are cached exactly as hard as module scripts, and a stale
@@ -23,9 +22,9 @@ import { createEmulator } from './emulator.js';
 // the driver paces by wall clock: run steps until the guest's frame count
 // catches up to realtime 35 fps.
 //
-// Measured cost (2026-08-14, E1M1, low detail ON): ~918k guest instructions
-// per frame, so a full 35 fps needs ~32 MIPS. The Unicorn WASM core tops out
-// near 20-24 MIPS, so the page runs ~25 fps and degrades gracefully.
+// Measured cost: ~918k guest instructions per frame (low detail) to ~1M
+// at high detail, so a full 35 fps needs ~32 MIPS, which the Rust core
+// delivers in the page — full speed at high detail with headroom to spare.
 //
 // Audio consequence: the guest mixer emits exactly one frame's worth of
 // samples (11025/35 = 315) per RENDERED frame, so production scales with fps.
@@ -34,7 +33,6 @@ import { createEmulator } from './emulator.js';
 // then advance faster than game logic and pitch-shift every sound.
 const FRAME_MS = 1000 / 35;      // one game frame (tic) per 28.57ms realtime
 const STEP_BUDGET = 32;          // max steps per burst
-const STEP_INST = 60000;         // instructions per emu.step()
 // Between bursts the loop must RETURN TO THE EVENT LOOP: stepping the guest
 // gap-free wedges Chrome's TCI interpreter (AGENTS §7/§16). The old
 // main-thread loop got that for free by living on rAF.
@@ -128,24 +126,6 @@ const upPending = new Map();     // code -> D ring position (see flushUpPending)
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 const status = (text, cls) => post({ t: 'status', text, cls });
-
-// Unicorn ships as a classic emscripten script that assigns a global, so it
-// cannot be `import`ed. Fetch + indirect-eval it, and hand it an explicit
-// locateFile: emscripten derives the .wasm path from document.currentScript,
-// which does not exist here, and would otherwise look for the wasm next to
-// this worker instead of in vendor/.
-// SECURITY: vendor/unicorn_arm.js is a vendored, version-pinned artifact
-// (alexaltea/unicorn.js 2.1.4). If you update it, bump ?v= and verify SRI:
-//   openssl dgst -sha384 -binary vendor/unicorn_arm.js | openssl base64 -A
-// and add <meta integrity> if served with CSP.
-async function loadUnicorn() {
-    const url = new URL('vendor/unicorn_arm.js?v=20', self.location.href);
-    const src = await (await fetch(url)).text();
-    const factory = (0, eval)(src + '\n;MUnicorn');
-    return () => factory({
-        locateFile: (p) => new URL('vendor/' + p, self.location.href).href,
-    });
-}
 
 function sendKey(code, pressed) {
     if (!uc) return 0;
@@ -383,29 +363,15 @@ async function boot(msg) {
     if (emu) { try { emu.close(); } catch (e) {} emu = null; }
 
     try {
-        // Unicorn is opt-in only (msg.cpuBackend === 'unicorn'); the default
-        // wasm backend never touches it, so skip the ~800KB fetch + compile.
-        const unicorn = msg.cpuBackend === 'unicorn' ? await loadUnicorn() : null;
         emu = await createEmulator({
             firmware: msg.firmware,
             bindings,
-            unicorn,
-            cpu_backend: msg.cpuBackend === 'unicorn' ? 'unicorn' : 'wasm',
-            cpu_backend: msg.cpuBackend || 'wasm',
             svdXml: msg.svdXml,
             extra_ram: [
                 { addr: 0xC0000000, size: 16 * 1024 * 1024 },   // .data/.bss + zone + heap
                 { addr: 0xB8000000, size: 8 * 1024 * 1024 },    // WAD image
             ],
             extra_mem: [{ addr: 0xB8000000, data: new Uint8Array(msg.wad) }],
-            // noCountHook: no per-block JS callback at all (measured ~6%
-            // faster than blockCounting, which crossed the WASM->JS boundary
-            // on every basic block just to bump a counter). Safe here because
-            // doom paces off the guest's FRAME counter, not instCount —
-            // instCount then tracks the emu_start budget, which is what the
-            // MIPS readout wants anyway (block counting over-reported ~1.39x).
-            minimalPolls: true, noCountHook: true,
-            maxBatch: STEP_INST,
             ext_devices: { speaker: true },   // enable the I2S capture drain
         });
         uc = emu.uc;

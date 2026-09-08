@@ -15,7 +15,7 @@ pub const EXC_RETURN_MSP: u32 = 0xFFFFFFF9;
 pub const EXC_RETURN_PSP: u32 = 0xFFFFFFFD;
 pub const EXC_RETURN_HANDLER: u32 = 0xFFFFFFF1;
 
-/// PC trace for differential debugging (wasm-vs-Unicorn lockstep): when
+/// PC trace for execution debugging: when
 /// enabled, every executed instruction appends its PC. Bounded by the
 /// harness (enable late, drain early); a runaway buffer just costs memory.
 static TRACE_ON: AtomicBool = AtomicBool::new(false);
@@ -79,9 +79,8 @@ pub struct Cpu {
     it_stack: Vec<SavedIt>,
     /// Break `run()` when the model has a pending interrupt, so a driver
     /// with guest exception delivery can take it. Off by default: polling
-    /// firmware (and the current JS wasm driver, which has no ISR pump)
-    /// must run full budgets exactly like the Unicorn path, where pending
-    /// model IRQs never stop `emu_start`.
+    /// firmware (and the plain JS driver stepping loop) must run full
+    /// budgets, where pending model IRQs never stop execution.
     pub deliver_irqs: bool,
     /// Halted in WFI/WFE (low-power). JS advances virtual time and wakes
     /// via `wake()` when an interrupt is pending. Only set when
@@ -348,12 +347,11 @@ impl Cpu {
                 }
             }
             self.cycles += 1;
-            // Inline interrupt delivery (no JS pump needed): take the next
+            // Inline interrupt delivery (no ISR pump needed): take the next
             // deliverable exception when in thread mode with PRIMASK clear.
-            // (Unicorn needs the memWriteHook+processInterrupts dance because
-            // it cannot do Cortex-M entry/return; here stacking is exact, so
-            // the mid-`str` PENDSVSET hazard of AGENTS.md §9 cannot occur —
-            // the store completes, PC advances, then we stack the next PC.)
+            // Stacking is exact, so the mid-`str` PENDSVSET hazard of
+            // AGENTS.md §9 cannot occur — the store completes, PC advances,
+            // then we stack the next PC.)
             if self.deliver_irqs && self.ipsr == 0 && self.regs.primask == 0 {
                 let pending = sys.p.nvic.borrow().has_pending();
                 if pending {

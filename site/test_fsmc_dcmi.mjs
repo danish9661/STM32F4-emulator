@@ -16,12 +16,9 @@
 // CPU core would, through a booted emulator.
 // Usage: node site/test_fsmc_dcmi.mjs   (exit 0 = PASS)
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../blinky/blinky.bin', import.meta.url)));
@@ -65,7 +62,7 @@ function cameraFrame(n) {
 }
 
 const emu = await createEmulator({
-    firmware, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes,
+    firmware, bindings, svdXml, wasmInit: wasmBytes,
     ext_devices: {
         fsmcDevices: [{ bank: 0, handler: lcdHandler }],
         camera: { width: CAM_W, height: CAM_H, frame: cameraFrame },

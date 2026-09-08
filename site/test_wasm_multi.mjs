@@ -30,7 +30,7 @@ for (const [name, rel, markers, budget] of fws) {
     const firmware = new Uint8Array(readFileSync(url));
     try {
         const emu = await createEmulator({
-            firmware, bindings, unicorn: null, svdXml, wasmInit: wasmBytes, cpu_backend: 'wasm',
+            firmware, bindings, svdXml, wasmInit: wasmBytes,
         });
         let uart = '';
         let stoppedAt = -1;

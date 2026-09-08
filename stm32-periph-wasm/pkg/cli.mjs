@@ -1,19 +1,28 @@
-import { readFileSync, writeSync } from 'fs';
+import { readFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const yaml = require('js-yaml');
 const path = require('path');
-import * as periph from './stm32_periph_wasm.js';
-const { periph_read, periph_write, tick, tick_n, get_next_pending_interrupt, dma_get_pending_count, dma_get_pending, dma_set_completed, dma_periph_read, dma_periph_write, is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, qspi_register_flash, init_svd, has_pending_interrupt, get_uart_output, uart_rx_byte, eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll, eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done, eth_signal_rx_poll } = periph;
+// Rust CPU backend (sole backend): the shared site emulator factory plus the
+// current peripheral-model build. No Unicorn anywhere in this path.
+import * as bindings from '../../site/vendor/stm32_periph_wasm.js';
+import { createEmulator } from '../../site/emulator.js';
 
 const parseHex = (v) => typeof v === 'number' ? v : parseInt(v, 16);
 
-async function getMUnicorn() {
-    const { createRequire } = await import('module');
-    const require = createRequire(import.meta.url);
-    return require('./unicorn_arm.cjs');
-}
+// usart_probe-style names (or hex) -> USART base for stdin UART injection.
+const UART_BASE = {
+    USART1: 0x40011000, USART2: 0x40004400, USART3: 0x40004800,
+    UART4: 0x40004C00, UART5: 0x40005000, USART6: 0x40011400,
+};
+const parseUartAddr = (name, fallback) => {
+    if (name == null) return fallback;
+    const key = String(name).toUpperCase();
+    if (UART_BASE[key] !== undefined) return UART_BASE[key];
+    const n = parseInt(key, 16);
+    return Number.isNaN(n) ? fallback : n;
+};
 
 async function main() {
     const args = process.argv.slice(2);
@@ -23,7 +32,7 @@ async function main() {
     const showRegs = args.includes('--regs') || process.env.SHOW_REGS === '1';
     const useGateway = (args.includes('--gateway') || args.includes('--connect')) || process.env.ETH_GATEWAY === '1';
     const spawnGateway = args.includes('--gateway') && !args.includes('--connect');
-    let uartAddr = parseInt(args.find(a => a.startsWith('--uart='))?.split('=')[1] || process.env.UART_ADDR || '0x40011000', 16);
+    let uartAddr = parseHex(args.find(a => a.startsWith('--uart='))?.split('=')[1] || process.env.UART_ADDR || '0x40011000');
 
     // Load and merge configs
     let config = {};
@@ -40,37 +49,35 @@ async function main() {
         console.log(`Using config(s): ${configPaths.join(', ')}`);
     }
 
-    const MUnicorn = await getMUnicorn();
-    const Module = await MUnicorn({});
+    const svdXml = readFileSync(new URL('../../monox/stm32f407.svd', import.meta.url), 'utf8');
+    const wasmBytes = new Uint8Array(readFileSync(new URL('../../site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 
     let firmware;
-    let vector_table;
-    let memRegions;
+    let vector_table = 0x08000000;
+    let ram_size = 0x20000;
+    const extra_ram = [];
+    const ext_devices = {};
 
     if (config.regions) {
         // Config mode
-        memRegions = config.regions.map(r => ({ ...r, start: parseHex(r.start), size: parseHex(r.size) }));
+        const memRegions = config.regions.map(r => ({ ...r, start: parseHex(r.start), size: parseHex(r.size) }));
         const romRegion = memRegions.find(r => r.load);
         if (!romRegion) { console.error('No region with load file found'); process.exit(1); }
         vector_table = parseHex(config.cpu?.vector_table || romRegion.start);
         const romFile = path.resolve(romRegion._dir || config._devices_dir, romRegion.load);
-        firmware = readFileSync(romFile);
+        firmware = new Uint8Array(readFileSync(romFile));
         console.log(`Loading firmware: ${romFile} (${firmware.length} bytes)`);
 
-        const svdPath = path.resolve(config._devices_dir, config.cpu?.svd || 'stm32f407.svd');
-        const svdXml = readFileSync(svdPath, 'utf8');
-
-        // QSPI flash must be registered BEFORE init_svd: the QUADSPI peripheral
+        // QSPI flash must be registered BEFORE init: the QUADSPI peripheral
         // binds its flash backend at construction time.
         if (config.devices && config.devices.qspi) {
+            ext_devices.qspi = [];
             for (const d of config.devices.qspi) {
-                const data = d.file ? readFileSync(path.resolve(config._devices_dir, d.file)) : new Uint8Array(d.size || 256);
-                qspi_register_flash(d.peripheral || 'QUADSPI', data);
+                const data = d.file ? new Uint8Array(readFileSync(path.resolve(config._devices_dir, d.file))) : new Uint8Array(d.size || 256);
+                ext_devices.qspi.push({ peripheral: d.peripheral || 'QUADSPI', data });
                 console.log(`Loaded QSPI flash (${data.length} bytes)`);
             }
         }
-
-        init_svd(svdXml);
 
         // Patches
         if (config.patches) {
@@ -85,6 +92,19 @@ async function main() {
                 }
             }
         }
+
+        // Non-ROM/RAM, non-model regions become plain extra RAM. Peripheral
+        // (0x40000000+) and system (0xE0000000+) space belongs to the model.
+        for (const r of memRegions) {
+            if (r === romRegion) continue;
+            if (r.start >= 0x40000000 && r.start < 0xB0000000) continue;
+            if (r.start >= 0xE0000000 && r.start < 0xE1000000) continue;
+            if (r.start <= 0x20000000 && r.start + r.size > 0x20000000) {
+                ram_size = r.size;
+                continue;
+            }
+            extra_ram.push({ addr: r.start, size: r.size });
+        }
     } else {
         // Default fallback (no config)
         const firmwarePath = posArgs[0] || process.env.FIRMWARE;
@@ -93,258 +113,85 @@ async function main() {
             console.error('  or set FIRMWARE env var');
             process.exit(1);
         }
-        firmware = readFileSync(firmwarePath);
+        firmware = new Uint8Array(readFileSync(firmwarePath));
         console.log(`Loading firmware: ${firmwarePath} (${firmware.length} bytes)`);
 
         const fwDir = firmwarePath.replace(/\\/g, '/').replace(/\/[^/]+$/, '');
         for (const fn of ['eeprom.bin', 'spi_flash.bin']) {
             try {
-                const data = readFileSync(`${fwDir}/${fn}`);
-                if (fn.startsWith('eeprom')) add_i2c_eeprom("I2C1", 0x50, data);
-                else add_spi_flash("SPI3", 0xef4016, data, null);
+                const data = new Uint8Array(readFileSync(`${fwDir}/${fn}`));
+                if (fn.startsWith('eeprom')) {
+                    (ext_devices.i2c_eeprom ||= []).push({ peripheral: 'I2C1', address: 0x50, data });
+                } else {
+                    (ext_devices.spi_flash ||= []).push({ peripheral: 'SPI3', jedec_id: 0xef4016, data, cs: null });
+                }
                 console.log(`Loaded ext device: ${fwDir}/${fn} (${data.length} bytes)`);
             } catch (_) {}
         }
 
-        const svdPath = new URL('../../monox/stm32f407.svd', import.meta.url);
-        const svdXml = readFileSync(svdPath, 'utf8');
-
-        // QSPI flash must be registered BEFORE init_svd: the QUADSPI peripheral
-        // binds its flash backend at construction time. For a qspi firmware we
+        // QSPI flash must be registered BEFORE init. For a qspi firmware we
         // use an adjacent qspi_flash.bin if present, else a default 256-byte
         // (blank) image so the indirect write/read round-trip still works.
         if (firmwarePath.toLowerCase().includes('qspi')) {
             try {
-                const data = readFileSync(`${fwDir}/qspi_flash.bin`);
-                qspi_register_flash('QUADSPI', data);
+                const data = new Uint8Array(readFileSync(`${fwDir}/qspi_flash.bin`));
+                (ext_devices.qspi ||= []).push({ peripheral: 'QUADSPI', data });
                 console.log(`Loaded QSPI flash: ${fwDir}/qspi_flash.bin (${data.length} bytes)`);
             } catch (_) {
-                qspi_register_flash('QUADSPI', new Uint8Array(256));
+                (ext_devices.qspi ||= []).push({ peripheral: 'QUADSPI', data: new Uint8Array(256) });
                 console.log('Loaded default 256-byte QSPI flash');
             }
         }
-
-        init_svd(svdXml);
-
-        vector_table = 0x08000000;
-        memRegions = [
-            { start: 0x08000000, size: 0x100000 },
-            { start: 0x20000000, size: 0x20000 },
-        ];
     }
 
     console.log(`Max instructions: ${maxInst}`);
-    console.log('Initializing Unicorn...');
-
-    const uc = new Module.Unicorn(
-        Module.ARCH_ARM,
-        Module.MODE_THUMB | Module.MODE_LITTLE_ENDIAN
-    );
-
-    // Map memory regions
-    for (const r of memRegions) {
-        uc.mem_map(r.start, r.size, Module.PROT_ALL);
-    }
-    // Write firmware into first writable-mapped ROM region
-    const romRegion = memRegions.find(r => firmware && (r._firmware || r.load || (r.start <= vector_table && r.start + r.size > vector_table)));
-    const romStart = romRegion ? romRegion.start : (memRegions[0]?.start || 0x08000000);
-    if (firmware) uc.mem_write(BigInt(romStart), firmware);
-
-    // Also write firmware to the exact vector_table region if different
-    if (romStart !== vector_table) uc.mem_write(BigInt(vector_table), firmware);
-
-    // FLASH program/erase gating: guest stores to 0x08000000..0x08100000 are
-    // only permitted while the model is in programming mode; otherwise the
-    // region is read/exec and stray stores fault (skipped by the driver).
-    const FLASH_GUEST_START = 0x08000000n;
-    const FLASH_GUEST_LEN = 0x100000;
-    let flashWritable = false;
-    const syncFlashProtection = () => {
-        const pg = periph.flash_is_programming();
-        if (pg && !flashWritable) {
-            uc.mem_protect(FLASH_GUEST_START, FLASH_GUEST_LEN, Module.PROT_ALL);
-            flashWritable = true;
-        } else if (!pg && flashWritable) {
-            uc.mem_protect(FLASH_GUEST_START, FLASH_GUEST_LEN, Module.PROT_READ | Module.PROT_EXEC);
-            flashWritable = false;
-        }
-    };
-    if (0x08000000 >= romStart && 0x08000000 < romStart + (memRegions[0]?.size || 0x100000)) {
-        uc.mem_protect(FLASH_GUEST_START, FLASH_GUEST_LEN, Module.PROT_READ | Module.PROT_EXEC);
-    }
-
-    const stepThroughFlashFault = () => {
-        const pc = uc.reg_read_i32(Module.ARM_REG_PC) >>> 0;
-        const b = uc.mem_read(BigInt(pc & ~1), 2);
-        const h = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint16(0, true);
-        const size = (h & 0xE000) === 0xE000 ? 4 : 2; // Thumb-2 wide vs halfword
-        uc.reg_write_i32(Module.ARM_REG_PC, (pc + size) | 1);
-    };
-
-    // Peripheral ranges
-    const periphRanges = [
-        [0x40000000, 0xB0000000],
-        [0xE0000000, 0xE1000000],
-    ];
-    for (const [start, end] of periphRanges) {
-        uc.mem_map(start, end - start, Module.PROT_READ | Module.PROT_WRITE);
-    }
+    console.log('Booting Rust CPU backend...');
 
     // Config devices
     if (config.devices) {
         for (const [type, devs] of Object.entries(config.devices)) {
             for (const d of devs || []) {
                 if (type === 'i2c_eeprom') {
-                    const data = d.file ? readFileSync(path.resolve(config._devices_dir, d.file)) : new Uint8Array(d.size || 0);
-                    add_i2c_eeprom(d.peripheral, parseHex(d.addr), data);
+                    const data = d.file ? new Uint8Array(readFileSync(path.resolve(config._devices_dir, d.file))) : new Uint8Array(d.size || 0);
+                    (ext_devices.i2c_eeprom ||= []).push({ peripheral: d.peripheral, address: parseHex(d.addr), data });
                 } else if (type === 'spi_flash') {
-                    const data = d.file ? readFileSync(path.resolve(config._devices_dir, d.file)) : new Uint8Array(d.size || 0);
-                    add_spi_flash(d.peripheral, parseHex(d.jedec_id), data, d.cs ?? null);
+                    const data = d.file ? new Uint8Array(readFileSync(path.resolve(config._devices_dir, d.file))) : new Uint8Array(d.size || 0);
+                    (ext_devices.spi_flash ||= []).push({ peripheral: d.peripheral, jedec_id: parseHex(d.jedec_id), data, cs: d.cs ?? null });
                 } else if (type === 'usart_probe') {
-                    uartAddr = parseHex(d.peripheral.match(/[0-9a-fA-F]+/)?.[0]) ? parseInt(d.peripheral, 16) : (PERIPH_ADDR[d.peripheral] || uartAddr);
+                    uartAddr = parseUartAddr(d.peripheral, uartAddr);
                 } else if (type === 'qspi') {
-                    const data = d.file ? readFileSync(path.resolve(config._devices_dir, d.file)) : new Uint8Array(d.size || 256);
-                    qspi_register_flash(d.peripheral || 'QUADSPI', data);
+                    const data = d.file ? new Uint8Array(readFileSync(path.resolve(config._devices_dir, d.file))) : new Uint8Array(d.size || 256);
+                    (ext_devices.qspi ||= []).push({ peripheral: d.peripheral || 'QUADSPI', data });
                 }
             }
         }
     }
 
-    const read32 = (addr) => {
-        const b = uc.mem_read(BigInt(addr), 4);
-        const dt = new DataView(b.buffer, b.byteOffset, b.byteLength);
-        return dt.getUint32(0, true);
-    };
+    // TX frames captured from the guest this step (sent to the gateway /
+    // logged after the step so a round-boundary restart happens first).
+    const stepTx = [];
+    // Driver mode: eth_http is a POLLING firmware (its ETH_IRQHandler must
+    // NOT run — it would stomp the driver's idx/len bookkeeping, and its
+    // first-match descriptor scan starves an older-indexed frame whenever a
+    // newer frame reuses d0, which loses the HTTP body at Rust-core speed).
+    // Pure polling (driver-owned SRAM flags + idx rotation) is the proven
+    // browser-gateway path. True IRQ firmware (eth_dhcp/eth_test/...) keeps
+    // the ISR-owns-flags mode of the old pump CLI.
+    const fwName = (configPaths[0] || posArgs[0] || process.env.FIRMWARE || '').toLowerCase();
+    const pollingEth = fwName.includes('eth_http');
+    const emu = await createEmulator({
+        firmware, bindings, svdXml, wasmInit: wasmBytes,
+        vector_table, ram_size, extra_ram, ext_devices, uart_addr: uartAddr,
+        // Interrupt-driven delivery: the guest ETH_IRQHandler owns its SRAM
+        // flags (the driver only signals the model + injects frames), exactly
+        // like the old ISR-pump CLI. Covers both polling (eth_http) and
+        // IRQ-driven (eth_dhcp/eth_test) firmware.
+        enable_irqs: !pollingEth, irq_eth: !pollingEth,
+        onTx: (pkt) => stepTx.push(pkt),
+    });
 
-    const sp_init = read32(vector_table);
-    const pc_init = read32(vector_table + 4);
-
-    uc.reg_write_i32(Module.ARM_REG_SP, sp_init);
-    uc.reg_write_i32(Module.ARM_REG_PC, pc_init | 1);
-
-    console.log(`SP=0x${sp_init.toString(16)} PC=0x${(pc_init | 1).toString(16)}`);
-
-    const memReadHook = (handle, type, address, size, value, user_data) => {
-        const addr32 = Number(address);
-        const val = periph_read(addr32, size) >>> 0;
-        const bytes = new Uint8Array(size);
-        for (let i = 0; i < size; i++) {
-            bytes[i] = (val >> (i * 8)) & 0xFF;
-        }
-        uc.mem_write(address, bytes);
-    };
-
-    const memWriteHook = (handle, type, address, size, value, user_data) => {
-        const a = Number(address);
-        if (process.env.DBG_DMA && (a === 0x40029004 || a === 0x40029018 || a === 0x40029010 || a === 0x40029014)) {
-            let pc = 0;
-            try { pc = uc.reg_read_i32(Module.ARM_REG_PC); } catch (_) {}
-            console.log(`[DMA] wr 0x${a.toString(16)} = 0x${(Number(value) >>> 0).toString(16)} pc=0x${(pc >>> 0).toString(16)}`);
-        }
-        if (process.env.DBG_DMA2 && a >= 0x40029000 && a <= 0x4002901c && (a & 3) === 0) {
-            let pc = 0;
-            try { pc = uc.reg_read_i32(Module.ARM_REG_PC); } catch (_) {}
-            console.log(`[DMA2] wr 0x${a.toString(16)} = 0x${(Number(value) >>> 0).toString(16)} pc=0x${(pc >>> 0).toString(16)}`);
-        }
-        periph_write(a, size, Number(value));
-        if (a >= 0x40023C00 && a <= 0x40023C18) syncFlashProtection(); // FLASH CR writes flip the pg gate
-    };
-
-    for (const [start, end] of periphRanges) {
-        uc.hook_add(Module.HOOK_MEM_READ, memReadHook, null, start, end);
-        uc.hook_add(Module.HOOK_MEM_WRITE, memWriteHook, null, start, end);
-    }
-
-    // FLASH program writes: guest writes to the flash region only stick when
-    // the model says programming is active (unlocked + PG + !BSY); the JS
-    // driver applies them to guest memory because uc.mem_write from the API
-    // does not trigger memory hooks (no recursion risk).
-    const flashWriteHook = (handle, type, address, size, value, user_data) => {
-        if (periph.flash_is_programming()) {
-            const a = Number(address);
-            if (a >= 0x08000000 && a < 0x08100000) {
-                const bytes = new Uint8Array(size);
-                const v = Number(value) >>> 0;
-                for (let i = 0; i < size; i++) bytes[i] = (v >> (i * 8)) & 0xFF;
-                uc.mem_write(address, bytes);
-            }
-        }
-    };
-    uc.hook_add(Module.HOOK_MEM_WRITE, flashWriteHook, null, 0x08000000n, 0x08100000n);
-
-    const applyFlashErase = () => {
-        const er = periph.flash_take_erase();
-        if (er.length === 2) {
-            const [start, len] = er;
-            const ff = new Uint8Array(4096).fill(0xFF);
-            for (let off = 0; off < len; off += 4096) {
-                const chunk = Math.min(4096, len - off);
-                uc.mem_write(BigInt(start + off), ff.subarray(0, chunk));
-            }
-            periph.flash_erase_applied();
-            if (process.env.DBG_FLASH) console.log(`[FLASH] erased ${len} bytes @ 0x${start.toString(16)}`);
-        }
-    };
-
-    if (process.env.DBG_FLAG) {
-        const flagHook = (handle, type, address, size, value, user_data) => {
-            const a = Number(address);
-            if (a >= 0x20000618 && a < 0x20000628) {
-                const pc = (uc.reg_read_i32(Module.ARM_REG_PC) >>> 0).toString(16);
-                const val = (Number(value) >>> 0).toString(2).padStart(32, '0');
-                console.log(`[FLAG] ${type === 2 ? 'WR' : 'rd'} 0x${a.toString(16)} = ${val} pc=0x${pc}`);
-            }
-        };
-        uc.hook_add(Module.HOOK_MEM_READ, flagHook, null, 0x20000600n, 0x20000640n);
-        uc.hook_add(Module.HOOK_MEM_WRITE, flagHook, null, 0x20000600n, 0x20000640n);
-    }
-
-    let instCount = 0n;
-    let stopRequested = false;
-    const TICK_EVERY = 5000;
-    const POLL_EVERY = 1000;
-    let tickAcc = 0;
-    let pollAcc = 0;
-
-    const codeHook = (handle, address, size, user_data) => {
-        instCount++;
-        if (process.env.DBG_PC) {
-            const a = Number(address) & 0xFFFFFFFE;
-            if ((a >= 0x8001080 && a <= 0x8001110)) {
-                if (a === 0x8001080 || a === 0x8001088 || a === 0x800108c || a === 0x8001098 || a === 0x8001092 || a === 0x80010b6 || a === 0x80010f8 || a === 0x8001100) {
-                    console.log(`[PC] 0x${a.toString(16)} inst=${instCount}`);
-                }
-            }
-        }
-        if (gwRxQueue.length > 0 && eth_is_rx_poll()) {
-            uc.emu_stop();
-            return;
-        }
-        tickAcc++;
-        if (tickAcc >= TICK_EVERY) {
-            tickAcc = 0;
-            tick_n(TICK_EVERY);
-            if (is_watchdog_reset_requested()) {
-                stopRequested = true;
-                uc.emu_stop();
-                return;
-            }
-            if (has_pending_interrupt()) {
-                uc.emu_stop();
-                return;
-            }
-        }
-        pollAcc++;
-        if (pollAcc >= POLL_EVERY) {
-            pollAcc = 0;
-            applyFlashErase(); // model holds BSY until the erase is applied
-            if (dma_get_pending_count() > 0 || eth_is_tx_poll()) {
-                uc.emu_stop();
-                return;
-            }
-        }
-    };
-    uc.hook_add(Module.HOOK_CODE, codeHook, null);
+    const regs0 = emu.getRegisters();
+    console.log(`SP=0x${regs0.SP.toString(16)} PC=0x${regs0.PC.toString(16)}`);
 
     // Gateway networking
     let gwProcess = null;
@@ -381,11 +228,6 @@ async function main() {
                 }
                 gwRxQueue.push(buf);
                 if (process.env.DBG_RX) console.log(`[RX] ws msg ${buf.length}B, queue=${gwRxQueue.length}`);
-                if (process.env.DBG_PC2 && typeof uc !== 'undefined') {
-                    let pcr = 0;
-                    try { pcr = uc.reg_read_i32(Module.ARM_REG_PC); } catch (_) {}
-                    console.log(`[GWF] guest PC=0x${(pcr >>> 0).toString(16)} rxQ=${gwRxQueue.length}`);
-                }
             };
             ws.onclose = () => { if (gwWs === ws) { gwConnected = false; console.log('Gateway WebSocket disconnected'); } };
             gwWs = ws;
@@ -492,236 +334,61 @@ async function main() {
     process.stdin.resume();
     if (process.stdin.isTTY) process.on('SIGINT', () => { process.stdin.setRawMode(false); process.exit(0); });
 
-    const intrHook = (handle, intno, user_data) => {
-        if (intno === 8) {
-            const sp = uc.reg_read_i32(Module.ARM_REG_SP);
-            const frame = uc.mem_read(BigInt(sp), 32);
-            const sv = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
-            uc.reg_write_i32(Module.ARM_REG_R0, sv.getUint32(28, true));
-            uc.reg_write_i32(Module.ARM_REG_R1, sv.getUint32(24, true));
-            uc.reg_write_i32(Module.ARM_REG_R2, sv.getUint32(20, true));
-            uc.reg_write_i32(Module.ARM_REG_R3, sv.getUint32(16, true));
-            uc.reg_write_i32(Module.ARM_REG_R12, sv.getUint32(12, true));
-            uc.reg_write_i32(Module.ARM_REG_LR, sv.getUint32(8, true));
-            uc.reg_write_i32(Module.ARM_REG_PC, sv.getUint32(4, true) | 1);
-            uc.reg_write_i32(Module.ARM_REG_SP, sp + 32);
-        }
-    };
-    uc.hook_add(Module.HOOK_INTR, intrHook, null);
-
-    const processEth = async (uc) => {
-        if (eth_is_tx_poll()) {
-            const ta = eth_get_tx_desc_addr();
-            const txDescAddr = eth_get_tx_desc_addr();
-            if (process.env.DBG_TX) console.log(`[TX!] poll desc=0x${txDescAddr.toString(16)}`);
-            if (txDescAddr !== 0) {
-                let descAddr = txDescAddr;
-                const seen = new Set();
-                while (descAddr !== 0 && !seen.has(descAddr)) {
-                    seen.add(descAddr);
-                    const desc = uc.mem_read(BigInt(descAddr), 8);
-                    const dv = new DataView(desc.buffer, desc.byteOffset, desc.byteLength);
-                    const tdes0 = dv.getUint32(0, true);
-                    const tdes1 = dv.getUint32(4, true);
-                    if ((tdes0 & 0x80000000) === 0) break;
-                    const bufAddr = tdes1 & 0xFFFFFFFC;
-                    const bufSize = (tdes0 & 0x3FFF);
-                    if (bufAddr !== 0 && bufSize > 0 && bufSize <= 2000) {
-                        // Round boundary: the guest already printed "=== HTTP ==="
-                        // and is now TXing the next round's first frame (DHCP
-                        // Discover). Restart the gateway BEFORE the frame goes
-                        // out, so the fresh stack sees the new transaction.
-                        if (gwRestartPending) {
-                            gwRestartPending = false;
-                            console.log(`[GW] restarting gateway on next-round TX (${bufSize}B)...`);
-                            await restartGateway();
-                        }
-                        const pkt = new Uint8Array(uc.mem_read(BigInt(bufAddr), bufSize));
-                        if (gwConnected && gwWs?.readyState === WebSocket.OPEN) {
-                            if (process.env.DBG_TX) console.log(`[TX] ${bufSize}B -> ws`);
-                            gwWs.send(pkt);
-                        } else if (useGateway) {
-                            if (process.env.DBG_TX) console.log(`[TX] ${bufSize}B queued (${gwConnected ? 'not-open' : 'disconnected'})`);
-                            gwTxPending.push(pkt);
-                        } else {
-                            console.log(`ETH TX ${bufSize} byte(s) from 0x${bufAddr.toString(16)}`);
-                        }
-                    }
-                    const ownClear = tdes0 & ~0x80000000;
-                    const status = ownClear | 0x20000000;
-                    const wb = new Uint8Array(4);
-                    new DataView(wb.buffer).setUint32(0, status, true);
-                    uc.mem_write(BigInt(descAddr), wb);
-                    if (tdes0 & (1 << 22)) descAddr = tdes1 & 0xFFFFFFFC;
-                    else descAddr = descAddr + 8;
-                }
-            }
-            eth_clear_tx_poll();
-            eth_tx_done();
-        }
-        if (eth_is_rx_poll()) {
-            const rxDescAddr = eth_get_rx_desc_addr();
-            let rxDelivered = 0;
-            if (process.env.DBG_RXP) console.log(`[RXP] rx_poll=true queue=${gwRxQueue.length} desc=0x${rxDescAddr.toString(16)} inst=${instCount}`);
-            if (rxDescAddr !== 0 && gwRxQueue.length > 0) {
-                if (process.env.DBG_RX) console.log(`[RX] poll, queue=${gwRxQueue.length}, desc=0x${rxDescAddr.toString(16)}`);
-                let descAddr = rxDescAddr;
-                const seen = new Set();
-                let attempts = 0;
-                while (descAddr !== 0 && !seen.has(descAddr) && gwRxQueue.length > 0 && attempts < 1) {
-                    attempts++;
-                    seen.add(descAddr);
-                    let desc;
-                    try { desc = uc.mem_read(BigInt(descAddr), 8); } catch (e) { break; }
-                    const dv = new DataView(desc.buffer, desc.byteOffset, desc.byteLength);
-                    const rdes0 = dv.getUint32(0, true);
-                    if ((rdes0 & 0x80000000) === 0) break;
-                    const rdes1 = dv.getUint32(4, true);
-                    const bufAddr = rdes1 & 0xFFFFFFFC;
-                    const bufSize = (rdes0 & 0x3FFF);
-                    if (bufAddr !== 0 && bufSize >= 60) {
-                        const pkt = gwRxQueue.shift();
-                        const len = Math.min(pkt.length, bufSize);
-                        if (process.env.RX_HEX === '1') {
-                            let hex = [];
-                            for (let i = 0; i < len && i < 64; i++) hex.push(pkt[i].toString(16).padStart(2, '0'));
-                            console.log(`[RXHEX len=${len}] ${hex.join('')}`);
-                        }
-                        try { uc.mem_write(BigInt(bufAddr), new Uint8Array(pkt.buffer, pkt.byteOffset, len)); } catch (e) { break; }
-                        // Real F407: RDES0 high word = frame length [29:16], OWN cleared; FS/LS
-                        // live in the low status word. No marker bits here.
-                        const rdes0_w = len << 16;
-                        const wb = new Uint8Array(4);
-                        new DataView(wb.buffer).setUint32(0, rdes0_w, true);
-                        try { uc.mem_write(BigInt(descAddr), wb); } catch (e) { break; }
-                        rxDelivered = 1;
-                    }
-                    if (rdes1 & (1 << 29)) descAddr = rdes1 & 0xFFFFFFFC;
-                    else descAddr = descAddr + 8;
-                }
-            }
-            eth_clear_rx_poll();
-            if (rxDelivered) {
-                eth_rx_done();
-                // Re-arm RX poll if more packets pending so next iteration gets a separate IRQ
-                if (gwRxQueue.length > 0) {
-                    const rda = eth_get_rx_desc_addr();
-                    if (rda !== 0) eth_signal_rx_poll(rda);
-                }
-            }
+    const sendTx = (pkt, meta) => {
+        if (process.env.DBG_TX) console.log(`[TX] ${pkt.length}B${meta?.bufAddr !== undefined ? ` from 0x${meta.bufAddr.toString(16)}` : ''} -> ws ${[...pkt.subarray(0, 48)].map((b) => b.toString(16).padStart(2, '0')).join('')}`);
+        if (gwConnected && gwWs?.readyState === WebSocket.OPEN) {
+            gwWs.send(pkt);
+        } else if (useGateway) {
+            if (process.env.DBG_TX) console.log(`[TX] ${pkt.length}B queued (${gwConnected ? 'not-open' : 'disconnected'})`);
+            gwTxPending.push(pkt);
+        } else {
+            console.log(`ETH TX ${pkt.length} byte(s)${meta?.bufAddr !== undefined ? ` from 0x${meta.bufAddr.toString(16)}` : ''}`);
         }
     };
 
-    const processDma = () => {
-        const isPeriphAddr = (a) => a >= 0x40000000 && a < 0x50000000;
-        const count = dma_get_pending_count();
-        for (let i = 0; i < count; i++) {
-            const pending = dma_get_pending(0);
-            if (pending.length < 5) continue;
-            const dir = pending[0];
-            const stream = pending[1];
-            const src = pending[2];
-            const dst = pending[3];
-            const size = pending[4];
-            const peri_addr = pending[5] || 0;
-            const peripheral = pending[6] || 0;
-            try {
-                if (dir === 2 || !peripheral || !isPeriphAddr(peri_addr)) {
-                    const data = uc.mem_read(BigInt(src), size);
-                    uc.mem_write(BigInt(dst), data);
-                } else if (dir === 0) {
-                    const data = dma_periph_read(peri_addr, size, (pending[7] || 0) === 1, pending[8] || 4);
-                    uc.mem_write(BigInt(dst), data);
-                } else {
-                    dma_periph_write(peri_addr, uc.mem_read(BigInt(src), size));
-                }
-            } catch (e) {
-                console.warn('DMA error:', e.message);
-            }
-            dma_set_completed(stream, true);
-        }
-    };
-
-    let lastUartLen = 0;
-    let uartStableCount = 0;
-
-    const processInterrupts = () => {
-        while (!stopRequested) {
-            const irq = get_next_pending_interrupt();
-            if (irq <= -100) break;
-            if (process.env.DBG_IRQ && (irq === 58 || irq === 61)) console.log(`[IRQ] ETH handler`);
-            // console.log(`DEBUG: IRQ ${irq} at inst ${instCount}`);
-
-            const savedAt = uc.reg_read_i32(Module.ARM_REG_SP);
-            const pc = uc.reg_read_i32(Module.ARM_REG_PC);
-            const lr = uc.reg_read_i32(Module.ARM_REG_LR);
-            const xpsr = uc.reg_read_i32(Module.ARM_REG_XPSR);
-            const r0 = uc.reg_read_i32(Module.ARM_REG_R0);
-            const r1 = uc.reg_read_i32(Module.ARM_REG_R1);
-            const r2 = uc.reg_read_i32(Module.ARM_REG_R2);
-            const r3 = uc.reg_read_i32(Module.ARM_REG_R3);
-            const r12 = uc.reg_read_i32(Module.ARM_REG_R12);
-            const frame = new Uint8Array(32);
-            const sv = new DataView(frame.buffer);
-            sv.setUint32(0, xpsr, true);
-            sv.setUint32(4, pc, true);
-            sv.setUint32(8, lr, true);
-            sv.setUint32(12, r12, true);
-            sv.setUint32(16, r3, true);
-            sv.setUint32(20, r2, true);
-            sv.setUint32(24, r1, true);
-            sv.setUint32(28, r0, true);
-            uc.mem_write(BigInt(savedAt - 32), frame);
-            uc.reg_write_i32(Module.ARM_REG_SP, savedAt - 32);
-            const handler_pc = read32(vector_table + 4 * (16 + irq));
-            uc.reg_write_i32(Module.ARM_REG_LR, 0xFFFFFFF9);
-            uc.reg_write_i32(Module.ARM_REG_PC, handler_pc);
-            if (process.env.DBG_IRQF) {
-                console.log(`[IRQF] irq=${irq} savedPC=0x${(pc & 0xFFFFFFFE).toString(16)} SP=0x${savedAt.toString(16)} r0=0x${r0.toString(16)} r1=0x${r1.toString(16)} r2=0x${r2.toString(16)} r3=0x${r3.toString(16)}`);
-            }
-            try {
-                uc.emu_start(BigInt(handler_pc), 0n, 0n, 20000);
-            } catch (e) {
-                if (process.env.DBG_IRQF) console.log(`[IRQF!] ISR aborted: ${String(e).slice(0, 60)}`);
-                // Handler crashed on BX LR (EXC_RETURN not supported)
-            }
-            const restoredR3 = uc.reg_read_i32(Module.ARM_REG_R3);
-            const restoredPC = uc.reg_read_i32(Module.ARM_REG_PC) & 0xFFFFFFFE;
-            if (process.env.DBG_IRQF) {
-                console.log(`[IRQF] after-ISR r3=0x${(restoredR3 >>> 0).toString(16)} pc=0x${restoredPC.toString(16)}`);
-            }
-            if (process.env.DBG_IRQSR) {
-                const hp = has_pending_interrupt();
-                console.log(`[IRQSR] has_pending_after_ISR: ${hp}`);
-            }
-            // Restore context from where we saved it (handlers may modify SP)
-            const savedFrame = uc.mem_read(BigInt(savedAt - 32), 32);
-            const savedSv = new DataView(savedFrame.buffer, savedFrame.byteOffset, savedFrame.byteLength);
-            uc.reg_write_i32(Module.ARM_REG_XPSR, savedSv.getUint32(0, true));
-            uc.reg_write_i32(Module.ARM_REG_R0, savedSv.getUint32(28, true));
-            uc.reg_write_i32(Module.ARM_REG_R1, savedSv.getUint32(24, true));
-            uc.reg_write_i32(Module.ARM_REG_R2, savedSv.getUint32(20, true));
-            uc.reg_write_i32(Module.ARM_REG_R3, savedSv.getUint32(16, true));
-            uc.reg_write_i32(Module.ARM_REG_R12, savedSv.getUint32(12, true));
-            uc.reg_write_i32(Module.ARM_REG_LR, savedSv.getUint32(8, true));
-            uc.reg_write_i32(Module.ARM_REG_PC, savedSv.getUint32(4, true) | 1);
-            uc.reg_write_i32(Module.ARM_REG_SP, savedAt);
-            processDma();
-            processEth(uc);
-        }
-    };
-
-    // Default batch budget. The old 20k cap guarded against the Unicorn
-    // WASM ~40k-instruction wedge; on Node 22.22 (V8) batches up to 500k
-    // run indefinitely without wedging (2000+ rounds, multiple soaks).
-    // 200k is a safe 10x default; MAX_BATCH overrides for tuning.
+    // Default batch budget. The old Unicorn CLI capped batches against the
+    // ~40k-instruction WASM wedge; the Rust core has no such limit, but the
+    // same cadence keeps gateway RX servicing prompt. MAX_BATCH overrides.
     let maxBatch = Number(process.env.MAX_BATCH) || 200000;
     let smallBatch = false;
     let totalSteps = 0;
+    let instCount = 0;
+    let dbgPrevSig = '';
     const startTime = Date.now();
 
-    while (!stopRequested) {
-        const uartChunk = get_uart_output();
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+        // Feed queued gateway frames before stepping so RX is serviced promptly.
+        while (gwRxQueue.length > 0) {
+            const f = gwRxQueue.shift();
+            if (process.env.DBG_RX) console.log(`[RX] inject ${f.length}B`);
+            if (process.env.RX_HEX === '1') {
+                let hex = [];
+                for (let i = 0; i < f.length && i < 64; i++) hex.push(f[i].toString(16).padStart(2, '0'));
+                console.log(`[RXHEX len=${f.length}] ${hex.join('')}`);
+            }
+            emu.injectFrame(f);
+        }
+        if (stdinQueue.length > 0) emu.sendUart(stdinQueue.splice(0));
+
+        let r;
+        try {
+            r = emu.step(smallBatch ? 1500 : maxBatch);
+        } catch (e) {
+            console.error('Emulation error:', e.message || e);
+            break;
+        }
+        instCount = r.instCount;
+        if (process.env.DBG_RXDESC === '2') {
+            // Per-step RX trace: flag/idx/len + all four rdes0 (only on change).
+            const rr = (a) => emu.read32(a) >>> 0;
+            const sig = [0x20000620, 0x20000628, 0x2000062c, 0x20000630, 0x20000638, 0x20000640, 0x20000648, 0x20000000, 0x20000654].map(rr).join(',');
+            if (sig !== dbgPrevSig) {
+                dbgPrevSig = sig;
+                console.log(`[RXT step=${totalSteps} inst=${instCount}] f=${rr(0x20000620).toString(16)} idx=${rr(0x20000628)} len=${rr(0x2000062c)} sport=${rr(0x20000000).toString(16)} ack=${rr(0x20000654).toString(16)} d=${[0, 1, 2, 3].map((i) => rr(0x20000630 + i * 8).toString(16)).join('/')}`);
+            }
+        }
+        const uartChunk = emu.drainUart() || '';
         if (uartChunk) {
             process.stdout.write(uartChunk);
             if (checkGwRestart(uartChunk)) {
@@ -743,63 +410,52 @@ async function main() {
                 console.log('[GW] DHCP re-established, restoring large batches');
             }
         }
-        while (stdinQueue.length > 0) uart_rx_byte(uartAddr, stdinQueue.shift());
-
-        processDma();
-        await processEth(uc);
-        tick();
-        const curPc = uc.reg_read_i32(Module.ARM_REG_PC);
-        try {
-            uc.emu_start(BigInt(curPc | 1), 0n, 0n, smallBatch ? 1500 : maxBatch);
-        } catch (e) {
-            const msg = String(e);
-            if (msg.includes('UC_ERR_READ_UNMAPPED') || msg.includes('UC_ERR_FETCH_UNMAPPED')) {
-                const pc2 = uc.reg_read_i32(Module.ARM_REG_PC);
-                uc.reg_write_i32(Module.ARM_REG_PC, (pc2 + 2) | 1);
-            } else if (msg.includes('WRITE_PROT')) {
-                if (periph.flash_is_programming()) {
-                    // pg is active but the gate flipped late: re-enable writes
-                    // and re-execute the store from the same PC.
-                    uc.mem_protect(FLASH_GUEST_START, FLASH_GUEST_LEN, Module.PROT_ALL);
-                    flashWritable = true;
-                    const pc2 = uc.reg_read_i32(Module.ARM_REG_PC);
-                    uc.emu_start(BigInt(pc2 | 1), 0n, 0n, maxBatch);
-                } else {
-                    stepThroughFlashFault();
-                }
-            } else {
-                console.error('Emulation error:', e.message || e);
-                break;
-            }
+        // Round boundary: the guest already printed its round marker and is
+        // now TXing the next round's first frame. Restart the gateway BEFORE
+        // the frame goes out, so the fresh stack sees the new transaction.
+        if (gwRestartPending && stepTx.length > 0) {
+            gwRestartPending = false;
+            console.log(`[GW] restarting gateway on next-round TX (${stepTx[0].length}B)...`);
+            await restartGateway();
         }
-        processDma();
-        await processEth(uc);
-        processInterrupts();
-        applyFlashErase();
+        for (const pkt of stepTx.splice(0)) sendTx(pkt, {});
+        if (r.stopped) {
+            console.log(`\n[STOP] guest stopped pc=0x${r.pc.toString(16)} fault=${JSON.stringify(emu.faultInfo())}`);
+            break;
+        }
         totalSteps++;
-        if (process.env.DBG_PC3) {
-            const pc3 = uc.reg_read_i32(Module.ARM_REG_PC) & 0xFFFFFFFE;
-            console.log(`[PC3] 0x${pc3.toString(16).padStart(8, '0')} n=${totalSteps} inst=${instCount}`);
-        }
         if (process.env.SOAK_STATS && totalSteps % 2500 === 0) {
             const rssMB = (process.memoryUsage().rss / 1048576).toFixed(0);
             const line = `[SOAK] t=${((Date.now() - startTime) / 1000).toFixed(0)}s inst=${instCount} rxQ=${gwRxQueue.length} txQ=${gwTxPending.length} rounds=${gwRoundsSeen} rss=${rssMB}MB\n`;
-            writeSync(1, line);
+            process.stdout.write(line);
         }
 
-        if (stopRequested || is_watchdog_reset_requested()) break;
-        if (instCount >= BigInt(maxInst)) break;
-        await new Promise(r => setImmediate(r));
+        if (instCount >= maxInst) break;
+        await new Promise(r2 => setImmediate(r2));
     }
 
     if (gwWs) try { gwWs.close(); } catch (_) {}
     if (gwProcess) try { gwProcess.kill(); } catch (_) {}
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-    const finalPc = uc.reg_read_i32(Module.ARM_REG_PC);
-    const finalSp = uc.reg_read_i32(Module.ARM_REG_SP);
+    const regs = emu.getRegisters();
+    if (process.env.DBG_RXDESC) {
+        // eth_http layout (nm-verified): ETH_IRQ_FLAG 0x20000620,
+        // RX_FRAME_IDX 0x20000628, RX_FRAME_LEN 0x2000062c, RX_DESC 0x20000630.
+        const r = (a) => (emu.read32(a) >>> 0).toString(16).padStart(8, '0');
+        console.log(`[RXDESC] flag=${r(0x20000620)} idx=${r(0x20000628)} len=${r(0x2000062c)}`);
+        console.log(`[RXDESC] srcport=${r(0x20000000)} tgtport=${r(0x20000650)}`);
+        for (let i = 0; i < 4; i++) {
+            console.log(`[RXDESC] d${i} rdes0=${r(0x20000630 + i * 8)} rdes1=${r(0x20000630 + i * 8 + 4)}`);
+        }
+        // First 40 bytes of the d1 buffer (TCP ports at +34 if IP ihl=5).
+        try {
+            const fb = emu.uc.mem_read(BigInt(0x20000c60), 40);
+            console.log(`[RXDESC] d1buf=${[...fb].map((b) => b.toString(16).padStart(2, '0')).join('')}`);
+        } catch (e) { console.log(`[RXDESC] d1buf READERR ${e.message}`); }
+    }
 
-    const uartOut = get_uart_output();
+    const uartOut = emu.drainUart() || '';
     if (!uartOut.trim()) {
         process.stdout.write('\n');
     } else {
@@ -809,23 +465,22 @@ async function main() {
     try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch (_) {}
 
     console.log(`\nDone: ${totalSteps} steps, ${instCount} instructions in ${elapsed}s`);
-    console.log(`PC=0x${finalPc.toString(16)} SP=0x${finalSp.toString(16)}`);
+    console.log(`PC=0x${regs.PC.toString(16)} SP=0x${regs.SP.toString(16)}`);
 
     if (showRegs) {
         for (let i = 0; i <= 12; i++) {
-            const reg = uc[`reg_read_i32`](Module[`ARM_REG_R${i}`]);
+            const reg = regs[`R${i}`] >>> 0;
             process.stdout.write(`R${i}=0x${reg.toString(16).padStart(8, '0')} `);
             if (i % 4 === 3) console.log();
         }
-        console.log(`LR=0x${uc.reg_read_i32(Module.ARM_REG_LR).toString(16).padStart(8, '0')}`);
-        console.log(`xPSR=0x${uc.reg_read_i32(Module.ARM_REG_XPSR).toString(16).padStart(8, '0')}`);
+        console.log(`LR=0x${(regs.LR >>> 0).toString(16).padStart(8, '0')}`);
+        console.log(`xPSR=0x${(regs.XPSR >>> 0).toString(16).padStart(8, '0')}`);
     }
 
-    uc.close();
+    emu.close();
 }
 
 main().catch(e => {
     console.error('Fatal:', typeof e, String(e));
     process.exit(1);
 });
-

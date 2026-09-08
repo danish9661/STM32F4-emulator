@@ -1,8 +1,8 @@
-// STM32F4 high-level facade (rp2040js / avr8js style) over the Unicorn-based
+// STM32F4 high-level facade (rp2040js / avr8js style) over the Rust-CPU
 // emulator. Thin: zero runtime overhead — every call delegates to the
 // underlying `emu` produced by createEmulator(); GPIO/USART/SPI/I2C events ride
-// the existing MMIO/code hooks. CPU execution is still Unicorn (a prebuilt QEMU
-// WASM core); only the on-chip peripherals are a Rust WASM model.
+// the bus taps. CPU execution is the WASM-native Thumb-2 interpreter; the
+// on-chip peripherals are a Rust WASM model.
 //
 // Virtual-peripheral API (Wokwi-style): SPI/I2C taps must be registered before
 // the model's init_svd() (the Spi/I2c peripheral snapshots its device list once

@@ -1,8 +1,7 @@
 // stm32f4-emu — Node API entry.
 // Wraps the browser/Node-universal emulator.js with the bundled assets
-// (SVD, wasm bindings, Unicorn) so Node consumers get a one-call setup.
+// (SVD, wasm bindings) so Node consumers get a one-call setup.
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import * as bindings from './site/vendor/stm32_periph_wasm.js';
 import { createEmulator } from './site/emulator.js';
 import { createNetSim } from './site/netsim.js';
@@ -14,11 +13,8 @@ import { STM32F4, GPIOPin, USART, DMAStream } from './site/stm32f4.js';
 // `firmware` option is optional (defer to loadBin/loadHex/loadELF after
 // create), matching the rp2040js / avr8js ergonomics.
 STM32F4.create = (opts = {}) => STM32F4._create({
-    bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes, ...opts,
+    bindings, svdXml, wasmInit: wasmBytes, ...opts,
 });
-
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./site/vendor/unicorn_arm.cjs');
 
 const svdXml = readFileSync(new URL('./site/vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
@@ -40,7 +36,7 @@ export async function createSTM32F407(opts = {}) {
     const { firmware } = opts;
     const bin = typeof firmware === 'string' ? decodeFirmware(firmware) : firmware;
     if (!bin) throw new Error('createSTM32F407 requires `firmware` (Uint8Array or a FIRMWARES key)');
-    return createEmulator({ ...opts, firmware: bin, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes });
+    return createEmulator({ ...opts, firmware: bin, bindings, svdXml, wasmInit: wasmBytes });
 }
 
-export { createEmulator, createNetSim, FIRMWARES, bindings, unicornFactory, svdXml, LED, Button, Pwm, I2cRegisterDevice, Potentiometer, STM32F4, GPIOPin, USART, DMAStream };
+export { createEmulator, createNetSim, FIRMWARES, bindings, svdXml, LED, Button, Pwm, I2cRegisterDevice, Potentiometer, STM32F4, GPIOPin, USART, DMAStream };

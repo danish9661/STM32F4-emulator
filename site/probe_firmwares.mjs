@@ -1,12 +1,9 @@
 // Boot-probes candidate firmware binaries: runs each for a few M instructions
 // and prints the UART banner (first ~200 chars) + whether TX happened.
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from '../site/vendor/stm32_periph_wasm.js';
 import { createEmulator } from '../site/emulator.js';
 
-const require = createRequire(import.meta.url);
-const unicorn = require('../site/vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('../site/vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('../site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 
@@ -34,7 +31,7 @@ for (const [name, path] of candidates) {
     let fw;
     try { fw = new Uint8Array(readFileSync(new URL(path, import.meta.url))); }
     catch (e) { console.log(name.padEnd(22), 'MISSING'); continue; }
-    const emu = await createEmulator({ firmware: fw, bindings, unicorn, svdXml, wasmInit: wasmBytes });
+    const emu = await createEmulator({ firmware: fw, bindings, svdXml, wasmInit: wasmBytes });
     let uart = '', txCount = 0;
     let res;
     try {

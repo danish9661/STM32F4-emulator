@@ -2,13 +2,9 @@
 // Runs the exact same emulator.js + netsim.js the site uses, and asserts
 // the full DHCP -> TCP -> HTTP flow completes.
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
-
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./vendor/unicorn_arm.cjs');
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
@@ -20,7 +16,6 @@ const netsim = createNetSim({ log: (m) => console.log('[netsim] ' + m) });
 const emu = await createEmulator({
     firmware,
     bindings,
-    unicorn: unicornFactory,
     svdXml,
     wasmInit: wasmBytes,
     onTx: (frame) => {

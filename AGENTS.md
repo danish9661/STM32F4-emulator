@@ -32,16 +32,17 @@ can pick up where the last one left off without re-deriving everything.
 
 This repo emulates an **STM32F407** microcontroller. The core ideas:
 
-- A **Unicorn** CPU emulator (`unicorn_arm.cjs`, Unicorn 2.1.4 compiled to WASM)
-  executes the ARM Cortex-M4 (Thumb-2) firmware instructions.
+- A **Rust CPU core** (`stm32-periph-wasm/src/cpu/`, Cortex-M4 Thumb-2
+  interpreter compiled to WASM) executes the firmware instructions with
+  exact inline exception entry/return (NVIC, SysTick, SVC/PendSV, WFI).
+  (Unicorn 2.1.4 was the original core and the differential-test oracle;
+  it was removed in §23 after bit-identical parity was proven.)
 - A **peripheral model** written in Rust, compiled to WASM with
   `wasm-bindgen` (`stm32_periph_wasm_bg.wasm`), simulates the on-chip
   peripherals (RCC, USART, GPIO, DMA, ETH, TIM, NVIC, etc.).
-- The two are connected by **memory hooks**: every read/write to a hooked
-  MMIO range is routed through `periph_read` / `periph_write` (the WASM model).
-  Reads are "answered" by writing the modeled register value back into guest
-  memory with `uc.mem_write` so the guest sees it.
-- A **gateway / test driver** (JS) drives `uc.emu_start`, drains UART output,
+- The two are connected by **direct model calls**: peripheral accesses call
+  straight into the WASM model (single width-correct call per access).
+- A **gateway / test driver** (JS) steps the core, drains UART output,
   injects network packets, and services the ETH TX/RX protocol.
 
 Native (non-WASM) build: a full SDL emulator (`stm32-emulator.exe`) also exists
@@ -59,10 +60,9 @@ stm32-emulator-main/
 │   │   ├── lib.rs          wasm_bindgen exports (periph_read/write, tick, eth_*, ...)
 │   │   ├── system.rs       System state, UART buffer, ETH_TX_POLL/RX_POLL/DONE atomics
 │   │   ├── peripherals/    mod.rs, eth.rs, usart.rs, rcc.rs, dma.rs, nvic.rs, ...
-│   └── pkg/                Compiled JS bindings + all test drivers
+│   └── pkg/                Compiled JS bindings + gateway CLI
 │       ├── stm32_periph_wasm.js / _bg.wasm / .d.ts   built bindings
-│       ├── unicorn_arm.cjs                            Unicorn 2.1.4 WASM build
-│       ├── cli.mjs                                    Reference gateway (batch exec)
+│       ├── cli.mjs                                    Gateway CLI (Rust core)
 │       └── test_*.mjs, trace_*.mjs, cmp_speed*.mjs    Test drivers (see §5)
 ├── webserver/              The target firmware (Arduino sketch)
 │   ├── webserver.ino       Source (DHCP + TCP + HTTP server)
@@ -177,7 +177,7 @@ interrupt is pending; it then services TX/RX and resumes.
 | `cli.mjs` | Reference gateway (config/YAML based, batch exec, ETH servicing, watchdog, interrupts). |
 | `trace_*.mjs`, `trace2.mjs`, `trace_precise.mjs`, `trace_addrs*.mjs` | PC / address tracing helpers. |
 | `cmp_speed*.mjs` | Throughput comparisons of execution strategies. |
-| `minimal_test.mjs`, `test_esm.mjs`, `test_require.cjs`, `test_unicorn.cjs`, `test_svd_run.cjs` | Sanity checks for the bindings. |
+| `minimal_test.mjs`, `test_esm.mjs`, `test_require.cjs` | Sanity checks for the bindings. (The Unicorn-era `test_unicorn.cjs`/`test_svd_run.cjs` were removed in §23.) |
 
 ### How to run the main test
 
@@ -449,6 +449,9 @@ Once execution is reliable, finish `test_webserver_net.mjs`:
   highest-priority task — deadlock the whole scheduler (`TASK1`/`TASK2`/SysTick
   never run). The `icsrYieldPc`/`deliveringIsr` plumbing in
   `processInterrupts`/`memWriteHook` enforces this; never "simplify" it back.
+  (Unicorn-era mechanism, removed with Unicorn in §23: the Rust core takes
+  exceptions inline *after* the store completes, so the hazard cannot occur —
+  but the regression test below still guards the stacking.)
   Regression test: `site/probe_freertos.mjs` (wired into `npm test`); the
   firmware is `freertos_test/` (TIM3 ISR → `xSemaphoreGiveFromISR(xTimSem)` →
   `vHighTask` pends on the semaphore). `vHighTask` **arms TIM3 itself** (it owns
@@ -555,6 +558,32 @@ node cli.mjs ../../eth_http/eth_http.bin 10000000 --gateway --config=../../eth_h
 
 All three ethernet firmwares pass: eth_http (44+ rounds, 0 TCP fail),
 eth_dhcp (repeated DHCP SUCCESS), eth_test (TX completed, "ETH Test: done").
+
+### Gateway CLI ported to the Rust core (2026-09-08) — read this first
+`stm32-periph-wasm/pkg/cli.mjs` was rewritten onto `createEmulator`
+(Rust CPU, no Unicorn): config/region/patch parsing, the gateway WS +
+spawn/restart logic, and the round markers are unchanged, but stepping,
+TX capture (`onTx`), RX injection (`injectFrame`), and IRQ delivery are
+the shared driver's. The batch/codeHook/ISR-pump machinery below in this
+section (§10 Multi-round, XPSR, Throughput) describes the OLD Unicorn CLI
+and is kept as history — the mechanisms no longer exist.
+- Driver mode is per firmware: `eth_http` runs **polling mode**
+  (`enable_irqs:false`, driver-owned SRAM flags + idx rotation — the proven
+  browser-gateway path), everything else runs **irq_eth mode** (guest ISR
+  owns flags, like the old pump CLI). Reason: the guest ISR's first-match
+  descriptor scan starves an older-indexed frame whenever a newer frame
+  reuses d0 — at Rust-core speed the HTTP body lost to the FIN every run
+  (`=== HTTP 000b ===`); polling mode completes 130b rounds deterministically.
+  Heuristic is a name match on the firmware path (`eth_http`); override by
+  editing the `pollingEth` line in pkg/cli.mjs.
+- Validated on a fresh gateway: eth_http 3× `=== HTTP 130b ===` + body,
+  eth_dhcp `=== DHCP SUCCESS ===`, eth_test `ETH Test: done`, all EXIT 0.
+- Debug: `DBG_TX=1` (TX len + first 48 B), `RX_HEX=1`, `DBG_RX=1`,
+  `DBG_RXDESC=1` (post-mortem flag/idx/len/descs at the eth_http layout),
+  `DBG_RXDESC=2` (per-step RX trace). Temp debug lives in the ported file.
+- Note: `scripts/verify_ethernet.sh` passes `"../$name/$name.bin"` (repo-root
+  relative), which only resolves if run with the firmware dirs next to
+  `pkg/` — pass explicit `../../eth_http/eth_http.bin`-style paths instead.
 
 ### Regression script
 `scripts/verify_ethernet.sh [max_inst]` runs all three firmwares and
@@ -795,8 +824,9 @@ register file that completes TX instantly:
   fetched at runtime — file:// won't work). Browser build of the peripheral
   model lives in `site/vendor/` (`wasm-pack build --release --target web
   --out-dir ../site/vendor`); the Node build stays in `stm32-periph-wasm/pkg`.
+  (Before §23 there were two copies of the vendored Unicorn module here —
   `unicorn_arm.js` (browser IIFE -> global `MUnicorn`) vs `unicorn_arm.cjs`
-  (require) are two copies of the same module.
+  (require); both deleted.)
 - `site/loaders.js`: `parseIntelHex`, `parseElf` (PT_LOAD segments split
   into flash/RAM + `extra_mem` preload list + symtab symbols), `parseMap`.
   Verified: hex/elf boot the blinky firmware through `createEmulator`.
@@ -848,11 +878,14 @@ ack=0x10000000+0+1, "TCP FIN", return 0. Fix: `rxInjectIdx` now rotates
 different RX descriptor slots. Verified: test_flow.mjs PASS (087b + body),
 and a CDP-driven headless-Chrome smoke test completes 2 rounds.
 
-### Interrupt pump — opt-in per firmware (fixed 2026-08-09)
-The guest-IRQ pump (`processInterrupts` in site/emulator.js, ported from
-cli.mjs) now runs **only when `enable_irqs: true`** (app.js enables it for
+### Interrupt delivery — opt-in per firmware (fixed 2026-08-09)
+Guest IRQs run **only when `enable_irqs: true`** (app.js enables it for
 `rx_interrupt_test` + `rx_crypto_test` + `comprehensive_test` +
-`eth_irq_test`). OFF by default — the polling ETH firmware (eth_http) is
+`eth_irq_test`). (Unicorn era this was a `processInterrupts` pump in
+site/emulator.js, ported from cli.mjs; since §21 the Rust core delivers
+exceptions inline and the pump is gone — the opt-in flag now toggles
+`deliver_irqs`, but the corruption rule below still applies.) OFF by
+default — the polling ETH firmware (eth_http) is
 corrupted by it: the driver signals TX/RX done by writing SRAM `irq_flag`
 + model DMASR, and a guest `ETH_IRQHandler` run on top re-reads DMASR and
 re-scans `rx_desc`, stomping `rx_frame_idx/len` (observed: response body
@@ -892,7 +925,7 @@ not the createEmulator path.
   `createEmulator` re-exports), `tools/make_firmware.mjs` (regenerates
   `site/firmware.js` base64 blobs from `eth_*/eth_*.bin`; runs on `prepack`).
 - `npm pack --dry-run` verified: 16 files, 1.2 MB tarball (includes
-  site/vendor wasm + SVD + both unicorn copies). NOT published. Consumer test
+  site/vendor wasm + SVD). NOT published. Consumer test
   (install tarball into /tmp/opencode/pkgtest, `consumer.mjs`) completes a
   full HTTP round — exit 0. Exports map covers `.`, `./emulator`,
   `./netsim`, `./firmwares`, `./vendor`, `./site`.
@@ -912,8 +945,8 @@ not the createEmulator path.
   ?fw= navigation boots and 8/8 same-page click-boots with the JS heap
   bounded at 15-17MB. If boots start failing with mem_map errors, restart
   Chrome (fresh `--user-data-dir`) — the page code is not at fault.
-  `performance.memory` only counts the JS heap, NOT the wasm heaps
-  (unicorn ~40MB + rust per boot) that actually accumulate.
+  `performance.memory` only counts the JS heap, NOT the per-boot wasm heaps
+  (CPU + peripheral model) that actually accumulate.
 - Headless-chrome `--virtual-time-budget` + `--dump-dom` throttles rAF to a
   few frames — it will NOT complete a run. Use the CDP driver
   (script: /tmp/opencode/site_smoke.mjs) for browser verification.
@@ -1075,11 +1108,11 @@ The browser build (`site/vendor`) still exports `__wbg_init as default`
 ### wasm-pack out-dir clean — gotcha
 `wasm-pack build --release --target web --out-dir ../site/vendor`
 DELETES the out-dir contents, including the manually-placed
-`stm32f407.svd` + `unicorn_arm.js`/`unicorn_arm.cjs` that
-`site/index.html`/`app.js` fetch at runtime, and writes a `.gitignore`
-containing `*` (which would silently untrack vendor assets). After any
-vendor rebuild: restore the three files from `pkg/unicorn_arm.{js,cjs}`
-and `monox/stm32f407.svd`, then `rm site/vendor/.gitignore`.
+`stm32f407.svd` that `site/index.html`/`app.js` fetch at runtime, and writes
+a `.gitignore` containing `*` (which would silently untrack vendor assets).
+After any vendor rebuild: restore the SVD from `monox/stm32f407.svd`, then
+`rm site/vendor/.gitignore`. (Before §23 this also covered the vendored
+`unicorn_arm.js`/`unicorn_arm.cjs`, now deleted.)
 
 ### Removed ext_devices
 `display.rs`, `lcd.rs`, `touchscreen.rs`, `usart_probe.rs` were deleted
@@ -1554,7 +1587,10 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
     cross less often. Removing the hook entirely gives 17.70, i.e. ~16% is
     on the table and the per-block hook captures most of it.
   * **The CPU hook, not the two-WASM-module boundary — but that depends on
-    the firmware, so measure before concluding.** The Unicorn↔Rust
+    the firmware, so measure before concluding.** (Unicorn-era framing; since
+    §23 the CPU lives in the SAME wasm module as the peripherals, so the
+    boundary is gone entirely — the traffic figures below now describe
+    in-module model calls.) The Unicorn↔Rust
     peripheral path (`periph_read`/`periph_write`) fires ~42 times per 3M
     instructions on blinky (0.001%) — but **2.25M times on an eth_http soak,
     3.75% of instructions, ~642 per HTTP round**. So for compute-bound
@@ -1688,6 +1724,7 @@ turned out to be wrong; all numbers here are measured, not estimated
   hook buys only ~6% (`noCountHook` option added to emulator.js), and
   rebuilding the firmware `-O2` instead of `-Os` changed inst/frame by <1%
   (reverted; it only cost 28 KB). The ceiling is the Unicorn WASM core.
+  (Superseded — see §22: the Rust core delivers ~65 MIPS and holds 35/35.)
 - **The mixer clipped ~45% of all nonzero samples.** The scale constant has
   been wrong in BOTH directions: the original 16129 was blamed for "weak and
   muffled" audio, but the real cause was the per-frame `/ active` divisor
@@ -1907,8 +1944,8 @@ the result, not the absolute numbers):
 Things that bite here:
 
 - **No `SharedArrayBuffer`.** It needs COOP/COEP headers GitHub Pages cannot
-  set, and it would buy nothing: the two WASM modules have separate linear
-  memories regardless, and Unicorn's build is single-threaded (§7).
+  set, and it would buy nothing: the CPU and peripheral WASM modules have
+  separate linear memories regardless.
 - **Never SKIP a queued tick.** A "minimum gap between bursts" guard that
   dropped ticks arriving while a burst was still running cost a whole frame
   each time and measured 413M vs 720M guest inst. The gap between bursts is
@@ -1924,12 +1961,11 @@ Things that bite here:
 - **A `MessageChannel` yield is NOT a valid way to reclaim duty cycle**
   (~99%, no clamp): over a 60s run it degraded to 760M inst at MIPS 1.1 —
   the same class of stall §7/§16 describe. Do not "optimize" it back.
-- **Unicorn cannot be `import`ed into the worker.** It is a classic
-  emscripten script that assigns a global, so the worker fetches and
-  indirect-`eval`s it, and must pass an explicit `locateFile`: there is no
-  `document.currentScript` for emscripten to derive the `.wasm` path from,
-  and it would otherwise look for it next to the worker instead of in
-  `vendor/`.
+- **(Removed with Unicorn in §23.)** The worker used to fetch and
+  indirect-`eval` the classic emscripten Unicorn script with an explicit
+  `locateFile` (no `document.currentScript` in a worker to derive the
+  `.wasm` path from). The worker now imports only the Rust CPU +
+  peripheral modules.
 - **Savegames are a round-trip.** Blobs live in guest EXTRAM but
   `localStorage` is on the page, so a load request stops the stepping loop
   (`loadPending`) until the answer arrives — the guest busy-waits on
@@ -1953,14 +1989,11 @@ Things that bite here:
 - **RTC wakeup**: `rtc.rs` RTC alarm sets NVIC pending IRQ **41** (F407
   `RTC_Alarm`; the model previously hardcoded 43 — wrong). The demo clears
   RTC `ISR` bit 0 to "start" the counter (model gate in `advance_time`).
-- **emulator.js** (`lowpower` opt, default false):
-  - Forces `HOOK_CODE` (codeHook) — `blockCounting`/`minimalPolls` must NOT
-    take precedence or the WFI trap never installs. Hook-dispatch order is
-    `noCountHook` → `minimalPolls||lowpower` → `blockCounting` → `perInstHook||
-    freertos` → `blockHookFull`.
-  - codeHook detects `WFI`/`WFE` (16-bit `0xBF30`/`0xBF20`, 32-bit
+- **emulator.js** (`lowpower` opt, default false; since §21 the Rust core
+  sleeps natively — no hook dispatch involved):
+  - The core traps `WFI`/`WFE` itself (16-bit `0xBF30`/`0xBF20`, 32-bit
     `0xF3BF 0x8F4F`/`0x2F5F`) with `primask==0` and no pending interrupt →
-    sets `sleeping = (SCR>>2)&1 ? 2 : 1` (STOP vs SLEEP) and `emu_stop()`.
+    `cpu.sleeping()` true (STOP vs SLEEP from SCR bit 2).
   - `step()` top: if `sleeping`, `tick_n(WAKE_STEP=120000)`,
     `periph_read(RTC_BASE=0x40002800,4)` (advances the virtual RTC → fires
     alarm → NVIC pending), then if `has_pending_interrupt()` → on STOP call
@@ -1992,13 +2025,13 @@ reload (fresh instance boots after a prior one), and multi-instance stress
 `reset_state`). Wired into `npm test`.
 
 ### Gotchas
-- The hook that detects WFI is `codeHook`; `blockCounting` (default true)
-  would install `blockHook` instead and the WFI trap would never run — so
-  `lowpower` is checked BEFORE `blockCounting` in the hook-dispatch chain.
+- The WFI trap lives in the Rust core (`cpu.sleeping()`); there is no hook
+  to install and no dispatch chain to order (pre-§23 `codeHook`/
+  `blockCounting` ordering notes below are history).
 - RTC time only advances when `ISR` bit 0 is clear (a model gate); the
   deep-sleep demo clears it (`RTC_ISR &= ~1u`) to "start" the counter.
-- Writing a multi-instance test: always `close()` each emulator (Unicorn is
-  1.75 GB/instance) and run `step()` inside the drain loop — a loop that only
+- Writing a multi-instance test: always `close()` each emulator (each holds
+  its own WASM memories) and run `step()` inside the drain loop — a loop that only
   calls `drainUart()` produces empty UART (the guest never executes).
 
 ### CAN host-injection API (2026-08-23)
@@ -2120,8 +2153,8 @@ reload (fresh instance boots after a prior one), and multi-instance stress
     `node cli.mjs --config=../../qspi_test/config.yaml 2000000` both print
     `QSPI OK`.
   - **Browser demo:** `site/vendor` was rebuilt (`wasm-pack build --release
-    --target web --out-dir ../site/vendor`, then `unicorn_arm.{js,cjs}` +
-    `stm32f407.svd` restored and `vendor/.gitignore` removed). `qspi_test`
+    --target web --out-dir ../site/vendor`, then `stm32f407.svd`
+    restored and `vendor/.gitignore` removed). `qspi_test`
     is in `site/firmware.js` (regenerated via `tools/make_firmware.mjs`,
     now 41 firmwares), selectable in `site/index.html` (`?fw=qspi_test`),
     mapped in `app.js` `DEVICE_FIRMWARES` (`qspi: [{ peripheral: 'QUADSPI',
@@ -2164,9 +2197,9 @@ reload (fresh instance boots after a prior one), and multi-instance stress
 
 ## 19. STM32F4 high-level facade (Wokwi-style API, 2026-08-27)
 
-A typed, rp2040js/avr8js-style wrapper over the Unicorn-based emulator, so
+A typed, rp2040js/avr8js-style wrapper over the Rust-CPU emulator, so
 firmware can be driven like a real chip (`gpio`, `usart`, `spi`, `i2c`,
-`dma`) without touching the `createEmulator`/hook plumbing.
+`dma`) without touching the `createEmulator` plumbing.
 
 ### Files
 - `site/stm32f4.js` — `STM32F4`, `GPIOPin`, `USART`, `DMAStream` classes +
@@ -2174,7 +2207,7 @@ firmware can be driven like a real chip (`gpio`, `usart`, `spi`, `i2c`,
   call delegates to the underlying `emu`).
 - `index.mjs` — re-exports `STM32F4, GPIOPin, USART, DMAStream` and binds
   `STM32F4.create` to the resolved Node assets
-  (`bindings`/`unicorn`/`svdXml`/`wasmInit` from the local `vendor/`).
+  (`bindings`/`svdXml`/`wasmInit` from the local `vendor/`).
 - `package.json` — `"./stm32f4"` export → `site/stm32f4.js`.
 - Tests: `site/test_stm32f4_api.mjs` (facade + GPIO/USART) and
   `site/test_stm32f4_periph.mjs` (Wokwi SPI/I2C), both wired into `npm test`.
@@ -2349,13 +2382,13 @@ works but is slower (reconnects).
 
 ---
 
-## 21. WASM-native Thumb-2 CPU (`cpu='wasm'` backend, 2026-09-03)
+## 21. WASM-native Thumb-2 CPU (sole backend since §23, 2026-09-03)
 
 A pure-Rust Cortex-M4 interpreter (`stm32-periph-wasm/src/cpu/`) that runs
-firmware WITHOUT Unicorn. **Since 2026-09-04 it is the DEFAULT backend**
-(`cpu_backend` defaults to `'wasm'`; pass `'unicorn'` to opt back into the
-Unicorn core — `probe_freertos.mjs` (ISR pump) and `test_doom.mjs` (TCI
-guard) stay pinned there). Status: boots blinky/eth_http/eth_test/can_test/hal_test/
+firmware WITHOUT Unicorn. **Since 2026-09-04 it has been the DEFAULT backend,
+and since §23 the ONLY backend** (Unicorn removed after bit-identical parity
+was proven; the `cpu_backend`/`unicorn` opts and the old ISR-pump path are
+gone). Status: boots blinky/eth_http/eth_test/can_test/hal_test/
 audio (DMA+I2S)/exti/rtc to markers, and runs eth_http DHCP→TCP→HTTP
 end-to-end (2 rounds, `npm run test:wasm`). ~20x faster than Unicorn on
 compute (~50 MIPS vs ~2-3). DOOM: title renders, menu → New Game → E1M1
@@ -2397,14 +2430,13 @@ play + quick-save + audio, `site/test_doom_wasm.mjs` PASS (see below).
   RMW emitted 4 UART chars per store — observed).
 - `stm32-periph-wasm/src/cpu/mod.rs` — `Cpu` + `CpuFault` (loud halts with
   pc/op, never silent wrongness) + `deliver_irqs` gate (default false, so
-  polling firmware runs full budgets like the Unicorn path).
+  polling firmware runs full budgets uninterrupted).
 - `stm32-periph-wasm/src/cpu/tests.rs` — native boot tests (blinky;
   eth_http DHCP incl. Offer/Ack replay from `site/testdata_offer.bin` /
   `testdata_ack.bin`, captured via `site/save_rx.mjs`). `BOOT_LOCK`
   serializes on the shared SYS global. `cargo test` 40/40.
-- `site/emulator.js` — `cpu_backend: 'wasm'` branch (before Unicorn
-  creation, so no Unicorn dependency at all): byte-correct `uc` shim,
-  `wProcessEth`/`wProcessDma` mirrors, `injectFrame`/`sendUart`/`pin`/
+- `site/emulator.js` — the driver around the Rust core: byte-correct `uc`
+  shim, `wProcessEth`/`wProcessDma` mirrors, `injectFrame`/`sendUart`/`pin`/
   `takeSpeakerSamples`/`faultInfo`/`reset`, watchdog reboot. Warns (not
   throws) for `enable_irqs`/`irq_eth`/`freertos`/`lowpower`, which need
   exception delivery (not implemented — SVC/BKPT/RFE record faults).
@@ -2412,7 +2444,7 @@ play + quick-save + audio, `site/test_doom_wasm.mjs` PASS (see below).
   (netsim ETH flow), `site/test_audio_wasm.mjs` (DMA+I2S),
   `site/test_wasm_multi.mjs` (7 firmware smoke). `npm run test:wasm`.
 - `package.json`: `test:wasm` script. `test:wasm_multi` hal_test passes on
-  wasm (and now unicorn too — earlier unicorn stall was stale-env).
+  wasm.
 
 ### Bugs fixed along the way (all verified by boot/packet traces)
 BL `0xFxxx`, SP-sub mask, hi-reg selector bits[9:8], CBZ imm, B pc+4 base,
@@ -2445,8 +2477,8 @@ register-shift-by-0 is a no-op (not imm-#0-means-32).
   (misaligned TBB read shifted table: wrong demo, no title); F9 LDRSB/H-reg
   (P_LoadVertexes stuck); predicated T1 MOVS/ADD-reg/SUB-reg preserve flags
   via `it_pred` snapshot (it_ok resets it_n before handlers read it; without
-  this the title never advances and E1M1 music dies) — matches Unicorn/GCC/
-  vanilla (raw-Unicorn probe: movlt preserves N, strlt takes).
+  this the title never advances and E1M1 music dies) — matches GCC/
+  vanilla semantics (verified: predicated mov preserves N, predicated str takes).
 - 16-bit MOVS-imm C-preserve (`0x30000000` mask typo cleared C);
   16-bit ADD/SUB-reg DO set flags unpredicated (GAS `adds`/`subs`; reverting
   broke strcasecmp/title), preserve only when predicated.
@@ -2464,9 +2496,8 @@ register-shift-by-0 is a no-op (not imm-#0-means-32).
 - Device parsers (OLED/TFT/buzzer/RTC/DCMI JS-side) now run on BOTH backends
   (shared device layer in `site/emulator.js`, driven per step; verified by
   `npm run test:browser` 10/10 on the wasm default).
-- `test_fsmc.mjs` used to fail on the unicorn path (pre-existing); it passes
-  on the wasm default (the register-shift-by-0 fix cured it) and the full
-  `npm test` is green end-to-end.
+- `test_fsmc.mjs` used to fail (pre-existing register-shift-by-0 bug); the
+  fix cured it and the full `npm test` is green end-to-end.
 
 ## 22. Headed-browser sweep + DOOM fixes (2026-09-04)
 
@@ -2534,14 +2565,17 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
   palette) match sampling phase (Unicorn overshoots each stepped batch by
   a translation block), not divergence. Rust CPU exonerated as the black/
   speed cause.
-- **Differential fuzz (fuzz_test/, 500/500 identical)**: fixed SMLAL-arm,
+- **Differential fuzz (fuzz_test/) — the parity proof behind §23.**
+  Historical record (the Unicorn oracle is gone, so this cannot be re-run;
+  the vectors live on in `fuzz_test/main.c`): fixed SMLAL-arm,
   SMLSD-arm, SSAT/USAT shift-field (imm3:imm2, not contiguous), USAT
    signedness, SMLAD/SMLSD-Q, PKH top/bottom swap, QADD gate+operand order,
    LDRD post-index, UADD8/USUB8/SEL (+GE), UMLAL. MRS-APSR now returns
    NZCVQ+GE (was dropping GE, hiding correct behavior). Census method:
    every opcode form in all shipped `.elf`s checked against decoder arms.
-   Full-program differential now **FUZZ-IDENTICAL, 525/525 lines**
-   (`site/test_fuzz.mjs`, `npm run test:fuzz`): all flag corners (FSUB/FADD/SBC0/ADC1, masked
+   Full-program differential was **FUZZ-IDENTICAL, 525/525 lines**
+   (harness was `site/test_fuzz.mjs`, `npm run test:fuzz` — removed in §23
+   with the oracle): all flag corners (FSUB/FADD/SBC0/ADC1, masked
    to NZCVQ like the other APSR ops — Unicorn's real MRS leaves low-bit EPSR
    residue `...01D3` vs our masked `...0000`), SMUAD/SMUSD/SMLAWT/PKHS5/
    SSATSH/USATSH, stamps + iter array identical. Scares along the way, all
@@ -2558,13 +2592,14 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
    preserve NZCV + Rd, later slots see LIVE flags (ITF4 r6 = 1/5/3/7 across
    ttt/tte/tet/tee — entry-flag evaluation would give 7/7/3/7), first mask
    slot is always T by encoding (`ieee` rejected by GAS). FUZZ-IDENTICAL
-   543/543 with the `ITF*` mask rule in test_fuzz.mjs.
-- **BKPT is a clean stop on both backends (2026-09-06, emulator.js)**: the
-  Unicorn path converted a BKPT fault-PC `UC_ERR_EXCEPTION` into
-  `stopRequested = true` (scoped to the `0xBE00+imm8` halfword at PC/PC-2;
-  all other exceptions still throw), matching the wasm `faulted ->
-  stopped:true`. fuzzcmp's unicorn leg now stops with zero harness noise.
-  `noCountHook` accounting skips stopped steps so the meter isn't inflated.
+   543/543 with the `ITF*` mask rule in test_fuzz.mjs (likewise removed).
+- **BKPT is a clean stop (2026-09-06, emulator.js; Unicorn leg removed in
+  §23)**: the Unicorn path used to convert a BKPT fault-PC
+  `UC_ERR_EXCEPTION` into `stopRequested = true` (scoped to the
+  `0xBE00+imm8` halfword at PC/PC-2; all other exceptions still threw),
+  matching the wasm `faulted -> stopped:true`, so the differential fuzz's
+  unicorn leg stopped with zero harness noise. On the sole Rust core a fault
+  (including BKPT) returns `stopped:true` natively.
 - **Green board 2026-09-08 @ `3c8ffe5`** (`.pw-scratch/greenboard.sh` runs all
   three to a verdict file): `cargo test` 57/57, `npm run test:wasm` 7/7
   (doom 80M inst, SAVE ok slot 0, peak 0.508, 0% clip), `npm test` all green
@@ -2621,3 +2656,48 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
   (`sum=0013F7E0` vs `93C40`) — the DMA path itself was fine (`n=64`).
   app.js now builds the identical PCM16 WAV (`makeAudioTestWav`) and loads
   it on `audio_test` boot; browser prints `DMA RX OK` + `TX n=16 OK`.
+
+---
+
+## 23. Unicorn removal (sole Rust-CPU tree)
+
+Unicorn 2.1.4 (vendored `unicorn_arm.{cjs,js}`, the `cpu_backend`/`unicorn`
+opts, the ISR-pump/`processInterrupts` path, per-inst/per-block JS hooks)
+was removed after bit-identical parity was proven (§22 fuzz 543/543 +
+lockstep + trajectory overlap). The Rust Thumb-2 core in
+`stm32-periph-wasm/src/cpu/` is the only backend; there is no `cpu_backend`
+flag anymore. Everything below in §§1–22 that describes Unicorn mechanisms
+(hooks, pump, wedge, `?cpu=unicorn`, `probe_freertos` ISR-pump pin,
+`test_doom` TCI guard, `test_fuzz` oracle) is preserved as archaeology —
+operational notes were updated in place where they stated current facts.
+
+What was removed or rewritten:
+- `site/vendor/unicorn_arm.{cjs,js}` + `stm32-periph-wasm/pkg/unicorn_arm.{cjs,js}`
+  (both copies), `pkg/{test_unicorn.cjs,test_svd_run.cjs,test_esm.mjs,extract_wasm.mjs}`.
+- `site/emulator.js`: the entire Unicorn path (~830 lines: mmap, mem hooks,
+  code/block hooks, ISR pump, WFI trap, watchdog reboot) + the
+  `unicorn`/`cpu_backend`/`tickEvery`/`pollEvery`/`minimalPolls`/`blockCounting`/
+  `noCountHook`/`perInstHook`/`maxBatch`/`verbose` opts. The wasm branch is
+  now the whole factory (~710 lines).
+- `site/probe_freertos.mjs` (Unicorn ISR-pump pin) — replaced in the `npm test`
+  chain by the same-name `probe_freertos_wasm.mjs` (renamed; inline delivery).
+  `site/test_doom.mjs` (TCI guard) — `test_doom_wasm.mjs` covers it.
+  `site/test_fuzz.mjs` + `test:fuzz` — the oracle is gone, cannot re-run.
+- `pkg/cli.mjs` ported to `createEmulator` (config/region/patch parsing and
+  the gateway WS/spawn/restart logic unchanged; stepping/TX/RX/IRQs are the
+  shared driver's). See the §10 port note for the polling-vs-irq_eth rule.
+- Callers: `app.js`/`doom.js` (CPU buttons + `?cpu=` gone), `doom-worker.js`
+  (Unicorn fetch path gone), `index.mjs`/`stm32f4.js` (facade),
+  `site/ws-bridge.mjs` (`--verbose` gone), root `cli.mjs` (`--verbose` is now
+  a capped guest-PC trace via the core trace API), `index.html` (script tag +
+  buttons + copy), `emulator.d.ts`, `package.json` (export/keyword/scripts).
+- Docs: README, `site/about.html`, `PERIPHERAL_TESTS.md`, Rust doc-comments
+  describing Unicorn paths. Generated `site/vendor/stm32_periph_wasm.*`
+  still contains old Unicorn mentions in comments — they refresh on rebuild.
+- `scripts/verify_ethernet.sh` passes repo-root-relative firmware paths
+  (`../$name/$name.bin`) that only resolve next to `pkg/` — invoke the ported
+  CLI with explicit `../../eth_http/eth_http.bin`-style paths instead.
+
+What was deliberately kept: the differential-fuzz RECORD in §22 (why the
+decoder is trusted), the wedge/pump archaeology in §§7/9/11/16–17 (why the
+code looks the way it does), and the gateway protocol notes in §10 (unchanged).

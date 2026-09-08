@@ -4,12 +4,9 @@
 //   scans/re-arms RX descriptors. The driver only signals the model
 //   (eth_tx_done/eth_rx_done) and injects frames — no SRAM flag writes.
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from '../site/vendor/stm32_periph_wasm.js';
 import { createEmulator } from '../site/emulator.js';
 
-const require = createRequire(import.meta.url);
-const unicorn = require('../site/vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('../site/vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('../site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const fw = new Uint8Array(readFileSync(new URL('../eth_irq_test/eth_irq_test.bin', import.meta.url)));
@@ -21,7 +18,7 @@ const eth = {
 
 const frames = [];
 const emu = await createEmulator({
-    firmware: fw, bindings, unicorn, svdXml, wasmInit: wasmBytes,
+    firmware: fw, bindings, svdXml, wasmInit: wasmBytes,
     enable_irqs: true, irq_eth: true, eth,
     onTx: (pkt) => { frames.push(new Uint8Array(pkt)); },
 });

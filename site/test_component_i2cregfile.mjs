@@ -4,13 +4,10 @@
 // emu.rtc decoder (see site/test_rtc.mjs for that path).
 // Usage: node site/test_component_i2cregfile.mjs  (exit 0 = PASS)
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 import { I2cRegisterDevice } from './components.js';
 
-const require = createRequire(import.meta.url);
-const unicorn = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../rtc_test/rtc_test.bin', import.meta.url)));
@@ -21,7 +18,7 @@ init[0x11] = 0x1B; // +27 C
 init[0x12] = 0x80; // +0.50 C fraction
 
 const emu = await createEmulator({
-    firmware, bindings, unicorn, svdXml, wasmInit: wasmBytes,
+    firmware, bindings, svdXml, wasmInit: wasmBytes,
     ext_devices: { rtc: { i2c: 'I2C1', addr: 0x68, init } },
 });
 

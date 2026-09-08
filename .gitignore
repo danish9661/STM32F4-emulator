@@ -1,4 +1,6 @@
 /target
+# Session scratch (detached-run logs, probes, harnesses, tmp builds)
+.pw-scratch/
 # npm pack output
 *.tgz
 # MCP server dependency tree (package-lock.json stays tracked)

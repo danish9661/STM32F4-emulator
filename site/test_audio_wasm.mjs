@@ -6,12 +6,9 @@
 //   capture FIFO (audio_take_capture) must return exactly those values.
 // Usage: node site/test_audio.mjs  (exit 0 = PASS)
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 
-const require = createRequire(import.meta.url);
-const unicornFactory = null;
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../audio_test/audio_test.bin', import.meta.url)));
@@ -42,7 +39,7 @@ function makePcm16Wav(samples) {
 }
 
 const wav = makePcm16Wav(samples);
-const emu = await createEmulator({ firmware, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes, cpu_backend: 'wasm' });
+const emu = await createEmulator({ firmware, bindings, svdXml, wasmInit: wasmBytes });
 
 bindings.audio_load_wav(wav);
 console.log('wav samples:', samples.length, 'expectedSum: 0x' + expectedSum.toString(16).toUpperCase());

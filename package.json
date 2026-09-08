@@ -1,7 +1,7 @@
 {
   "name": "stm32f4-emu",
   "version": "1.0.1",
-  "description": "STM32F407 emulator: Unicorn (WASM) CPU + Rust peripheral model. Runs real Cortex-M4 firmware in Node or the browser.",
+  "description": "STM32F407 emulator: Rust CPU + peripheral model (WASM). Runs real Cortex-M4 firmware in Node or the browser.",
   "type": "module",
   "main": "index.mjs",
   "bin": {
@@ -19,7 +19,6 @@
     "./loaders": "./site/loaders.js",
     "./stm32f4": "./site/stm32f4.js",
     "./vendor": "./site/vendor/stm32_periph_wasm.js",
-    "./vendor/unicorn": "./site/vendor/unicorn_arm.cjs",
     "./remote": "./site/remote-emu.js",
     "./ws-bridge": "./site/ws-bridge.mjs"
   },
@@ -50,7 +49,6 @@
     "emulator",
     "arm",
     "cortex-m4",
-    "unicorn",
     "wasm",
     "embedded",
     "firmware"
@@ -99,11 +97,10 @@
     "lint": "eslint site mcp tools index.mjs cli.mjs",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
-    "build:wasm": "wasm-pack build stm32-periph-wasm --target web --out-dir ../site/vendor && rm -f site/vendor/.gitignore && cp stm32-periph-wasm/pkg/unicorn_arm.cjs site/vendor/ 2>/dev/null || true; cp stm32-periph-wasm/pkg/unicorn_arm.js site/vendor/ 2>/dev/null || true; cp monox/stm32f407.svd site/vendor/ 2>/dev/null || true; command -v wasm-opt >/dev/null 2>&1 && wasm-opt -O3 site/vendor/stm32_periph_wasm_bg.wasm -o site/vendor/stm32_periph_wasm_bg.wasm || echo 'wasm-opt not found, skipping'",
+    "build:wasm": "wasm-pack build stm32-periph-wasm --target web --out-dir ../site/vendor && rm -f site/vendor/.gitignore && cp monox/stm32f407.svd site/vendor/ 2>/dev/null || true; command -v wasm-opt >/dev/null 2>&1 && wasm-opt -O3 site/vendor/stm32_periph_wasm_bg.wasm -o site/vendor/stm32_periph_wasm_bg.wasm || echo 'wasm-opt not found, skipping'",
     "build:wasm:node": "wasm-pack build stm32-periph-wasm --target nodejs --out-dir pkg",
-    "build:wasm:opt": "wasm-opt -O3 site/vendor/stm32_periph_wasm_bg.wasm -o site/vendor/stm32_periph_wasm_bg.wasm && wasm-opt -O3 site/vendor/unicorn_arm.cjs -o site/vendor/unicorn_arm.cjs 2>/dev/null || true",
-    "test:wasm": "node site/test_wasm_cpu.mjs && node site/test_flow_wasm.mjs && node site/test_audio_wasm.mjs && node site/test_wasm_multi.mjs && node site/test_lowpower_wasm.mjs && node site/probe_freertos_wasm.mjs && node site/test_doom_wasm.mjs",
-    "test:fuzz": "node site/test_fuzz.mjs"
+    "build:wasm:opt": "wasm-opt -O3 site/vendor/stm32_periph_wasm_bg.wasm -o site/vendor/stm32_periph_wasm_bg.wasm",
+    "test:wasm": "node site/test_wasm_cpu.mjs && node site/test_flow_wasm.mjs && node site/test_audio_wasm.mjs && node site/test_wasm_multi.mjs && node site/test_lowpower_wasm.mjs && node site/probe_freertos.mjs && node site/test_doom_wasm.mjs"
   },
   "dependencies": {
     "ws": "^8.21.3"

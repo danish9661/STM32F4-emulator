@@ -54,18 +54,6 @@ const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test', 'eth_dhcp', 'eth_test']);
 // core on WFI and advances the virtual RTC until an alarm/interrupt wakes it.
 const LOWPOWER_FIRMWARES = new Set(['deep_sleep_demo']);
 
-// Firmwares that can run hookless (no WASM->JS crossing per block).
-// These have no ETH/DMA/IRQ dependency — they only need CPU + GPIO/TIM/etc.
-// Using noCountHook (+ minimalPolls) gives +10% and honest instCount vs
-// blockCounting's 1.39× over-report. ETH/IRQ/lowpower keep polling.
-const NO_COUNT_FIRMWARES = new Set([
-  'blinky', 'rtc_test', 'oled_test', 'tft_test', 'buzzer_test',
-  'audio_test', 'audio_play_test', 'ltdc_test', 'tim_capture_demo',
-  'qspi_test', 'watchdog_demo', 'wwdg_demo', 'wwdg_window_demo',
-  'fsmc_test', 'dcmi_test', 'spi_tft_test', 'adc_demo', 'dac_demo', 'pwm_demo',
-  'can_test', 'can_demo', 'can_host_rx', 'crypto_test', 'hash_test',
-]);
-
 // Virtual hardware attached to the emulator per firmware: the JS device
 // layer parses the peripheral traffic and renders it (OLED fb, TFT fb,
 // buzzer freq, speaker samples). Matches emulator.js ext_devices.
@@ -303,13 +291,6 @@ const setBusy = (busy) => {
 // mode (the default).
 const params = new URLSearchParams(location.search);
 const bridgeUrl = params.get('bridge');
-// CPU backend: ?cpu=unicorn opts back into the Unicorn core (for A/B
-// comparison); anything else (including absent) uses the Rust interpreter.
-let cpuBackend = params.get('cpu') === 'unicorn' ? 'unicorn' : 'wasm';
-const refreshCpuButtons = () => {
-    $('btnCpuWasm').style.fontWeight = cpuBackend === 'wasm' ? 'bold' : '';
-    $('btnCpuUnicorn').style.fontWeight = cpuBackend === 'unicorn' ? 'bold' : '';
-};
 
 const boot = async () => {
     const id = ++session;
@@ -378,20 +359,15 @@ const boot = async () => {
         netsim = gw.connected ? null : createNetSim();
         gw.tx = 0; gw.rx = 0;
         if (gw.connected) setGwStatus(true, gwLabel());
-        const useNoCount = NO_COUNT_FIRMWARES.has(image.name) && !IRQ_FIRMWARES.has(image.name) && !LOWPOWER_FIRMWARES.has(image.name);
         emu = await createEmulator({
             firmware: fw,
             bindings,
-            unicorn: MUnicorn,
-            cpu_backend: cpuBackend,
             svdXml,
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),
             irq_eth: IRQ_ETH_FIRMWARES.has(image.name),
             lowpower: LOWPOWER_FIRMWARES.has(image.name),
-            minimalPolls: useNoCount,
-            noCountHook: useNoCount,
             eth: ETH_RX_MAP[image.name],
             ext_devices: DEVICE_FIRMWARES[image.name],
             onTx: (pkt) => {
@@ -417,7 +393,7 @@ const boot = async () => {
 
     const bootTags = bridgeUrl
         ? `(bridge ${bridgeUrl})`
-        : `(cpu: ${cpuBackend})` + (gw.connected ? ' (gateway)' : ' (netsim)');
+        : (gw.connected ? '(gateway)' : '(netsim)');
     appendUart(`── booted ${image.name} ${bootTags} ──\r\n`);
     window.__emu = emu;          // debug handle (CDP smoke tests)
     window.__bindings = bindings;
@@ -476,9 +452,6 @@ $('btnReset').addEventListener('click', () => {
 });
 $('btnClear').addEventListener('click', () => { uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0; });
 $('btnGw').addEventListener('click', connectGateway);
-$('btnCpuWasm').addEventListener('click', () => { cpuBackend = 'wasm'; refreshCpuButtons(); boot(); });
-$('btnCpuUnicorn').addEventListener('click', () => { cpuBackend = 'unicorn'; refreshCpuButtons(); boot(); });
-refreshCpuButtons();
 
 const sendRx = (term) => {
     const input = $('rxInput');

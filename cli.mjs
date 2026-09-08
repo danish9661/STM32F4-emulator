@@ -10,15 +10,12 @@
 // emulator advances the virtual RTC until a wakeup source (e.g. an RTC alarm)
 // fires — so firmware that enters STOP (e.g. deep_sleep_demo.bin) runs.
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import * as bindings from './site/vendor/stm32_periph_wasm.js';
 import { createEmulator } from './site/emulator.js';
 import { parseIntelHex, parseElf } from './site/loaders.js';
 
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./site/vendor/unicorn_arm.cjs');
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const svdXml = readFileSync(resolve(__dirname, 'site/vendor/stm32f407.svd'), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(resolve(__dirname, 'site/vendor/stm32_periph_wasm_bg.wasm')));
@@ -35,7 +32,7 @@ Arguments:
 Options:
   -n, --inst <N>        instruction budget to run (default 20000000)
   -f, --format <fmt>    firmware format: auto|bin|hex|elf (default auto)
-  -v, --verbose         trace peripheral register reads/writes to stderr
+  -v, --verbose         trace guest PCs to stderr (capped per step)
   -l, --lowpower        halt on WFI/WFE and advance the virtual RTC until wakeup
   -h, --help            show this help
   -V, --version         show version
@@ -119,8 +116,8 @@ async function main() {
     let emu;
     try {
         emu = await createEmulator({
-            firmware, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes,
-            extra_mem, verbose, lowpower,
+            firmware, bindings, svdXml, wasmInit: wasmBytes,
+            extra_mem, lowpower,
         });
     } catch (e) {
         fail(`emulator failed to load firmware: ${e.message}`);
@@ -132,7 +129,15 @@ async function main() {
     try {
         while (remaining > 0) {
             const take = Math.min(STEP, remaining);
+            if (verbose) { try { emu.traceStart(); } catch {} }
             const r = emu.step(take);
+            if (verbose) {
+                try {
+                    const pcs = emu.takeTrace() || [];
+                    const tail = pcs.slice(-8).map((p) => `0x${(p >>> 0).toString(16)}`).join(' ');
+                    if (tail) process.stderr.write(`[trace]${tail}\n`);
+                } catch {} finally { try { emu.traceStop(); } catch {} }
+            }
             remaining -= (r.instCount - lastInst);
             lastInst = r.instCount;
             const u = emu.drainUart();

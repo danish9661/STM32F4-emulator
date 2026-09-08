@@ -4,18 +4,15 @@
 // ext_device (see site/test_buzzer.mjs for that path).
 // Usage: node site/test_component_pwm.mjs  (exit 0 = PASS)
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 import { Pwm } from './components.js';
 
-const require = createRequire(import.meta.url);
-const unicorn = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../buzzer_test/buzzer_test.bin', import.meta.url)));
 
-const emu = await createEmulator({ firmware, bindings, unicorn, svdXml, wasmInit: wasmBytes });
+const emu = await createEmulator({ firmware, bindings, svdXml, wasmInit: wasmBytes });
 
 const pwm = new Pwm(emu, 'TIM2', 1);
 let uart = '';

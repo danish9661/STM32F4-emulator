@@ -4,12 +4,9 @@
 // reboot the firmware detects the WWDG reset cause (RCC->CSR WWDGRSTF).
 // Usage: node site/test_wwdg_window.mjs  (exit 0 = PASS)
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../wwdg_window_demo/wwdg_window_demo.bin', import.meta.url)));
@@ -17,7 +14,7 @@ const firmware = new Uint8Array(readFileSync(new URL('../wwdg_window_demo/wwdg_w
 function fail(msg) { console.error('WDOG-WW-WIN FAIL: ' + msg); process.exit(1); }
 
 (async () => {
-    const emu = await createEmulator({ firmware, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes });
+    const emu = await createEmulator({ firmware, bindings, svdXml, wasmInit: wasmBytes });
     const markers = [
         '=== WWDG Window Demo ===',
         'WWDG windowed (W=0x50), pet in window',

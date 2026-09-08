@@ -10,11 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { createEmulator } from './emulator.js';
 import * as bindings from './vendor/stm32_periph_wasm.js';
-import { createRequire } from 'node:module';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(resolve(__dirname, 'vendor/stm32f407.svd'), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(resolve(__dirname, 'vendor/stm32_periph_wasm_bg.wasm')));
 
@@ -63,7 +60,7 @@ async function runTest() {
                     const flash = new Uint8Array(buf.buffer, buf.byteOffset + 9, flashLen);
                     try {
                         emu = await createEmulator({
-                            firmware: new Uint8Array(flash), bindings, unicorn: unicornFactory,
+                            firmware: new Uint8Array(flash), bindings,
                             svdXml, wasmInit: wasmBytes,
                         });
                         const resp = new Uint8Array(5);

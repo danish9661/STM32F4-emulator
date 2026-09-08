@@ -3,18 +3,15 @@
 // framebuffer quadrant colors (red/green/blue/white).
 // Usage: node site/test_tft.mjs  (exit 0 = PASS)
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../tft_test/tft_test.bin', import.meta.url)));
 
 const emu = await createEmulator({
-    firmware, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes,
+    firmware, bindings, svdXml, wasmInit: wasmBytes,
     ext_devices: { tft: { spi: 'SPI2', cs: 'PB12', dc: 'PB11' } },
 });
 

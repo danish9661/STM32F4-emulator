@@ -1,5 +1,5 @@
-// Smoke test for the WASM-native CPU backend (cpu:'wasm').
-// Boots blinky without Unicorn: no static imports of unicorn needed.
+// Smoke test for the Rust CPU backend.
+// Boots blinky.
 import { readFileSync } from 'fs';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
@@ -9,7 +9,7 @@ const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_was
 const firmware = new Uint8Array(readFileSync(new URL('../blinky/blinky.bin', import.meta.url)));
 
 const emu = await createEmulator({
-    firmware, bindings, unicorn: null, svdXml, wasmInit: wasmBytes, cpu_backend: 'wasm',
+    firmware, bindings, svdXml, wasmInit: wasmBytes,
 });
 
 const uart = [];

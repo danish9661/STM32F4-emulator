@@ -1,14 +1,11 @@
 // Node harness for the doomgeneric F407 port on the wasm CPU backend.
-// Mirrors test_doom.mjs (Unicorn): boot -> title -> menu -> New Game ->
+// DOOM boot -> title -> menu -> New Game ->
 // E1M1 play with W + turns, quick-save, framebuffer/audio/save assertions.
 // Usage: node site/test_doom_wasm.mjs  (exit 0 = PASS)
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../doom/doom.bin', import.meta.url)));
@@ -31,13 +28,12 @@ const DGSB = ABASE + 0x510n;         // u32 DG_ScreenBuffer value
 const PALETTE = ABASE + 0x110n;      // 1024 B (b,g,r,a per entry)
 
 const emu = await createEmulator({
-    firmware, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes,
+    firmware, bindings, svdXml, wasmInit: wasmBytes,
     extra_ram: [
         { addr: 0xC0000000, size: 16 * 1024 * 1024 },   // .data/.bss + zone + heap
         { addr: 0xB8000000, size: 8 * 1024 * 1024 },    // WAD image
     ],
     extra_mem: [{ addr: 0xB8000000, data: wad }],
-    cpu_backend: 'wasm', minimalPolls: true, blockCounting: true,
     ext_devices: { speaker: true },   // I2S capture drain (audio test)
 });
 

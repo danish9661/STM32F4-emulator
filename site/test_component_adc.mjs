@@ -7,18 +7,15 @@
 // style test_exti.mjs already uses for GPIO.
 // Usage: node site/test_component_adc.mjs  (exit 0 = PASS)
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 import { Potentiometer } from './components.js';
 
-const require = createRequire(import.meta.url);
-const unicorn = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../blinky/blinky.bin', import.meta.url)));
 
-const emu = await createEmulator({ firmware, bindings, unicorn, svdXml, wasmInit: wasmBytes });
+const emu = await createEmulator({ firmware, bindings, svdXml, wasmInit: wasmBytes });
 
 const ADC1 = 0x40012000;
 const CHANNEL = 3;

@@ -73,9 +73,6 @@
   <div id="stats">MIPS: — · FPS: —</div>
   <div id="keys"></div>
   <div class="btns">
-    <span style="color:#888;font-size:12px;">CPU:</span>
-    <button id="btnCpuWasm" title="Rust Thumb-2 interpreter (default, full speed)">WASM</button>
-    <button id="btnCpuUnicorn" title="Unicorn 2.1.4 core (slower; keeps old behavior)">Unicorn</button>
     <button id="btnReset" title="Reboot the emulator and restart DOOM">Reset</button>
     <button id="btnPause" title="Pause/resume emulation">Pause</button>
     <button id="btnFull" title="Fullscreen (Esc to exit)">Fullscreen</button>
@@ -101,10 +98,7 @@
 </div>
 <pre id="uart"></pre>
 
-<!-- Unicorn is no longer loaded here: emulation runs in doom-worker.js, which
-     fetches and evaluates it in the worker scope with an explicit locateFile
-     (a worker has no document.currentScript for emscripten to derive the
-     .wasm path from). -->
+<!-- Emulation runs in doom-worker.js (Rust CPU core + peripheral model). -->
 <!-- Bump ?v= on every doom.js edit: the module is cached hard, and a stale
      copy looks exactly like the bug you thought you just fixed. The worker
      has its own ?v= inside doom.js. -->

@@ -4,12 +4,9 @@
 // seed 0x1B/0x80), and the verify-OK marker.
 // Usage: node site/test_rtc.mjs  (exit 0 = PASS)
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../rtc_test/rtc_test.bin', import.meta.url)));
@@ -23,7 +20,7 @@ init[0x11] = 0x1B;   // +27 C
 init[0x12] = 0x80;   // +0.50 C fraction (bits 7-6 = 2 quarters)
 
 const emu = await createEmulator({
-    firmware, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes,
+    firmware, bindings, svdXml, wasmInit: wasmBytes,
     ext_devices: { rtc: { i2c: 'I2C1', addr: 0x68, init } },
 });
 

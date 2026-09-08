@@ -7,7 +7,8 @@
 [![Pages](https://github.com/danish9661/stm32F4-emulator/actions/workflows/pages.yml/badge.svg)](https://github.com/danish9661/stm32F4-emulator/actions/workflows/pages.yml)
 
 An STM32F407 microcontroller emulator that runs real Cortex-M4 firmware. It
-combines a **Unicorn CPU core** (QEMU-derived, compiled to WASM) with a
+combines a **Rust CPU core** (a WASM-native Thumb-2 interpreter with exact
+Cortex-M exception entry/return) with a
 **Rust peripheral model** (RCC, USART, GPIO, DMA, ETH, TIM, NVIC, ...) also
 compiled to WASM — so the whole machine runs headless in **Node.js or a
 browser tab**, with no SDL, no native deps, no hardware.
@@ -32,18 +33,18 @@ scripted network (netsim) as fallback, a live UART terminal (with **UART
 RX input** — type into the console and the firmware reads it; newline
 characters excluded per HTML spec, see AGENTS.md §11), GPIO pin readout
 for banks A–E, and key peripheral registers. Interrupt-driven firmware
-(`rx_interrupt_test`, `rx_crypto_test`) is serviced by an opt-in guest-IRQ
-pump; polling firmware (the ETH demos) never uses it. For automation, a
+(`rx_interrupt_test`, `rx_crypto_test`) gets inline guest-IRQ delivery;
+polling firmware (the ETH demos) never uses it. For automation, a
 preset can auto-boot via the URL: `?fw=eth_http`, `?fw=blinky`, `?fw=crypto_test`, …
 
 ## DOOM (in the browser)
 
 **[`site/doom.html`](site/doom.html)** runs DOOM 1 shareware
-(doomgeneric, ported to the emulated F407) at ~25 FPS in a
-headless-Chrome-verified browser page — playable, but below DOOM's native
-35 fps: at ~918k guest instructions per rendered frame, 35 fps would need
-~32 MIPS and the Unicorn WASM core tops out near 20-24 (details and the
-measurements in AGENTS.md §16). Because the guest mixes one frame of audio
+(doomgeneric, ported to the emulated F407) at the full 35 fps in a
+headless-Chrome-verified browser page — playable: at ~1M guest instructions
+per rendered frame, 35 fps needs ~32 MIPS and the Rust core delivers ~65
+(details and the measurements in AGENTS.md §16/§22). Because the guest mixes
+one frame of audio
 per rendered frame, sound below 35 fps plays slightly slow and pitched-down
 rather than breaking up — the worklet rate-matches instead of inserting
 gaps, and the stats line reports it (`audio 0.72x`). The page: 320×200
@@ -182,9 +183,9 @@ watchdog timeouts close to spec) will diverge — see docs/progress-and-future.m
 ## Architecture
 
 ```
-firmware .bin ──► Unicorn WASM CPU ──► memory hooks
+firmware .bin ──► Rust WASM CPU (Thumb-2 + NVIC/exceptions)
                           │
-                    periph_read/write ──► Rust peripheral model (WASM)
+              peripheral MMIO ──► Rust peripheral model (WASM)
                                           RCC USART GPIO DMA ETH TIM NVIC
                           │
                     UART out / ETH TX frames ──► driver (cli.mjs / site/emulator.js)
@@ -192,9 +193,10 @@ firmware .bin ──► Unicorn WASM CPU ──► memory hooks
                     RX frames injected (netsim, or real gVisor gateway)
 ```
 
-- **CPU**: Unicorn 2.1.4 compiled to WASM executes Thumb-2 code; every
-  read/write to a hooked MMIO range is routed into the Rust model, which
-  answers by writing the modeled register value back into guest memory.
+- **CPU**: a pure-Rust Cortex-M4 Thumb-2 interpreter compiled to WASM;
+  peripheral accesses call straight into the Rust model, and guest IRQs
+  (SysTick, ETH, USART, SVC/PendSV) are delivered inline with exact
+  exception stacking — no native deps, no JIT, no hooks.
 - **Peripherals**: a `wasm-bindgen` crate (`stm32-periph-wasm/`); registers
   and bit fields come from the vendor SVD (`monox/stm32f407.svd`).
 - **Ethernet**: TX is captured from the DMA descriptors; RX frames are
@@ -223,8 +225,8 @@ firmware .bin ──► Unicorn WASM CPU ──► memory hooks
 │   ├── test_blinky.mjs      Node blinky GPIO test (npm test)
 │   ├── test_rx_interrupt.mjs Node UART-interrupt test (npm test)
 │   ├── test_component_*.mjs Component-API tests, one firmware each (npm test)
-│   ├── test_doom.mjs        Node DOOM boot/menu/gameplay/save test
-│   └── vendor/              Browser WASM build, SVD, Unicorn
+│   ├── test_doom_wasm.mjs  Node DOOM boot/menu/gameplay/save test
+│   └── vendor/              Browser WASM build (CPU + peripherals), SVD
 ├── index.mjs, package.json  npm package entry (stm32f4-emu)
 ├── mcp/                     MCP server (drive the emulator from an AI agent)
 ├── .github/workflows/       CI (Linux/Windows/macOS test matrix) + Pages deploy
@@ -296,6 +298,5 @@ rebuild — delete it so the vendor assets stay tracked/committed.
 ## License & Credits
 
 - **License**: GPL-3.0-only. See [LICENSE](LICENSE).
-- **Unicorn CPU Core**: Powered by [Unicorn.js](https://github.com/AlexAltea/unicorn.js) by [Alex Altea](https://github.com/AlexAltea) (WASM/JS port of the [Unicorn Engine](https://www.unicorn-engine.org/) CPU emulator, derived from QEMU, licensed under GPLv2).
 - **Heritage**: Fork and continuation of [nviennot/stm32-emulator](https://github.com/nviennot/stm32-emulator) (native SDL 3D printer emulator by Nicolas Viennot). The headless WASM peripheral model, networking stack, browser demo, virtual components API, MCP server, and npm package are new work built on that base.
 - **DOOM**: Ported using [doomgeneric](https://github.com/ozkl/doomgeneric) by Ozkan Sezgin.

@@ -7,8 +7,9 @@
 // frame it does one putImageData of an RGBA buffer the worker transferred.
 //
 // It is a responsiveness win, not a throughput one — there is still one
-// emulation thread, and the guest still runs at whatever the Unicorn WASM
-// core manages (~20-24 MIPS, so ~25 of the target 35 fps). Throughput is
+// emulation thread, and the guest holds the full 35 fps the engine targets
+// (the Rust core delivers ~65 MIPS in the page; a frame costs ~1M guest
+// instructions). Throughput is
 // unchanged from the old main-thread build because this file still sets the
 // cadence: one 'tick' per rAF, one burst per tick (AGENTS §17).
 //
@@ -26,31 +27,6 @@ const img = ctx.createImageData(320, 200);
 // and the guest applies detail only through the ABI slot
 // (R_SetViewSize()+R_ExecuteSetViewSize(); writing the engine's
 // `detailLevel` global directly is a NO-OP).
-
-// CPU backend (?cpu=unicorn opts back into Unicorn; default is the Rust
-// interpreter). Changing it reboots, like Reset. Persisted in localStorage.
-const cpuParams = new URLSearchParams(location.search);
-let cpuBackend = cpuParams.get('cpu') === 'unicorn'
-    ? 'unicorn'
-    : (localStorage.getItem('doomCpu') || 'wasm');
-if (cpuBackend !== 'wasm' && cpuBackend !== 'unicorn') cpuBackend = 'wasm';
-const refreshCpuButtons = () => {
-    $('btnCpuWasm').style.fontWeight = cpuBackend === 'wasm' ? 'bold' : '';
-    $('btnCpuUnicorn').style.fontWeight = cpuBackend === 'unicorn' ? 'bold' : '';
-};
-$('btnCpuWasm').addEventListener('click', () => {
-    cpuBackend = 'wasm';
-    localStorage.setItem('doomCpu', 'wasm');
-    refreshCpuButtons();
-    boot();
-});
-$('btnCpuUnicorn').addEventListener('click', () => {
-    cpuBackend = 'unicorn';
-    localStorage.setItem('doomCpu', 'unicorn');
-    refreshCpuButtons();
-    boot();
-});
-refreshCpuButtons();
 
 // Doom keycodes (engine/doomkeys.h; TranslateKey is identity)
 const KEY = {
@@ -102,7 +78,7 @@ window.__doomLog = () => dbgLog.slice();
 window.__pace = () => window.__lastPace || null;
 // Build stamp: type __doomVer in the console — if it doesn't print the
 // number below, the tab runs a cached copy (hard-refresh: Ctrl+Shift+R).
-window.__doomVer = 42;
+window.__doomVer = 43;
 // Keys pressed before the worker boots would be eaten (nothing listens
 // yet) — the old "wait before touching anything" ritual. Instead they queue
 // here and flush on 'booted', so press ahead: the game catches up. The
@@ -457,7 +433,7 @@ function onWorkerMessage(e) {
 
 async function boot() {
     setStatus('booting…');
-    dlog('boot', 'starting, cpu=' + cpuBackend);
+    dlog('boot', 'starting');
     prebootQueue.length = 0;   // stale taps from a previous instance die here
     fitCanvas();
     // Start audio at boot so scripted/headed runs (and watch-only sessions)
@@ -490,13 +466,13 @@ async function boot() {
 
         // Bump ?v= on every doom-worker.js edit — worker scripts cache as hard
         // as module scripts, and a stale copy looks exactly like a bug.
-        worker = new Worker('doom-worker.js?v=16', { type: 'module' });
+        worker = new Worker('doom-worker.js?v=17', { type: 'module' });
         worker.onmessage = onWorkerMessage;
         worker.onerror = (e) => {
             setStatus('worker failed: ' + (e.message || 'load error'), 'error');
             console.error(e);
         };
-        send({ t: 'boot', svdXml, wad, firmware, lowDetail: false, saveMap, cpuBackend }, [wad]);
+        send({ t: 'boot', svdXml, wad, firmware, lowDetail: false, saveMap }, [wad]);
         send({ t: 'hidden', hidden: document.hidden });
         startTicking();
     } catch (e) {

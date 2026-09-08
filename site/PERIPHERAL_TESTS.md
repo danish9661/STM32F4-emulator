@@ -1,7 +1,7 @@
 # Peripheral tests — what they do and what to expect
 
 Every peripheral test boots a small bare-metal firmware into the emulator
-(Unicorn + the WASM peripheral model) and checks two things:
+(the Rust CPU core + the WASM peripheral model) and checks two things:
 
 1. **UART markers** — lines the firmware prints as it progresses.
 2. **Model-side state** — registers, framebuffers, capture FIFOs, model

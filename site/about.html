@@ -85,8 +85,9 @@
 
   <h2>Architecture</h2>
   <ul>
-    <li><strong>CPU</strong> — Unicorn 2.1.4 compiled to WASM, executing
-      Thumb-2 instructions. Reset vector, SP/PC, and exception handling follow
+    <li><strong>CPU</strong> — a Rust WASM-native Thumb-2 interpreter,
+      executing instructions with exact Cortex-M exception entry/return.
+      Reset vector, SP/PC, and NVIC handling follow
       the Cortex-M programming model.</li>
     <li><strong>Peripheral model</strong> — a Rust crate compiled to WASM via
       <code>wasm-bindgen</code>. ~33 peripheral modules (RCC, GPIO, USART,
@@ -173,7 +174,7 @@ npx stm32f4-mcp          <span class="c"># speaks MCP over stdio</span></pre>
     <li><a href="CHANGELOG.md">CHANGELOG.md</a> — releases and features.</li>
   </ul>
 
-  <footer>stm32f4-emu — Unicorn (WASM) CPU + Rust peripheral model.</footer>
+  <footer>stm32f4-emu — Rust CPU + peripheral model (WASM).</footer>
 </main>
 </body>
 </html>

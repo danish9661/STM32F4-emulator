@@ -7,7 +7,7 @@
 // execution stays in Node.
 //
 // Usage:
-//   node site/ws-bridge.mjs [--port 8234] [--firmware path] [--verbose]
+//   node site/ws-bridge.mjs [--port 8234] [--firmware path]
 //                            [--lowpower] [--inst N]
 //
 // Protocol (binary WebSocket, little-endian):
@@ -42,7 +42,6 @@
 //     0xFF PONG        (response to PING)
 
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
@@ -50,8 +49,6 @@ import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 import { parseIntelHex, parseElf } from './loaders.js';
 
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./vendor/unicorn_arm.cjs');
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const svdXml = readFileSync(resolve(__dirname, 'vendor/stm32f407.svd'), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(resolve(__dirname, 'vendor/stm32_periph_wasm_bg.wasm')));
@@ -60,13 +57,11 @@ const wasmBytes = new Uint8Array(readFileSync(resolve(__dirname, 'vendor/stm32_p
 const args = process.argv.slice(2);
 let port = 8234;
 let firmwarePath = null;
-let verbose = false;
 let lowpower = false;
 let maxInst = 0; // 0 = run until client stops
 for (let i = 0; i < args.length; i++) {
     if (args[i] === '--port') port = Number(args[++i]) || 8234;
     else if (args[i] === '--firmware' || args[i] === '-f') firmwarePath = args[++i];
-    else if (args[i] === '--verbose' || args[i] === '-v') verbose = true;
     else if (args[i] === '--lowpower' || args[i] === '-l') lowpower = true;
     else if (args[i] === '--inst' || args[i] === '-n') maxInst = Number(args[++i]) || 0;
     else if (!firmwarePath && !args[i].startsWith('-')) firmwarePath = args[i];
@@ -193,8 +188,8 @@ async function handleConnection(ws) {
         try {
             const { firmware, extra_mem } = loadFirmware(firmwarePath);
             emu = await createEmulator({
-                firmware, bindings, unicorn: unicornFactory, svdXml, wasmInit: wasmBytes,
-                extra_mem, verbose, lowpower,
+                firmware, bindings, svdXml, wasmInit: wasmBytes,
+                extra_mem, lowpower,
                 onTx: (pkt) => {
                     if (ws.readyState !== 1) return;
                     const msg = new Uint8Array(5 + pkt.length);
@@ -304,8 +299,8 @@ async function handleConnection(ws) {
                     if (gpioTimer) { clearInterval(gpioTimer); gpioTimer = null; }
                     try {
                         emu = await createEmulator({
-                            firmware: new Uint8Array(flash), bindings, unicorn: unicornFactory,
-                            svdXml, wasmInit: wasmBytes, verbose, lowpower,
+                            firmware: new Uint8Array(flash), bindings,
+                            svdXml, wasmInit: wasmBytes, lowpower,
                             onTx: (pkt) => {
                                 if (ws.readyState !== 1) return;
                                 const msg = new Uint8Array(5 + pkt.length);

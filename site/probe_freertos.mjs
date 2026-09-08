@@ -1,21 +1,17 @@
 import { readFileSync } from 'fs';
-import { createRequire } from 'module';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 
-const require = createRequire(import.meta.url);
-const unicornFactory = require('./vendor/unicorn_arm.cjs');
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const firmware = new Uint8Array(readFileSync(new URL('../freertos_test/freertos_test.bin', import.meta.url)));
 
 const emu = await createEmulator({
-    firmware, bindings, unicorn: unicornFactory, svdXml,
+    firmware, bindings, svdXml,
     wasmInit: wasmBytes, enable_irqs: true, freertos: true,
-    cpu_backend: 'unicorn', // pinned: drives the Unicorn ISR pump via Module/uc regs
 });
 
-const uc = emu.uc, M = emu.Module;
+const uc = emu.uc, M = emu.Module || { ARM_REG_PC: 15, ARM_REG_LR: 14, ARM_REG_PSP: 13, ARM_REG_SP: 13, ARM_REG_CONTROL: 20 };
 const rd32 = (a) => { const b = uc.mem_read(BigInt(a), 4); return (b[3]<<24)|(b[2]<<16)|(b[1]<<8)|b[0]; };
 
 // Resolve kernel variable addresses from the firmware ELF symbol table so the
@@ -85,8 +81,8 @@ const gTim3IsrAddr = elfSym.g_tim3_isr, gHighAddr = HIGH;
 let maxTim3 = 0, diagDone = false;
 
 try {
-    for (; instCount < MAX; instCount += 250000) {
-        const r = emu.step(250000);
+    for (; instCount < MAX; instCount += 37000) {
+        const r = emu.step(37000);
         pc = r.pc;
         const u = emu.drainUart().toString();
         allOut += u;
@@ -102,6 +98,21 @@ try {
         else if (tcb === TCB_IDLE) seen.add('IDLE');
         else if (tcb !== 0) seen.add('HIGH');
         tcbSet.add(tcb);
+        // Mini-samples: HIGH/TASK2 slices are short (a print + block ≈ hundreds
+        // of inst) and fall between batch boundaries. A few short steps per
+        // batch sample different phases so brief slices get observed.
+        for (let ms = 0; ms < 3; ms++) {
+            const mr = await emu.step(500);
+            instCount += 500;
+            const mtcb = rd32(PCUR);
+            if (mtcb === TCB_T1) seen.add('TASK1');
+            else if (mtcb === TCB_T2) seen.add('TASK2');
+            else if (mtcb === TCB_IDLE) seen.add('IDLE');
+            else if (mtcb !== 0) seen.add('HIGH');
+            tcbSet.add(mtcb);
+            allOut += emu.drainUart().toString();
+            if (mr.stopped) { pc = mr.pc; break; }
+        }
         if (tick > maxTick) maxTick = tick;
         const m2 = u.match(/TIM2 adv (-?\d+)->(-?\d+)[^\r\n]*/);
         if (m2) { tim2c0 = parseInt(m2[1]); tim2c1 = parseInt(m2[2]); }

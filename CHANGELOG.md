@@ -20,6 +20,17 @@ date-based entries rather than strict SemVer until the first published release.
   expected format and likely cause.
 - **`stm32f4-mcp --help` / `--version`** for the MCP server bin.
 
+### Removed
+- **Unicorn CPU backend**: the vendored Unicorn 2.1.4 engine
+  (`site/vendor/unicorn_arm.*`, `stm32-periph-wasm/pkg/unicorn_arm.*`, the
+  `stm32-periph-wasm/package/` distribution), the `cpu_backend`/`unicorn`
+  emulator options, the JS ISR pump, and the `?cpu=` UI switch. The Rust
+  Thumb-2 core (proven bit-identical over 543 differential-fuzz vectors plus
+  lockstep traces) is now the sole backend. `probe_freertos.mjs`,
+  `test_doom.mjs`, and the `test:fuzz` oracle were removed or replaced by
+  their Rust-core equivalents; `pkg/cli.mjs` was ported onto
+  `createEmulator`.
+
 ### Fixed
 - **FreeRTOS interrupt-pump context-switch bug**: a task-context `portYIELD()`
   (a `str` to SCB ICSR `PENDSVSET`) was stopped mid-instruction with PC frozen

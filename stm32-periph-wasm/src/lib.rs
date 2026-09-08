@@ -131,9 +131,8 @@ pub fn tim_inject_capture(name: String, ch: u32) {
 
 /// Set a pending interrupt in the NVIC. Negative `irq` values select system
 /// exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
-/// Used by the FreeRTOS path in the JS driver, which detects `svc` in the CPU
-/// hook and synthesizes the SVC exception here instead of letting Unicorn take
-/// it natively (this WASM build cannot perform the Cortex-M exception return).
+/// Used by the FreeRTOS path: the Rust core synthesizes these exceptions
+/// with exact inline entry/return.
 #[wasm_bindgen]
 pub fn set_intr_pending(irq: i32) {
     sys().p.nvic.borrow_mut().set_intr_pending(irq);
@@ -639,8 +638,8 @@ impl WasmCpu {
     }
     pub fn reset_cpu(&mut self, sp: u32, pc: u32) { self.cpu.reset(sp, pc); }
     /// Enable/disable inline guest exception delivery (NVIC SysTick, ETH,
-    /// USART RX, SVC, PendSV...). Off by default (polling-only, matches the
-    /// Unicorn path where pending model IRQs never stop execution).
+    /// USART RX, SVC, PendSV...). Off by default (polling-only: pending
+    /// model IRQs never stop execution).
     pub fn set_deliver_irqs(&mut self, v: bool) { self.cpu.deliver_irqs = v; }
     /// True while halted in WFI/WFE (low-power). The driver advances virtual
     /// time and calls `wake()` once an interrupt is pending.
