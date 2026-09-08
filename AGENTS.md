@@ -2605,6 +2605,16 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
   (doom 80M inst, SAVE ok slot 0, peak 0.508, 0% clip), `npm test` all green
   incl. `test_browser` 11 passed / 0 failed. Full battery ≈ 2 min wall
   (wasm default backend).
+- **Post-removal browser validation (2026-09-08, headless Chrome):**
+  `.pw-scratch/pw_sweep.py` 36/41 console presets PASS (fresh profile every
+  4 boots; serves `site/` on 8173 — 8123 belongs to another project).
+  The 5 failures (periph/edge slowness, new/deep_periph DCMI+TIM+DMA,
+  spi_tft SPI-status) reproduce IDENTICALLY on the pre-removal tree
+  (worktree control @ `b059cbc`, same uart tails) — pre-existing
+  headless-timing/preset-config issues, not removal regressions.
+  `.pw-scratch/pw_doom.py` PASSes 11/11: boot → menu → E1M1 (720u move,
+  13.7° turn, 16000px canvas, 53 MIPS / 34 FPS / audio 1.00x) → quick-save
+  `qpk` stored. `?cpu=`/`btnCpu*`/`MUnicorn` are fully gone from the pages.
 - **`doom_sym()` in cpu/tests.rs**: resolves test addresses from
   doom.elf's symtab at test time — hardcoded addresses rot on every
   firmware rebuild (strcasecmp moved twice).
