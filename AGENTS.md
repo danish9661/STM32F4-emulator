@@ -2559,6 +2559,12 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
    ttt/tte/tet/tee — entry-flag evaluation would give 7/7/3/7), first mask
    slot is always T by encoding (`ieee` rejected by GAS). FUZZ-IDENTICAL
    543/543 with the `ITF*` mask rule in fuzzcmp.mjs.
+- **BKPT is a clean stop on both backends (2026-09-06, emulator.js)**: the
+  Unicorn path converted a BKPT fault-PC `UC_ERR_EXCEPTION` into
+  `stopRequested = true` (scoped to the `0xBE00+imm8` halfword at PC/PC-2;
+  all other exceptions still throw), matching the wasm `faulted ->
+  stopped:true`. fuzzcmp's unicorn leg now stops with zero harness noise.
+  `noCountHook` accounting skips stopped steps so the meter isn't inflated.
 - **`doom_sym()` in cpu/tests.rs**: resolves test addresses from
   doom.elf's symtab at test time — hardcoded addresses rot on every
   firmware rebuild (strcasecmp moved twice).

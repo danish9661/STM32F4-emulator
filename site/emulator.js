@@ -1435,13 +1435,26 @@ export async function createEmulator(opts) {
                     stepThroughFlashFault();
                 }
             } else {
-                const pc = uc.reg_read_i32(Module.ARM_REG_PC);
-                throw new Error(`emu_start failed at pc=0x${pc.toString(16)}: ${e}`);
+                const pc = (uc.reg_read_i32(Module.ARM_REG_PC) >>> 0) & ~1;
+                // BKPT is a debug-stop request, not a crash: match the wasm
+                // backend (fault -> stopped:true) instead of throwing.
+                // Scoped to the 16-bit BKPT encoding (0xBE00+imm8) at the
+                // fault PC (or the halfword before it, if PC advanced past);
+                // every other exception still throws below.
+                let isBkpt = false;
+                try {
+                    for (const a of [pc, pc - 2]) {
+                        const b = uc.mem_read(BigInt(a >>> 0), 2);
+                        if ((((b[1] << 8) | b[0]) & 0xFF00) === 0xBE00) { isBkpt = true; break; }
+                    }
+                } catch {}
+                if (!isBkpt) throw new Error(`emu_start failed at pc=0x${pc.toString(16)}: ${e}`);
+                stopRequested = true;
             }
         }
         // With no counting hook the budget issued IS the instruction account
         // (emu_start runs to the budget unless something stops it early).
-        if (noCountHook) instCount += max_inst;
+        if (noCountHook && !stopRequested) instCount += max_inst;
         if (freertos) {
             // Feed the SysTick deterministically from the step budget. FreeRTOS
             // has no ETH/DMA early-stops, so the full budget is the executed
