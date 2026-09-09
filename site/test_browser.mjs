@@ -17,6 +17,7 @@ const CASES = [
     { label: 'rtc_test',        fw: 'rtc_test',        markers: ['RTC verify OK'],                failMarkers: ['RTC verify FAIL'], timeoutMs: 60000 },
     { label: 'audio_play_test', fw: 'audio_play_test', markers: ['I2S1 TX sine 256 samples'],     timeoutMs: 60000 },
     { label: 'deep_sleep_demo', fw: 'deep_sleep_demo', markers: ['WOKE FROM STOP'],               timeoutMs: 60000 },
+    { label: 'fpu_test',        fw: 'fpu_test',        markers: ['FPU all PASS'],                 failMarkers: ['FAIL'], timeoutMs: 60000 },
 ];
 
 let failed = 0;

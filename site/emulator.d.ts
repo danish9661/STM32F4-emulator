@@ -23,6 +23,8 @@ export interface CreateEmulatorOpts {
   svdXml?: string;
   /** Optional wasm bytes for bindings.default() (Node). */
   wasmInit?: Uint8Array;
+  /** Optional versioned wasm URL for bindings.default() (browser cache-busting). */
+  wasmUrl?: string;
 
   flash_size?: number;
   ram_size?: number;

@@ -13,6 +13,7 @@ export async function createEmulator(opts) {
         bindings,             // wasm-bindgen module (web or nodejs build)
         svdXml,               // SVD XML string for init_svd
         wasmInit,             // optional: wasm bytes for bindings.default() (Node)
+        wasmUrl,              // optional: versioned wasm URL for bindings.default() (browser cache-busting; see VENDOR_V)
         flash_size = 0x100000,
         ram_size = 0x20000,
         vector_table = 0x08000000,
@@ -124,6 +125,7 @@ export async function createEmulator(opts) {
 
     if (typeof bindings.default === 'function') {
         if (wasmInit) await bindings.default({ module_or_path: wasmInit });
+        else if (wasmUrl) await bindings.default({ module_or_path: wasmUrl });
         else await bindings.default();
     }
     // Clear process-lifetime wasm globals before registering THIS instance's

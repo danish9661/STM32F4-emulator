@@ -55,6 +55,8 @@ const firmwares = [
     ['deep_sleep_demo', 'deep_sleep_demo/deep_sleep_demo.bin', 'deep_sleep_demo.bin'],
     // QSPI indirect read/write round-trip
     ['qspi_test', 'qspi_test/qspi_test.bin', 'qspi_test.bin'],
+    // VFPv4-SP: real GCC hard-float (vfma/vcmpe/vcvt/vsqrt/D=1 regs)
+    ['fpu_test', 'fpu_test/fpu_test.bin', 'fpu_test.bin'],
     // doom (doomgeneric F407 port; needs doom1.wad served alongside)
     ['doom', 'doom/doom.bin', 'doom.bin'],
 ];

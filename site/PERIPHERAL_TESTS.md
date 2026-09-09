@@ -312,6 +312,47 @@ clamp) backs the device; the JS side decodes the BCD registers live into
 
 ---
 
+## FPU — VFPv4-SP (2026-09-09)
+
+### test_fpu.mjs — hard-float firmware (fpu_test)
+Bare-metal firmware compiled with `-mfpu=fpv4-sp-d16 -mfloat-abi=hard`
+(real GCC output, not hand-written asm): the disassembly contains `vfma`
+(plain `a*b+c` contracts too), `vcmpe`, `vcvt.s32.f32`, `vsqrt`, D=1
+high-register arithmetic (`vadd s15,s13,s15`), and CPACR enable — the
+first instruction faults (UsageFault NOCP) without it, so the gate itself
+is under test. Results print as raw hex bits with per-check PASS/FAIL.
+- Exercises: CPACR gate, vadd/vsub/vmul/vdiv/vsqrt, fused vfma (the
+  `0x28800000` result appears only with single-rounding fusion),
+  vcmp/vcmpe + NaN-unordered, vcvt int/float both directions.
+- Expected UART:
+  ```
+  === FPU Test ===
+  CPACR ok
+  ADD 40700000 PASS
+  SUB C0600000 PASS
+  MUL 40900000 PASS
+  DIV 40600000 PASS
+  SQRT 3FB504F3 PASS
+  FMA 28800000 PASS
+  CMP OK
+  CVT OK
+  FPU all PASS
+  FPU done
+  ```
+- Pass: every marker above, no `FAIL`, no CPU fault. Also wired into
+  `test_browser.mjs` (`FPU all PASS`) and the headed sweep.
+- Gotcha the wiring caught: the firmware dropdown is TWO hardcoded lists
+  (native `<option>` + custom `data-value` divs in index.html) —
+  `?fw=` boots eth_http silently when the custom div is missing (empty
+  UART, no error). Every new preset needs all three: native option,
+  custom div, `firmware.js` entry.
+- Gotcha the firmware caught while being written: the decoder's op
+  selector included the D bit (faulted all odd-high-reg arithmetic) and
+  the B-group op-nibble baked in the M bit (faulted every even-Sm form).
+  Both fixed; see AGENTS.md §25 and `docs/encodings/`.
+
+---
+
 ## DOOM (2026-08-14)
 
 ### test_doom.mjs — DOOM boot → menu → E1M1 gameplay + save/load (doom)
@@ -357,10 +398,11 @@ save-slot menu → name char 'a' (0x61) + Enter → asserts the firmware's
 | test_can | can_test | CAN1/CAN2 | `CAN arbitration OK`, `CAN loopback OK` |
 | test_buzzer | buzzer_test | TIM2/GPIO | `BUZZ 262 Hz`, `BUZZ 523 Hz`, `Buzzer done` |
 | test_rtc | rtc_test | I2C1/regfile | `RTC verify OK`, `RTC time=10:45:30 DOW=3 15/07/26`, temp=27.5 |
+| test_fpu | fpu_test | VFPv4-SP/CPACR | `FPU all PASS`, `FMA 28800000 PASS`, `FPU done` |
 
-Plus the Rust unit suite: `cargo test --release` (19 tests covering CAN
-arbitration, filters, FIFOs, loopback, SPI taps/CS, I2C taps, DCMI frames,
-WAV parsing, LTDC scanout, register files — 19/19 green).
+Plus the Rust unit suite: `cargo test` (87 tests — 68 CPU/decoder incl. 19
+FPU encoding/semantics tests, plus CAN, SPI/I2C taps, DCMI, WAV, LTDC,
+register files — 87/87 green).
 
 ## Gotchas
 

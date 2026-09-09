@@ -1117,7 +1117,8 @@ fn fpu_rejects() {
     for code in [
         [0xEE30u16, 0x0B81u16], // vadd sz=1
         [0xEE80, 0x0AD1u16],    // opc1 8 + op 1: no such op
-        [0xEEB4, 0x0A40u16],    // vcmp shape with #0-reg swapped: (4,4) undefined
+        [0xEE30, 0x0A91u16],    // vadd shape with op2[4]=1 (reserved)
+        [0xEEB6, 0x0A60u16],    // B-group opc2=6: no such op
         [0xED00, 0x2A04],       // DB store without ! (no such encoding)
         [0xEC50, 0x0A04],       // P=1,U=1: no such mode (also VMOV-2reg shape? op2 0A04: (0x04&0xD0)=0x00 != 0x10, falls to VLDM -> bad P/U)
         [0xEC9F, 0x0A04],       // vldmia pc,{s0-s3}
@@ -1370,4 +1371,63 @@ fn fpu_fma_fused() {
     assert_eq!(cpu.regs.s[0], f(6.0));
     let (cpu, _) = run_fpu_snippet(&[0xEEA0, 0x0AC1], &[], &[(0, 0), (1, f(2.0)), (2, f(3.0))], 0, 1);
     assert_eq!(cpu.regs.s[0], f(-6.0), "vfms zero-acc negates");
+}
+
+#[test]
+fn fpu_vcmpe() {
+    let f = |x: f32| x.to_bits();
+    // GAS (fpu12.s): vcmpe s0,s1=EEB4 0AE0; vcmpe s4,s5=EEB4 2AE2;
+    // vcmpe s0,#0=EEB5 0AC0. E-form raises IOC on ANY NaN (quiet too).
+    let (cpu, _) = run_fpu_snippet(&[0xEEB4, 0x0AE0], &[], &[(0, f(1.0)), (1, f(2.0))], 0, 1);
+    assert_eq!((cpu.regs.fpscr & 0xF000_0000, cpu.regs.fpscr & 0x1F), (0x8000_0000, 0), "ordered LT, no flag");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB4, 0x0AE0], &[], &[(0, 0x7FC0_0000), (1, f(1.0))], 0, 1);
+    assert_eq!((cpu.regs.fpscr & 0xF000_0000, cpu.regs.fpscr & 0x1F), (0x3000_0000, 0x01), "QNaN unordered + IOC");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB4, 0x2AE2], &[], &[(4, f(2.0)), (5, f(1.0))], 0, 1);
+    assert_eq!(cpu.regs.fpscr & 0xF000_0000, 0x2000_0000, "high-reg GT");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB5, 0x0AC0], &[], &[(0, f(0.0))], 0, 1);
+    assert_eq!((cpu.regs.fpscr & 0xF000_0000, cpu.regs.fpscr & 0x1F), (0x6000_0000, 0), "E-#0 equal");
+}
+
+#[test]
+fn fpu_high_regs_and_even_sm() {
+    // The D=1 (odd-high dest) and M=0 (even source) space the first FPU
+    // cut missed: opc used to include D, and the B-group op-nibble baked
+    // in M=1. GAS vectors: fpu13.s + fpu14.s.
+    let f = |x: f32| x.to_bits();
+    // vadd s17,s18,s19=EE79 8A29 (the firmware's EE76-class bug).
+    let (cpu, _) = run_fpu_snippet(&[0xEE79, 0x8A29], &[], &[(18, f(1.5)), (19, f(2.5))], 0, 1);
+    assert_eq!(cpu.regs.s[17], f(4.0));
+    // vsub s31,s30,s29=EE7F FA6E (D,N,M all set).
+    let (cpu, _) = run_fpu_snippet(&[0xEE7F, 0xFA6E], &[], &[(30, f(5.0)), (29, f(1.5))], 0, 1);
+    assert_eq!(cpu.regs.s[31], f(3.5));
+    // vfma s21,s22,s23=EEEB AA2B.
+    let (cpu, _) = run_fpu_snippet(&[0xEEEB, 0xAA2B], &[], &[(21, f(1.0)), (22, f(2.0)), (23, f(3.0))], 0, 1);
+    assert_eq!(cpu.regs.s[21], f(7.0));
+    // vsqrt s17,s18=EEF1 8AC9 (op1 collides with VMRS shape; op2lo decides).
+    let (cpu, _) = run_fpu_snippet(&[0xEEF1, 0x8AC9], &[], &[(18, f(9.0))], 0, 1);
+    assert_eq!(cpu.regs.s[17], f(3.0));
+    // vcmp s17,s18=EEF4 8A49; vmov s17,s18=EEF0 8A49.
+    let (cpu, _) = run_fpu_snippet(&[0xEEF4, 0x8A49], &[], &[(17, f(1.0)), (18, f(1.0))], 0, 1);
+    assert_eq!(cpu.regs.fpscr & 0xF000_0000, 0x6000_0000);
+    let (cpu, _) = run_fpu_snippet(&[0xEEF0, 0x8A49], &[], &[(18, 0xDEAD_BEEF)], 0, 1);
+    assert_eq!(cpu.regs.s[17], 0xDEAD_BEEF);
+    // vcvt.s32.f32 s17,s18=EEFD 8AC9 (old gate faulted M=1 here).
+    let (cpu, _) = run_fpu_snippet(&[0xEEFD, 0x8AC9], &[], &[(18, f(2.5))], 0, 1);
+    assert_eq!(cpu.regs.s[17], 2);
+    // M=0 forms the old nibble match missed.
+    let (cpu, _) = run_fpu_snippet(&[0xEEB0, 0x0A40], &[], &[(0, 0x1234_5678)], 0, 1);
+    assert_eq!(cpu.regs.s[0], 0x1234_5678, "vmov M=0");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB1, 0x0A40], &[], &[(0, f(1.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(-1.0), "vneg M=0");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB0, 0x0AC0], &[], &[(0, f(-1.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(1.0), "vabs M=0");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB4, 0x0A40], &[], &[(0, f(1.0))], 0, 1);
+    assert_eq!(cpu.regs.fpscr & 0xF000_0000, 0x6000_0000, "vcmp M=0");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB2, 0x0A40], &[], &[(0, 0x3C00)], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(1.0), "vcvtb M=0");
+    // Unsigned int->float (sign is op2[7], not op2[6]) + M=1 source.
+    let (cpu, _) = run_fpu_snippet(&[0xEEB8, 0x2A62], &[], &[(5, 0xFFFF_FFFF)], 0, 1);
+    assert_eq!((cpu.regs.s[4], cpu.regs.fpscr & 0x1F), (0x4F80_0000, 0x10), "u32 max -> 2^32");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB8, 0x2AE2], &[], &[(5, 42)], 0, 1);
+    assert_eq!((cpu.regs.s[4], cpu.regs.fpscr & 0x1F), (f(42.0), 0), "s32 M=1 exact");
 }

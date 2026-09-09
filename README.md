@@ -8,7 +8,7 @@
 
 An STM32F407 microcontroller emulator that runs real Cortex-M4 firmware. It
 combines a **Rust CPU core** (a WASM-native Thumb-2 interpreter with exact
-Cortex-M exception entry/return) with a
+Cortex-M exception entry/return, including the VFPv4-SP FPU) with a
 **Rust peripheral model** (RCC, USART, GPIO, DMA, ETH, TIM, NVIC, ...) also
 compiled to WASM — so the whole machine runs headless in **Node.js or a
 browser tab**, with no SDL, no native deps, no hardware.

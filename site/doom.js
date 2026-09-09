@@ -15,7 +15,7 @@
 //
 // Serve from site/ (python3 -m http.server 8123 --directory site) — the page
 // fetches the WAD + SVD + wasm at runtime (file:// won't work).
-import { FIRMWARES } from './firmware.js?v=2';
+import { FIRMWARES } from './firmware.js?v=3';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
@@ -452,7 +452,7 @@ async function boot() {
 
     try {
         const [svdXml, wad] = await Promise.all([
-            fetch('vendor/stm32f407.svd').then((r) => r.text()),
+            fetch('vendor/stm32f407.svd?v=1').then((r) => r.text()),
             fetch('doom1.wad').then((r) => r.arrayBuffer()),
         ]);
         const firmware = new Uint8Array(atob(FIRMWARES.doom.bytes).split('').map((c) => c.charCodeAt(0)));
@@ -466,7 +466,7 @@ async function boot() {
 
         // Bump ?v= on every doom-worker.js edit — worker scripts cache as hard
         // as module scripts, and a stale copy looks exactly like a bug.
-        worker = new Worker('doom-worker.js?v=17', { type: 'module' });
+        worker = new Worker('doom-worker.js?v=18', { type: 'module' });
         worker.onmessage = onWorkerMessage;
         worker.onerror = (e) => {
             setStatus('worker failed: ' + (e.message || 'load error'), 'error');

@@ -18,6 +18,11 @@
   served file (doom.js, worker, app.js, firmware.js) so a single
   hard-refresh always reaches the current build; record the number in
   `__doomVer`.
+- **Vendor assets have their own `?v=`** (`VENDOR_V`, in app.js/doom.js/
+  doom-worker.js for `vendor/*.js`, `*.wasm`, `*.svd`): bump all of them
+  together after every `wasm-pack` rebuild, or browsers keep the stale
+  model (the wasm URL does NOT inherit the JS import's query — both need
+  explicit versions, wired via the `wasmUrl` opt in `createEmulator`).
 
 This file is the working knowledge base for this repository. It documents the
 architecture, build steps, how to run the various tests, the current state of
@@ -2789,19 +2794,26 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   OFC/UFC only), CONTROL.FPCA set on first FPU use.
 - VFPExpandImm pinned by GAS: 0x70->1.0, 0x00->2.0, 0xE0->-0.5, 0x1B->6.75.
 
-### Encoding rules (all GAS-probed, probes in `.pw-scratch/tmp/dsp/fpu*.s`)
+### Encoding rules (all GAS-probed, probes in `docs/encodings/fpu*.s`)
 - Sd=(Vd<<1)|D, Sn=(Vn<<1)|N, Sm=(Vm<<1)|M (extension bit is the LOW bit).
   D-lists use D:Vd with D HIGH. VLDM counts imm8 S-regs / imm8/2 D-regs.
 - VCMP's first source is the Sd FIELD (op1[19:16] is opc2=4/5, not Vn).
-- VMOV-imm opc1 is 1D11 (0xB/0xF — D=1 form is 0xF, e.g. EEFE 2A00).
-- 3-reg (opc1,op2[6]): (3,0)ADD (3,1)SUB (2,0)MUL (2,1)NMUL (8,0)DIV
-  (0,0)MLA (0,1)MLS (1,1)NMLA (1,0)NMLS; fused (0xA,0)FMA (0xA,1)FMS
-  (0x9,1)FNMA (0x9,0)FNMS. sz (op2[8]) must be 0 throughout.
-- B-group (opc1 MUST be 0xB — fused ops share op2 shapes and would
-  otherwise misdecode): (0,E)ABS (1,6)NEG (1,E)SQRT (4,6)CMP (5,4)CMP#0,
-  int->float (8, C-signed/4-unsigned via op2[6]) + float->int (C/D, opc2[0]
-  = signed, op2lo fixed 0xC0), fixed (A/B,to-float)/(E/F,to-fixed,
-  opc2[0]=signed, opc2[2]=direction), f16 (2,6/E)b/t->f32 (3,6/E)f32->b/t.
+- VMOV-imm opc1-field is 1D11 (0xB/0xF — D=1 form is 0xF, e.g. EEFE 2A00).
+- EE data-processing opcode EXCLUDES the D bit:
+  `opc = bit23 : bits21:20 : op2[6]` (4 bits). 0 MLA, 1 MLS, 2 NMLS,
+  3 NMLA, 4 MUL, 5 NMUL, 6 ADD, 7 SUB, 8 DIV, 10 FNMS, 11 FNMA, 12 FMA,
+  13 FMS (9 = no op). sz (op2[8]) and op2[4] must be 0 throughout.
+- B-group zone is opc 14/15 (bit23=1, bits21:20=3); the op selector is
+  op2[7,6,4] (opb3 — op2[5] is M data and must not participate):
+  (0,2)MOV (0,6)ABS (1,2)NEG (1,6)SQRT (4,2)CMP (5,2)CMP#0 (4,6)CMPE
+  (5,6)CMPE#0, int->float (8,6-signed/2-unsigned via op2[7:6]) +
+  float->int (C/D with opb3==6, opc2[0]=signed), fixed (A/B,to-float)/
+  (E/F,to-fixed, opc2[0]=signed, opc2[2]=direction), f16 (2,2/6)b/t->f32
+  (3,2/6)f32->b/t (b/t = op2[7]).
+- VMRS/VMSR (EEF1/EEE1) and VMOV-core (EE10/EE00) shapes are SHARED with
+  B-group/3-reg ops — claim only on the FULL shape (op2lo 0x10 [+sz 0]
+  for VMRS; op2lo 0x10/0x90 [+sz 0] for VMOV-core) and fall through
+  otherwise: vsqrt s17,s18 (EEF1 8AC9) and vmla (EE00 0A81) live there.
 
 ### Model/decoder gotchas found implementing this (do not re-break)
 - The SVD splits CPACR into its own `FPU_CPACR` peripheral at 0xE000ED88
@@ -2830,6 +2842,16 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   test silently runs RNE.
 - Fixed-VCVT direction bit is opc2[2] (value 4): A/B to-float, E/F
   to-fixed. Bit 1 is set in all four — `(opc2&2)` is always true.
+- The opc used for 3-reg/fused EXCLUDES D (bit22): the first cut used
+  `(o1>>4)&0xF` and misdecoded every odd-high-reg arithmetic op (the
+  firmware's `vadd s15,s13,s15` = EE76 7AA7 faulted). All D=0 unit tests
+  passed — only the firmware run caught it. Regression cover:
+  `fpu_high_regs_and_even_sm` (fpu13.s/fpu14.s GAS vectors).
+- B-group op selection must exclude M (op2[5], Sm data): the first cut
+  matched the op2[7:4] nibble and missed every even-Sm form (vcvt s4,s5,
+  f16 with M=0, vmov/cmp/neg/abs M=0 all faulted). Selector is op2[7,6,4].
+  Same test guards it. Int->float signedness is op2[7:6] (11/01), not
+  op2[6] — the old `(o2&0x40)` called unsigned (0x40) signed.
 
 ### Deliberate v1 limitations (documented in code)
 - No lazy stacking: exception entry stacks the 8-word integer frame only;

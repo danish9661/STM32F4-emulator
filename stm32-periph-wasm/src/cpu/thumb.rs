@@ -3216,7 +3216,7 @@ pub fn exec32(
         return fault(cpu, pc, op1, op2, 4);
     } else if (o1 & 0xF000) == 0xE000 {
         // ---- EC/ED/EE/EF: FPU (VFPv4-SP, coproc 10/11) ----
-        // Bitfield ground truth: .pw-scratch/tmp/dsp/fpu*.s + fpu7.s
+        // Bitfield ground truth: docs/encodings/fpu*.s (see README there).
         // (Sd=(Vd<<1)|D, Sn=(Vn<<1)|N, Sm=(Vm<<1)|M; D-lists use D:Vd with
         // D HIGH; VLDM counts imm8 S-regs / imm8/2 D-regs; VCVT frac =
         // 32-2*imm4-opbit; VFPExpandImm pinned by vmov #1.0/#2.0/#-0.5/#6.75).
@@ -3258,11 +3258,11 @@ pub fn exec32(
         // shapes below also match EC/ED multiples — e.g. VPOP ECBD 0A04
         // hits the VMOV-imm shape — so the EE prefix must be verified).
         if (o1 & 0xFF00) == 0xEE00 {
-        // VMRS / VMSR (op1 exact; op2lo == 0x10; Rt = Vd field, 0xF = APSR).
-        if o1 == 0xEEF1 || o1 == 0xEEE1 {
-            if (o2 & 0xFF) != 0x10 || (o2 >> 8) & 1 != 0 {
-                return fault(cpu, pc, op1, op2, 4);
-            }
+        // VMRS / VMSR (op1 exact AND op2lo == 0x10 AND sz == 0; Rt = Vd
+        // field, 0xF = APSR). Full-shape gate: B-group ops with a high odd
+        // dest (e.g. vsqrt s17,s18 = EEF1 8AC9) share the EEF1 op1 and must
+        // fall through (same lesson as VMOV-core vs VMLA below).
+        if (o1 == 0xEEF1 || o1 == 0xEEE1) && (o2 & 0xFF) == 0x10 && (o2 >> 8) & 1 == 0 {
             if o1 == 0xEEF1 {
                 if vd4 == 0xF {
                     cpu.regs.xpsr = (cpu.regs.xpsr & !0xF000_0000) | (cpu.regs.fpscr & 0xF000_0000);
@@ -3303,41 +3303,46 @@ pub fn exec32(
             adv(cpu, pc, 4);
             return true;
         }
-        // VMOV-imm (opc1==1D11, i.e. 0xB/0xF, op==0): imm8 = opc2:op2[3:0].
-        // sz must be 0.
+        // VMOV-imm (opc1-field==1D11, i.e. 0xB/0xF covering D=0/1, with
+        // op2[7:4]==0): imm8 = opc2:op2[3:0]. sz must be 0. (The D bit
+        // lives inside the opc1 nibble for this form, hence B|F.)
         if (((o1 >> 4) & 0xF) == 0xB || ((o1 >> 4) & 0xF) == 0xF) && (o2 & 0xF0) == 0x00 && (o2 >> 8) & 1 == 0 {
             cpu.regs.s[sd] = vfp_expand_imm(((o1 & 0xF) << 4) | (o2 & 0xF));
             cpu.regs.control |= 4;
             adv(cpu, pc, 4);
             return true;
         }
-        // VMOV-reg (opc2==0, op==6). sz must be 0 (no f64 moves).
-        if (o1 & 0xF) == 0 && (o1 & 0xF0) == 0xB0 && (o2 & 0xF0) == 0x60 && (o2 >> 8) & 1 == 0 {
-            cpu.regs.s[sd] = cpu.regs.s[sm];
-            cpu.regs.control |= 4;
-            adv(cpu, pc, 4);
-            return true;
-        }
-        // ---- (c) three-register data processing ----
-        // opc1 = o1[23:20], op = o2[6] (0=add-flavor, 1=sub-flavor), sz =
-        // o2[8] must be 0 (no f64 datapath on FPv4-SP). GAS table:
-        // (3,0)=ADD (3,1)=SUB (2,0)=MUL (2,1)=NMUL (8,0)=DIV (0,0)=MLA
-        // (0,1)=MLS (1,1)=NMLA (1,0)=NMLS. MLA/MLS are UNFUSED (mul then
-        // add in f32, like silicon — never mul_add).
-        // Fused (VFPv4, single rounding): (0xA,0)=FMA (0xA,1)=FMS
-        // (0x9,1)=FNMA (0x9,0)=FNMS (GAS fpu11.s).
-        let opc1 = (o1 >> 4) & 0xF;
+        // ---- (c) EE data-processing op selector ----
+        // The D bit (o1[6]) is NOT part of the opcode: opc = bit23 :
+        // bits21:20 : op2[6] (4 bits). The old (o1>>4)&0xF form included
+        // D and misdecoded every odd-high-reg arithmetic op (firmware hit
+        // vadd s15,s13,s15 = EE76 7AA7). GAS table (fpu*.s, fpu11-13.s):
+        // 0 MLA, 1 MLS, 2 NMLS, 3 NMLA, 4 MUL, 5 NMUL, 6 ADD, 7 SUB,
+        // 8 DIV, 10 FNMS, 11 FNMA, 12 FMA, 13 FMS (9 = no op).
+        // MLA/MLS are UNFUSED (mul then add in f32 — never mul_add);
+        // fused forms use single rounding (exact u128 path).
+        // sz (o2[8]) must be 0 and op2[4] must be 0 throughout (both
+        // GAS-verified fixed; fault otherwise, never silent).
+        let opc = (((o1 >> 7) & 1) << 3) | (((o1 >> 4) & 0x3) << 1) | ((o2 >> 6) & 1);
         let fpscr0 = cpu.regs.fpscr;
-        if opc1 == 0x9 || opc1 == 0xA {
-            if (o2 >> 8) & 1 != 0 {
+        if opc <= 8 || opc == 10 || opc == 11 || opc == 12 || opc == 13 {
+            if (o2 >> 8) & 1 != 0 || (o2 & 0x10) != 0 {
                 return fault(cpu, pc, op1, op2, 4);
             }
-            let opb = (o2 >> 6) & 1;
-            let (r, fl) = match (opc1, opb) {
-                (0xA, 0) => fpu_fma(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], false, false),
-                (0xA, 1) => fpu_fma(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], true, false),
-                (0x9, 1) => fpu_fma(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], false, true),
-                (0x9, 0) => fpu_fma(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], true, true),
+            let (r, fl) = match opc {
+                6 => fpu_add(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm], false),
+                7 => fpu_add(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm], true),
+                4 => fpu_mul(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm], false),
+                5 => fpu_mul(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm], true),
+                8 => fpu_div(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm]),
+                0 => fpu_mla(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], false, false),
+                1 => fpu_mla(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], true, false),
+                3 => fpu_mla(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], false, true),
+                2 => fpu_mla(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], true, true),
+                12 => fpu_fma(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], false, false),
+                13 => fpu_fma(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], true, false),
+                11 => fpu_fma(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], false, true),
+                10 => fpu_fma(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], true, true),
                 _ => return fault(cpu, pc, op1, op2, 4),
             };
             cpu.regs.s[sd] = r;
@@ -3346,65 +3351,53 @@ pub fn exec32(
             adv(cpu, pc, 4);
             return true;
         }
-        if opc1 == 0 || opc1 == 1 || opc1 == 2 || opc1 == 3 || opc1 == 8 {
-            if (o2 >> 8) & 1 != 0 {
-                return fault(cpu, pc, op1, op2, 4);
-            }
-            let opb = (o2 >> 6) & 1;
-            let (r, fl) = match (opc1, opb) {
-                (3, 0) => fpu_add(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm], false),
-                (3, 1) => fpu_add(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm], true),
-                (2, 0) => fpu_mul(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm], false),
-                (2, 1) => fpu_mul(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm], true),
-                (8, 0) => fpu_div(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm]),
-                (0, 0) => fpu_mla(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], false, false),
-                (0, 1) => fpu_mla(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], true, false),
-                (1, 1) => fpu_mla(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], false, true),
-                (1, 0) => fpu_mla(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], true, true),
-                _ => return fault(cpu, pc, op1, op2, 4), // (8,1): no such op
-            };
-            cpu.regs.s[sd] = r;
-            cpu.regs.fpscr |= fl;
-            cpu.regs.control |= 4;
-            adv(cpu, pc, 4);
-            return true;
-        }
-        // ---- (c) B-group misc: ABS/NEG/SQRT/CMP/VCVT ----
-        // opc2 = o1[19:16], op = o2[7:4]; sz (o2[8]) must be 0. opc1 MUST
-        // be 0xB here: VFPv4 fused ops (VFMA/VFMS/VFNMA/VFNMS, opc1 0x9/0xA)
-        // share the op2 shapes and would otherwise misdecode (loud fault
-        // until the fused arms land).
+        // ---- (c) B-group misc: MOV-reg/ABS/NEG/SQRT/CMP/VCVT ----
+        // Zone: bit23==1 && bits21:20==3 (opc 14/15). The op selector is
+        // op2[7,6,4] (opb3, 3 bits) — op2[5] is M (Sm data) and MUST NOT
+        // participate: the old op2[7:4]-nibble match baked in M=1 and
+        // missed every even-Sm form (faulted valid vcvt/f16/vmov/cmp).
+        // sz (o2[8]) must be 0. GAS: fpu*.s + fpu12.s (vcmpe) + fpu13.s.
         {
-            if opc1 != 0xB {
+            if opc < 14 {
                 return fault(cpu, pc, op1, op2, 4);
             }
             if (o2 >> 8) & 1 != 0 {
                 return fault(cpu, pc, op1, op2, 4);
             }
             let opc2 = o1 & 0xF;
-            let opb = (o2 >> 4) & 0xF;
-            match (opc2, opb) {
-                (0, 0xE) => {
+            let opb3 = (((o2 >> 6) & 0x3) << 1) | ((o2 >> 4) & 0x1);
+            match (opc2, opb3) {
+                (0, 2) => {
+                    cpu.regs.s[sd] = cpu.regs.s[sm]; // VMOV-reg
+                }
+                (0, 6) => {
                     cpu.regs.s[sd] = cpu.regs.s[sm] & !0x8000_0000; // VABS (no flags, even SNaN)
                 }
-                (1, 6) => {
+                (1, 2) => {
                     cpu.regs.s[sd] = cpu.regs.s[sm] ^ 0x8000_0000; // VNEG (no flags)
                 }
-                (1, 0xE) => {
+                (1, 6) => {
                     let (r, fl) = fpu_sqrt(fpscr0, cpu.regs.s[sm]);
                     cpu.regs.s[sd] = r;
                     cpu.regs.fpscr |= fl;
                 }
-                (4, 6) | (5, 4) => {
-                    // VCMP reg / VCMP #0. NZCV -> FPSCR (never xPSR);
-                    // unordered (any NaN) = N=0,Z=0,C=1,V=1; SNaN -> IOC.
+                (4, 2) | (5, 2) | (4, 6) | (5, 6) => {
+                    // VCMP reg / #0 and VCMPE reg / #0 (quiet opb3=2,
+                    // signaling-E opb3=6; GAS fpu12.s). NZCV -> FPSCR (never
+                    // xPSR); unordered (any NaN) = N=0,Z=0,C=1,V=1. IOC on
+                    // SNaN always, and on QNaN too for the E form. #0 forms
+                    // (opc2=5) have no Sm: M must be 0.
                     // NOTE: the first source lives in the Sd field
                     // (Vd<<1|D), NOT Sn — op1[19:16] is opc2=4/5 here.
+                    if opc2 == 5 && mbit != 0 {
+                        return fault(cpu, pc, op1, op2, 4);
+                    }
+                    let exc = opb3 == 6;
                     let a = fpu_flush(cpu.regs.s[sd], fpscr0);
                     let b = if opc2 == 5 { 0 } else { fpu_flush(cpu.regs.s[sm], fpscr0) };
                     let mut fl = 0;
                     let nzcv = if f32_nan(a) || f32_nan(b) {
-                        if f32_snan(a) || f32_snan(b) {
+                        if f32_snan(a) || f32_snan(b) || exc {
                             fl |= FPSCR_IOC;
                         }
                         0x3
@@ -3416,13 +3409,11 @@ pub fn exec32(
                     cpu.regs.fpscr = (fpscr0 & !0xF000_0000) | (nzcv << 28);
                     cpu.regs.fpscr |= fl;
                 }
-                (8, 0xC) | (8, 0x4) => {
-                    // VCVT.f32.s32/u32 (op2[6] = signed). RNE via `as`;
-                    // other RModes need explicit adjust (fpu_round_f32).
-                    if (o2 & 0xFF) != 0xC0 && (o2 & 0xFF) != 0x40 {
-                        return fault(cpu, pc, op1, op2, 4);
-                    }
-                    let signed = (o2 & 0x40) != 0;
+                (8, 6) | (8, 2) => {
+                    // VCVT.f32.s32/u32 (opb3: 6=signed, 2=unsigned — the
+                    // sign lives in op2[7:6], M:Vm is the source). RNE via
+                    // `as`; other RModes need explicit adjust.
+                    let signed = opb3 == 6;
                     let iv = cpu.regs.s[sm];
                     let v: f64 = if signed { (iv as i32) as f64 } else { iv as f64 };
                     let (r, inexact) = fpu_round_f32(v, fpu_rmode(fpscr0));
@@ -3431,12 +3422,10 @@ pub fn exec32(
                         cpu.regs.fpscr |= FPSCR_IXC;
                     }
                 }
-                (0xC, 0xC) | (0xD, 0xC) => {
-                    // VCVT.s32/u32.f32 (opc2[0] = signed). RMode rounding,
-                    // saturate + IOC on invalid/overflow.
-                    if (o2 & 0xFF) != 0xC0 {
-                        return fault(cpu, pc, op1, op2, 4);
-                    }
+                (0xC, 6) | (0xD, 6) => {
+                    // VCVT.s32/u32.f32 (opc2[0] = signed; opb3==6 already
+                    // gates bit7=1,bit6=1,bit4=0 while M:Vm stay data).
+                    // RMode rounding, saturate + IOC on invalid/overflow.
                     let signed = opc2 == 0xD;
                     let x = f32::from_bits(fpu_flush(cpu.regs.s[sm], fpscr0)) as f64;
                     let (r, invalid) = fpu_round_int(x, signed, fpu_rmode(fpscr0));
@@ -3513,11 +3502,11 @@ pub fn exec32(
                         }
                     }
                 }
-                (2, 6) | (2, 0xE) | (3, 6) | (3, 0xE) => {
+                (2, 2) | (2, 6) | (3, 2) | (3, 6) => {
                     // VCVT f16<->f32. opc2[0]: 0 = f16->f32, 1 = f32->f16;
-                    // op: 6 = bottom half, 0xE = top half.
+                    // opb3: 2 = bottom half (op2[7]=0), 6 = top (op2[7]=1).
                     let from_half = opc2 == 2;
-                    let top = opb == 0xE;
+                    let top = opb3 == 6;
                     if from_half {
                         let sh = cpu.regs.s[sm];
                         let h = if top { (sh >> 16) as u16 } else { sh as u16 };
