@@ -53,11 +53,19 @@ export interface RunResult {
   instCount: number;
 }
 
+export interface FpuState {
+  s: number[];
+  fpscr: number;
+}
+
 export interface EmulatorHandle {
   uc: any;
   step(maxInst?: number): StepResult;
   run(maxInstructions?: number): RunResult;
   drainUart(): Uint8Array;
+  getFpuState(): FpuState;
+  setSreg(i: number, v: number): void;
+  setFpscr(v: number): void;
   read32(addr: number): number;
   write32(addr: number, val: number): void;
   read16(addr: number): number;

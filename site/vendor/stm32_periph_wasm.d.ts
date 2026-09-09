@@ -14,11 +14,20 @@ export class WasmCpu {
      * Fault program counter, or 0xFFFF_FFFF when running clean.
      */
     fault_pc(): number;
+    /**
+     * FPSCR (cumulative flags, RMode, FZ/DN).
+     */
+    get_fpscr(): number;
     get_ipsr(): number;
     get_pc(): number;
     get_primask(): number;
     get_regs(): Uint32Array;
     get_sp(): number;
+    /**
+     * Raw S0-S31 file (f32 bits; Dd aliases S(2d)/S(2d+1)). Debugger and
+     * driver visibility for the VFPv4-SP unit (nothing else reads these).
+     */
+    get_sregs(): Uint32Array;
     get_xpsr(): number;
     /**
      * Load firmware bytes (writes through flash protection).
@@ -40,6 +49,16 @@ export class WasmCpu {
      * model IRQs never stop execution).
      */
     set_deliver_irqs(v: boolean): void;
+    /**
+     * Debugger poke for FPSCR, under the same write mask the guest VMSR
+     * uses (NZCVQC + AHP/DN/FZ/RMode + enables/flags; STRIDE/LEN/reserved
+     * stay zero).
+     */
+    set_fpscr(v: number): void;
+    /**
+     * Debugger poke for one S register (out of range is ignored).
+     */
+    set_sreg(i: number, v: number): void;
     /**
      * True while halted in WFI/WFE (low-power). The driver advances virtual
      * time and calls `wake()` once an interrupt is pending.
@@ -491,11 +510,13 @@ export interface InitOutput {
     readonly wasmcpu_fault_op1: (a: number) => number;
     readonly wasmcpu_fault_op2: (a: number) => number;
     readonly wasmcpu_fault_pc: (a: number) => number;
+    readonly wasmcpu_get_fpscr: (a: number) => number;
     readonly wasmcpu_get_ipsr: (a: number) => number;
     readonly wasmcpu_get_pc: (a: number) => number;
     readonly wasmcpu_get_primask: (a: number) => number;
     readonly wasmcpu_get_regs: (a: number, b: number) => void;
     readonly wasmcpu_get_sp: (a: number) => number;
+    readonly wasmcpu_get_sregs: (a: number, b: number) => void;
     readonly wasmcpu_get_xpsr: (a: number) => number;
     readonly wasmcpu_load_firmware: (a: number, b: number, c: number, d: number) => void;
     readonly wasmcpu_mem_fault: (a: number) => number;
@@ -506,6 +527,8 @@ export interface InitOutput {
     readonly wasmcpu_read8: (a: number, b: number) => number;
     readonly wasmcpu_reset_cpu: (a: number, b: number, c: number) => void;
     readonly wasmcpu_set_deliver_irqs: (a: number, b: number) => void;
+    readonly wasmcpu_set_fpscr: (a: number, b: number) => void;
+    readonly wasmcpu_set_sreg: (a: number, b: number, c: number) => void;
     readonly wasmcpu_sleeping: (a: number) => number;
     readonly wasmcpu_step: (a: number, b: number) => number;
     readonly wasmcpu_take_trace: (a: number, b: number) => void;

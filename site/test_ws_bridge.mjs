@@ -18,16 +18,18 @@ const wasmBytes = new Uint8Array(readFileSync(resolve(__dirname, 'vendor/stm32_p
 // ── inline bridge logic (same as ws-bridge.mjs but in-process) ──────────────
 const MSG = {
     STEP: 0x01, STOP: 0x02, RESET: 0x03, LOAD_IMAGE: 0x04,
-    READ32: 0x10, WRITE32: 0x11, GET_REGS: 0x12,
+    READ32: 0x10, WRITE32: 0x11, GET_REGS: 0x12, GET_FPREGS: 0x13, SET_FPREG: 0x14,
     ETH_RX: 0x20, CAN_RX: 0x21, UART_TX: 0x22,
     PUSH_UART: 0x80, PUSH_ETH: 0x81, PUSH_GPIO: 0x82,
     STOPPED: 0x8A,
     STEP_RESP: 0x90, READ32_RESP: 0x91, WRITE32_OK: 0x92,
-    LOAD_OK: 0x93, REGS_RESP: 0x94, ERROR: 0xA0,
+    LOAD_OK: 0x93, REGS_RESP: 0x94, FPREGS_RESP: 0x95, SET_FPREG_OK: 0x96, ERROR: 0xA0,
 };
 
 function u32LE(buf, off) {
-    return buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24);
+    // >>> 0: bitwise ops are signed in JS; register values need unsigned
+    // compare (same reason remote-emu.js readU32 callers use >>> 0).
+    return (buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)) >>> 0;
 }
 
 function packU32(v) {
@@ -135,6 +137,41 @@ async function runTest() {
                     ws.send(out);
                     break;
                 }
+                case MSG.GET_FPREGS: {
+                    const st = emu.getFpuState();
+                    const out = new Uint8Array(1 + 4 + 33 * 4);
+                    out[0] = MSG.FPREGS_RESP;
+                    new DataView(out.buffer).setUint32(1, id, true);
+                    let off = 5;
+                    for (let i = 0; i < 32; i++) {
+                        new DataView(out.buffer).setUint32(off, st.s[i] >>> 0, true); off += 4;
+                    }
+                    new DataView(out.buffer).setUint32(off, st.fpscr >>> 0, true);
+                    ws.send(out);
+                    break;
+                }
+                case MSG.SET_FPREG: {
+                    const idx = buf[5];
+                    const v = u32LE(buf, 6);
+                    if (idx < 32) emu.setSreg(idx, v);
+                    else if (idx === 32) emu.setFpscr(v);
+                    else {
+                        const enc = new TextEncoder().encode('bad fp index ' + idx);
+                        const resp = new Uint8Array(7 + enc.length);
+                        resp[0] = MSG.ERROR;
+                        new DataView(resp.buffer).setUint32(1, id, true);
+                        resp[5] = enc.length & 0xFF;
+                        resp[6] = (enc.length >> 8) & 0xFF;
+                        resp.set(enc, 7);
+                        ws.send(resp);
+                        break;
+                    }
+                    const resp = new Uint8Array(5);
+                    resp[0] = MSG.SET_FPREG_OK;
+                    new DataView(resp.buffer).setUint32(1, id, true);
+                    ws.send(resp);
+                    break;
+                }
                 case MSG.STOP: {
                     if (emu) emu.stop();
                     break;
@@ -220,6 +257,41 @@ async function runTest() {
     console.log('\n6. STOP');
     ws.send(new Uint8Array([MSG.STOP]));
     assert(true, 'STOP sent (fire-and-forget)');
+
+    // FP register file round-trip (blinky uses no FPU: fresh S file + FPSCR)
+    console.log('\n7. GET_FPREGS / SET_FPREG');
+    const fpResp = await request(MSG.GET_FPREGS);
+    assert(fpResp.type === MSG.FPREGS_RESP, 'FPREGS_RESP received');
+    assert(fpResp.buf.length === 1 + 4 + 33 * 4, `FPREGS len = ${fpResp.buf.length} (137)`);
+    const s0 = u32LE(fpResp.buf, 5);
+    const fpscr0 = u32LE(fpResp.buf, 5 + 32 * 4);
+    assert(s0 === 0 && fpscr0 === 0, `fresh S0=${s0} FPSCR=${fpscr0} (both zero)`);
+    const setResp = await request(MSG.SET_FPREG, new Uint8Array([5]), packU32(0xDEADBEEF));
+    assert(setResp.type === MSG.SET_FPREG_OK, 'SET_FPREG_OK received');
+    const setFpscr = await request(MSG.SET_FPREG, new Uint8Array([32]), packU32(0xE0000000));
+    assert(setFpscr.type === MSG.SET_FPREG_OK, 'SET_FPREG_OK (fpscr) received');
+    const fpResp2 = await request(MSG.GET_FPREGS);
+    assert(u32LE(fpResp2.buf, 5 + 5 * 4) === 0xDEADBEEF, 'S5 round-trips 0xDEADBEEF');
+    assert(u32LE(fpResp2.buf, 5 + 32 * 4) === 0xE0000000, 'FPSCR round-trips NZCV');
+    const badResp = await request(MSG.SET_FPREG, new Uint8Array([99]), packU32(0));
+    assert(badResp.type === MSG.ERROR, 'bad fp index -> ERROR');
+
+    // Remote-emu adapter over the same server (covers remote-emu.js
+    // getFpuState/setSreg/setFpscr, which the raw client above bypasses).
+    console.log('\n8. remote-emu adapter FP round-trip');
+    const { createRemoteEmulator } = await import('./remote-emu.js');
+    const remote = await createRemoteEmulator('ws://127.0.0.1:8235');
+    await remote.loadImage(fwBytes);
+    await remote.step(100000);
+    const rst = await remote.getFpuState();
+    assert(Array.isArray(rst.s) && rst.s.length === 32 && rst.s.every((v) => v === 0), 'adapter: fresh S file zeros');
+    assert(rst.fpscr === 0, 'adapter: fresh FPSCR zero');
+    await remote.setSreg(5, 0xDEADBEEF);
+    await remote.setFpscr(0xE0000000);
+    const rst2 = await remote.getFpuState();
+    assert(rst2.s[5] === 0xDEADBEEF, 'adapter: S5 round-trips');
+    assert(rst2.fpscr === 0xE0000000, 'adapter: FPSCR round-trips');
+    await remote.close();
 
     // ── cleanup ─────────────────────────────────────────────────────────
     ws.close();

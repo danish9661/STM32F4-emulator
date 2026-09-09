@@ -658,6 +658,23 @@ impl WasmCpu {
     pub fn get_sp(&self) -> u32 { self.cpu.regs.r[13] }
     pub fn get_regs(&self) -> Vec<u32> { self.cpu.regs.r.to_vec() }
     pub fn get_xpsr(&self) -> u32 { self.cpu.regs.xpsr }
+    /// Raw S0-S31 file (f32 bits; Dd aliases S(2d)/S(2d+1)). Debugger and
+    /// driver visibility for the VFPv4-SP unit (nothing else reads these).
+    pub fn get_sregs(&self) -> Vec<u32> { self.cpu.regs.s.to_vec() }
+    /// FPSCR (cumulative flags, RMode, FZ/DN).
+    pub fn get_fpscr(&self) -> u32 { self.cpu.regs.fpscr }
+    /// Debugger poke for one S register (out of range is ignored).
+    pub fn set_sreg(&mut self, i: u32, v: u32) {
+        if (i as usize) < 32 {
+            self.cpu.regs.s[i as usize] = v;
+        }
+    }
+    /// Debugger poke for FPSCR, under the same write mask the guest VMSR
+    /// uses (NZCVQC + AHP/DN/FZ/RMode + enables/flags; STRIDE/LEN/reserved
+    /// stay zero).
+    pub fn set_fpscr(&mut self, v: u32) {
+        self.cpu.regs.fpscr = (self.cpu.regs.fpscr & !0xFFC0_01FF) | (v & 0xFFC0_01FF);
+    }
     pub fn get_primask(&self) -> u32 { self.cpu.regs.primask }
     /// Fault program counter, or 0xFFFF_FFFF when running clean.
     pub fn fault_pc(&self) -> u32 { self.cpu.fault.map(|f| f.pc).unwrap_or(0xFFFF_FFFF) }

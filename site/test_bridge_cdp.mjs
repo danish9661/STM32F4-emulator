@@ -235,6 +235,25 @@ try {
         }
     }
 
+    // 6. FPREGS: getFpuState/setSreg round-trip through the remote adapter
+    // (blinky uses no FPU: fresh S file; poke S5 + FPSCR and read back).
+    if (ok) {
+        const r = await send('Runtime.evaluate', {
+            expression: `(async () => {
+                const a = await window.__emu.getFpuState();
+                await window.__emu.setSreg(5, 0xDEADBEEF);
+                await window.__emu.setFpscr(0xE0000000);
+                const b = await window.__emu.getFpuState();
+                return JSON.stringify({ s0: a.s[0], fpscr0: a.fpscr, s5: b.s[5], fpscr: b.fpscr });
+            })()`,
+            awaitPromise: true, returnByValue: true,
+        });
+        const fp = JSON.parse((r && r.result && r.result.value) || '{}');
+        if (fp.s0 !== 0 || fp.fpscr0 !== 0 || fp.s5 !== 0xDEADBEEF || fp.fpscr !== 0xE0000000) {
+            ok = false; reason = `FPREGS failed: ${JSON.stringify(fp)}`;
+        }
+    }
+
 } catch (e) {
     ok = false; reason = e.message;
 } finally {

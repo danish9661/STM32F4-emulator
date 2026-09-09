@@ -1667,3 +1667,72 @@ fn fpu_irq_firmware() {
     eprintln!("IRQ count: {n}");
     assert!(n >= 10, "SysTick never fired - vacuous run");
 }
+
+#[test]
+fn fpu_directed_div_sqrt_exact() {
+    // Directed div/sqrt go through exact integer cores (long division +
+    // digit-recurrence sqrt) — no f64 anywhere. Hand-derived vectors where
+    // the directed answer provably differs from RNE.
+    let f = |x: f32| x.to_bits();
+    // 1/3: RNE = 0x3EAAAAAB (above truth); toward -inf steps down one ulp.
+    let (cpu, _) = run_fpu_snippet(
+        &[0xEEE1, 0x0A10, 0xEE80, 0x0A81], &[(0, 2 << 22)], &[(1, f(1.0)), (2, f(3.0))], 0, 2);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x3EAA_AAAA, 0x10));
+    // 2/3: RNE = 0x3F2AAAAB (above truth); -inf and toward-zero agree here.
+    for (rm, want) in [(1u32, 0x3F2A_AAAB), (2, 0x3F2A_AAAA), (3, 0x3F2A_AAAA)] {
+        let (cpu, _) = run_fpu_snippet(
+            &[0xEEE1, 0x0A10, 0xEE80, 0x0A81], &[(0, rm << 22)], &[(1, f(2.0)), (2, f(3.0))], 0, 2);
+        assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (want, 0x10), "2/3 rmode {rm}");
+    }
+    // Overflow quotient: max/0.5 overflows; -inf clamps to max finite.
+    let (cpu, _) = run_fpu_snippet(
+        &[0xEEE1, 0x0A10, 0xEE80, 0x0A81], &[(0, 1 << 22)], &[(1, f(f32::MAX)), (2, f(0.5))], 0, 2);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7F80_0000, 0x04 | 0x10));
+    let (cpu, _) = run_fpu_snippet(
+        &[0xEEE1, 0x0A10, 0xEE80, 0x0A81], &[(0, 2 << 22)], &[(1, f(f32::MAX)), (2, f(0.5))], 0, 2);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7F7F_FFFF, 0x04 | 0x10));
+    // Subnormal quotient ties: (2^-126 + 2^-149)/2 = 2^-127 + half-ulp:
+    // RNE-even -> 0x00400000, +inf -> 0x00400001, -inf/zero -> 0x00400000.
+    for (rm, want) in [(0u32, 0x0040_0000), (1, 0x0040_0001), (2, 0x0040_0000), (3, 0x0040_0000)] {
+        let (cpu, _) = run_fpu_snippet(
+            &[0xEEE1, 0x0A10, 0xEE80, 0x0A81], &[(0, rm << 22)], &[(1, 0x0080_0001), (2, f(2.0))], 0, 2);
+        assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (want, 0x08 | 0x10), "tiny div rmode {rm}");
+    }
+    // sqrt(2): RNE = 0x3FB504F3 (below truth); +inf steps up one ulp.
+    let (cpu, _) = run_fpu_snippet(
+        &[0xEEE1, 0x0A10, 0xEEB1, 0x0AE0], &[(0, 1 << 22)], &[(1, f(2.0))], 0, 2);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x3FB5_04F4, 0x10));
+    // Perfect squares are exact in every mode (no IXC).
+    for rm in [0u32, 1, 2, 3] {
+        let (cpu, _) = run_fpu_snippet(
+            &[0xEEE1, 0x0A10, 0xEEB1, 0x0AE0], &[(0, rm << 22)], &[(1, f(6.25))], 0, 2);
+        assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (f(2.5), 0), "sqrt exact rmode {rm}");
+    }
+    // sqrt(+-0) = +-0, exact, no flags (must not reach the integer core).
+    let (cpu, _) = run_fpu_snippet(&[0xEEB1, 0x0AE0], &[], &[(1, 0x8000_0000)], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x8000_0000, 0));
+}
+
+#[test]
+fn fpu_vmrs_id_regs() {
+    // GAS (fpu16.s): vmrs r0,mvfr0=EEF7 0A10; vmrs r4,mvfr1=EEF6 4A10.
+    // Same M4F constants as the MMIO block (peripherals/fpu.rs).
+    let (cpu, _) = run_fpu_snippet(&[0xEEF7, 0x0A10], &[], &[], 0, 1);
+    assert_eq!(cpu.regs.r[0], 0x1011_0021, "MVFR0");
+    let (cpu, _) = run_fpu_snippet(&[0xEEF6, 0x4A10], &[], &[], 0, 1);
+    assert_eq!(cpu.regs.r[4], 0x1100_0011, "MVFR1");
+    // FPEXC (EEF8) has no served meaning on M4 guests (CPACR country):
+    // loud fault, never a made-up value. MVFR with Rt=13/15 likewise.
+    for code in [[0xEEF8u16, 0x0A10u16], [0xEEF7, 0xFA10u16], [0xEEF6, 0xDA10u16]] {
+        let _g = lock_boot();
+        let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+        mem.write32(0xE000ED88, 0x00F0_0000);
+        for (i, w) in code.iter().enumerate() {
+            mem.write16(0x20002000 + (i as u32) * 2, *w);
+        }
+        cpu.regs.r[15] = 0x20002001;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 1);
+        assert!(cpu.fault.is_some(), "must fault: {:04x} {:04x}", code[0], code[1]);
+    }
+}

@@ -632,6 +632,10 @@ export async function createEmulator(opts) {
             uc: wuc,
             read32: wread32, write32: wwrite32,
             getRegisters: () => { const r = cpu.get_regs(); return { R0: r[0], R1: r[1], R2: r[2], R3: r[3], R4: r[4], R5: r[5], R6: r[6], R7: r[7], R8: r[8], R9: r[9], R10: r[10], R11: r[11], R12: r[12], SP: r[13], LR: r[14], PC: r[15], XPSR: cpu.get_xpsr() >>> 0 }; },
+            // VFPv4-SP file visibility (debugger pokes; Dd aliases S(2d)/S(2d+1)).
+            getFpuState: () => ({ s: Array.from(cpu.get_sregs(), (v) => v >>> 0), fpscr: cpu.get_fpscr() >>> 0 }),
+            setSreg: (i, v) => { cpu.set_sreg(i >>> 0, v >>> 0); },
+            setFpscr: (v) => { cpu.set_fpscr(v >>> 0); },
             step: (n = 100000) => {
                 // WFI/WFE sleep: advance virtual time (which fires the RTC
                 // alarm etc.), then wake when an interrupt is pending.

@@ -42,6 +42,14 @@ export class WasmCpu {
         return ret >>> 0;
     }
     /**
+     * FPSCR (cumulative flags, RMode, FZ/DN).
+     * @returns {number}
+     */
+    get_fpscr() {
+        const ret = wasm.wasmcpu_get_fpscr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * @returns {number}
      */
     get_ipsr() {
@@ -84,6 +92,24 @@ export class WasmCpu {
     get_sp() {
         const ret = wasm.wasmcpu_get_sp(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * Raw S0-S31 file (f32 bits; Dd aliases S(2d)/S(2d+1)). Debugger and
+     * driver visibility for the VFPv4-SP unit (nothing else reads these).
+     * @returns {Uint32Array}
+     */
+    get_sregs() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.wasmcpu_get_sregs(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v1 = getArrayU32FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export(r0, r1 * 4, 4);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * @returns {number}
@@ -180,6 +206,23 @@ export class WasmCpu {
      */
     set_deliver_irqs(v) {
         wasm.wasmcpu_set_deliver_irqs(this.__wbg_ptr, v);
+    }
+    /**
+     * Debugger poke for FPSCR, under the same write mask the guest VMSR
+     * uses (NZCVQC + AHP/DN/FZ/RMode + enables/flags; STRIDE/LEN/reserved
+     * stay zero).
+     * @param {number} v
+     */
+    set_fpscr(v) {
+        wasm.wasmcpu_set_fpscr(this.__wbg_ptr, v);
+    }
+    /**
+     * Debugger poke for one S register (out of range is ignored).
+     * @param {number} i
+     * @param {number} v
+     */
+    set_sreg(i, v) {
+        wasm.wasmcpu_set_sreg(this.__wbg_ptr, i, v);
     }
     /**
      * True while halted in WFI/WFE (low-power). The driver advances virtual

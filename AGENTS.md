@@ -2618,6 +2618,18 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
   `.pw-scratch/pw_doom.py` PASSes 11/11: boot → menu → E1M1 (720u move,
   13.7° turn, 16000px canvas, 53 MIPS / 34 FPS / audio 1.00x) → quick-save
   `qpk` stored. `?cpu=`/`btnCpu*`/`MUnicorn` are fully gone from the pages.
+- **doom turn is load-flaky (2026-09-09, 3 consecutive FAILs at 0.4°/6.7°/
+  5.6° vs the 10° bar, all else green):** gametic advances ~full speed
+  (94/105 in the 3s hold) while turning runs ~1/60th rate; repeated taps
+  accumulate but one hold saturates — an input-delivery pathology, not
+  emulation. Ruled out vs the tree three ways: doom.elf contains 0 VFP
+  insns (decoder unreachable — any EE/EC/ED coproc insn would fault
+  loudly), doom runs with delivery off (exception code unreachable; and
+  the 8-word path is byte-identical anyway), and 'a'/ArrowLeft map to
+  the SAME keycode (a code defect cannot slow one and not the other).
+  The box was saturated by other users' jobs (esp32 emu @98% CPU) at the
+  time; W still passes because 720u is a wall-capped ceiling that hides
+  the rate deficit. Rerun on a quiet box before touching any code.
 - **`doom_sym()` in cpu/tests.rs**: resolves test addresses from
   doom.elf's symtab at test time — hardcoded addresses rot on every
   firmware rebuild (strcasecmp moved twice).
@@ -2774,7 +2786,9 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
 
 ### What is implemented
 - Moves: vmov-imm/reg, core<->S, 2-core<->D, vmrs (APSR_nzcv + Rt) / vmsr
-  (masked `0xFFC001FF`: NZCVQC+AHP/DN/FZ/RMode+enables/flags).
+  (masked `0xFFC001FF`: NZCVQC+AHP/DN/FZ/RMode+enables/flags), vmrs
+  MVFR0/MVFR1 (EEF7/EEF6, GAS fpu16.s; FPEXC faults loudly — M4 guests
+  use CPACR and invented EN/EX bits are worse than a fault).
 - Memory: vldr/vstr (offset-only; GAS rejects writeback — fault on P=0/W=1),
   vldm/vstm/vpush/vpop (IA: P=0,U=1,W optional; DB: P=1,U=0, W REQUIRED —
   both GAS-probed rejections; D-lists gated to D0–D15, imm8 odd faults).
@@ -2789,11 +2803,14 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   preserving, subnormal/overflow/underflow paths).
 - vcmp (+#0): NZCV into FPSCR (never xPSR); unordered = C|V; SNaN -> IOC.
 - IEEE state: FZ (sign-preserving flush), DN (default NaN), RMode honored
-  everywhere (vcvt/vcvtf16/fused fully; add/sub/mul via f64-exact adjust;
-  div/sqrt via f64 with the double-rounding caveat below), cumulative
-  IOC/DZC/OFC/UFC/IXC (UFC v1 rule: subnormal result; IXC whenever the
-  delivered result differs from the infinitely-precise value — exactness
-  via f64, exact for add/sub/mul), CONTROL.FPCA set on first FPU use.
+  everywhere: vcvt/vcvtf16/fused fully; add/sub/mul exact via f64;
+  div/sqrt exact via integer long-division (u128, 27 quotient bits) and
+  digit-recurrence sqrt (Newton isqrt on u128) sharing one `fpu_pack`
+  round/overflow/subnormal tail — no double-rounding caveat remains.
+  Cumulative IOC/DZC/OFC/UFC/IXC (UFC: subnormal result; IXC whenever the
+  delivered result differs from the infinitely-precise value), CONTROL.FPCA
+  set on first FPU use. Overflow clamps per RMode (`fpu_overflow`:
+  directed modes take finite max on the bounded side, not inf).
 - VFPExpandImm pinned by GAS: 0x70->1.0, 0x00->2.0, 0xE0->-0.5, 0x1B->6.75.
 - Lazy stacking (implemented 2026-09-09, was the v1 gap): exception entry
   with CONTROL.FPCA + FPCCR.ASPEN reserves the 26-word extended frame
@@ -2849,10 +2866,11 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   VMOV-imm shape (opc1==0xB via o1[7:4], op2lo-hi==0). VMOV-core (EE10/EE00
   op1) is shared with VNMLA/VNMLS/VMLA/VMLS — gate on the FULL shape
   (op2lo 0x10/0x90) and fall through otherwise (faulting there broke vmla).
-- Hex-literal vigilance: f32 exp mask is `0x7F800000` (8 digits) — a
-  7-digit `0x7F80_0000` (= 0x07F80000) silently breaks every NaN/inf test;
-  `0x4400|0x2C0 = 0x46C0`, not 0x46E0; 2^-126 (0x00800000) is min-NORMAL,
-  not subnormal (UFC test needs 2^-127 x 0.5).
+- Hex-literal vigilance: `0x4400|0x2C0 = 0x46C0`, not 0x46E0 (do the
+  addition, don't eyeball it); 2^-126 (0x00800000) is min-NORMAL, not
+  subnormal (UFC test needs 2^-127 x 0.5). (An earlier draft of this note
+  claimed `0x7F80_0000` was 7 digits — wrong, underscores don't count;
+  both forms are 0x7F800000. Verified, not assumed.)
 - `fpu_fma`: product mantissa is 48-bit (scale 2^(p_exp-46)) — the addend
   needs `<<23` to the same scale, final exp is E'-22. acc==0 must shortcut
   to `fpu_mul` (fpu_norm(0) is garbage). Magnitude-subtract sign: larger
@@ -2871,6 +2889,12 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   f16 with M=0, vmov/cmp/neg/abs M=0 all faulted). Selector is op2[7,6,4].
   Same test guards it. Int->float signedness is op2[7:6] (11/01), not
   op2[6] — the old `(o2&0x40)` called unsigned (0x40) signed.
+- Bridge u32 fields MUST be read with `>>> 0`: JS bitwise ops are
+  int32-signed, so `0xDEADBEEF` parses as -559038737 and `=== 0xDEADBEEF`
+  fails even when the bytes on the wire are perfect (verified by byte
+  dump). remote-emu.js already did this; the test helper didn't — an hour
+  of phantom "bridge corruption". Any new protocol field with bit31 set
+  trips it.
 - `branch()`'s EXC_RETURN mask must ignore FType (bit 4): the old
   `(t & 0x0FFFFFF0) == 0x0FFFFFF0` rejected E9/ED, so the first lazy-
   stacked `bx lr` "branched" to wilderness (PC=0x783 with a valid frame
@@ -2890,10 +2914,14 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   changes no production behavior. Found as a 1-in-3 `freertos_tasks_run`
   flake after the FPU tick-pumping test joined the suite.
 
-### Deliberate v1 limitations (documented in code)
-- Arithmetic/sqrt directed modes go through f64 (exact for add/sub/mul;
-  div/sqrt carry a half-f64-ulp double-rounding caveat).
-- MVFR reads via MRC ID encodings fault (use
-  the MMIO 0xE000EF40–48, like CMSIS does).
-- S/D files and FPSCR are core-side only (not exposed to the JS driver or
-  wasm bindings yet).
+### Deliberate v1 limitations — ALL CLOSED (2026-09-09 sessions)
+- ~~MVFR reads via MRC ID encodings fault~~ — served (EEF7/EEF6, same
+  M4F constants as MMIO; FPEXC still faults by decision, see above).
+- ~~S/D files and FPSCR are core-side only~~ — exposed: wasm `get_sregs/
+  get_fpscr/set_sreg/set_fpscr`, `emu.getFpuState/setSreg/setFpscr`,
+  bridge `GET_FPREGS/SET_FPREG` (0x13/0x14 → 0x95/0x96) + remote-emu
+  methods, covered by test_ws_bridge (raw + adapter, 23/23).
+- ~~div/sqrt directed rounding via f64~~ — exact integer cores now
+  (u128 long division to 27 quotient bits; Newton isqrt digit-recurrence),
+  sharing `fpu_pack` with fused MLA. Overflow clamps per RMode via
+  `fpu_overflow` (directed modes take finite max, not inf).

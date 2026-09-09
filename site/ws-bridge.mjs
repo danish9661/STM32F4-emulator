@@ -20,6 +20,8 @@
 //     0x10 READ32      [id:u32] [addr:u32]
 //     0x11 WRITE32     [id:u32] [addr:u32] [value:u32]
 //     0x12 GET_REGS    [id:u32]
+//     0x13 GET_FPREGS  [id:u32]
+//     0x14 SET_FPREG   [id:u32] [idx:u8] [value:u32] (idx 0-31 = S, 32 = FPSCR)
 //     0x20 ETH_RX      [len:u32] [frame bytes…]
 //     0x21 CAN_RX      [id:u16] [dlc:u8] [8 bytes data]
 //     0x22 UART_TX     [len:u16] [bytes…]
@@ -37,6 +39,8 @@
 //     0x92 WRITE32_OK  [id:u32]
 //     0x93 LOAD_OK     [id:u32]
 //     0x94 REGS_RESP   [id:u32] [36 × u32 LE]
+//     0x95 FPREGS_RESP [id:u32] [33 × u32 LE: S0-31, FPSCR]
+//     0x96 SET_FPREG_OK [id:u32]
 //     0xA0 ERROR       [id:u32] [len:u16] [msg bytes…]
 //     0xFE PING        (keepalive — client sends periodically)
 //     0xFF PONG        (response to PING)
@@ -97,14 +101,14 @@ function loadFirmware(path) {
 const MSG = {
     // Browser → Node
     STEP: 0x01, STOP: 0x02, RESET: 0x03, LOAD_IMAGE: 0x04,
-    READ32: 0x10, WRITE32: 0x11, GET_REGS: 0x12,
+    READ32: 0x10, WRITE32: 0x11, GET_REGS: 0x12, GET_FPREGS: 0x13, SET_FPREG: 0x14,
     ETH_RX: 0x20, CAN_RX: 0x21, UART_TX: 0x22,
     SPI_MISO: 0x30, I2C_RX: 0x31, SET_INPUT: 0x40,
     // Node → Browser
     PUSH_UART: 0x80, PUSH_ETH: 0x81, PUSH_GPIO: 0x82,
     STOPPED: 0x8A, PING: 0xFE, PONG: 0xFF,
     STEP_RESP: 0x90, READ32_RESP: 0x91, WRITE32_OK: 0x92,
-    LOAD_OK: 0x93, REGS_RESP: 0x94, ERROR: 0xA0,
+    LOAD_OK: 0x93, REGS_RESP: 0x94, FPREGS_RESP: 0x95, SET_FPREG_OK: 0x96, ERROR: 0xA0,
 };
 
 function u8(v) { return v & 0xFF; }
@@ -364,6 +368,40 @@ async function handleConnection(ws) {
                             new DataView(out.buffer).setUint32(off, regs[n] >>> 0, true); off += 4;
                         }
                         try { ws.send(out); } catch {}
+                    } catch (e) {
+                        try { ws.send(encodeError(id, e.message)); } catch {}
+                    }
+                    break;
+                }
+                case MSG.GET_FPREGS: {
+                    if (!emu) { ws.send(encodeError(u32LE(buf, 1), 'no firmware loaded')); break; }
+                    const id = u32LE(buf, 1);
+                    try {
+                        const st = emu.getFpuState();
+                        const out = new Uint8Array(1 + 4 + 33 * 4);
+                        out[0] = MSG.FPREGS_RESP;
+                        new DataView(out.buffer).setUint32(1, id, true);
+                        let off = 5;
+                        for (let i = 0; i < 32; i++) {
+                            new DataView(out.buffer).setUint32(off, st.s[i] >>> 0, true); off += 4;
+                        }
+                        new DataView(out.buffer).setUint32(off, st.fpscr >>> 0, true);
+                        try { ws.send(out); } catch {}
+                    } catch (e) {
+                        try { ws.send(encodeError(id, e.message)); } catch {}
+                    }
+                    break;
+                }
+                case MSG.SET_FPREG: {
+                    if (!emu) { ws.send(encodeError(u32LE(buf, 1), 'no firmware loaded')); break; }
+                    const id = u32LE(buf, 1);
+                    try {
+                        const idx = buf[5];
+                        const v = u32LE(buf, 6);
+                        if (idx < 32) emu.setSreg(idx, v);
+                        else if (idx === 32) emu.setFpscr(v);
+                        else throw new Error('bad fp index ' + idx);
+                        try { ws.send(encodeResp(MSG.SET_FPREG_OK, id, new Uint8Array(0))); } catch {}
                     } catch (e) {
                         try { ws.send(encodeError(id, e.message)); } catch {}
                     }

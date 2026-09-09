@@ -268,8 +268,14 @@ fn fpu_div(fpscr: u32, a: u32, b: u32) -> (u32, u32) {
         let fl = if af == 0.0 { 0 } else { FPSCR_UFC | FPSCR_IXC };
         return (r, fl);
     }
-    let rb = (af / bf).to_bits();
-    fpu_final(fpscr, rb, af as f64 / bf as f64)
+    if fpu_rmode(fpscr) == 0 {
+        let rb = (af / bf).to_bits();
+        fpu_final(fpscr, rb, af as f64 / bf as f64)
+    } else {
+        // Directed: exact integer long division (no f64 rounding anywhere).
+        let (kept, sticky, exp, rs) = fpu_div_exact(a, b);
+        fpu_pack(kept, sticky, exp, rs, fpu_rmode(fpscr))
+    }
 }
 /// Accumulate: acc +/- (a*b), unfused (separate f32 mul then add, like
 /// silicon — never mul_add). VNMLA/VNMLS negation is folded into the
@@ -293,8 +299,17 @@ fn fpu_sqrt(fpscr: u32, a: u32) -> (u32, u32) {
     if af < 0.0 {
         return (fpu_dn(0x7FC0_0000, fpscr), FPSCR_IOC);
     }
-    let rb = af.sqrt().to_bits();
-    fpu_final(fpscr, rb, (af as f64).sqrt())
+    if af == 0.0 {
+        return (a, 0); // sqrt(+-0) = +-0, exact
+    }
+    if fpu_rmode(fpscr) == 0 {
+        let rb = af.sqrt().to_bits();
+        fpu_final(fpscr, rb, (af as f64).sqrt())
+    } else {
+        // Directed: exact digit-recurrence sqrt (no f64 rounding anywhere).
+        let (kept, sticky, exp, rs) = fpu_sqrt_exact(a);
+        fpu_pack(kept, sticky, exp, rs, fpu_rmode(fpscr))
+    }
 }
 /// Normalize a finite nonzero f32 to (sign, unbiased exp, 24-bit mantissa
 /// with hidden 1 at bit 23). Subnormals are normalized (FZ flushing is the
@@ -420,24 +435,34 @@ fn fpu_fma(fpscr: u32, acc: u32, a: u32, b: u32, sub: bool, neg: bool) -> (u32, 
         (mag << (25 - l) as u32, 0, base_exp - (25 - l) - 22)
     };
     let sticky_base = sticky0 || rest != 0;
+    fpu_pack(kept, sticky_base, exp, rs, rmode)
+}
+/// Round a normalized 25-bit mantissa (bit 24 set) + below-sticky to f32.
+///
+/// Shared tail for exact single-rounding paths (fused MLA, directed
+/// divide/sqrt): `kept` holds 25 significant bits with value
+/// kept x 2^(exp-24) (unbiased exp), `sticky` is OR of everything below
+/// kept's bit 0. Handles overflow (inf + OFC|IXC), normals (24-bit round
+/// + IXC on inexact) and subnormals (via fpu_fma_subnormal).
+fn fpu_pack(kept: u128, sticky: bool, exp: i32, rs: u32, rmode: u32) -> (u32, u32) {
     if exp > 127 {
-        return (rs << 31 | 0x7F80_0000, FPSCR_OFC | FPSCR_IXC);
+        return fpu_overflow(rs, rmode);
     }
     if exp >= -126 {
         // Round 25 -> 24 bits (guard = bit 0, sticky below).
-        let lsb = (kept & 2) >> 1;
-        let guard = kept & 1;
-        let up = fpu_round_up(((guard as u32) << 1) | (sticky_base as u32), 2, lsb as u32, rmode, rs != 0);
-        let mut k = (kept >> 1) as u32 + if up { 1 } else { 0 };
+        let lsb = ((kept & 2) >> 1) as u32;
+        let guard = (kept & 1) as u32;
+        let up = fpu_round_up((guard << 1) | (sticky as u32), 2, lsb, rmode, rs != 0);
+        let mut k = ((kept >> 1) as u32) + if up { 1 } else { 0 };
         let mut e = exp;
         if k == 0x100_0000 {
             k = 0x8000_00;
             e += 1;
         }
         if e > 127 {
-            return (rs << 31 | 0x7F80_0000, FPSCR_OFC | FPSCR_IXC);
+            return fpu_overflow(rs, rmode);
         }
-        let fl = if guard != 0 || sticky_base { FPSCR_IXC } else { 0 };
+        let fl = if guard != 0 || sticky { FPSCR_IXC } else { 0 };
         return (rs << 31 | ((e + 127) as u32) << 23 | (k & 0x7FFF_FF), fl);
     }
     // Subnormal: round kept25 to multiples of 2^-149 (sh = -125-exp >= 2).
@@ -445,7 +470,33 @@ fn fpu_fma(fpscr: u32, acc: u32, a: u32, b: u32, sub: bool, neg: bool) -> (u32, 
     if sh >= 128 {
         return (rs << 31, FPSCR_UFC | FPSCR_IXC); // nonzero inputs -> tiny
     }
-    fpu_fma_subnormal(kept, sticky_base, rs, rmode, sh as u32)
+    fpu_fma_subnormal(kept, sticky, rs, rmode, sh as u32)
+}
+/// Overflow result per RMode: infinities round outward; directed modes
+/// clamp to finite max on the bounded side (toward +inf of negative
+/// overflow is -max, etc.). OFC|IXC always accompany (overflow is inexact).
+fn fpu_overflow(rs: u32, rmode: u32) -> (u32, u32) {
+    let inf = rs << 31 | 0x7F80_0000;
+    let max = rs << 31 | 0x7F7F_FFFF;
+    let r = match rmode {
+        0 => inf,
+        1 => {
+            if rs == 0 {
+                inf
+            } else {
+                max
+            }
+        }
+        2 => {
+            if rs == 0 {
+                max
+            } else {
+                inf
+            }
+        }
+        _ => max,
+    };
+    (r, FPSCR_OFC | FPSCR_IXC)
 }
 /// Round a normalized 25-bit fused-mantissa (bit 24 set) + below-sticky to
 /// an f32 subnormal/zero: units of 2^-149, sh = -125-exp >= 1.
@@ -484,6 +535,65 @@ fn fpu_round_int(v: f64, signed: bool, rmode: u32) -> (u32, bool) {
         }
         (r as u64 as u32, false)
     }
+}
+/// Integer square root (floor) for u128 via Newton iteration from a
+/// power-of-two overestimate. Used by exact directed sqrt.
+fn isqrt_u128(n: u128) -> u128 {
+    if n == 0 {
+        return 0;
+    }
+    let mut x = 1u128 << ((128 - n.leading_zeros() + 1) / 2);
+    loop {
+        let y = (x + n / x) >> 1;
+        if y >= x {
+            return x;
+        }
+        x = y;
+    }
+}
+/// Exact directed division core: finite nonzero a/b (already flushed) into
+/// the shared pack form — (kept25 with bit 24 set, below-sticky, unbiased
+/// exp for kept x 2^(exp-24)). Long division to 27 quotient bits makes the
+/// rounding decision exact (no f64 anywhere).
+fn fpu_div_exact(a: u32, b: u32) -> (u128, bool, i32, u32) {
+    let (sa, ea, ma) = fpu_norm(a);
+    let (sb, eb, mb) = fpu_norm(b);
+    let rs = sa ^ sb;
+    // Q = (ma<<26)/mb lies in (2^25, 2^27); value = Q x 2^(ea-eb-26).
+    // (ma/mb in (0.5, 2): ma >= 2^23 > mb/2 and ma < 2*mb always hold.)
+    let num = (ma as u128) << 26;
+    let q = num / mb as u128;
+    let r = num % mb as u128;
+    // Normalize to 25 bits (see fpu_pack contract).
+    let (kept, rest, exp) = if q >= (1u128 << 26) {
+        (q >> 2, q & 3, ea - eb)
+    } else {
+        (q >> 1, q & 1, ea - eb - 1)
+    };
+    (kept, rest != 0 || r != 0, exp, rs)
+}
+/// Exact directed square-root core: finite positive nonzero w (already
+/// flushed; caller handles zero/sign/NaN) into the shared pack form.
+/// Digit-recurrence via integer sqrt makes rounding exact.
+fn fpu_sqrt_exact(w: u32) -> (u128, bool, i32, u32) {
+    let (s, e, m) = fpu_norm(w); // value = m x 2^(e-23), m 24-bit
+    // Even-ize the exponent so F is integral: value = M x 2^(2F) with
+    // M in [2^23, 2^25). (Only even numerators are halved — Rust `/`
+    // truncates, so the parity branch matters, not just the value.)
+    let (mm, f) = if (e - 23) & 1 != 0 {
+        ((m as u128) << 1, (e - 24) / 2)
+    } else {
+        (m as u128, (e - 23) / 2)
+    };
+    // S = floor(sqrt(M) x 2^26) lies in [2^37, 2^39).
+    let big = mm << 52; // < 2^77, no overflow
+    let sq = isqrt_u128(big);
+    // kept25 needs bit 24 set: shift 14 if S >= 2^38 else 13.
+    let (kept, sh) = if sq >= (1u128 << 38) { (sq >> 14, 14u32) } else { (sq >> 13, 13u32) };
+    let rem = sq & ((1u128 << sh) - 1);
+    let sticky = rem != 0 || sq * sq != big;
+    // result = kept x 2^(F+sh-26) = kept x 2^(exp-24).
+    (kept, sticky, f + sh as i32 - 2, s)
 }
 /// Round an exact f64 to f32 per RMode (int->float and fixed->float need
 /// this; plain `as` is RNE-only). Returns (bits, inexact).
@@ -3295,11 +3405,19 @@ pub fn exec32(
         // shapes below also match EC/ED multiples — e.g. VPOP ECBD 0A04
         // hits the VMOV-imm shape — so the EE prefix must be verified).
         if (o1 & 0xFF00) == 0xEE00 {
-        // VMRS / VMSR (op1 exact AND op2lo == 0x10 AND sz == 0; Rt = Vd
-        // field, 0xF = APSR). Full-shape gate: B-group ops with a high odd
+        // VMRS / VMSR (op1 selects the register — GAS fpu16.s — AND op2lo
+        // == 0x10 AND sz == 0; Rt = Vd field, 0xF = APSR_nzcv for FPSCR).
+        // op1: EEE1 = VMSR FPSCR; EEF1 = VMRS FPSCR; EEF7 = MVFR0;
+        // EEF6 = MVFR1 (M4F ID values, same consts as the MMIO block).
+        // FPEXC (EEF8) is NOT served (faults via the B-group fallthrough):
+        // M4 guests use CPACR, and inventing EN/EX bits is worse than loud.
+        // Full-shape gate (as with VMOV-core): B-group ops with a high odd
         // dest (e.g. vsqrt s17,s18 = EEF1 8AC9) share the EEF1 op1 and must
         // fall through (same lesson as VMOV-core vs VMLA below).
-        if (o1 == 0xEEF1 || o1 == 0xEEE1) && (o2 & 0xFF) == 0x10 && (o2 >> 8) & 1 == 0 {
+        if (o1 == 0xEEF1 || o1 == 0xEEE1 || o1 == 0xEEF7 || o1 == 0xEEF6)
+            && (o2 & 0xFF) == 0x10
+            && (o2 >> 8) & 1 == 0
+        {
             if o1 == 0xEEF1 {
                 if vd4 == 0xF {
                     cpu.regs.xpsr = (cpu.regs.xpsr & !0xF000_0000) | (cpu.regs.fpscr & 0xF000_0000);
@@ -3309,12 +3427,23 @@ pub fn exec32(
                     }
                     cpu.regs.r[vd4] = cpu.regs.fpscr;
                 }
-            } else {
+            } else if o1 == 0xEEE1 {
                 if vd4 == 13 || vd4 == 15 {
                     return fault(cpu, pc, op1, op2, 4);
                 }
                 cpu.regs.fpscr = (cpu.regs.fpscr & !0xFFC0_01FF)
                     | (rr(cpu, vd4, pc) & 0xFFC0_01FF);
+            } else {
+                // MVFR0/MVFR1: read-only ID values (no APSR form: Rt=15
+                // UNPREDICTABLE here, unlike the FPSCR form above).
+                if vd4 == 13 || vd4 == 15 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                cpu.regs.r[vd4] = if o1 == 0xEEF7 {
+                    crate::peripherals::fpu::MVFR0
+                } else {
+                    crate::peripherals::fpu::MVFR1
+                };
             }
             cpu.regs.control |= 4;
             adv(cpu, pc, 4);

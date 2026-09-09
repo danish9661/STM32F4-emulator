@@ -26,13 +26,13 @@
 
 const MSG = {
     STEP: 0x01, STOP: 0x02, RESET: 0x03, LOAD_IMAGE: 0x04,
-    READ32: 0x10, WRITE32: 0x11, GET_REGS: 0x12,
+    READ32: 0x10, WRITE32: 0x11, GET_REGS: 0x12, GET_FPREGS: 0x13, SET_FPREG: 0x14,
     ETH_RX: 0x20, CAN_RX: 0x21, UART_TX: 0x22,
     SPI_MISO: 0x30, I2C_RX: 0x31, SET_INPUT: 0x40,
     PUSH_UART: 0x80, PUSH_ETH: 0x81, PUSH_GPIO: 0x82,
     STOPPED: 0x8A, PING: 0xFE, PONG: 0xFF,
     STEP_RESP: 0x90, READ32_RESP: 0x91, WRITE32_OK: 0x92,
-    LOAD_OK: 0x93, REGS_RESP: 0x94, ERROR: 0xA0,
+    LOAD_OK: 0x93, REGS_RESP: 0x94, FPREGS_RESP: 0x95, SET_FPREG_OK: 0x96, ERROR: 0xA0,
 };
 
 let nextId = 1;
@@ -154,6 +154,8 @@ export async function createRemoteEmulator(url, opts = {}) {
             case MSG.WRITE32_OK:
             case MSG.LOAD_OK:
             case MSG.REGS_RESP:
+            case MSG.FPREGS_RESP:
+            case MSG.SET_FPREG_OK:
             case MSG.ERROR: {
                 if (buf.length >= 5) {
                     const id = readU32(buf, 1);
@@ -363,6 +365,22 @@ export async function createRemoteEmulator(url, opts = {}) {
                 }
                 return regs;
             });
+        },
+
+        getFpuState() {
+            return request(MSG.GET_FPREGS).then(({ buf }) => {
+                const s = [];
+                for (let i = 0; i < 32; i++) s.push(readU32(buf, 5 + i * 4) >>> 0);
+                return { s, fpscr: readU32(buf, 5 + 32 * 4) >>> 0 };
+            });
+        },
+
+        setSreg(i, v) {
+            return request(MSG.SET_FPREG, new Uint8Array([i & 0xFF]), packU32(v)).then(() => {});
+        },
+
+        setFpscr(v) {
+            return request(MSG.SET_FPREG, new Uint8Array([32]), packU32(v)).then(() => {});
         },
 
         loadImage(flash, extraMem) {
