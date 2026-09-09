@@ -413,6 +413,327 @@ fn usat_ssat_q() {
 }
 
 #[test]
+fn smlald_dual_add_long() {
+    // smlald r0,r1,r2,r3 = fbc2 01c3: acc += lo*lo + hi*hi (signed).
+    let (mut cpu, _) = run_snippet(
+        &[0xFBC2, 0x01C3],
+        &[(0, 0), (1, 0), (2, 0x00020001), (3, 0x00040003)],
+    );
+    assert_eq!(cpu.regs.r[0], 11); // 1*3 + 2*4
+    assert_eq!(cpu.regs.r[1], 0);
+    // Mixed signs: 1*1 + (-1)*1 = 0.
+    let (mut cpu, _) = run_snippet(
+        &[0xFBC2, 0x01C3],
+        &[(0, 0), (1, 0), (2, 0xFFFF0001), (3, 0x00010001)],
+    );
+    assert_eq!(cpu.regs.r[0], 0);
+    assert_eq!(cpu.regs.r[1], 0);
+}
+
+#[test]
+fn smlsld_dual_sub_long() {
+    // smlsld r0,r1,r2,r3 = fbd2 01c3: acc += lo*lo - hi*hi.
+    // 1*3 - 2*4 = -5.
+    let (mut cpu, _) = run_snippet(
+        &[0xFBD2, 0x01C3],
+        &[(0, 0), (1, 0), (2, 0x00020001), (3, 0x00040003)],
+    );
+    assert_eq!(cpu.regs.r[0], 0xFFFFFFFB);
+    assert_eq!(cpu.regs.r[1], 0xFFFFFFFF);
+}
+
+#[test]
+fn umaal_dual_accumulate() {
+    // umaal r4,r5,r6,r7 = fbe6 4567: acc += Rn*Rm + RdLo + RdHi.
+    // (2^32-1)^2 + 1 + 2 = 0xFFFFFFFE00000004.
+    let (mut cpu, _) = run_snippet(
+        &[0xFBE6, 0x4567],
+        &[(4, 1), (5, 2), (6, 0xFFFFFFFF), (7, 0xFFFFFFFF)],
+    );
+    assert_eq!(cpu.regs.r[4], 4);
+    assert_eq!(cpu.regs.r[5], 0xFFFFFFFE);
+    // Small: 2*3 + 10 + 0 = 16 (exercises both Rd adds).
+    let (mut cpu, _) = run_snippet(
+        &[0xFBE6, 0x4567],
+        &[(4, 10), (5, 0), (6, 2), (7, 3)],
+    );
+    assert_eq!(cpu.regs.r[4], 16);
+    assert_eq!(cpu.regs.r[5], 0);
+}
+
+#[test]
+fn smmul_rounding() {
+    // smmul r0,r1,r2 = fb51 f002: top32(prod). 0x40000000^2 top = 0x10000000.
+    let (mut cpu, _) = run_snippet(&[0xFB51, 0xF002], &[(1, 0x40000000), (2, 0x40000000)]);
+    assert_eq!(cpu.regs.r[0], 0x10000000);
+    // smmulr (fb51 f012) rounds: (-2^31)*(-1) = 2^31 -> top 0...
+    // prod = 0x80000000, +0x80000000 = 0x100000000 -> top 1.
+    let (mut cpu, _) = run_snippet(&[0xFB51, 0xF012], &[(1, 0x80000000), (2, 0xFFFFFFFF)]);
+    assert_eq!(cpu.regs.r[0], 1);
+    let (mut cpu, _) = run_snippet(&[0xFB51, 0xF002], &[(1, 0x80000000), (2, 0xFFFFFFFF)]);
+    assert_eq!(cpu.regs.r[0], 0);
+    // smmla r0,r1,r2,r3 = fb51 3002: Ra + top.
+    let (mut cpu, _) = run_snippet(
+        &[0xFB51, 0x3002],
+        &[(1, 0x40000000), (2, 0x40000000), (3, 5)],
+    );
+    assert_eq!(cpu.regs.r[0], 0x10000005);
+    // smmlar (fb51 3012) vs smmla on the rounding edge (prod = 0x80000000).
+    let (mut cpu, _) = run_snippet(
+        &[0xFB51, 0x3012],
+        &[(1, 0x80000000), (2, 0xFFFFFFFF), (3, 7)],
+    );
+    assert_eq!(cpu.regs.r[0], 8);
+    let (mut cpu, _) = run_snippet(
+        &[0xFB51, 0x3002],
+        &[(1, 0x80000000), (2, 0xFFFFFFFF), (3, 7)],
+    );
+    assert_eq!(cpu.regs.r[0], 7);
+    // smmls r0,r1,r2,r3 = fb61 3002: Ra - top.
+    let (mut cpu, _) = run_snippet(
+        &[0xFB61, 0x3002],
+        &[(1, 0x40000000), (2, 0x40000000), (3, 5)],
+    );
+    assert_eq!(cpu.regs.r[0], 0xF0000005);
+    // smmlsr (fb61 3012): 7 - 1 = 6 with rounding, 7 - 0 = 7 without.
+    let (mut cpu, _) = run_snippet(
+        &[0xFB61, 0x3012],
+        &[(1, 0x80000000), (2, 0xFFFFFFFF), (3, 7)],
+    );
+    assert_eq!(cpu.regs.r[0], 6);
+    let (mut cpu, _) = run_snippet(
+        &[0xFB61, 0x3002],
+        &[(1, 0x80000000), (2, 0xFFFFFFFF), (3, 7)],
+    );
+    assert_eq!(cpu.regs.r[0], 7);
+}
+
+#[test]
+fn usad8_accumulate() {
+    // usad8 r0,r1,r2 = fb71 f002: |1-4|+|2-3|+|3-2|+|4-1| = 8.
+    let (mut cpu, _) = run_snippet(&[0xFB71, 0xF002], &[(1, 0x01020304), (2, 0x04030201)]);
+    assert_eq!(cpu.regs.r[0], 8);
+    // usada8 r0,r1,r2,r3 = fb71 3002: + Ra.
+    let (mut cpu, _) = run_snippet(
+        &[0xFB71, 0x3002],
+        &[(1, 0x01020304), (2, 0x04030201), (3, 100)],
+    );
+    assert_eq!(cpu.regs.r[0], 108);
+}
+
+#[test]
+fn parallel_qadd_qsub() {
+    // qadd8 r0,r1,r2 = fa81 f012: 0x7F+1 saturates per lane + Q.
+    let (mut cpu, _) = run_snippet(&[0xFA81, 0xF012], &[(1, 0x7F7F7F7F), (2, 0x01010101)]);
+    assert_eq!(cpu.regs.r[0], 0x7F7F7F7F);
+    assert_ne!(cpu.regs.xpsr & 0x08000000, 0);
+    // No saturation: exact + Q clear.
+    let (mut cpu, _) = run_snippet(&[0xFA81, 0xF012], &[(1, 0x01010101), (2, 0x02020202)]);
+    assert_eq!(cpu.regs.r[0], 0x03030303);
+    assert_eq!(cpu.regs.xpsr & 0x08000000, 0);
+    // qsub8 r0,r1,r2 = fac1 f012: -128-1 saturates to -128 + Q.
+    let (mut cpu, _) = run_snippet(&[0xFAC1, 0xF012], &[(1, 0x80808080), (2, 0x01010101)]);
+    assert_eq!(cpu.regs.r[0], 0x80808080);
+    assert_ne!(cpu.regs.xpsr & 0x08000000, 0);
+    // qadd16 r0,r1,r2 = fa91 f012: 0x7FFF+1 saturates + Q.
+    let (mut cpu, _) = run_snippet(&[0xFA91, 0xF012], &[(1, 0x7FFF7FFF), (2, 0x00010001)]);
+    assert_eq!(cpu.regs.r[0], 0x7FFF7FFF);
+    assert_ne!(cpu.regs.xpsr & 0x08000000, 0);
+    // qsub16 r0,r1,r2 = fad1 f012: 0x8000-1 saturates to 0x8000 + Q.
+    let (mut cpu, _) = run_snippet(&[0xFAD1, 0xF012], &[(1, 0x80008000), (2, 0x00010001)]);
+    assert_eq!(cpu.regs.r[0], 0x80008000);
+    assert_ne!(cpu.regs.xpsr & 0x08000000, 0);
+    // uqadd16 r0,r1,r2 = fa91 f052: 0xFFFF+1 saturates + Q (lo exact).
+    let (mut cpu, _) = run_snippet(&[0xFA91, 0xF052], &[(1, 0xFFFF0001), (2, 0x00010000)]);
+    assert_eq!(cpu.regs.r[0], 0xFFFF0001);
+    assert_ne!(cpu.regs.xpsr & 0x08000000, 0);
+    // uqsub16 r0,r1,r2 = fad1 f052: underflow saturates to 0 + Q.
+    let (mut cpu, _) = run_snippet(&[0xFAD1, 0xF052], &[(1, 0x00010000), (2, 0x00020001)]);
+    assert_eq!(cpu.regs.r[0], 0x00000000);
+    assert_ne!(cpu.regs.xpsr & 0x08000000, 0);
+    // uqadd8/uqsub8 (fa81/fac1 f052).
+    let (mut cpu, _) = run_snippet(&[0xFA81, 0xF052], &[(1, 0xFF00FF00), (2, 0x01000100)]);
+    assert_eq!(cpu.regs.r[0], 0xFF00FF00);
+    assert_ne!(cpu.regs.xpsr & 0x08000000, 0);
+    let (mut cpu, _) = run_snippet(&[0xFAC1, 0xF052], &[(1, 0x01000100), (2, 0x02000200)]);
+    assert_eq!(cpu.regs.r[0], 0x00000000);
+    assert_ne!(cpu.regs.xpsr & 0x08000000, 0);
+}
+
+#[test]
+fn parallel_halving() {
+    // shadd8 r0,r1,r2 = fa81 f022: (2+4)>>1 = 3, no Q.
+    let (mut cpu, _) = run_snippet(&[0xFA81, 0xF022], &[(1, 0x02020202), (2, 0x04040404)]);
+    assert_eq!(cpu.regs.r[0], 0x03030303);
+    assert_eq!(cpu.regs.xpsr & 0x08000000, 0);
+    // Arithmetic shift keeps sign: (-2 + -4)>>1 = -3.
+    let (mut cpu, _) = run_snippet(&[0xFA81, 0xF022], &[(1, 0xFEFEFEFE), (2, 0xFCFCFCFC)]);
+    assert_eq!(cpu.regs.r[0], 0xFDFDFDFD);
+    assert_eq!(cpu.regs.xpsr & 0x08000000, 0);
+    // shsub8 r0,r1,r2 = fac1 f022: (4-2)>>1 = 1.
+    let (mut cpu, _) = run_snippet(&[0xFAC1, 0xF022], &[(1, 0x04040404), (2, 0x02020202)]);
+    assert_eq!(cpu.regs.r[0], 0x01010101);
+    // uhadd8 r0,r1,r2 = fa81 f062: (255+255)>>1 = 255 (logical).
+    let (mut cpu, _) = run_snippet(&[0xFA81, 0xF062], &[(1, 0xFFFFFFFF), (2, 0xFFFFFFFF)]);
+    assert_eq!(cpu.regs.r[0], 0xFFFFFFFF);
+    // uhsub8 r0,r1,r2 = fac1 f062: (4-6)>>1 logical = 0x7FFFFFFF[lane] = 0xFF.
+    let (mut cpu, _) = run_snippet(&[0xFAC1, 0xF062], &[(1, 0x04040404), (2, 0x06060606)]);
+    assert_eq!(cpu.regs.r[0], 0xFFFFFFFF);
+    // shadd16 r0,r1,r2 = fa91 f022: (2+6)>>1=4, (4+8)>>1=6.
+    let (mut cpu, _) = run_snippet(&[0xFA91, 0xF022], &[(1, 0x00020004), (2, 0x00060008)]);
+    assert_eq!(cpu.regs.r[0], 0x00040006);
+    // shsub16 r0,r1,r2 = fad1 f022.
+    let (mut cpu, _) = run_snippet(&[0xFAD1, 0xF022], &[(1, 0x00040006), (2, 0x00020004)]);
+    assert_eq!(cpu.regs.r[0], 0x00010001);
+    // uhadd16 r0,r1,r2 = fa91 f062: (0xFFFE+4)>>1 = 0x8001, (2+6)>>1 = 4.
+    let (mut cpu, _) = run_snippet(&[0xFA91, 0xF062], &[(1, 0xFFFE0002), (2, 0x00040006)]);
+    assert_eq!(cpu.regs.r[0], 0x80010004);
+    // uhsub16 r0,r1,r2 = fad1 f062: (4-2)>>1 = 1, (6-8)>>1 logical = 0xFFFF.
+    let (mut cpu, _) = run_snippet(&[0xFAD1, 0xF062], &[(1, 0x00040006), (2, 0x00020008)]);
+    assert_eq!(cpu.regs.r[0], 0x0001FFFF);
+}
+
+#[test]
+fn parallel_asx_sax() {
+    // qasx r0,r1,r2 = faa1 f012: top = hi+lo, bottom = lo-hi.
+    // Rn=0x00020001, Rm=0x00040003 -> top 2+3=5, bot 1-4=-3.
+    let (mut cpu, _) = run_snippet(&[0xFAA1, 0xF012], &[(1, 0x00020001), (2, 0x00040003)]);
+    assert_eq!(cpu.regs.r[0], 0x0005FFFD);
+    assert_eq!(cpu.regs.xpsr & 0x08000000, 0);
+    // Saturating: top 0x7FFF+1 -> 0x7FFF + Q; bot 1-0x7FFF fits.
+    let (mut cpu, _) = run_snippet(&[0xFAA1, 0xF012], &[(1, 0x7FFF0001), (2, 0x7FFF0001)]);
+    assert_eq!(cpu.regs.r[0], 0x7FFF8002);
+    assert_ne!(cpu.regs.xpsr & 0x08000000, 0);
+    // qsax r0,r1,r2 = fae1 f012: top = hi-lo, bot = lo+hi.
+    let (mut cpu, _) = run_snippet(&[0xFAE1, 0xF012], &[(1, 0x00020001), (2, 0x00040003)]);
+    assert_eq!(cpu.regs.r[0], 0xFFFF0005);
+    // uqasx r0,r1,r2 = faa1 f052: top 0xFFFF+0xFFFF saturates + Q.
+    let (mut cpu, _) = run_snippet(&[0xFAA1, 0xF052], &[(1, 0xFFFF0001), (2, 0x0001FFFF)]);
+    assert_eq!(cpu.regs.r[0], 0xFFFF0000);
+    assert_ne!(cpu.regs.xpsr & 0x08000000, 0);
+    // uqsax r0,r1,r2 = fae1 f052: bot 2+0xFFFF saturates + Q.
+    let (mut cpu, _) = run_snippet(&[0xFAE1, 0xF052], &[(1, 0x00010002), (2, 0xFFFF0001)]);
+    assert_eq!(cpu.regs.r[0], 0x0000FFFF);
+    assert_ne!(cpu.regs.xpsr & 0x08000000, 0);
+    // shasx r0,r1,r2 = faa1 f022: top (2+8)>>1=5, bot (4-6)>>1=-1.
+    let (mut cpu, _) = run_snippet(&[0xFAA1, 0xF022], &[(1, 0x00020004), (2, 0x00060008)]);
+    assert_eq!(cpu.regs.r[0], 0x0005FFFF);
+    // shsax r0,r1,r2 = fae1 f022: top (2-8)>>1=-3, bot (4+6)>>1=5.
+    // (Rm halves exchange: top uses Rm.lo=8, bottom uses Rm.hi=6.)
+    let (mut cpu, _) = run_snippet(&[0xFAE1, 0xF022], &[(1, 0x00020004), (2, 0x00060008)]);
+    assert_eq!(cpu.regs.r[0], 0xFFFD0005);
+    // uhasx r0,r1,r2 = faa1 f062: top (2+8)>>1=5, bot (4-6)>>1 logical=0xFFFF.
+    let (mut cpu, _) = run_snippet(&[0xFAA1, 0xF062], &[(1, 0x00020004), (2, 0x00060008)]);
+    assert_eq!(cpu.regs.r[0], 0x0005FFFF);
+    // uhsax r0,r1,r2 = fae1 f062: top (2-6)>>1 logical=0xFFFE,
+    // bot (4+8)>>1=6.
+    let (mut cpu, _) = run_snippet(&[0xFAE1, 0xF062], &[(1, 0x00020004), (2, 0x00080006)]);
+    assert_eq!(cpu.regs.r[0], 0xFFFE0006);
+}
+
+#[test]
+fn sxtab16_uxtab16() {    // sxtab16 r0,r1,r2 = fa21 f082: lo = 2+SXTH(4), hi = 1+SXTH(3).
+    let (mut cpu, _) = run_snippet(&[0xFA21, 0xF082], &[(1, 0x00010002), (2, 0x00030004)]);
+    assert_eq!(cpu.regs.r[0], 0x00040006);
+    // ror #8 first: Rm=0x04000300 ror 8 = 0x00040003.
+    let (mut cpu, _) = run_snippet(&[0xFA21, 0xF092], &[(1, 0x00010002), (2, 0x04000300)]);
+    assert_eq!(cpu.regs.r[0], 0x00050005);
+    // uxtab16 r0,r1,r2 = fa31 f082: zero-extend.
+    let (mut cpu, _) = run_snippet(&[0xFA31, 0xF082], &[(1, 0x00010002), (2, 0x00FF00FE)]);
+    assert_eq!(cpu.regs.r[0], 0x01000100);
+}
+
+#[test]
+fn shift_reg_flag_setting() {
+    // lsls.w r0,r1,r2 = fa11 f002.
+    let (mut cpu, _) = run_snippet(&[0xFA11, 0xF002], &[(1, 1), (2, 3)]);
+    assert_eq!(cpu.regs.r[0], 8);
+    assert_eq!(cpu.regs.xpsr & 0xE0000000, 0);
+    // Carry out of bit 31.
+    let (mut cpu, _) = run_snippet(&[0xFA11, 0xF002], &[(1, 0x80000000), (2, 1)]);
+    assert_eq!(cpu.regs.r[0], 0);
+    assert_ne!(cpu.regs.xpsr & 0x60000000, 0); // Z=1, C=1
+    // lsrs.w r0,r1,r2 = fa31 f002: 1>>1 = 0, C=1 (bit 0 out), Z=1.
+    let (mut cpu, _) = run_snippet(&[0xFA31, 0xF002], &[(1, 1), (2, 1)]);
+    assert_eq!(cpu.regs.r[0], 0);
+    assert_ne!(cpu.regs.xpsr & 0x60000000, 0);
+    // asrs.w r0,r1,r2 = fa51 f002: 0x80000000>>4 arithmetic.
+    let (mut cpu, _) = run_snippet(&[0xFA51, 0xF002], &[(1, 0x80000000), (2, 4)]);
+    assert_eq!(cpu.regs.r[0], 0xF8000000);
+    assert_ne!(cpu.regs.xpsr & 0x80000000, 0); // N=1
+    // rors.w r0,r1,r2 = fa71 f002: ror(1, 1) = 0x80000000, C=1.
+    let (mut cpu, _) = run_snippet(&[0xFA71, 0xF002], &[(1, 1), (2, 1)]);
+    assert_eq!(cpu.regs.r[0], 0x80000000);
+    assert_ne!(cpu.regs.xpsr & 0xA0000000, 0); // N=1, C=1
+}
+
+#[test]
+fn ldrex_strex_sizes() {
+    // Byte/halfword/word exclusives; single-threaded: STREX always 0.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    mem.write8(0x20003000, 0xAB);
+    mem.write16(0x20003010, 0xCDEF);
+    mem.write32(0x20003020, 0x12345678);
+    // ldrexb r0,[r1] = e8d1 0f4f ; ldrexh r2,[r3] = e8d3 2f5f
+    // (Rt = o2[15:12]).
+    mem.write16(0x20002000, 0xE8D1);
+    mem.write16(0x20002002, 0x0F4F);
+    mem.write16(0x20002004, 0xE8D3);
+    mem.write16(0x20002006, 0x2F5F);
+    cpu.regs.r[1] = 0x20003000;
+    cpu.regs.r[3] = 0x20003010;
+    cpu.regs.r[15] = 0x20002001;
+    let sys = crate::sys();
+    cpu.run(sys, &mut mem, 2);
+    assert_eq!(cpu.regs.r[0], 0xAB);
+    assert_eq!(cpu.regs.r[2], 0xCDEF);
+    // strexb r4,r5,[r6] = e8c6 5f44 ; strexh r7,r8,[r9] = e8c9 8f57
+    // (o2 = Rt:F:size:Rd).
+    mem.write16(0x20002000, 0xE8C6);
+    mem.write16(0x20002002, 0x5F44);
+    mem.write16(0x20002004, 0xE8C9);
+    mem.write16(0x20002006, 0x8F57);
+    cpu.regs.r[5] = 0x12;
+    cpu.regs.r[6] = 0x20003000;
+    cpu.regs.r[8] = 0x3456;
+    cpu.regs.r[9] = 0x20003010;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 2);
+    assert_eq!(mem.read8(0x20003000), 0x12);
+    assert_eq!(cpu.regs.r[4], 0);
+    assert_eq!(mem.read16(0x20003010), 0x3456);
+    assert_eq!(cpu.regs.r[7], 0);
+    // Word forms: ldrex r0,[r1] = e851 0f00 ;
+    // strex r2,r3,[r4,#8] = e844 3208 (word o1 nibble is 0x084x, NOT 0x08Cx;
+    // o2 = Rt:Rd:imm8, imm scaled x4).
+    // (Reload the word source: the strexb above wrote 0x12 to 0x20003000.)
+    mem.write32(0x20003000, 0x12345678);
+    mem.write16(0x20002000, 0xE851);
+    mem.write16(0x20002002, 0x0F00);
+    mem.write16(0x20002004, 0xE844);
+    mem.write16(0x20002006, 0x3208);
+    cpu.regs.r[1] = 0x20003000;
+    cpu.regs.r[3] = 0xDEADBEEF;
+    cpu.regs.r[4] = 0x20003000;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 2);
+    assert_eq!(cpu.regs.r[0], 0x12345678);
+    assert_eq!(mem.read32(0x20003020), 0xDEADBEEF);
+    assert_eq!(cpu.regs.r[2], 0);
+    // Word LDREX with an offset whose imm8 hits the B/H size nibbles
+    // (imm8 0x40 -> [7:4]==4): still a word load, addr scaled x4.
+    // ldrex r5,[r6,#0x100] = e856 5f40 (nibble stays 0x0850).
+    mem.write32(0x20003100, 0xA5A5A5A5);
+    mem.write16(0x20002000, 0xE856);
+    mem.write16(0x20002002, 0x5F40);
+    cpu.regs.r[6] = 0x20003000;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    assert_eq!(cpu.regs.r[5], 0xA5A5A5A5);
+}
+
+#[test]
 fn addw_subw_plain_imm() {
     let (mut cpu, _) = run_snippet(&[0xF20A, 0x46BC], &[(10, 100)]);
     assert_eq!(cpu.regs.r[6], 100 + 1212);
