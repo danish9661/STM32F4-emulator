@@ -66,6 +66,7 @@ export const spi_take_events: (a: number, b: number, c: number) => void;
 export const spi_tap: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
 export const tick: () => void;
 export const tick_n: (a: number) => void;
+export const tick_peripherals: () => void;
 export const tim_inject_capture: (a: number, b: number, c: number) => void;
 export const uart_rx_byte: (a: number, b: number) => number;
 export const wasmcpu_fault_len: (a: number) => number;

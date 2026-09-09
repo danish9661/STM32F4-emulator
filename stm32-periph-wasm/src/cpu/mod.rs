@@ -305,6 +305,13 @@ impl Cpu {
 
     pub fn run(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, budget: u32) -> u32 {
         let mut done = 0;
+        // Publish executed-instruction progress to the shared virtual clock
+        // in small chunks, so model reads mid-step (polled timer counters,
+        // watchdog edges) observe time advancing instead of a frozen count.
+        // Chunked rather than per-instruction to keep the atomic off the
+        // hottest path; the remainder flushes at step end. Model-side delta
+        // bookkeeping (last_tick) partitions the interval exactly, so chunked
+        // publishing neither gains nor loses ticks vs one batch.
         while done < budget {
             if self.fault.is_some() {
                 break;
@@ -331,6 +338,9 @@ impl Cpu {
                 break;
             }
             done += 1;
+            if done & 15 == 0 {
+                crate::system::INSTRUCTION_COUNT.fetch_add(16u64, Ordering::Relaxed);
+            }
             // Keep the inactive... no — keep the CURRENT stack bank in sync
             // with r13 after every thread-mode instruction. PUSH/POP/ADD-SP
             // and LDM/STM writeback move r13 directly; without this the bank
@@ -364,6 +374,7 @@ impl Cpu {
                 }
             }
         }
+        crate::system::INSTRUCTION_COUNT.fetch_add((done & 15) as u64, Ordering::Relaxed);
         done
     }
 }

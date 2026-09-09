@@ -578,9 +578,7 @@ and is kept as history — the mechanisms no longer exist.
   editing the `pollingEth` line in pkg/cli.mjs.
 - Validated on a fresh gateway: eth_http 3× `=== HTTP 130b ===` + body,
   eth_dhcp `=== DHCP SUCCESS ===`, eth_test `ETH Test: done`, all EXIT 0.
-- Debug: `DBG_TX=1` (TX len + first 48 B), `RX_HEX=1`, `DBG_RX=1`,
-  `DBG_RXDESC=1` (post-mortem flag/idx/len/descs at the eth_http layout),
-  `DBG_RXDESC=2` (per-step RX trace). Temp debug lives in the ported file.
+- Debug: `DBG_TX=1` (TX len + first 48 B), `RX_HEX=1`, `DBG_RX=1`.
 - Note: `scripts/verify_ethernet.sh` passes `"../$name/$name.bin"` (repo-root
   relative), which only resolves if run with the firmware dirs next to
   `pkg/` — pass explicit `../../eth_http/eth_http.bin`-style paths instead.
@@ -2711,3 +2709,47 @@ What was removed or rewritten:
 What was deliberately kept: the differential-fuzz RECORD in §22 (why the
 decoder is trusted), the wedge/pump archaeology in §§7/9/11/16–17 (why the
 code looks the way it does), and the gateway protocol notes in §10 (unchanged).
+
+---
+
+## 24. Peripheral-model live-evaluation fixes (2026-09-09)
+
+Five headless-Chrome sweep failures (36/41 PASS), all proven pre-existing
+via a worktree control @ `b059cbc` (identical uart tails), then fixed.
+Pattern behind most of them: polled model state that only advanced in the
+post-step `tick_n`, so same-step firmware checks saw frozen state.
+
+- **Sync mem-to-mem DMA** (`cpu/mem.rs` + `system.rs`): the Rust core drains
+  staged `MemCopy && !peripheral` transfers inline after the guest EN store
+  (memmove in guest RAM + `mark_dma_completed`). Fixes `edge_test`/`periph_test`
+  immediate NDTR/dst/TCIF checks. Peripheral transfers still stage for JS.
+- **Live instruction clock** (`cpu/mod.rs` + `lib.rs`): the core publishes
+  executed counts in 16-inst chunks (`INSTRUCTION_COUNT`), so mid-step model
+  reads observe time. The post-step driver tick switched to count-less
+  `tick_peripherals()` (keeps `tick_n` for sleep paths; native-test
+  semantics unchanged). Verified totals identical (cargo 57/57, soaks).
+- **TIM CNT live** (`tim.rs`): the `0x24` early-return skipped `advance()`;
+  now advances on read (delta-partitioned, exact). Fixes `TIM CNT advances`.
+  Also fixed the PWM duty div-by-zero (`ARR==0xFFFFFFFF` transient → u64
+  math; this crashed `test_component_pwm` with `unreachable` at tim.rs:162).
+- **WWDG live + WDGA semantics** (`wwdg.rs`): SR read evaluates the
+  countdown; the counter runs once a CR write starts it **regardless of
+  WDGA** (WDGA gates only reset generation — firmware observes EWIF
+  reset-free, matching silicon). Default-state SR stays 0 (no counting
+  before first CR write). Fixes `WWDG EWIF set`.
+- **DCMI FNE + live-pull** (`dcmi.rs`): SR bit 2 reports FIFO-nonempty OR
+  capture-with-data-remaining; polled DR reads pull one live pixel when the
+  FIFO is empty mid-capture (no spurious OVR — push only happens on empty).
+- **Demo harness wiring** (`site/app.js`): `spi_tft_test`/`edge_test` SPI3
+  flash (PB12 / no-CS), `periph_test`+`edge_test` I2C EEPROM @0x50 (their
+  wait loops hang without a slave), DCMI ramp camera + boot-time feed for
+  `new_periph_test`/`deep_periph_test` (sensor data must predate CAPTURE),
+  `edge_test`+`periph_test` into `IRQ_FIRMWARES` (their DMA-IRQ waits need
+  delivery; neither enables SysTick-IRQ/ETH so nothing spurious fires).
+- **edge_test SPI clocking** (firmware bug, fails on silicon too): JEDEC /
+  device-ID / 16-bit reads now discard the command-phase dummy byte first
+  (reads never clock). Rebuilt via arduino-cli + `tools/make_firmware.mjs`.
+- `scripts/verify_ethernet.sh`: fixed repo-root-relative firmware paths
+  (`../../$name`) and moved logs to `.pw-scratch/`.
+- `pkg/cli.mjs` debug kept: `DBG_TX` (len + 48 B), `RX_HEX`, `DBG_RX`;
+  the case-specific `DBG_RXDESC`/`RXT` traces were removed after use.

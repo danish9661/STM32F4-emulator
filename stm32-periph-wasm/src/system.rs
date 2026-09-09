@@ -525,6 +525,20 @@ impl WasmSystem {
         }
     }
 
+    /// Atomically remove and return the oldest queued DMA transfer iff it is
+    /// a pure memory-to-memory move (MemCopy direction, no peripheral side).
+    /// The CPU core drains these synchronously right after the guest's EN
+    /// store, so polling firmware observes completion (data + TCIF/HTIF)
+    /// without waiting for the JS driver round-trip. Peripheral-involving
+    /// transfers always stay staged for the driver (it owns the data path).
+    pub fn take_memcopy_dma_transfer(&self) -> Option<DmaTransfer> {
+        let mut pending = self.pending_dma.borrow_mut();
+        match pending.first() {
+            Some(t) if t.direction == DmaDir::MemCopy && !t.peripheral => Some(pending.remove(0)),
+            _ => None,
+        }
+    }
+
     pub fn mark_dma_completed(&self, stream_idx: usize, _success: bool) {
         DMA_COMPLETED[stream_idx].store(true, Ordering::Release);
         // Fire NVIC interrupt after transfer completes

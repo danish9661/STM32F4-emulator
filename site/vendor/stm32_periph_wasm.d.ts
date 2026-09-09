@@ -36,8 +36,8 @@ export class WasmCpu {
     reset_cpu(sp: number, pc: number): void;
     /**
      * Enable/disable inline guest exception delivery (NVIC SysTick, ETH,
-     * USART RX, SVC, PendSV...). Off by default (polling-only, matches the
-     * Unicorn path where pending model IRQs never stop execution).
+     * USART RX, SVC, PendSV...). Off by default (polling-only: pending
+     * model IRQs never stop execution).
      */
     set_deliver_irqs(v: boolean): void;
     /**
@@ -353,9 +353,8 @@ export function reset_state(): void;
 /**
  * Set a pending interrupt in the NVIC. Negative `irq` values select system
  * exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
- * Used by the FreeRTOS path in the JS driver, which detects `svc` in the CPU
- * hook and synthesizes the SVC exception here instead of letting Unicorn take
- * it natively (this WASM build cannot perform the Cortex-M exception return).
+ * Used by the FreeRTOS path: the Rust core synthesizes these exceptions
+ * with exact inline entry/return.
  */
 export function set_intr_pending(irq: number): void;
 
@@ -391,6 +390,13 @@ export function tick(): void;
  * delta is semantically identical to one tick per instruction.
  */
 export function tick_n(delta: number): void;
+
+/**
+ * Run one peripheral-model tick WITHOUT advancing the instruction clock.
+ * The CPU core publishes its executed count itself while stepping, so the
+ * post-step driver tick must not add the budget a second time.
+ */
+export function tick_peripherals(): void;
 
 /**
  * Host/JS-driven TIM input-capture edge. Simulate a TIx edge on timer `name`
@@ -478,6 +484,7 @@ export interface InitOutput {
     readonly spi_tap: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly tick: () => void;
     readonly tick_n: (a: number) => void;
+    readonly tick_peripherals: () => void;
     readonly tim_inject_capture: (a: number, b: number, c: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;
     readonly wasmcpu_fault_len: (a: number) => number;

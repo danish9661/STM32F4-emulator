@@ -248,7 +248,11 @@ void setup() {
     tx_s("--- SPI ---\n");
 
     SPI_CR1 = (1 << 6) | (1 << 2) | (1 << 1);
-    SPI_DR = 0x9F;
+    // NOTE: each DR write clocks exactly one response byte, and the command
+    // byte itself clocks out a dummy — so discard the first read of every
+    // sequence (real silicon behaves the same; reading DR never clocks).
+    SPI_DR = 0x9F; (void)SPI_DR;
+    SPI_DR = 0;
     uint8_t j1 = SPI_DR;
     SPI_DR = 0;
     uint8_t j2 = SPI_DR;
@@ -256,10 +260,12 @@ void setup() {
     uint8_t j3 = SPI_DR;
     CHECK(j1 == 0xEF && j2 == 0x40 && j3 == 0x16, "SPI flash JEDEC ID");
 
-    // SPI device ID
-    SPI_DR = 0x90;
-    SPI_DR = 0;
-    SPI_DR = 0;
+    // SPI device ID (0x90 + 3 addr clocks + data; first 5 bytes dummy)
+    SPI_DR = 0x90; (void)SPI_DR;
+    SPI_DR = 0; (void)SPI_DR;
+    SPI_DR = 0; (void)SPI_DR;
+    SPI_DR = 0; (void)SPI_DR;
+    SPI_DR = 0; (void)SPI_DR;
     SPI_DR = 0;
     uint8_t d1 = SPI_DR;
     SPI_DR = 0;
@@ -270,13 +276,15 @@ void setup() {
     CHECK((SPI_SR & 3) != 0, "SPI SR data ready");
     CHECK((SPI_SR & 3) == 0, "SPI SR toggles");
 
-    // SPI 16-bit mode
+    // SPI 16-bit mode (same dummy-first rule: the 0x9F00 word clocks out
+    // dummy,0xEF, so the following word carries 0x40,0x16)
     SPI_CR1 = (1 << 6) | (1 << 11) | (1 << 2) | (1 << 1);
-    SPI_DR = 0x9F00;
+    SPI_DR = 0x9F00; (void)SPI_DR;
+    SPI_DR = 0x0000;
     uint32_t j16 = SPI_DR;
     uint8_t hi = (j16 >> 8) & 0xFF;
     uint8_t lo = j16 & 0xFF;
-    CHECK(hi == 0xEF && lo == 0x40, "SPI 16-bit JEDEC hi/lo");
+    CHECK(hi == 0x40 && lo == 0x16, "SPI 16-bit JEDEC hi/lo");
 
     tx_s("---- SUMMARY ----\n");
     tx_s("PASS: "); tx_hex(pass); tx_s("\n");

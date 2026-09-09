@@ -61,7 +61,7 @@ export async function createEmulator(opts) {
     }
 
     const {
-        periph_read, periph_write, tick, tick_n, get_uart_output,
+        periph_read, periph_write, tick, tick_n, tick_peripherals, get_uart_output,
         dma_get_pending_count, dma_get_pending, dma_set_completed,
         dma_periph_read, dma_periph_write,
         is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, qspi_register_flash, init_svd,
@@ -648,7 +648,9 @@ export async function createEmulator(opts) {
                 }
                 const c = cpu.step(n);
                 instCount += c;
-                try { tick_n(c); } catch {}
+                // The core published its executed count itself mid-step, so
+                // tick WITHOUT adding here (tick_n(c) would double-count).
+                try { tick_peripherals(); } catch {}
                 wProcessDma();
                 wProcessEth();
                 try { processDevices(); } catch {}

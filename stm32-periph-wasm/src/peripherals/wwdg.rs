@@ -30,20 +30,32 @@ impl Wwdg {
 
     /// Continuous countdown driven by the virtual clock (PCLK1/4096/prescaler),
     /// independent of CPU accesses to the WWDG registers.
+    /// NOTE: no WDGA gate here — on real hardware the counter runs whenever
+    /// the peripheral is clocked; WDGA only gates *reset generation*. This
+    /// lets firmware observe the EWIF edge with WDGA=0, reset-free (which is
+    /// exactly what new_periph_test does).
     fn tick_counter(&mut self, sys: &System) {
-        if !self.wdga_enabled() { return; }
         let now = INSTRUCTION_COUNT.load(Ordering::Relaxed);
-        if !self.initialized { self.last_tick = now; self.initialized = true; return; }
+        // Not started (no CR write yet): don't count, just track time, so a
+        // default-state SR read stays 0. Starting happens in the CR-write
+        // path below, WDGA or not.
+        if !self.initialized { self.last_tick = now; return; }
         let elapsed = now.saturating_sub(self.last_tick);
         let ticks = elapsed / self.tick_instructions();
         if ticks == 0 { return; }
         self.last_tick = now;
         let counter = self.cr & 0x7F;
         if counter < ticks as u32 {
+            // Underflow: wrap and keep counting. A reset is generated only
+            // when WDGA was set (captured before overwriting CR); with WDGA
+            // clear the watchdog is purely observational.
+            let wdga = self.wdga_enabled();
             self.cr = 0x7F; // clear WDGA + counter; re-enabled only when firmware re-sets it
-            self.initialized = false;
             self.early_wakeup(sys);
-            request_watchdog_reset(2);
+            if wdga {
+                self.initialized = false;
+                request_watchdog_reset(2);
+            }
         } else {
             let new_counter = counter - ticks as u32;
             self.cr = (self.cr & !0x7F) | new_counter;
@@ -56,8 +68,17 @@ impl Peripheral for Wwdg {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn tick(&mut self, sys: &System) { self.tick_counter(sys); }
 
-    fn read(&mut self, _sys: &System, offset: u32) -> u32 {
-        match offset { 0x00 => self.cr, 0x04 => self.cfr, 0x08 => self.sr, _ => 0 }
+    fn read(&mut self, sys: &System, offset: u32) -> u32 {
+        match offset {
+            0x00 => self.cr,
+            0x04 => self.cfr,
+            // Evaluate the countdown live: the EWIF edge can fall between the
+            // enable write and the SR read inside a single emulation step,
+            // before any tick() runs. Consumes the pending delta, so tick()
+            // later finds nothing left to do (no double advance).
+            0x08 => { self.tick_counter(sys); self.sr },
+            _ => 0,
+        }
     }
 
     fn write(&mut self, sys: &System, offset: u32, value: u32) {

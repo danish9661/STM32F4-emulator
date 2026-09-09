@@ -43,7 +43,7 @@ const ETH_RX_MAP = {
 // Interrupt-driven firmware: the emulator pumps guest IRQ handlers (USART RXNE
 // etc.). OFF for ETH firmware — the driver signals completion via SRAM
 // irq_flag and the guest ETH_IRQHandler would double-process DMASR/rx_desc.
-const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehensive_test', 'eth_irq_test']);
+const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehensive_test', 'eth_irq_test', 'edge_test', 'periph_test']);
 
 // Interrupt-driven ETH firmware: the guest ETH_IRQHandler (run by the pump)
 // reads DMASR and scans rx_desc itself, so the driver must not write the
@@ -72,6 +72,19 @@ const DEVICE_FIRMWARES = {
     audio_play_test: { speaker: true },
     rtc_test: { rtc: { i2c: 'I2C1', addr: 0x68, init: RTC_INIT } },
     qspi_test: { qspi: [{ peripheral: 'QUADSPI', size: 256 }] },
+    // new_periph_test exercises DCMI polled capture (DR increments + FNE),
+    // which needs a sensor frame — same idea as the audio_test WAV seed.
+    // Ramp pixels so consecutive DR reads differ.
+    new_periph_test: { camera: { width: 64, height: 48, pixels: Uint8Array.from({ length: 64 * 48 }, (_, i) => i & 0xFF) } },
+    deep_periph_test: { camera: { width: 64, height: 48, pixels: Uint8Array.from({ length: 64 * 48 }, (_, i) => i & 0xFF) } },
+    // periph_test talks to an I2C EEPROM at 0x50 (write/readback + blank
+    // check at addr 0). Blank image; the model handles the R/W protocol.
+    periph_test: { i2c_eeprom: [{ peripheral: 'I2C1', address: 0x50, data: new Uint8Array(256).fill(0xFF) }] },
+    edge_test: { i2c_eeprom: [{ peripheral: 'I2C1', address: 0x50, data: new Uint8Array(256).fill(0xFF) }], spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4016, size: 0x200000, cs: null, data: new Uint8Array(0x200000).fill(0xFF) }] },
+    // spi_tft_test talks to an SPI NOR flash on SPI3 (software CS PB12).
+    // Without it JEDEC/status reads return 0xFF and the checks FAIL.
+    // Blank 2 MB image, same shape as site/test_spi_flash.mjs.
+    spi_tft_test: { spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4015, size: 0x200000, cs: 'PB12', data: new Uint8Array(0x200000).fill(0xFF) }] },
 };
 
 // audio_test needs the same 64-sample PCM16 WAV the node harness
@@ -388,6 +401,15 @@ const boot = async () => {
         // Seed the model's audio source for audio_test (see makeAudioTestWav).
         if (image.name === 'audio_test' && bindings.audio_load_wav) {
             try { bindings.audio_load_wav(makeAudioTestWav()); } catch (e) {}
+        }
+        // Pre-feed one camera frame so DCMI capture has sensor data from the
+        // very first step (the firmware reads DR immediately after setting
+        // CAPTURE, before any per-step feed runs).
+        if ((image.name === 'new_periph_test' || image.name === 'deep_periph_test') && emu.camera) {
+            try {
+                const cam = DEVICE_FIRMWARES[image.name].camera;
+                emu.camera.feed(cam.width, cam.height, cam.pixels);
+            } catch (e) {}
         }
     }
 

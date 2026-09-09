@@ -8,6 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 MAX_INST="${1:-5000000}"
 PKG="$REPO_ROOT/stm32-periph-wasm/pkg"
+LOGDIR="$REPO_ROOT/.pw-scratch"
+mkdir -p "$LOGDIR"
 FAIL=0
 
 command -v node >/dev/null || { echo "node not found"; exit 2; }
@@ -27,7 +29,9 @@ fi
 
 run_check() {
   local name="$1" cfg="$2" log="$3" marker="$4"
-  (cd "$PKG" && node cli.mjs "../$name/$name.bin" "$MAX_INST" --gateway --config="../../$name/$cfg") >"$log" 2>&1
+  # NOTE: firmware/config paths are repo-root relative (../../ from $PKG);
+  # the old "../$name" form resolved inside stm32-periph-wasm/ and failed.
+  (cd "$PKG" && node cli.mjs "../../$name/$name.bin" "$MAX_INST" --gateway --config="../../$name/$cfg") >"$log" 2>&1
   if grep -a -q "$marker" "$log"; then
     echo "PASS: $name (marker '$marker')"
   else
@@ -37,12 +41,12 @@ run_check() {
   fi
 }
 
-run_check eth_http  config.yaml /tmp/opencode/verify_eth_http.log  "TCP connected"
-run_check eth_dhcp  config.yaml /tmp/opencode/verify_eth_dhcp.log  "=== DHCP SUCCESS ==="
-run_check eth_test  config.yaml /tmp/opencode/verify_eth_test.log  "ETH Test: done"
+run_check eth_http  config.yaml "$LOGDIR/verify_eth_http.log"  "TCP connected"
+run_check eth_dhcp  config.yaml "$LOGDIR/verify_eth_dhcp.log"  "=== DHCP SUCCESS ==="
+run_check eth_test  config.yaml "$LOGDIR/verify_eth_test.log"  "ETH Test: done"
 
 # eth_http must also show zero TCP failures
-if grep -a -q "TCP fail" /tmp/opencode/verify_eth_http.log; then
+if grep -a -q "TCP fail" "$LOGDIR/verify_eth_http.log"; then
   echo "FAIL: eth_http reported TCP fail"
   FAIL=1
 fi

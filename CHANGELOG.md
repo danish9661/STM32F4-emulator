@@ -32,6 +32,26 @@ date-based entries rather than strict SemVer until the first published release.
   `createEmulator`.
 
 ### Fixed
+- **Synchronous mem-to-mem DMA completion**: polling firmware that checks
+  NDTR/dst/flags on the instructions right after enabling the stream
+  (`edge_test`, `periph_test`) now sees the transfer complete inline. The
+  Rust core drains staged mem-copy transfers straight after the guest's EN
+  store (bytes moved in guest RAM + TCIF/HTIF latched); peripheral-side
+  transfers still stage for the JS driver.
+- **Live timer/counter reads**: TIM CNT, WWDG counter/EWIF, and DCMI FIFO
+  state are now evaluated from the live instruction clock on read, so polled
+  checks (`TIM CNT advances`, `WWDG EWIF set`, `DCMI FNE set`) pass even when
+  no model tick ran since the enabling write. The core publishes executed
+  instructions in 16-inst chunks; the post-step driver tick no longer
+  re-adds the budget (`tick_peripherals`).
+- **WWDG counts with WDGA clear** (reset generation still needs WDGA):
+  firmware can observe the EWIF edge reset-free, matching silicon.
+- **DCMI FNE (SR bit 2)** reflects FIFO/sensor state; polled DR reads pull
+  live pixels mid-capture.
+- **PWM duty math** uses u64: ARR=0xFFFFFFFF (reset default) no longer
+  traps on divide-by-zero during transient config windows.
+- **edge_test SPI clocking**: JEDEC/device-ID/16-bit reads now discard the
+  command-phase dummy byte first (reads never clock on real SPI either).
 - **FreeRTOS interrupt-pump context-switch bug**: a task-context `portYIELD()`
   (a `str` to SCB ICSR `PENDSVSET`) was stopped mid-instruction with PC frozen
   at the store; the exception frame saved that frozen PC, so the resumed task

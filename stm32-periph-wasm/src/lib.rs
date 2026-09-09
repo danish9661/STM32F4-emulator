@@ -90,6 +90,14 @@ pub fn tick_n(delta: u32) {
     sys().tick();
 }
 
+/// Run one peripheral-model tick WITHOUT advancing the instruction clock.
+/// The CPU core publishes its executed count itself while stepping, so the
+/// post-step driver tick must not add the budget a second time.
+#[wasm_bindgen]
+pub fn tick_peripherals() {
+    sys().tick();
+}
+
 /// Check if any interrupt is pending (non-consuming).
 #[wasm_bindgen]
 pub fn has_pending_interrupt() -> bool {

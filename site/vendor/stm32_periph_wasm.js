@@ -174,8 +174,8 @@ export class WasmCpu {
     }
     /**
      * Enable/disable inline guest exception delivery (NVIC SysTick, ETH,
-     * USART RX, SVC, PendSV...). Off by default (polling-only, matches the
-     * Unicorn path where pending model IRQs never stop execution).
+     * USART RX, SVC, PendSV...). Off by default (polling-only: pending
+     * model IRQs never stop execution).
      * @param {boolean} v
      */
     set_deliver_irqs(v) {
@@ -925,9 +925,8 @@ export function reset_state() {
 /**
  * Set a pending interrupt in the NVIC. Negative `irq` values select system
  * exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
- * Used by the FreeRTOS path in the JS driver, which detects `svc` in the CPU
- * hook and synthesizes the SVC exception here instead of letting Unicorn take
- * it natively (this WASM build cannot perform the Cortex-M exception return).
+ * Used by the FreeRTOS path: the Rust core synthesizes these exceptions
+ * with exact inline entry/return.
  * @param {number} irq
  */
 export function set_intr_pending(irq) {
@@ -1021,6 +1020,15 @@ export function tick() {
  */
 export function tick_n(delta) {
     wasm.tick_n(delta);
+}
+
+/**
+ * Run one peripheral-model tick WITHOUT advancing the instruction clock.
+ * The CPU core publishes its executed count itself while stepping, so the
+ * post-step driver tick must not add the budget a second time.
+ */
+export function tick_peripherals() {
+    wasm.tick_peripherals();
 }
 
 /**

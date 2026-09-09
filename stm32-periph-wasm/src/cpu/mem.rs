@@ -111,6 +111,51 @@ impl FlatMemory {
             }
         }
     }
+
+    fn read_ram_byte(&self, addr: u32) -> u8 {
+        if self.in_ram(addr) {
+            self.ram[(addr - self.ram_base) as usize]
+        } else if let Some(idx) = self.extra_idx(addr) {
+            self.extra[idx].data[(addr - self.extra[idx].base) as usize]
+        } else {
+            0
+        }
+    }
+
+    fn write_ram_byte(&mut self, addr: u32, v: u8) {
+        if self.in_ram(addr) {
+            self.ram[(addr - self.ram_base) as usize] = v;
+        } else if let Some(idx) = self.extra_idx(addr) {
+            let r = &mut self.extra[idx];
+            r.data[(addr - r.base) as usize] = v;
+        }
+        // Flash/unmapped destinations are skipped (matches the JS driver,
+        // whose mem_write there throws and is ignored before completion).
+    }
+
+    /// Synchronously complete staged memory-to-memory DMA transfers.
+    /// Real mem-to-mem DMA runs at bus rate while the guest continues, but
+    /// polling firmware (edge_test, periph_test) checks NDTR/dst/flags on
+    /// the very next instructions — only an inline move satisfies that, the
+    /// way the pre-latch model behaved. Peripheral transfers stay staged:
+    /// their data path lives in the JS driver.
+    fn service_sync_dma(&mut self) {
+        loop {
+            let t = match crate::sys().take_memcopy_dma_transfer() {
+                Some(t) => t,
+                None => break,
+            };
+            // memmove semantics via a temp buffer (src/dst may overlap).
+            let mut buf = Vec::with_capacity(t.size);
+            for i in 0..t.size {
+                buf.push(self.read_ram_byte(t.src.wrapping_add(i as u32)));
+            }
+            for (i, b) in buf.iter().enumerate() {
+                self.write_ram_byte(t.dst.wrapping_add(i as u32), *b);
+            }
+            crate::sys().mark_dma_completed(t.stream_idx, true);
+        }
+    }
 }
 
 impl Memory for FlatMemory {
@@ -157,6 +202,7 @@ impl Memory for FlatMemory {
             // (a USART DR write emits a UART char), so one guest store must
             // equal exactly one model call, like the JS memWriteHook.
             crate::sys().p.write(crate::sys(), addr, 1, v as u32);
+            self.service_sync_dma();
             return;
         }
         if self.in_flash(addr) {
@@ -173,6 +219,7 @@ impl Memory for FlatMemory {
     fn write16(&mut self, addr: u32, v: u16) {
         if is_periph(addr) {
             crate::sys().p.write(crate::sys(), addr, 2, v as u32);
+            self.service_sync_dma();
             return;
         }
         self.write8(addr, (v & 0xFF) as u8);
@@ -181,6 +228,7 @@ impl Memory for FlatMemory {
     fn write32(&mut self, addr: u32, v: u32) {
         if is_periph(addr) {
             crate::sys().p.write(crate::sys(), addr, 4, v);
+            self.service_sync_dma();
             return;
         }
         self.write8(addr, (v & 0xFF) as u8);

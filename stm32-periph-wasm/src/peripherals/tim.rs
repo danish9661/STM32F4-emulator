@@ -156,10 +156,14 @@ impl Timer {
             }
         }
 
-        // Update PWM duty based on CCR/ARR
+        // Update PWM duty based on CCR/ARR. u64 math: ARR==0xFFFFFFFF
+        // (reset default on 32-bit timers, or a transient config window with
+        // CC already enabled) would otherwise make (arr+1) wrap to zero and
+        // trap, and CCR*100 can overflow u32 for large CCR values. A full-
+        // range period yields ~0% duty, which is the honest answer.
         for ch in 0..4 {
             if self.ccer & (1 << (ch * 4)) != 0 && self.arr > 0 {
-                self.pwm_duty[ch] = self.ccr[ch] * 100 / (self.arr + 1);
+                self.pwm_duty[ch] = ((self.ccr[ch] as u64 * 100) / ((self.arr as u64) + 1)) as u32;
             }
         }
     }

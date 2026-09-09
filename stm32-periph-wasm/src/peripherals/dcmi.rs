@@ -81,8 +81,13 @@ impl Dcmi {
         px
     }
 
-    fn feed_next_pixel(&mut self) {
-        if let Some(px) = self.advance_pixel() {
+    /// Capture running with sensor data still to stream (frame loaded and
+    /// not fully consumed). Used for live FNE reporting and polled pulls.
+    fn streaming(&self) -> bool {
+        (self.cr & 1) != 0 && self.frame.is_some() && self.frame_y < self.frame_h
+    }
+
+    fn feed_next_pixel(&mut self) {        if let Some(px) = self.advance_pixel() {
             if self.fifo.len() >= FIFO_DEPTH {
                 // FIFO overflow: drop the oldest, flag OVR.
                 self.fifo.remove(0);
@@ -112,7 +117,13 @@ impl Peripheral for Dcmi {
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => self.cr,
-            0x04 => self.sr,
+            // SR bit 2 is FNE (FIFO not empty) on real hardware: report it
+            // live ORed with the latched event bits (LINE/FRAME), so polled
+            // capture drivers see data available without an interrupt.
+            // "Streaming" (capture on with frame data remaining) also reads
+            // as FNE: the live-pull DR path below guarantees a read always
+            // produces fresh data while the sensor runs, like continuous PCLK.
+            0x04 => self.sr | (if !self.fifo.is_empty() || self.streaming() { 0x04 } else { 0 }),
             0x08 => self.ris,
             0x0C => self.ier,
             0x10 => { let v = self.ris; self.ris = 0; v }
@@ -123,11 +134,20 @@ impl Peripheral for Dcmi {
             0x28 => {
                 let v = if crate::system::dma_read_active() {
                     self.dma_pop()
-                } else if let Some(px) = self.fifo.first().copied() {
-                    self.fifo.remove(0);
-                    px as u32
                 } else {
-                    0
+                    if self.fifo.is_empty() && self.streaming() {
+                        // Live PCLK: pull one pixel so a polled read during
+                        // capture observes streaming data even if no model
+                        // tick ran since CAPTURE was set. Only fires on an
+                        // empty FIFO, so no spurious overruns.
+                        self.feed_next_pixel();
+                    }
+                    if let Some(px) = self.fifo.first().copied() {
+                        self.fifo.remove(0);
+                        px as u32
+                    } else {
+                        0
+                    }
                 };
                 self.dr = v;
                 self.fire_interrupts(sys);

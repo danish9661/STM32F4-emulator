@@ -353,7 +353,6 @@ async function main() {
     let smallBatch = false;
     let totalSteps = 0;
     let instCount = 0;
-    let dbgPrevSig = '';
     const startTime = Date.now();
 
     // eslint-disable-next-line no-constant-condition
@@ -379,15 +378,6 @@ async function main() {
             break;
         }
         instCount = r.instCount;
-        if (process.env.DBG_RXDESC === '2') {
-            // Per-step RX trace: flag/idx/len + all four rdes0 (only on change).
-            const rr = (a) => emu.read32(a) >>> 0;
-            const sig = [0x20000620, 0x20000628, 0x2000062c, 0x20000630, 0x20000638, 0x20000640, 0x20000648, 0x20000000, 0x20000654].map(rr).join(',');
-            if (sig !== dbgPrevSig) {
-                dbgPrevSig = sig;
-                console.log(`[RXT step=${totalSteps} inst=${instCount}] f=${rr(0x20000620).toString(16)} idx=${rr(0x20000628)} len=${rr(0x2000062c)} sport=${rr(0x20000000).toString(16)} ack=${rr(0x20000654).toString(16)} d=${[0, 1, 2, 3].map((i) => rr(0x20000630 + i * 8).toString(16)).join('/')}`);
-            }
-        }
         const uartChunk = emu.drainUart() || '';
         if (uartChunk) {
             process.stdout.write(uartChunk);
@@ -439,21 +429,6 @@ async function main() {
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
     const regs = emu.getRegisters();
-    if (process.env.DBG_RXDESC) {
-        // eth_http layout (nm-verified): ETH_IRQ_FLAG 0x20000620,
-        // RX_FRAME_IDX 0x20000628, RX_FRAME_LEN 0x2000062c, RX_DESC 0x20000630.
-        const r = (a) => (emu.read32(a) >>> 0).toString(16).padStart(8, '0');
-        console.log(`[RXDESC] flag=${r(0x20000620)} idx=${r(0x20000628)} len=${r(0x2000062c)}`);
-        console.log(`[RXDESC] srcport=${r(0x20000000)} tgtport=${r(0x20000650)}`);
-        for (let i = 0; i < 4; i++) {
-            console.log(`[RXDESC] d${i} rdes0=${r(0x20000630 + i * 8)} rdes1=${r(0x20000630 + i * 8 + 4)}`);
-        }
-        // First 40 bytes of the d1 buffer (TCP ports at +34 if IP ihl=5).
-        try {
-            const fb = emu.uc.mem_read(BigInt(0x20000c60), 40);
-            console.log(`[RXDESC] d1buf=${[...fb].map((b) => b.toString(16).padStart(2, '0')).join('')}`);
-        } catch (e) { console.log(`[RXDESC] d1buf READERR ${e.message}`); }
-    }
 
     const uartOut = emu.drainUart() || '';
     if (!uartOut.trim()) {
