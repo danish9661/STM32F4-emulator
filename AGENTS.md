@@ -2792,6 +2792,10 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
 - Memory: vldr/vstr (offset-only; GAS rejects writeback — fault on P=0/W=1),
   vldm/vstm/vpush/vpop (IA: P=0,U=1,W optional; DB: P=1,U=0, W REQUIRED —
   both GAS-probed rejections; D-lists gated to D0–D15, imm8 odd faults).
+  Compiler-output coverage: fpu_test's SPILL path runs real `vpush.64
+  {d8-d10}`/`vpop` through a call/return (GCC never emits S-list
+  multiples — tried; S-lists stay unit+probe-covered, same as
+  parallel-DSP with no compiler emitters).
 - Arithmetic: add/sub/mul/div/mla/mls/nmul/nmla/nmls (UNFUSED, never
   `mul_add`), vsqrt, vabs/vneg (pure bit ops, never raise — even SNaN).
 - Fused VFMA/VFMS/VFNMA/VFNMS: SINGLE rounding, exact via u128 integer

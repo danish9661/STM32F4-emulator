@@ -15,7 +15,7 @@
 //
 // Serve from site/ (python3 -m http.server 8123 --directory site) — the page
 // fetches the WAD + SVD + wasm at runtime (file:// won't work).
-import { FIRMWARES } from './firmware.js?v=4';
+import { FIRMWARES } from './firmware.js?v=5';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
@@ -78,7 +78,7 @@ window.__doomLog = () => dbgLog.slice();
 window.__pace = () => window.__lastPace || null;
 // Build stamp: type __doomVer in the console — if it doesn't print the
 // number below, the tab runs a cached copy (hard-refresh: Ctrl+Shift+R).
-window.__doomVer = 44;
+window.__doomVer = 45;
 // Keys pressed before the worker boots would be eaten (nothing listens
 // yet) — the old "wait before touching anything" ritual. Instead they queue
 // here and flush on 'booted', so press ahead: the game catches up. The

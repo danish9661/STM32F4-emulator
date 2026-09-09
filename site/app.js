@@ -5,7 +5,7 @@
 import * as bindings from './vendor/stm32_periph_wasm.js?v=2';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
-import { FIRMWARES } from './firmware.js?v=4';
+import { FIRMWARES } from './firmware.js?v=5';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
 

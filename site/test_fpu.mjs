@@ -28,7 +28,8 @@ console.log('uart tail:', tail);
 
 const want = ['=== FPU Test ===', 'CPACR ok', 'ADD 40700000 PASS', 'SUB C0600000 PASS',
     'MUL 40900000 PASS', 'DIV 40600000 PASS', 'SQRT 3FB504F3 PASS',
-    'FMA 28800000 PASS', 'CMP OK', 'CVT OK', 'FPU all PASS', 'FPU done'];
+    'FMA 28800000 PASS', 'CMP OK', 'CVT OK', 'SPILL 43528000 PASS',
+    'FPU all PASS', 'FPU done'];
 const missing = want.filter((m) => !all.includes(m));
 if (missing.length) console.log('missing:', missing.join(' | '));
 const pass = missing.length === 0 && !all.includes('FAIL') && emu.faultInfo() == null;

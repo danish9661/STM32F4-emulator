@@ -336,6 +336,7 @@ is under test. Results print as raw hex bits with per-check PASS/FAIL.
   FMA 28800000 PASS
   CMP OK
   CVT OK
+  SPILL 43528000 PASS
   FPU all PASS
   FPU done
   ```

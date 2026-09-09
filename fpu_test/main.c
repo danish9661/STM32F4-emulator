@@ -55,6 +55,20 @@ static unsigned int fbits(float f) {
     return u.u;
 }
 
+// Many live floats across a call: forces the compiler to spill callee-
+// saved D-regs via vpush/vldm (the multi-register path — check the
+// disassembly for vpush.64/vldm sp!). Plain (non-volatile) locals so they
+// actually live in S-regs; the array is volatile so nothing folds.
+static volatile float Vvals[20];
+__attribute__((noinline)) static float spill_helper(float x) { return x * 1.5f; }
+__attribute__((noinline)) static float spill_call(float *p) {
+    float a0=p[0],a1=p[1],a2=p[2],a3=p[3],a4=p[4],a5=p[5],a6=p[6],a7=p[7];
+    float a8=p[8],a9=p[9],a10=p[10],a11=p[11],a12=p[12],a13=p[13],a14=p[14],a15=p[15];
+    float a16=p[16],a17=p[17],a18=p[18],a19=p[19];
+    float t = spill_helper(a0);
+    return t+a1+a2+a3+a4+a5+a6+a7+a8+a9+a10+a11+a12+a13+a14+a15+a16+a17+a18+a19;
+}
+
 static int fails = 0;
 
 static void check(const char *name, unsigned int got, unsigned int want) {
@@ -132,6 +146,11 @@ int main(void) {
     } else {
         uart_puts("CVT OK\r\n");
     }
+
+    // Multi-register spill across a call (vpush.64/vldm in the disasm):
+    // 1..20 with a0 replaced by 1.5x => 210.5 (0x43528000).
+    for (int i = 0; i < 20; i++) Vvals[i] = (float)(i + 1);
+    check("SPILL", fbits(spill_call((float *)Vvals)), 0x43528000);
 
     if (fails == 0) uart_puts("FPU all PASS\r\n");
     uart_puts("FPU done\r\n");
