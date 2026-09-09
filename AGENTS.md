@@ -2789,10 +2789,29 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   preserving, subnormal/overflow/underflow paths).
 - vcmp (+#0): NZCV into FPSCR (never xPSR); unordered = C|V; SNaN -> IOC.
 - IEEE state: FZ (sign-preserving flush), DN (default NaN), RMode honored
-  for vcvt/vcvtf16/fused (arithmetic/sqrt use RNE — documented), cumulative
-  IOC/DZC/OFC/UFC/IXC (UFC v1 rule: subnormal result; IXC v1: vcvt/f16 +
-  OFC/UFC only), CONTROL.FPCA set on first FPU use.
+  everywhere (vcvt/vcvtf16/fused fully; add/sub/mul via f64-exact adjust;
+  div/sqrt via f64 with the double-rounding caveat below), cumulative
+  IOC/DZC/OFC/UFC/IXC (UFC v1 rule: subnormal result; IXC whenever the
+  delivered result differs from the infinitely-precise value — exactness
+  via f64, exact for add/sub/mul), CONTROL.FPCA set on first FPU use.
 - VFPExpandImm pinned by GAS: 0x70->1.0, 0x00->2.0, 0xE0->-0.5, 0x1B->6.75.
+- Lazy stacking (implemented 2026-09-09, was the v1 gap): exception entry
+  with CONTROL.FPCA + FPCCR.ASPEN reserves the 26-word extended frame
+  (R0-R3/R12/LR/PC/xPSR +0..28, S0-S15 +32..92, FPSCR +96); lazy
+  (LSPEN=1, reset state) writes FPSCR only + FPCAR=sp+32 + LSPACT, and the
+  first handler FPU use stacks S0-S15 (thumb.rs hook, keys off LSPACT);
+  eager (LSPEN=0) stacks all at entry. EXC_RETURN carries FType=0
+  (0xFFFFFFE9/0xFFFFFFED); return with LSPACT restores FPSCR only, else
+  the full S file. An `fp_stack` (mirroring `it_stack`) preserves
+  LSPACT/FPCAR across nested reserves. No S-reg is modifiable except via
+  hooked FPU insns, so lazy-always-stacks-live is airtight by
+  construction (no eager-on-entry rule needed).
+- End-to-end proof: `fpu_irq_test/` (SysTick + FPU, 18 IRQs, S0-S3 +
+  FPSCR verified intact) + native `fpu_irq_firmware` test. Native
+  delivery tests MUST pump `sys.tick()` per loop (what the JS driver's
+  post-step tick does) — without it INSTRUCTION_COUNT never advances for
+  the model, no IRQ fires, and the run passes vacuously (assert IRQ
+  count, like that test does).
 
 ### Encoding rules (all GAS-probed, probes in `docs/encodings/fpu*.s`)
 - Sd=(Vd<<1)|D, Sn=(Vn<<1)|N, Sm=(Vm<<1)|M (extension bit is the LOW bit).
@@ -2852,14 +2871,29 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   f16 with M=0, vmov/cmp/neg/abs M=0 all faulted). Selector is op2[7,6,4].
   Same test guards it. Int->float signedness is op2[7:6] (11/01), not
   op2[6] — the old `(o2&0x40)` called unsigned (0x40) signed.
+- `branch()`'s EXC_RETURN mask must ignore FType (bit 4): the old
+  `(t & 0x0FFFFFF0) == 0x0FFFFFF0` rejected E9/ED, so the first lazy-
+  stacked `bx lr` "branched" to wilderness (PC=0x783 with a valid frame
+  on the stack — deeply misleading). Now `(t & 0x0FFFFFE0) == 0x0FFFFFE0`
+  with exact validation inside exception_return. Caught by fpu_irq_test,
+  never by unit tests (they call exception_return directly).
+- Extended-frame layout: integer regs at frame+0..28 with FP above
+  (S0-S15 +32..92, FPSCR +96). The first lazy cut pushed integer first
+  and FP below (FPSCR landing on the stacked PC slot) — native unit
+  tests still passed (they never ran a real handler epilogue); only the
+  firmware run caught it.
+- NVIC SysTick `n - last` must be `saturating_sub`: parallel cargo tests
+  share the process-global INSTRUCTION_COUNT, so another thread's tick
+  can store a newer `last_systick_trigger` than this thread's Relaxed
+  `n` load observes (debug-panic on underflow; release would wrap into a
+  spurious fire). Single-threaded `last <= n` always holds, so the fix
+  changes no production behavior. Found as a 1-in-3 `freertos_tasks_run`
+  flake after the FPU tick-pumping test joined the suite.
 
 ### Deliberate v1 limitations (documented in code)
-- No lazy stacking: exception entry stacks the 8-word integer frame only;
-  handlers must not use FPU regs (true of all shipped firmware). FPCCR
-  ASPEN/LSPEN reset set like hardware; FPDSCR stored only.
-- Arithmetic/sqrt use RNE regardless of RMode (vcvt/vcvtf16/fused honor it).
-- IXC only for vcvt/f16 (+OFC/UFC accompaniment); plain-rounding
-  arithmetic leaves it clear. MVFR reads via MRC ID encodings fault (use
+- Arithmetic/sqrt directed modes go through f64 (exact for add/sub/mul;
+  div/sqrt carry a half-f64-ulp double-rounding caveat).
+- MVFR reads via MRC ID encodings fault (use
   the MMIO 0xE000EF40–48, like CMSIS does).
 - S/D files and FPSCR are core-side only (not exposed to the JS driver or
   wasm bindings yet).

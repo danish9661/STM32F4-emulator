@@ -136,7 +136,13 @@ impl Nvic {
     pub fn maybe_set_systick_intr_pending(&mut self) {
         if let Some(systick_period) = self.systick_period {
             let n = INSTRUCTION_COUNT.load(Ordering::Relaxed);
-            let delta = n - self.last_systick_trigger;
+            // saturating: with parallel cargo tests sharing the process-global
+            // INSTRUCTION_COUNT, another thread's tick can store a newer
+            // last_systick_trigger than this thread's Relaxed load observes
+            // (n < last). Single-threaded (all production paths) last <= n
+            // always holds, so saturating only removes the panic class: a
+            // stale read then means "no time passed" and skips the fire.
+            let delta = n.saturating_sub(self.last_systick_trigger);
             if delta > systick_period as u64 {
                 self.last_systick_trigger = n;
                 self.set_intr_pending(irq::SYSTICK);

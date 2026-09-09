@@ -1431,3 +1431,239 @@ fn fpu_high_regs_and_even_sm() {
     let (cpu, _) = run_fpu_snippet(&[0xEEB8, 0x2AE2], &[], &[(5, 42)], 0, 1);
     assert_eq!((cpu.regs.s[4], cpu.regs.fpscr & 0x1F), (f(42.0), 0), "s32 M=1 exact");
 }
+
+#[test]
+fn fpu_lazy_reserve_and_return() {
+    // CONTROL.FPCA=1 + FPCCR.ASPEN (reset) => PendSV reserves the 26-word
+    // extended frame: FPSCR stacked at +96, S0-S15 untouched (lazy),
+    // LSPACT=1, FPCAR=sp+32, LR=0xFFFFFFE9. Return restores FPSCR + SP.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write32(0xE000ED88, 0x00F0_0000);
+    cpu.regs.s[0] = 0xAAAAAAAA;
+    cpu.regs.s[15] = 0xBBBB_BBBB;
+    cpu.regs.fpscr = 0x1234_5678;
+    cpu.regs.control |= 4; // FPCA: thread uses the FPU
+    let sp0 = cpu.regs.r[13];
+    cpu.take_exception(sys, &mut mem, -2); // PendSV
+    assert_eq!(cpu.regs.r[14], 0xFFFF_FFE9, "LR carries FType=0");
+    let sp = cpu.regs.r[13];
+    assert_eq!(sp, sp0.wrapping_sub(104), "26-word frame");
+    assert_eq!(mem.read32(sp.wrapping_add(96)), 0x1234_5678, "FPSCR stacked");
+    assert_eq!(mem.read32(sp.wrapping_add(32)), 0, "S0 lazy (untouched)");
+    assert_ne!(sys.p.read(sys, 0xE000EF34, 4) & 1, 0, "LSPACT set");
+    assert_eq!(sys.p.read(sys, 0xE000EF38, 4), sp.wrapping_add(32), "FPCAR at S0 slot");
+    // Handler clobbers FPSCR; return must restore it (lazy: no S traffic).
+    cpu.regs.fpscr = 0;
+    cpu.regs.s[0] = 0;
+    assert!(cpu.exception_return(sys, &mut mem, 0xFFFF_FFE9, 0x2000_2000));
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.fpscr, 0x1234_5678, "FPSCR restored");
+    assert_eq!(cpu.regs.s[0], 0, "S0 not restored (was never stacked)");
+    assert_eq!(cpu.regs.r[13], sp0, "SP restored");
+    assert_eq!(sys.p.read(sys, 0xE000EF34, 4) & 1, 0, "LSPACT clear after pop");
+}
+
+#[test]
+fn fpu_lazy_first_use_stacks() {
+    // First handler FPU use stacks the LIVE S regs into FPCAR, clears
+    // LSPACT; return then restores the thread's values (over handler mods).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write32(0xE000ED88, 0x00F0_0000);
+    cpu.regs.s[0] = 0xAAAAAAAA;
+    cpu.regs.s[15] = 0xBBBB_BBBB;
+    cpu.regs.control |= 4;
+    cpu.take_exception(sys, &mut mem, -2);
+    let fpcar = sys.p.read(sys, 0xE000EF38, 4);
+    // Run a real FPU insn in handler mode: vmov.f32 s0,#1.0.
+    mem.write16(0x20002000, 0xEEB7);
+    mem.write16(0x20002002, 0x0A00);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.s[0], 0x3F80_0000, "insn executed");
+    assert_eq!(mem.read32(fpcar), 0xAAAAAAAA, "live S0 stacked first");
+    assert_eq!(mem.read32(fpcar.wrapping_add(60)), 0xBBBB_BBBB, "live S15 stacked");
+    assert_eq!(sys.p.read(sys, 0xE000EF34, 4) & 1, 0, "LSPACT cleared by use");
+    // Return with LSPACT=0: full unstack overwrites the handler's s0=1.0
+    // with the thread's seeded value.
+    assert!(cpu.exception_return(sys, &mut mem, 0xFFFF_FFE9, 0x2000_2000));
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.s[0], 0xAAAAAAAA, "thread S0 restored");
+    assert_eq!(cpu.regs.s[15], 0xBBBB_BBBB, "thread S15 restored");
+}
+
+#[test]
+fn fpu_eager_stacks_at_entry() {
+    // LSPEN=0: S0-S15 + FPSCR land in the frame at entry; LSPACT stays 0.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write32(0xE000ED88, 0x00F0_0000);
+    mem.write32(0xE000EF34, 0x8000_0000); // ASPEN only (no LSPEN)
+    cpu.regs.s[3] = 0xCCCC_CCCC;
+    cpu.regs.fpscr = 0x1122_3344;
+    cpu.regs.control |= 4;
+    cpu.take_exception(sys, &mut mem, -2);
+    assert_eq!(cpu.regs.r[14], 0xFFFF_FFE9, "FType=0 even eager");
+    let sp = cpu.regs.r[13];
+    assert_eq!(mem.read32(sp.wrapping_add(32 + 12)), 0xCCCC_CCCC, "S3 stacked at entry");
+    assert_eq!(mem.read32(sp.wrapping_add(96)), 0x1122_3344, "FPSCR stacked at entry");
+    assert_eq!(sys.p.read(sys, 0xE000EF34, 4) & 1, 0, "no LSPACT when eager");
+    cpu.regs.s[3] = 0;
+    assert!(cpu.exception_return(sys, &mut mem, 0xFFFF_FFE9, 0x2000_2000));
+    assert_eq!(cpu.regs.s[3], 0xCCCC_CCCC, "eager frame restores");
+}
+
+#[test]
+fn fpu_no_fpca_unchanged() {
+    // No FPU use: classic 8-word frame, classic LR, model FP regs untouched.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write32(0xE000ED88, 0x00F0_0000);
+    let sp0 = cpu.regs.r[13];
+    cpu.take_exception(sys, &mut mem, -2);
+    assert_eq!(cpu.regs.r[14], 0xFFFF_FFF9, "classic EXC_RETURN");
+    assert_eq!(cpu.regs.r[13], sp0.wrapping_sub(32), "8-word frame");
+    assert_eq!(sys.p.read(sys, 0xE000EF34, 4) & 1, 0, "no LSPACT");
+    assert_eq!(sys.p.read(sys, 0xE000EF38, 4), 0, "no FPCAR");
+    assert!(cpu.exception_return(sys, &mut mem, 0xFFFF_FFF9, 0x2000_2000));
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[13], sp0);
+}
+
+#[test]
+fn fpu_nested_frames() {
+    // Outer PendSV reserve, inner SysTick reserve, inner use+return, outer
+    // use+return — every S modification goes through a real FPU snippet
+    // (the only way guest code CAN touch S-regs, so the hook always fires).
+    // Thread 0x11111111 -> outer use stacks it, sets 1.0 -> inner use
+    // stacks 1.0, sets -0.5 -> returns unwind exactly.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write32(0xE000ED88, 0x00F0_0000);
+    // Thread uses the FPU: vmov s0,r0 (EE00 0A10) with r0=0x11111111.
+    cpu.regs.r[0] = 0x1111_1111;
+    mem.write16(0x20002000, 0xEE00);
+    mem.write16(0x20002002, 0x0A10);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    assert_eq!(cpu.regs.s[0], 0x1111_1111);
+    assert_ne!(cpu.regs.control & 4, 0, "FPCA set by use");
+    cpu.take_exception(sys, &mut mem, -2); // outer PendSV
+    let outer_fpcar = sys.p.read(sys, 0xE000EF38, 4);
+    let outer_lr = cpu.regs.r[14];
+    assert_eq!(outer_lr, 0xFFFF_FFE9);
+    // Outer handler: vmov.f32 s0,#1.0 stacks 0x11111111, sets 1.0.
+    mem.write16(0x20002000, 0xEEB7);
+    mem.write16(0x20002002, 0x0A00);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.s[0], 0x3F80_0000);
+    assert_eq!(mem.read32(outer_fpcar), 0x1111_1111, "thread value stacked");
+    cpu.take_exception(sys, &mut mem, -1); // inner SysTick
+    let inner_fpcar = sys.p.read(sys, 0xE000EF38, 4);
+    assert_ne!(inner_fpcar, outer_fpcar, "inner frame is distinct");
+    let inner_lr = cpu.regs.r[14];
+    // Inner handler: vmov.f32 s0,#-0.5 (EEBE 0A00, GAS fpu15.s)
+    // stacks live 1.0, sets -0.5.
+    mem.write16(0x20002000, 0xEEBE);
+    mem.write16(0x20002002, 0x0A00);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.s[0], 0xBF00_0000);
+    assert_eq!(mem.read32(inner_fpcar), 0x3F80_0000, "outer-live stacked");
+    assert!(cpu.exception_return(sys, &mut mem, inner_lr, 0x2000_2000));
+    assert_eq!(cpu.regs.s[0], 0x3F80_0000, "outer-live restored");
+    assert_eq!(sys.p.read(sys, 0xE000EF38, 4), outer_fpcar, "outer FPCAR restored");
+    assert_eq!(sys.p.read(sys, 0xE000EF34, 4) & 1, 0, "outer LSPACT consumed");
+    assert!(cpu.exception_return(sys, &mut mem, outer_lr, 0x2000_2000));
+    assert_eq!(cpu.regs.s[0], 0x1111_1111, "thread value restored");
+    assert_eq!(sys.p.read(sys, 0xE000EF34, 4) & 1, 0, "LSPACT clear at end");
+}
+
+#[test]
+fn fpu_rmode_arith() {
+    // Directed rounding via VMSR RMode (vmsr=EEE1 0A10): 1.0 + 2^-24 is
+    // exact-tie-ish — RNE gives 1.0 (even), +inf gives nextUp, -inf/zero
+    // give 1.0, all with IXC (except the exact RNE case... 1.0 is inexact
+    // too: the true sum is not representable, so IXC fires everywhere).
+    let f = |x: f32| x.to_bits();
+    let tiny = 0x3380_0000u32; // 2^-24
+    // RNE baseline.
+    let (cpu, _) = run_fpu_snippet(&[0xEE30, 0x0A81], &[], &[(1, f(1.0)), (2, tiny)], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (f(1.0), 0x10));
+    // Toward +inf: nextUp(1.0) = 1+2^-23.
+    let (cpu, _) = run_fpu_snippet(
+        &[0xEEE1, 0x0A10, 0xEE30, 0x0A81], &[(0, 1 << 22)], &[(1, f(1.0)), (2, tiny)], 0, 2);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x3F80_0001, 0x10));
+    // Toward -inf and toward zero: 1.0.
+    for rmode in [2u32, 3u32] {
+        let (cpu, _) = run_fpu_snippet(
+            &[0xEEE1, 0x0A10, 0xEE30, 0x0A81], &[(0, rmode << 22)], &[(1, f(1.0)), (2, tiny)], 0, 2);
+        assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (f(1.0), 0x10), "rmode {rmode}");
+    }
+    // Mul directed: (1+2^-22)^2... use (1+2^-23)*(1+2^-23): RNE rounds the
+    // 2^-46 square term away -> 1+2^-22; -inf keeps it too (above); the
+    // discriminating mode is toward-zero/+inf only when below... instead
+    // pin exactness: 1.5*1.5 = 2.25 exact in all modes, no IXC.
+    let (cpu, _) = run_fpu_snippet(
+        &[0xEEE1, 0x0A10, 0xEE20, 0x0A81], &[(0, 1 << 22)], &[(1, f(1.5)), (2, f(1.5))], 0, 2);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (f(2.25), 0));
+    // Div/sqrt directed, expectations computed from host f64 (correctly
+    // rounded) + next_up/down — execution-grounded, not hand-derived.
+    let t = 1f64 / 3f64;
+    let rne = t as f32;
+    let up = if (rne as f64) < t { rne.next_up() } else { rne };
+    let (cpu, _) = run_fpu_snippet(
+        &[0xEEE1, 0x0A10, 0xEE80, 0x0A81], &[(0, 1 << 22)], &[(1, f(1.0)), (2, f(3.0))], 0, 2);
+    assert_eq!(cpu.regs.s[0], up.to_bits(), "div toward +inf");
+    assert_ne!(cpu.regs.fpscr & 0x10, 0, "div inexact IXC");
+    let t = 2f64.sqrt();
+    let rne = t as f32;
+    let up = if (rne as f64) < t { rne.next_up() } else { rne };
+    let (cpu, _) = run_fpu_snippet(
+        &[0xEEE1, 0x0A10, 0xEEB1, 0x0AE0], &[(0, 1 << 22)], &[(1, f(2.0))], 0, 2);
+    assert_eq!(cpu.regs.s[0], up.to_bits(), "sqrt toward +inf");
+}
+
+#[test]
+fn fpu_irq_firmware() {
+    // Full firmware run: fpu_irq_test.bin with real SysTick delivery.
+    // The loop pumps model ticks (what the JS driver's post-step tick does);
+    // without it INSTRUCTION_COUNT never advances for the model and no IRQ
+    // fires (a run that finishes with count 0 is vacuous — asserted below).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../fpu_irq_test/fpu_irq_test.bin"));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    let mut uart = String::new();
+    for _ in 0..600 {
+        cpu.run(sys, &mut mem, 100_000);
+        sys.tick();
+        uart.push_str(&crate::system::get_uart_output().lock().unwrap().clone());
+        crate::system::get_uart_output().lock().unwrap().clear();
+        if uart.contains("FPU IRQ done") {
+            break;
+        }
+        if cpu.fault.is_some() {
+            break;
+        }
+    }
+    assert!(uart.contains("FPU IRQ done"), "firmware did not finish");
+    for m in ["CPACR ok", "S0 11111111 ok", "S3 44444444 ok", "FPSCR 00000000 ok", "FPU IRQ all PASS"] {
+        assert!(uart.contains(m), "missing marker {m}");
+    }
+    assert!(!uart.contains("FAIL"), "firmware reported FAIL");
+    no_fault(&cpu, &mem);
+    let n: u32 = uart.split("IRQ count ").nth(1).unwrap_or("0").split(|c: char| !c.is_numeric()).next().unwrap_or("0").parse().unwrap_or(0);
+    eprintln!("IRQ count: {n}");
+    assert!(n >= 10, "SysTick never fired - vacuous run");
+}

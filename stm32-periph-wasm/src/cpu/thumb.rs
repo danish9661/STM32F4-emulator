@@ -189,6 +189,28 @@ fn fpu_ou_flags(r: u32) -> u32 {
         0
     }
 }
+/// Final rounding for add/sub/mul/div/sqrt. IXC fires whenever the
+/// delivered result differs from the infinitely-precise value (exactness
+/// via f64: add/sub/mul of f32 operands are exact in f64; div/sqrt carry
+/// the standard double-rounding caveat — truth within half-f64-ulp of an
+/// f32 boundary can mis-set it — documented). RNE takes the f32 result
+/// directly (bit-identical to the historical path); other modes round the
+/// f64-exact value.
+fn fpu_final(fpscr: u32, r_rne: u32, exact: f64) -> (u32, u32) {
+    if fpu_rmode(fpscr) == 0 {
+        let mut fl = fpu_ou_flags(r_rne);
+        if f32::from_bits(r_rne) as f64 != exact {
+            fl |= FPSCR_IXC;
+        }
+        return (fpu_dn(r_rne, fpscr), fl);
+    }
+    let (rb, inexact) = fpu_round_f32(exact, fpu_rmode(fpscr));
+    let mut fl = fpu_ou_flags(rb);
+    if inexact {
+        fl |= FPSCR_IXC;
+    }
+    (fpu_dn(rb, fpscr), fl)
+}
 /// f32 add/sub (sub flips b). Invalid (inf + -inf) -> NaN + IOC.
 fn fpu_add(fpscr: u32, a: u32, b: u32, sub: bool) -> (u32, u32) {
     let a = fpu_flush(a, fpscr);
@@ -202,27 +224,24 @@ fn fpu_add(fpscr: u32, a: u32, b: u32, sub: bool) -> (u32, u32) {
         return (fpu_dn(0x7FC0_0000, fpscr), FPSCR_IOC);
     }
     let r = if sub { af - bf } else { af + bf };
-    let rb = r.to_bits();
-    (fpu_dn(rb, fpscr), fpu_ou_flags(rb))
+    let exact = if sub { af as f64 - bf as f64 } else { af as f64 + bf as f64 };
+    fpu_final(fpscr, r.to_bits(), exact)
 }
-/// f32 multiply (neg flips the result sign). 0*inf -> NaN + IOC.
+/// f32 multiply (neg flips an input sign up front — exact, so directed
+/// rounding sees final signs). 0*inf -> NaN + IOC.
 fn fpu_mul(fpscr: u32, a: u32, b: u32, neg: bool) -> (u32, u32) {
     let a = fpu_flush(a, fpscr);
     let b = fpu_flush(b, fpscr);
+    let a = if neg { a ^ 0x8000_0000 } else { a };
     if let Some(n) = fpu_nan_scan(fpscr, &[a, b]) {
-        let (r, f) = n;
-        return (r ^ if neg { 0x8000_0000 } else { 0 }, f);
+        return n;
     }
     let af = f32::from_bits(a);
     let bf = f32::from_bits(b);
     if (af == 0.0 && bf.is_infinite()) || (af.is_infinite() && bf == 0.0) {
         return (fpu_dn(0x7FC0_0000, fpscr), FPSCR_IOC);
     }
-    let mut rb = (af * bf).to_bits();
-    if neg {
-        rb ^= 0x8000_0000;
-    }
-    (fpu_dn(rb, fpscr), fpu_ou_flags(rb))
+    fpu_final(fpscr, (af * bf).to_bits(), af as f64 * bf as f64)
 }
 /// f32 divide. 0/0 and inf/inf -> NaN + IOC; x/0 -> inf + DZC.
 fn fpu_div(fpscr: u32, a: u32, b: u32) -> (u32, u32) {
@@ -250,7 +269,7 @@ fn fpu_div(fpscr: u32, a: u32, b: u32) -> (u32, u32) {
         return (r, fl);
     }
     let rb = (af / bf).to_bits();
-    (fpu_dn(rb, fpscr), fpu_ou_flags(rb))
+    fpu_final(fpscr, rb, af as f64 / bf as f64)
 }
 /// Accumulate: acc +/- (a*b), unfused (separate f32 mul then add, like
 /// silicon — never mul_add). VNMLA/VNMLS negation is folded into the
@@ -274,8 +293,8 @@ fn fpu_sqrt(fpscr: u32, a: u32) -> (u32, u32) {
     if af < 0.0 {
         return (fpu_dn(0x7FC0_0000, fpscr), FPSCR_IOC);
     }
-    let rb = af.sqrt().to_bits(); // RNE; RMode only honored for vcvt (documented)
-    (fpu_dn(rb, fpscr), fpu_ou_flags(rb))
+    let rb = af.sqrt().to_bits();
+    fpu_final(fpscr, rb, (af as f64).sqrt())
 }
 /// Normalize a finite nonzero f32 to (sign, unbiased exp, 24-bit mantissa
 /// with hidden 1 at bit 23). Subnormals are normalized (FZ flushing is the
@@ -630,7 +649,10 @@ fn fault(c: &mut Cpu, pc: u32, op1: u16, op2: u16, l: u8) -> bool {
     false
 }
 /// Interworking branch. An EXC_RETURN value performs an exception return
-/// through the stacked context instead. Branching to ARM state (bit0
+/// through the stacked context instead. The mask ignores bit 4 (FType):
+/// FP-extended returns (0xFFFFFFE9/0xFFFFFFED) must route here exactly like
+/// F9/FD — masking with 0x0FFFFFF0 strands them (bx lr then "branches" to
+/// wilderness with bit0 set). Branching to ARM state (bit0
 /// clear, non-EXC_RETURN) is a fault on Cortex-M (no ARM state); halting
 /// loudly beats silently running garbage.
 fn branch(
@@ -643,7 +665,7 @@ fn branch(
     op2: u16,
     l: u8,
 ) -> bool {
-    if (t & 0x0FFFFFF0) == 0x0FFFFFF0 {
+    if (t & 0x0FFFFFE0) == 0x0FFFFFE0 {
         return c.exception_return(sys, mem, t, pc);
     }
     if t & 1 == 0 {
@@ -3241,6 +3263,21 @@ pub fn exec32(
             adv(cpu, pc, 4);
             cpu.take_exception(sys, mem, -10); // UsageFault
             return true;
+        }
+        // Lazy-stacking completion: a pending lazy FP context (LSPACT set
+        // by exception entry) stacks S0-S15 into the FPCAR frame on the
+        // FIRST FPU instruction executed in handler mode, then clears
+        // LSPACT. Thread mode never takes this path (its FP state is live).
+        // Keys off LSPACT alone: a reserve implies ASPEN+LSPEN held then.
+        if cpu.ipsr != 0 {
+            let fpccr = sys.p.read(sys, 0xE000EF34, 4);
+            if fpccr & 1 != 0 {
+                let fpcar = sys.p.read(sys, 0xE000EF38, 4);
+                for i in 0..16 {
+                    mem.write32(fpcar.wrapping_add(4 * i as u32), cpu.regs.s[i]);
+                }
+                sys.p.write(sys, 0xE000EF34, 4, fpccr & !1);
+            }
         }
         // ---- (b) moves + MF/VMSR + VLDR/VSTR/VLDM/VSTM ----
         // S-numbering (probe-verified): Sd=(Vd<<1)|D, Sn=(Vn<<1)|N,

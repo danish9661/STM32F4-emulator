@@ -346,6 +346,29 @@ is under test. Results print as raw hex bits with per-check PASS/FAIL.
   `?fw=` boots eth_http silently when the custom div is missing (empty
   UART, no error). Every new preset needs all three: native option,
   custom div, `firmware.js` entry.
+
+### test_fpu_irq.mjs — FPU state across SysTick IRQs (fpu_irq_test)
+Main seeds S0–S3 + FPSCR=0 (setting CONTROL.FPCA), enables SysTick every
+2000 instructions; the handler does its own float work on other S-regs
+and dirties FPSCR (0.0/0.0 → IOC). Pass = S0–S3 intact, FPSCR clean after
+~18 IRQs — only possible with entry reserve + first-use stacking + full
+restore on return (lazy FP stacking end-to-end).
+- Exercises: CPACR gate, CONTROL.FPCA, FPCCR/FPCAR/LSPACT lifecycle,
+  SysTick delivery with `enable_irqs`, EXC_RETURN with FType=0.
+- Expected UART:
+  ```
+  === FPU IRQ Test ===
+  CPACR ok
+  IRQ count 18
+  S0 11111111 ok
+  S1 22222222 ok
+  S2 33333333 ok
+  S3 44444444 ok
+  FPSCR 00000000 ok
+  FPU IRQ all PASS
+  FPU IRQ done
+  ```
+- Pass: every marker above, IRQ count ≥ 10, no `FAIL`, no CPU fault.
 - Gotcha the firmware caught while being written: the decoder's op
   selector included the D bit (faulted all odd-high-reg arithmetic) and
   the B-group op-nibble baked in the M bit (faulted every even-Sm form).
@@ -399,10 +422,11 @@ save-slot menu → name char 'a' (0x61) + Enter → asserts the firmware's
 | test_buzzer | buzzer_test | TIM2/GPIO | `BUZZ 262 Hz`, `BUZZ 523 Hz`, `Buzzer done` |
 | test_rtc | rtc_test | I2C1/regfile | `RTC verify OK`, `RTC time=10:45:30 DOW=3 15/07/26`, temp=27.5 |
 | test_fpu | fpu_test | VFPv4-SP/CPACR | `FPU all PASS`, `FMA 28800000 PASS`, `FPU done` |
+| test_fpuirq | fpu_irq_test | VFPv4-SP/SysTick/NVIC | `FPU IRQ all PASS`, `S0 11111111 ok`, `FPSCR 00000000 ok` |
 
-Plus the Rust unit suite: `cargo test` (87 tests — 68 CPU/decoder incl. 19
-FPU encoding/semantics tests, plus CAN, SPI/I2C taps, DCMI, WAV, LTDC,
-register files — 87/87 green).
+Plus the Rust unit suite: `cargo test` (94 tests — 68 CPU/decoder incl. 26
+FPU encoding/semantics/stacking tests, plus CAN, SPI/I2C taps, DCMI, WAV,
+LTDC, register files — 94/94 green).
 
 ## Gotchas
 

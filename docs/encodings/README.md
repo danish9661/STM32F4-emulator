@@ -26,6 +26,7 @@ ${TC}as -march=armv7e-m -mfloat-abi=hard -mfpu=fpv4-sp-d16 -o /tmp/x.o <file>.s 
 | `fpu12.s` | VCMPE reg + #0 (opb3=6 E-form; raises IOC on any NaN) |
 | `fpu13.s` | D=1 forms: vadd s17/s18/s19, vfma s21/s22/s23, vsqrt/vcmp/vmov/vcvt s17/s18, vsub s31/s30/s29 |
 | `fpu14.s` | M=0 forms: vcvt.f32.s32/s4/s5, vmov/vcvtb/vcmp/vneg/vabs s0/s0, vcvt.f32.u32 s4/s5 |
+| `fpu15.s` | `vmov.f32 s0, #-0.5` (EEBE 0A00) — the D=0 counterpart of fpu7's s5 form |
 
 Key derivations are written up in AGENTS.md §25 (encoding rules + gotchas).
 

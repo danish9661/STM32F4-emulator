@@ -14,6 +14,10 @@ use std::sync::Mutex;
 pub const EXC_RETURN_MSP: u32 = 0xFFFFFFF9;
 pub const EXC_RETURN_PSP: u32 = 0xFFFFFFFD;
 pub const EXC_RETURN_HANDLER: u32 = 0xFFFFFFF1;
+/// Same, with an FP-extended frame (EXC_RETURN bit 4 == 0): issued when the
+/// thread uses the FPU (CONTROL.FPCA) and FPCCR.ASPEN is set.
+pub const EXC_RETURN_MSP_FP: u32 = 0xFFFFFFE9;
+pub const EXC_RETURN_PSP_FP: u32 = 0xFFFFFFED;
 
 /// PC trace for execution debugging: when
 /// enabled, every executed instruction appends its PC. Bounded by the
@@ -54,6 +58,16 @@ struct SavedIt {
     idx: u8,
 }
 
+/// Saved lazy-FP-stacking state across an exception (pushed on entry,
+/// popped on return — parallel to it_stack, which is what makes NESTED
+/// FPU use safe: an inner reserve clobbers the model's LSPACT/FPCAR, and
+/// the pop restores the outer frame's).
+#[derive(Clone, Copy, Debug, Default)]
+struct SavedFp {
+    lspact: bool,
+    fpcar: u32,
+}
+
 pub struct Cpu {
     pub regs: Regs,
     pub cycles: u64,
@@ -77,6 +91,8 @@ pub struct Cpu {
     exc_stack: Vec<i32>,
     /// Saved IT states, parallel to exc_stack.
     it_stack: Vec<SavedIt>,
+    /// Saved lazy-FP states, parallel to exc_stack.
+    fp_stack: Vec<SavedFp>,
     /// Break `run()` when the model has a pending interrupt, so a driver
     /// with guest exception delivery can take it. Off by default: polling
     /// firmware (and the plain JS driver stepping loop) must run full
@@ -102,6 +118,7 @@ impl Cpu {
             ipsr: 0,
             exc_stack: Vec::new(),
             it_stack: Vec::new(),
+            fp_stack: Vec::new(),
             deliver_irqs: false,
             sleeping: false,
         }
@@ -116,6 +133,7 @@ impl Cpu {
         self.ipsr = 0;
         self.exc_stack.clear();
         self.it_stack.clear();
+        self.fp_stack.clear();
         self.sleeping = false;
     }
 
@@ -176,6 +194,13 @@ impl Cpu {
         self.it_n = 0;
         self.it_idx = 0;
         self.exc_stack.push(irq);
+        // Save the lazy-FP state for nesting (an inner reserve clobbers the
+        // model's LSPACT/FPCAR; the pop on return restores the outer frame).
+        let prev_fpccr = sys.p.read(sys, 0xE000EF34, 4);
+        self.fp_stack.push(SavedFp {
+            lspact: prev_fpccr & 1 != 0,
+            fpcar: sys.p.read(sys, 0xE000EF38, 4),
+        });
         // Bank the thread stack, then run the handler on MSP. The frame
         // goes onto the CURRENT stack (PSP if thread+PSP, else MSP) — this
         // is what makes FreeRTOS task stacks work.
@@ -186,28 +211,34 @@ impl Cpu {
             self.regs.msp = self.regs.r[13];
         }
         let mut sp = self.regs.r[13];
-        // Push xPSR (T-bit set), PC, LR, R12, R3-R0.
-        let xpsr = self.regs.xpsr | 0x01000000;
-        sp = sp.wrapping_sub(4);
-        mem.write32(sp, xpsr);
-        sp = sp.wrapping_sub(4);
-        mem.write32(sp, self.regs.r[15]);
-        sp = sp.wrapping_sub(4);
-        mem.write32(sp, self.regs.r[14]);
-        sp = sp.wrapping_sub(4);
-        mem.write32(sp, self.regs.r[12]);
-        sp = sp.wrapping_sub(4);
-        mem.write32(sp, self.regs.r[3]);
-        sp = sp.wrapping_sub(4);
-        mem.write32(sp, self.regs.r[2]);
-        sp = sp.wrapping_sub(4);
-        mem.write32(sp, self.regs.r[1]);
-        sp = sp.wrapping_sub(4);
+        // Lazy FP stacking decision FIRST (model read, no mem writes yet):
+        // CONTROL.FPCA (thread uses the FPU) + FPCCR.ASPEN select the
+        // 26-word extended frame; otherwise the classic 8-word frame.
+        let fpccr0 = sys.p.read(sys, 0xE000EF34, 4);
+        let fp_ext = self.regs.control & 4 != 0 && fpccr0 & (1 << 31) != 0;
+        // ARM frame layout (low->high): R0-R3, R12, LR, PC, xPSR (+0..28),
+        // then (extended only) S0-S15 (+32..92), FPSCR (+96), RESERVED.
+        sp = sp.wrapping_sub(if fp_ext { 104 } else { 32 });
         mem.write32(sp, self.regs.r[0]);
+        mem.write32(sp.wrapping_add(4), self.regs.r[1]);
+        mem.write32(sp.wrapping_add(8), self.regs.r[2]);
+        mem.write32(sp.wrapping_add(12), self.regs.r[3]);
+        mem.write32(sp.wrapping_add(16), self.regs.r[12]);
+        mem.write32(sp.wrapping_add(20), self.regs.r[14]);
+        mem.write32(sp.wrapping_add(24), self.regs.r[15]);
+        // xPSR with the T-bit set (R0 landed lowest, xPSR highest).
+        let xpsr = self.regs.xpsr | 0x01000000;
+        mem.write32(sp.wrapping_add(28), xpsr);
         // Handler mode always runs on MSP.
         self.regs.r[13] = self.regs.msp;
-        // LR = EXC_RETURN selecting the thread stack we came from.
-        self.regs.r[14] = if was_psp { EXC_RETURN_PSP } else { EXC_RETURN_MSP };
+        // LR = EXC_RETURN selecting the thread stack we came from, with
+        // bit 4 (FType) clear when an FP-extended frame was reserved.
+        self.regs.r[14] = match (was_psp, fp_ext) {
+            (false, false) => EXC_RETURN_MSP,
+            (true, false) => EXC_RETURN_PSP,
+            (false, true) => EXC_RETURN_MSP_FP,
+            (true, true) => EXC_RETURN_PSP_FP,
+        };
         // ^ BUG: r13 must be the POST-PUSH sp, not stale msp! Fix below.
         self.regs.r[13] = sp;
         self.regs.msp = sp;
@@ -217,6 +248,28 @@ impl Cpu {
         // clobbered and the switch-back unstacks garbage (FreeRTOS slide).
         if was_psp {
             self.regs.psp = sp;
+        }
+        // Lazy FP stacking (VFPv4-SP): with CONTROL.FPCA (thread uses the
+        // FPU) and FPCCR.ASPEN, reserve the 26-word extended frame now.
+        // Lazy (LSPEN=1, the reset state): write FPSCR at frame offset 96
+        // only, point FPCAR at the S0 slot (offset 32), set LSPACT — S0-S15
+        // land on the first handler FPU use (see the thumb.rs FPU hook).
+        // Eager (LSPEN=0): stack S0-S15 + FPSCR immediately, LSPACT stays 0.
+        // Without FPCA/ASPEN the 8-word integer frame above is the whole
+        // story (all pre-FPU firmware, incl. FreeRTOS, is unaffected).
+        // (sp already spans the full frame, so the bank sync above and the
+        // fp_stack nesting push both cover it as-is.)
+        if fp_ext {
+            if fpccr0 & (1 << 30) != 0 {
+                mem.write32(sp.wrapping_add(96), self.regs.fpscr);
+                sys.p.write(sys, 0xE000EF38, 4, sp.wrapping_add(32));
+                sys.p.write(sys, 0xE000EF34, 4, fpccr0 | 1);
+            } else {
+                for i in 0..16 {
+                    mem.write32(sp.wrapping_add(32 + 4 * i as u32), self.regs.s[i]);
+                }
+                mem.write32(sp.wrapping_add(96), self.regs.fpscr);
+            }
         }
         self.ipsr = vector;
         sys.p.nvic.borrow_mut().set_in_interrupt(true);
@@ -240,13 +293,21 @@ impl Cpu {
             self.fault = Some(CpuFault { pc, op1: 0x4770, op2: 0, len: 2 });
             return false;
         }
-        if exc != EXC_RETURN_MSP && exc != EXC_RETURN_PSP {
+        // EXC_RETURN bit 4 (FType): 0 = FP-extended 26-word frame.
+        let extended = exc & 0x10 == 0;
+        if exc != EXC_RETURN_MSP
+            && exc != EXC_RETURN_PSP
+            && exc != EXC_RETURN_MSP_FP
+            && exc != EXC_RETURN_PSP_FP
+        {
             self.fault = Some(CpuFault { pc, op1: 0x4770, op2: 0, len: 2 });
             return false;
         }
         // Unstack from the bank selected by EXC_RETURN (using CURRENT bank
-        // values — a PendSV task switch updates PSP mid-handler).
-        let mut sp = if exc == EXC_RETURN_PSP { self.regs.psp } else { self.regs.msp };
+        // values — a PendSV task switch updates PSP mid-handler). The FP
+        // variants (ED/E9) select the same bank as their FType=1 twins.
+        let to_psp = exc == EXC_RETURN_PSP || exc == EXC_RETURN_PSP_FP;
+        let mut sp = if to_psp { self.regs.psp } else { self.regs.msp };
         // In handler mode r13 == MSP; if returning to MSP it must match.
         // (If a buggy handler moved MSP, trust the bank per ARM.)
         let r0 = mem.read32(sp);
@@ -258,6 +319,30 @@ impl Cpu {
         let retpc = mem.read32(sp.wrapping_add(24));
         let xpsr = mem.read32(sp.wrapping_add(28));
         sp = sp.wrapping_add(32);
+        if extended {
+            // FP-extended frame: S0-S15 at sp+0..60, FPSCR at sp+64 (sp
+            // already advanced past the integer 8 words). Lazy-never-
+            // stacked (LSPACT set): FPSCR only; else the full S file.
+            // Either way the frame is 104 bytes total.
+            let fpccr = sys.p.read(sys, 0xE000EF34, 4);
+            if fpccr & 1 != 0 {
+                self.regs.fpscr = mem.read32(sp.wrapping_add(64));
+            } else {
+                for i in 0..16 {
+                    self.regs.s[i] = mem.read32(sp.wrapping_add(4 * i as u32));
+                }
+                self.regs.fpscr = mem.read32(sp.wrapping_add(64));
+            }
+            sp = sp.wrapping_add(72);
+            // Pop the nesting state back into the model (an inner reserve
+            // clobbered LSPACT/FPCAR; the outer frame owns them again now).
+            if let Some(saved) = self.fp_stack.pop() {
+                let cur = sys.p.read(sys, 0xE000EF34, 4);
+                let restored = if saved.lspact { cur | 1 } else { cur & !1 };
+                sys.p.write(sys, 0xE000EF34, 4, restored);
+                sys.p.write(sys, 0xE000EF38, 4, saved.fpcar);
+            }
+        }
         self.regs.r[0] = r0;
         self.regs.r[1] = r1;
         self.regs.r[2] = r2;
@@ -267,7 +352,7 @@ impl Cpu {
         // Restore flags (APSR) + IT/ICI bits live in xPSR; T-bit stays set.
         self.regs.xpsr = (xpsr & 0xF8000000) | 0x01000000;
         self.regs.r[13] = sp;
-        if exc == EXC_RETURN_PSP {
+        if to_psp {
             self.regs.psp = sp;
         } else {
             self.regs.msp = sp;
@@ -277,7 +362,7 @@ impl Cpu {
         // CONTROL-gated bank decision after the first return is wrong and
         // PendSV saves to a stale PSP — the FreeRTOS wedge). Bit0
         // (privilege) is preserved.
-        if exc == EXC_RETURN_PSP {
+        if to_psp {
             self.regs.control |= 2;
         } else {
             self.regs.control &= !2;

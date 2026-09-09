@@ -18,6 +18,7 @@ const CASES = [
     { label: 'audio_play_test', fw: 'audio_play_test', markers: ['I2S1 TX sine 256 samples'],     timeoutMs: 60000 },
     { label: 'deep_sleep_demo', fw: 'deep_sleep_demo', markers: ['WOKE FROM STOP'],               timeoutMs: 60000 },
     { label: 'fpu_test',        fw: 'fpu_test',        markers: ['FPU all PASS'],                 failMarkers: ['FAIL'], timeoutMs: 60000 },
+    { label: 'fpu_irq_test',    fw: 'fpu_irq_test',    markers: ['FPU IRQ all PASS'],             failMarkers: ['FAIL'], timeoutMs: 90000 },
 ];
 
 let failed = 0;
