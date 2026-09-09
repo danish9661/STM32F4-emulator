@@ -101,6 +101,517 @@ fn ror32(v: u32, s: u32) -> u32 {
         (v >> s) | (v << (32 - s))
     }
 }
+/// VFP immediate expansion (ARM ARM VFPExpandImm, N=32): encodable value =
+/// sign:exponent:fraction with exp = NOT(b):b*5:c:d. Pinned by GAS probes:
+/// 0x70->1.0, 0x00->2.0, 0xE0->-0.5, 0x1B->6.75 (fpu.s/fpu7.s).
+#[inline]
+fn vfp_expand_imm(imm8: u32) -> u32 {
+    let b = (imm8 >> 6) & 1;
+    let exp = (((b ^ 1) << 7) | (b << 6) | (b << 5) | (b << 4) | (b << 3) | (b << 2)
+        | (((imm8 >> 5) & 1) << 1)
+        | ((imm8 >> 4) & 1)) as u32;
+    (((imm8 >> 7) & 1) << 31) | (exp << 23) | ((imm8 & 0xF) << 19)
+}
+
+// ---- VFPv4-SP datapath helpers (FPU (c)) ----
+// FPSCR cumulative exception flags.
+const FPSCR_IOC: u32 = 1; // invalid operation
+const FPSCR_DZC: u32 = 1 << 1; // divide by zero
+const FPSCR_OFC: u32 = 1 << 2; // overflow
+const FPSCR_UFC: u32 = 1 << 3; // underflow (v1: subnormal result; see below)
+const FPSCR_IXC: u32 = 1 << 4; // inexact (v1: vcvt/f16 only, + OFC/UFC)
+
+#[inline]
+fn fpu_rmode(fpscr: u32) -> u32 {
+    (fpscr >> 22) & 3 // 0 RNE, 1 +inf, 2 -inf, 3 zero
+}
+#[inline]
+fn f32_subnormal(w: u32) -> bool {
+    w & 0x7F800000 == 0 && w & 0x007F_FFFF != 0
+}
+#[inline]
+fn f32_nan(w: u32) -> bool {
+    w & 0x7F800000 == 0x7F800000 && w & 0x007F_FFFF != 0
+}
+#[inline]
+fn f32_snan(w: u32) -> bool {
+    f32_nan(w) && w & 0x0040_0000 == 0
+}
+#[inline]
+fn f32_inf(w: u32) -> bool {
+    w & 0x7FFF_FFFF == 0x7F800000
+}
+/// Flush-to-zero (FPSCR FZ, bit 24): subnormal inputs become signed zero.
+/// Sign-preserving, per the ARM ARM flush pseudocode. Documented choice.
+#[inline]
+fn fpu_flush(w: u32, fpscr: u32) -> u32 {
+    if fpscr & (1 << 24) != 0 && f32_subnormal(w) {
+        w & 0x8000_0000
+    } else {
+        w
+    }
+}
+/// Default NaN (FPSCR DN, bit 25): any NaN result is 0x7FC00000.
+#[inline]
+fn fpu_dn(w: u32, fpscr: u32) -> u32 {
+    if fpscr & (1 << 25) != 0 && f32_nan(w) {
+        0x7FC0_0000
+    } else {
+        w
+    }
+}
+/// NaN-operand scan. Returns Some((result, ioc)) when any input is NaN:
+/// SNaN anywhere -> IOC (+ DN ? default : quieted first SNaN); else the
+/// first QNaN propagates quietly. None = no NaN inputs.
+fn fpu_nan_scan(fpscr: u32, ops: &[u32]) -> Option<(u32, u32)> {
+    let mut qnan: Option<u32> = None;
+    for &o in ops {
+        if f32_snan(o) {
+            let r = if fpscr & (1 << 25) != 0 { 0x7FC0_0000 } else { o | 0x0040_0000 };
+            return Some((r, FPSCR_IOC));
+        }
+        if qnan.is_none() && f32_nan(o) {
+            qnan = Some(o);
+        }
+    }
+    qnan.map(|q| (fpu_dn(q, fpscr), 0))
+}
+/// Overflow/underflow flags for a computed f32 result with all-finite,
+/// non-NaN inputs (callers handle inf-input and invalid cases explicitly).
+/// v1 approximation (documented): subnormal nonzero result -> UFC (+IXC);
+/// +-inf result -> OFC (+IXC). Plain rounding never touches IXC here.
+fn fpu_ou_flags(r: u32) -> u32 {
+    if f32_inf(r) {
+        FPSCR_OFC | FPSCR_IXC
+    } else if f32_subnormal(r) {
+        FPSCR_UFC | FPSCR_IXC
+    } else {
+        0
+    }
+}
+/// f32 add/sub (sub flips b). Invalid (inf + -inf) -> NaN + IOC.
+fn fpu_add(fpscr: u32, a: u32, b: u32, sub: bool) -> (u32, u32) {
+    let a = fpu_flush(a, fpscr);
+    let b = fpu_flush(b, fpscr);
+    if let Some(n) = fpu_nan_scan(fpscr, &[a, b]) {
+        return n;
+    }
+    let af = f32::from_bits(a);
+    let bf = f32::from_bits(b);
+    if af.is_infinite() && bf.is_infinite() && (af.is_sign_negative() != bf.is_sign_negative()) == !sub {
+        return (fpu_dn(0x7FC0_0000, fpscr), FPSCR_IOC);
+    }
+    let r = if sub { af - bf } else { af + bf };
+    let rb = r.to_bits();
+    (fpu_dn(rb, fpscr), fpu_ou_flags(rb))
+}
+/// f32 multiply (neg flips the result sign). 0*inf -> NaN + IOC.
+fn fpu_mul(fpscr: u32, a: u32, b: u32, neg: bool) -> (u32, u32) {
+    let a = fpu_flush(a, fpscr);
+    let b = fpu_flush(b, fpscr);
+    if let Some(n) = fpu_nan_scan(fpscr, &[a, b]) {
+        let (r, f) = n;
+        return (r ^ if neg { 0x8000_0000 } else { 0 }, f);
+    }
+    let af = f32::from_bits(a);
+    let bf = f32::from_bits(b);
+    if (af == 0.0 && bf.is_infinite()) || (af.is_infinite() && bf == 0.0) {
+        return (fpu_dn(0x7FC0_0000, fpscr), FPSCR_IOC);
+    }
+    let mut rb = (af * bf).to_bits();
+    if neg {
+        rb ^= 0x8000_0000;
+    }
+    (fpu_dn(rb, fpscr), fpu_ou_flags(rb))
+}
+/// f32 divide. 0/0 and inf/inf -> NaN + IOC; x/0 -> inf + DZC.
+fn fpu_div(fpscr: u32, a: u32, b: u32) -> (u32, u32) {
+    let a = fpu_flush(a, fpscr);
+    let b = fpu_flush(b, fpscr);
+    if let Some(n) = fpu_nan_scan(fpscr, &[a, b]) {
+        return n;
+    }
+    let af = f32::from_bits(a);
+    let bf = f32::from_bits(b);
+    if bf == 0.0 {
+        if af == 0.0 {
+            return (fpu_dn(0x7FC0_0000, fpscr), FPSCR_IOC);
+        }
+        let r = (if af.is_sign_negative() != bf.is_sign_negative() { f32::NEG_INFINITY } else { f32::INFINITY }).to_bits();
+        return (r, FPSCR_DZC);
+    }
+    if af.is_infinite() && bf.is_infinite() {
+        return (fpu_dn(0x7FC0_0000, fpscr), FPSCR_IOC);
+    }
+    if bf.is_infinite() {
+        // Finite/inf: exact zero, but the true quotient is tiny-nonzero.
+        let r = (if af.is_sign_negative() != bf.is_sign_negative() { -0.0 } else { 0.0f32 }).to_bits();
+        let fl = if af == 0.0 { 0 } else { FPSCR_UFC | FPSCR_IXC };
+        return (r, fl);
+    }
+    let rb = (af / bf).to_bits();
+    (fpu_dn(rb, fpscr), fpu_ou_flags(rb))
+}
+/// Accumulate: acc +/- (a*b), unfused (separate f32 mul then add, like
+/// silicon — never mul_add). VNMLA/VNMLS negation is folded into the
+/// operand signs up front (exact).
+fn fpu_mla(fpscr: u32, acc: u32, a: u32, b: u32, sub: bool, neg: bool) -> (u32, u32) {
+    // Negation is exact: fold it into the operand signs up front so the
+    // add's zero-sign rules and directed rounding see the final signs.
+    let (acc, a) = if neg { (acc ^ 0x8000_0000, a ^ 0x8000_0000) } else { (acc, a) };
+    let (p, f1) = fpu_mul(fpscr, a, b, false);
+    // A NaN product propagates through the add (flags OR, idempotent).
+    let (r, f2) = fpu_add(fpscr, acc, p, sub);
+    (fpu_dn(r, fpscr), f1 | f2)
+}
+/// f32 square root. Negative (nonzero) -> NaN + IOC.
+fn fpu_sqrt(fpscr: u32, a: u32) -> (u32, u32) {
+    let a = fpu_flush(a, fpscr);
+    if let Some(n) = fpu_nan_scan(fpscr, &[a]) {
+        return n;
+    }
+    let af = f32::from_bits(a);
+    if af < 0.0 {
+        return (fpu_dn(0x7FC0_0000, fpscr), FPSCR_IOC);
+    }
+    let rb = af.sqrt().to_bits(); // RNE; RMode only honored for vcvt (documented)
+    (fpu_dn(rb, fpscr), fpu_ou_flags(rb))
+}
+/// Normalize a finite nonzero f32 to (sign, unbiased exp, 24-bit mantissa
+/// with hidden 1 at bit 23). Subnormals are normalized (FZ flushing is the
+/// caller's job); zeros/infs/NaNs must not reach here.
+fn fpu_norm(w: u32) -> (u32, i32, u32) {
+    let s = w >> 31;
+    let e = ((w >> 23) & 0xFF) as i32;
+    let f = w & 0x7FFF_FF;
+    if e == 0 {
+        // Subnormal f x 2^-149, top bit q = 22-sh: exp q-149, mantissa
+        // normalized to bit 23 (same pattern as f16_to_f32_bits, tested).
+        let sh = f.leading_zeros() - 9; // 23-bit frac in u32
+        (s, -127 - sh as i32, ((f << (sh + 1)) & 0x7FFF_FF) | 0x8000_00)
+    } else {
+        (s, e - 127, f | 0x8000_00)
+    }
+}
+/// Fused acc +/- (a*b): SINGLE rounding (VFPv4 VFMA/VFMS/VFNMA/VFNMS),
+/// exact via u128 integer arithmetic — never f64 (which can double-round
+/// near f32 rounding boundaries). Negation folded into operand signs up
+/// front (exact), so zero-sign rules and directed rounding see final signs.
+fn fpu_fma(fpscr: u32, acc: u32, a: u32, b: u32, sub: bool, neg: bool) -> (u32, u32) {
+    let (acc, a) = if neg { (acc ^ 0x8000_0000, a ^ 0x8000_0000) } else { (acc, a) };
+    let acc = fpu_flush(acc, fpscr);
+    let a = fpu_flush(a, fpscr);
+    let b = fpu_flush(b, fpscr);
+    if let Some(n) = fpu_nan_scan(fpscr, &[acc, a, b]) {
+        return n;
+    }
+    let rmode = fpu_rmode(fpscr);
+    // 0 * inf (either order) is invalid even fused.
+    if (a == 0 && f32_inf(b)) || (f32_inf(a) && b == 0) {
+        return (fpu_dn(0x7FC0_0000, fpscr), FPSCR_IOC);
+    }
+    // Exact-zero-product path (no inf involved): acc +/- 0 is exact.
+    if a == 0 || b == 0 {
+        let ps = (a >> 31) ^ (b >> 31) ^ (sub as u32); // signed term sign
+        if acc == 0 {
+            // Exact-zero add on effective signs (negation already folded).
+            let sa = acc >> 31;
+            let zs = match rmode {
+                2 => 1,       // toward -inf: -0
+                0 => sa & ps, // RNE: -0 only if both negative
+                _ => 0,       // toward +inf / zero: +0
+            };
+            return (zs << 31, 0);
+        }
+        // acc +/- 0: exact, sign of acc, no flags.
+        return (acc, 0);
+    }
+    // Infinity propagation (no zeros reach here).
+    let a_inf = f32_inf(a);
+    let b_inf = f32_inf(b);
+    let acc_inf = f32_inf(acc);
+    if a_inf || b_inf {
+        let ps = (a >> 31) ^ (b >> 31) ^ (sub as u32);
+        if acc_inf {
+            if (acc >> 31) != ps {
+                return (fpu_dn(0x7FC0_0000, fpscr), FPSCR_IOC);
+            }
+            return (acc & 0x8000_0000 | 0x7F80_0000, 0);
+        }
+        return (ps << 31 | 0x7F80_0000, 0);
+    }
+    if acc_inf {
+        return (acc, 0);
+    }
+    if acc == 0 {
+        // Fused with a zero addend is exactly the correctly-rounded
+        // product (single rounding) — and keeps fpu_norm away from zero.
+        return fpu_mul(fpscr, a, b, sub);
+    }
+    // All finite nonzero: exact integer accumulation.
+    let (sa, ea, ma) = fpu_norm(acc);
+    let (s1, e1, m1) = fpu_norm(a);
+    let (s2, e2, m2) = fpu_norm(b);
+    let sb = s1 ^ s2 ^ (sub as u32); // effective product sign
+    let p_exp = e1 + e2;
+    let p_mant = m1 as u128 * m2 as u128; // <= 2^48
+    // Align to the larger exponent, sticky-shifting the smaller. Scales:
+    // p_mant is 48-bit (value x 2^(p_exp-46)); the addend is lifted to the
+    // same 46-scale via <<23 (value ma x 2^(ea-23) = (ma<<23) x 2^(ea-46)).
+    let shr_sticky = |v: u128, sh: i32| -> (u128, bool) {
+        if sh <= 0 {
+            (v, false)
+        } else if sh >= 128 {
+            (0, v != 0)
+        } else {
+            (v >> sh, (v & ((1u128 << sh) - 1)) != 0)
+        }
+    };
+    let (pm, cm, base_exp, sticky0) = if p_exp >= ea {
+        let (c, st) = shr_sticky((ma as u128) << 23, p_exp - ea);
+        (p_mant, c, p_exp, st)
+    } else {
+        let (p, st) = shr_sticky(p_mant, ea - p_exp);
+        (p, (ma as u128) << 23, ea, st)
+    };
+    // Add/sub magnitudes (A=acc/cm, B=term/pm, same scale now).
+    let (mag, rs) = if sa == sb {
+        (pm + cm, sa)
+    } else if cm >= pm {
+        (cm - pm, sa)
+    } else {
+        (pm - cm, sb)
+    };
+    if mag == 0 {
+        // Exact cancellation: RNE sign rule on effective signs.
+        let zs = match rmode {
+            2 => 1,
+            0 => sa & sb,
+            _ => 0,
+        };
+        return (zs << 31, 0);
+    }
+    // Normalize to a 25-bit kept (bit 24 = hidden 1) + rest. kept's value
+    // is kept x 2^(E'-46) with kept in [2^24, 2^25), i.e. unbiased exp E'-22.
+    let l = 128 - mag.leading_zeros() as i32; // bit length, >= 1
+    let (kept, rest, exp) = if l > 25 {
+        let drop = (l - 25) as u32;
+        (mag >> drop, mag & ((1u128 << drop) - 1), base_exp + drop as i32 - 22)
+    } else {
+        (mag << (25 - l) as u32, 0, base_exp - (25 - l) - 22)
+    };
+    let sticky_base = sticky0 || rest != 0;
+    if exp > 127 {
+        return (rs << 31 | 0x7F80_0000, FPSCR_OFC | FPSCR_IXC);
+    }
+    if exp >= -126 {
+        // Round 25 -> 24 bits (guard = bit 0, sticky below).
+        let lsb = (kept & 2) >> 1;
+        let guard = kept & 1;
+        let up = fpu_round_up(((guard as u32) << 1) | (sticky_base as u32), 2, lsb as u32, rmode, rs != 0);
+        let mut k = (kept >> 1) as u32 + if up { 1 } else { 0 };
+        let mut e = exp;
+        if k == 0x100_0000 {
+            k = 0x8000_00;
+            e += 1;
+        }
+        if e > 127 {
+            return (rs << 31 | 0x7F80_0000, FPSCR_OFC | FPSCR_IXC);
+        }
+        let fl = if guard != 0 || sticky_base { FPSCR_IXC } else { 0 };
+        return (rs << 31 | ((e + 127) as u32) << 23 | (k & 0x7FFF_FF), fl);
+    }
+    // Subnormal: round kept25 to multiples of 2^-149 (sh = -125-exp >= 2).
+    let sh = -125 - exp;
+    if sh >= 128 {
+        return (rs << 31, FPSCR_UFC | FPSCR_IXC); // nonzero inputs -> tiny
+    }
+    fpu_fma_subnormal(kept, sticky_base, rs, rmode, sh as u32)
+}
+/// Round a normalized 25-bit fused-mantissa (bit 24 set) + below-sticky to
+/// an f32 subnormal/zero: units of 2^-149, sh = -125-exp >= 1.
+fn fpu_fma_subnormal(kept: u128, sticky_below: bool, rs: u32, rmode: u32, sh: u32) -> (u32, u32) {
+    let q = (kept >> sh) as u32;
+    let rem = kept & ((1u128 << sh) - 1);
+    let guard = ((rem >> (sh - 1)) & 1) as u32;
+    let sticky = sticky_below || (rem & ((1u128 << (sh - 1)) - 1)) != 0;
+    let up = fpu_round_up((guard << 1) | (sticky as u32), 2, q & 1, rmode, rs != 0);
+    let k = q + if up { 1 } else { 0 };
+    if k >= 0x80_0000 {
+        // Rounded up into the smallest normal.
+        return (rs << 31 | 0x0080_0000, FPSCR_UFC | FPSCR_IXC);
+    }
+    let fl = if guard != 0 || sticky { FPSCR_UFC | FPSCR_IXC } else { 0 };
+    (rs << 31 | k, fl)
+}
+fn fpu_round_int(v: f64, signed: bool, rmode: u32) -> (u32, bool) {
+    if v.is_nan() {
+        return (0, true);
+    }
+    let r = match rmode {
+        0 => v.round_ties_even(),
+        1 => v.ceil(),
+        2 => v.floor(),
+        _ => v.trunc(),
+    };
+    if signed {
+        if r < -2147483648.0 || r >= 2147483648.0 {
+            return (0, true);
+        }
+        (r as i64 as u32, false)
+    } else {
+        if r < 0.0 || r >= 4294967296.0 {
+            return (0, true);
+        }
+        (r as u64 as u32, false)
+    }
+}
+/// Round an exact f64 to f32 per RMode (int->float and fixed->float need
+/// this; plain `as` is RNE-only). Returns (bits, inexact).
+fn fpu_round_f32(v: f64, rmode: u32) -> (u32, bool) {
+    let r = v as f32; // RNE
+    if rmode == 0 || (r as f64) == v {
+        return (r.to_bits(), (r as f64) != v);
+    }
+    let adj = match rmode {
+        1 => (r as f64) < v,
+        2 => (r as f64) > v,
+        _ => {
+            if v > 0.0 {
+                (r as f64) > v
+            } else {
+                (r as f64) < v
+            }
+        }
+    };
+    if !adj {
+        return (r.to_bits(), true);
+    }
+    let r2 = match rmode {
+        1 => r.next_up(),
+        2 => r.next_down(),
+        _ => {
+            if v > 0.0 {
+                r.next_down()
+            } else {
+                r.next_up()
+            }
+        }
+    };
+    (r2.to_bits(), true)
+}
+/// f16 (bits) -> f32 (bits), exact widening (NaN payload preserved).
+fn f16_to_f32_bits(h: u16) -> u32 {
+    let s = ((h >> 15) & 1) as u32;
+    let e = ((h >> 10) & 0x1F) as u32;
+    let f = (h & 0x3FF) as u32;
+    match e {
+        31 => {
+            if f == 0 {
+                (s << 31) | 0x7F800000
+            } else {
+                // QNaN passes; SNaN (bit9 clear) is quieted (caller sets IOC).
+                (s << 31) | 0x7F800000 | (f << 13) | if f & 0x200 == 0 { 0x0040_0000 } else { 0 }
+            }
+        }
+        0 => {
+            if f == 0 {
+                s << 31
+            } else {
+                // Normalize the subnormal: f = 0x200>>sh-style value f x 2^-24
+                // with top bit p = 9-sh -> 1.xxx x 2^(p-24), exp 103+p.
+                let sh = f.leading_zeros() - 22; // 10-bit frac in u32
+                let e32 = 112 - sh as i32;
+                let m32 = (f << (sh + 1)) & 0x3FF;
+                (s << 31) | ((e32 as u32) << 23) | (m32 << 13)
+            }
+        }
+        _ => (s << 31) | ((e + 112) << 23) | (f << 13),
+    }
+}
+/// Round-to-nearest-or-directed helper over dropped bits.
+/// `kept` = value after shifting out `drop` bits, `rest` = dropped bits,
+/// `lsb` = kept bit 0. Returns whether to round up (magnitude).
+fn fpu_round_up(rest: u32, drop: u32, lsb: u32, rmode: u32, neg: bool) -> bool {
+    if rest == 0 {
+        return false;
+    }
+    match rmode {
+        0 => {
+            let guard = (rest >> (drop - 1)) & 1;
+            let sticky = rest & ((1 << (drop - 1)) - 1);
+            guard == 1 && (sticky != 0 || lsb == 1)
+        }
+        1 => !neg,
+        2 => neg,
+        _ => false,
+    }
+}
+/// f32 (bits) -> f16 (bits) per RMode. Returns (half, flags).
+fn f32_to_f16_bits(w: u32, rmode: u32) -> (u16, u32) {
+    let s = w >> 31;
+    let neg = s != 0;
+    let e = ((w >> 23) & 0xFF) as i32;
+    let f = w & 0x7FFF_FF;
+    if e == 0xFF {
+        if f == 0 {
+            return ((s << 15 | 0x7C00) as u16, 0); // inf exact, no flag
+        }
+        let mut h = 0x7E00 | ((f >> 13) as u16 & 0x3FF);
+        if f & 0x0040_0000 == 0 {
+            h |= 0x0200; // quiet an SNaN (caller sets IOC)
+        }
+        if h & 0x3FF == 0 {
+            h |= 1; // payload must stay nonzero (still NaN)
+        }
+        return ((s << 15) as u16 | h, 0);
+    }
+    // Normalized (exp, 24-bit mantissa with hidden 1).
+    let (exp, mant): (i32, u32) = if e == 0 {
+        if f == 0 {
+            return ((s << 15) as u16, 0);
+        }
+        // f32 subnormal f x 2^-149, top bit q = 22-sh -> exp q-149.
+        let sh = f.leading_zeros() - 9; // 23-bit frac in u32
+        (-127 - sh as i32, ((f << sh) & 0x7FFF_FF) | 0x8000_00)
+    } else {
+        (e - 127, f | 0x8000_00)
+    };
+    let h_exp = exp + 15;
+    if h_exp >= 31 {
+        return ((s << 15 | 0x7C00) as u16, FPSCR_OFC | FPSCR_IXC);
+    }
+    if h_exp <= 0 {
+        // Subnormal (or zero): total dropped bits = 14 - h_exp.
+        let drop = (14 - h_exp) as u32;
+        if drop >= 32 {
+            return ((s << 15) as u16, FPSCR_UFC | FPSCR_IXC);
+        }
+        let kept = mant >> drop;
+        let rest = mant & ((1 << drop) - 1);
+        let up = fpu_round_up(rest, drop, kept & 1, rmode, neg);
+        let k = kept + if up { 1 } else { 0 };
+        if k >= 0x400 {
+            // Rounded up into the smallest normal.
+            return ((s << 15 | 0x0400) as u16, FPSCR_UFC | FPSCR_IXC);
+        }
+        let fl = if rest != 0 { FPSCR_UFC | FPSCR_IXC } else { 0 };
+        return ((s << 15 | k) as u16, fl);
+    }
+    // Normal: drop 13 bits (23 -> 10).
+    let kept = mant >> 13;
+    let rest = mant & 0x1FFF;
+    let up = fpu_round_up(rest, 13, kept & 1, rmode, neg);
+    let k = kept + if up { 1 } else { 0 };
+    if k >= 0x800 {
+        // Mantissa overflow carries into the exponent.
+        if h_exp + 1 >= 31 {
+            return ((s << 15 | 0x7C00) as u16, FPSCR_OFC | FPSCR_IXC);
+        }
+        return ((s << 15 | (((h_exp + 1) as u32) << 10)) as u16, if rest != 0 { FPSCR_IXC } else { 0 });
+    }
+    ((s << 15 | ((h_exp as u32) << 10) | (k & 0x3FF)) as u16, if rest != 0 { FPSCR_IXC } else { 0 })
+}
 /// Register read with Thumb PC semantics: reads of R15 see `(pc+4)&!3`.
 #[inline]
 fn rr(c: &Cpu, n: usize, pc: u32) -> u32 {
@@ -2702,6 +3213,455 @@ pub fn exec32(
             adv(cpu, pc, 4);
             return true;
         }
+        return fault(cpu, pc, op1, op2, 4);
+    } else if (o1 & 0xF000) == 0xE000 {
+        // ---- EC/ED/EE/EF: FPU (VFPv4-SP, coproc 10/11) ----
+        // Bitfield ground truth: .pw-scratch/tmp/dsp/fpu*.s + fpu7.s
+        // (Sd=(Vd<<1)|D, Sn=(Vn<<1)|N, Sm=(Vm<<1)|M; D-lists use D:Vd with
+        // D HIGH; VLDM counts imm8 S-regs / imm8/2 D-regs; VCVT frac =
+        // 32-2*imm4-opbit; VFPExpandImm pinned by vmov #1.0/#2.0/#-0.5/#6.75).
+        // No other coprocessor exists on the M4F: non-0xA/0xB is a fault.
+        if (o2 >> 8) & 0xF != 0xA && (o2 >> 8) & 0xF != 0xB {
+            return fault(cpu, pc, op1, op2, 4);
+        }
+        // CPACR gate: CP10+CP11 need full access, else UsageFault NOCP
+        // (UFSR bit 3 = CFSR bit 19 latched; without delivery this is a
+        // loud fault like SVC — polling firmware never touches the FPU
+        // without enabling it, so hitting this is a bug worth surfacing).
+        // NOTE: no lazy stacking in v1 (take_exception stacks the 8-word
+        // integer frame only): handlers must not use FPU regs (true of all
+        // shipped firmware incl. the FreeRTOS port). Each successful FPU
+        // arm sets CONTROL.FPCA like hardware.
+        if sys.p.read(sys, 0xE000ED88, 4) & 0x00F0_0000 != 0x00F0_0000 {
+            let cfsr = sys.p.read(sys, 0xE000ED28, 4);
+            sys.p.write(sys, 0xE000ED28, 4, cfsr | 0x0008_0000);
+            if !cpu.deliver_irqs {
+                return fault(cpu, pc, op1, op2, 4);
+            }
+            adv(cpu, pc, 4);
+            cpu.take_exception(sys, mem, -10); // UsageFault
+            return true;
+        }
+        // ---- (b) moves + MF/VMSR + VLDR/VSTR/VLDM/VSTM ----
+        // S-numbering (probe-verified): Sd=(Vd<<1)|D, Sn=(Vn<<1)|N,
+        // Sm=(Vm<<1)|M with D=o1[6], N=o2[7], M=o2[5]. D-lists use D:Vd
+        // (D HIGH). sz=o2[8] must be 0 (no double-precision datapath on
+        // FPv4-SP). Every successful arm sets CONTROL.FPCA like hardware.
+        let vd4 = ((o2 >> 12) & 0xF) as usize;
+        let dbit = ((o1 >> 6) & 1) as usize;
+        let nbit = ((o2 >> 7) & 1) as usize;
+        let mbit = ((o2 >> 5) & 1) as usize;
+        let sd = (vd4 << 1) | dbit;
+        let sn = (((o1 & 0xF) as usize) << 1) | nbit;
+        let sm = (((o2 & 0xF) as usize) << 1) | mbit;
+        // ---- EE: VMRS/VMSR + VMOV family (prefix-gated: the opc1/op
+        // shapes below also match EC/ED multiples — e.g. VPOP ECBD 0A04
+        // hits the VMOV-imm shape — so the EE prefix must be verified).
+        if (o1 & 0xFF00) == 0xEE00 {
+        // VMRS / VMSR (op1 exact; op2lo == 0x10; Rt = Vd field, 0xF = APSR).
+        if o1 == 0xEEF1 || o1 == 0xEEE1 {
+            if (o2 & 0xFF) != 0x10 || (o2 >> 8) & 1 != 0 {
+                return fault(cpu, pc, op1, op2, 4);
+            }
+            if o1 == 0xEEF1 {
+                if vd4 == 0xF {
+                    cpu.regs.xpsr = (cpu.regs.xpsr & !0xF000_0000) | (cpu.regs.fpscr & 0xF000_0000);
+                } else {
+                    if vd4 == 13 {
+                        return fault(cpu, pc, op1, op2, 4);
+                    }
+                    cpu.regs.r[vd4] = cpu.regs.fpscr;
+                }
+            } else {
+                if vd4 == 13 || vd4 == 15 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                cpu.regs.fpscr = (cpu.regs.fpscr & !0xFFC0_01FF)
+                    | (rr(cpu, vd4, pc) & 0xFFC0_01FF);
+            }
+            cpu.regs.control |= 4;
+            adv(cpu, pc, 4);
+            return true;
+        }
+        // VMOV core<->S (Vn field varies in o1 low nibble). The op1 shape
+        // (EE10/EE00) is SHARED with VNMLA/VNMLS/VMLA/VMLS, so the full
+        // shape (op2lo == 0x10|N<<7, sz == 0) must match before claiming;
+        // otherwise fall through to the 3-reg arm. Rt=13/15 UNPREDICTABLE.
+        if ((o1 & 0xFFF0) == 0xEE10 || (o1 & 0xFFF0) == 0xEE00)
+            && ((o2 & 0xFF) == 0x10 || (o2 & 0xFF) == 0x90)
+            && (o2 >> 8) & 1 == 0
+        {
+            if vd4 == 13 || vd4 == 15 {
+                return fault(cpu, pc, op1, op2, 4);
+            }
+            if (o1 & 0xFFF0) == 0xEE10 {
+                cpu.regs.r[vd4] = cpu.regs.s[sn];
+            } else {
+                cpu.regs.s[sn] = rr(cpu, vd4, pc);
+            }
+            cpu.regs.control |= 4;
+            adv(cpu, pc, 4);
+            return true;
+        }
+        // VMOV-imm (opc1==1D11, i.e. 0xB/0xF, op==0): imm8 = opc2:op2[3:0].
+        // sz must be 0.
+        if (((o1 >> 4) & 0xF) == 0xB || ((o1 >> 4) & 0xF) == 0xF) && (o2 & 0xF0) == 0x00 && (o2 >> 8) & 1 == 0 {
+            cpu.regs.s[sd] = vfp_expand_imm(((o1 & 0xF) << 4) | (o2 & 0xF));
+            cpu.regs.control |= 4;
+            adv(cpu, pc, 4);
+            return true;
+        }
+        // VMOV-reg (opc2==0, op==6). sz must be 0 (no f64 moves).
+        if (o1 & 0xF) == 0 && (o1 & 0xF0) == 0xB0 && (o2 & 0xF0) == 0x60 && (o2 >> 8) & 1 == 0 {
+            cpu.regs.s[sd] = cpu.regs.s[sm];
+            cpu.regs.control |= 4;
+            adv(cpu, pc, 4);
+            return true;
+        }
+        // ---- (c) three-register data processing ----
+        // opc1 = o1[23:20], op = o2[6] (0=add-flavor, 1=sub-flavor), sz =
+        // o2[8] must be 0 (no f64 datapath on FPv4-SP). GAS table:
+        // (3,0)=ADD (3,1)=SUB (2,0)=MUL (2,1)=NMUL (8,0)=DIV (0,0)=MLA
+        // (0,1)=MLS (1,1)=NMLA (1,0)=NMLS. MLA/MLS are UNFUSED (mul then
+        // add in f32, like silicon — never mul_add).
+        // Fused (VFPv4, single rounding): (0xA,0)=FMA (0xA,1)=FMS
+        // (0x9,1)=FNMA (0x9,0)=FNMS (GAS fpu11.s).
+        let opc1 = (o1 >> 4) & 0xF;
+        let fpscr0 = cpu.regs.fpscr;
+        if opc1 == 0x9 || opc1 == 0xA {
+            if (o2 >> 8) & 1 != 0 {
+                return fault(cpu, pc, op1, op2, 4);
+            }
+            let opb = (o2 >> 6) & 1;
+            let (r, fl) = match (opc1, opb) {
+                (0xA, 0) => fpu_fma(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], false, false),
+                (0xA, 1) => fpu_fma(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], true, false),
+                (0x9, 1) => fpu_fma(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], false, true),
+                (0x9, 0) => fpu_fma(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], true, true),
+                _ => return fault(cpu, pc, op1, op2, 4),
+            };
+            cpu.regs.s[sd] = r;
+            cpu.regs.fpscr |= fl;
+            cpu.regs.control |= 4;
+            adv(cpu, pc, 4);
+            return true;
+        }
+        if opc1 == 0 || opc1 == 1 || opc1 == 2 || opc1 == 3 || opc1 == 8 {
+            if (o2 >> 8) & 1 != 0 {
+                return fault(cpu, pc, op1, op2, 4);
+            }
+            let opb = (o2 >> 6) & 1;
+            let (r, fl) = match (opc1, opb) {
+                (3, 0) => fpu_add(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm], false),
+                (3, 1) => fpu_add(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm], true),
+                (2, 0) => fpu_mul(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm], false),
+                (2, 1) => fpu_mul(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm], true),
+                (8, 0) => fpu_div(fpscr0, cpu.regs.s[sn], cpu.regs.s[sm]),
+                (0, 0) => fpu_mla(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], false, false),
+                (0, 1) => fpu_mla(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], true, false),
+                (1, 1) => fpu_mla(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], false, true),
+                (1, 0) => fpu_mla(fpscr0, cpu.regs.s[sd], cpu.regs.s[sn], cpu.regs.s[sm], true, true),
+                _ => return fault(cpu, pc, op1, op2, 4), // (8,1): no such op
+            };
+            cpu.regs.s[sd] = r;
+            cpu.regs.fpscr |= fl;
+            cpu.regs.control |= 4;
+            adv(cpu, pc, 4);
+            return true;
+        }
+        // ---- (c) B-group misc: ABS/NEG/SQRT/CMP/VCVT ----
+        // opc2 = o1[19:16], op = o2[7:4]; sz (o2[8]) must be 0. opc1 MUST
+        // be 0xB here: VFPv4 fused ops (VFMA/VFMS/VFNMA/VFNMS, opc1 0x9/0xA)
+        // share the op2 shapes and would otherwise misdecode (loud fault
+        // until the fused arms land).
+        {
+            if opc1 != 0xB {
+                return fault(cpu, pc, op1, op2, 4);
+            }
+            if (o2 >> 8) & 1 != 0 {
+                return fault(cpu, pc, op1, op2, 4);
+            }
+            let opc2 = o1 & 0xF;
+            let opb = (o2 >> 4) & 0xF;
+            match (opc2, opb) {
+                (0, 0xE) => {
+                    cpu.regs.s[sd] = cpu.regs.s[sm] & !0x8000_0000; // VABS (no flags, even SNaN)
+                }
+                (1, 6) => {
+                    cpu.regs.s[sd] = cpu.regs.s[sm] ^ 0x8000_0000; // VNEG (no flags)
+                }
+                (1, 0xE) => {
+                    let (r, fl) = fpu_sqrt(fpscr0, cpu.regs.s[sm]);
+                    cpu.regs.s[sd] = r;
+                    cpu.regs.fpscr |= fl;
+                }
+                (4, 6) | (5, 4) => {
+                    // VCMP reg / VCMP #0. NZCV -> FPSCR (never xPSR);
+                    // unordered (any NaN) = N=0,Z=0,C=1,V=1; SNaN -> IOC.
+                    // NOTE: the first source lives in the Sd field
+                    // (Vd<<1|D), NOT Sn — op1[19:16] is opc2=4/5 here.
+                    let a = fpu_flush(cpu.regs.s[sd], fpscr0);
+                    let b = if opc2 == 5 { 0 } else { fpu_flush(cpu.regs.s[sm], fpscr0) };
+                    let mut fl = 0;
+                    let nzcv = if f32_nan(a) || f32_nan(b) {
+                        if f32_snan(a) || f32_snan(b) {
+                            fl |= FPSCR_IOC;
+                        }
+                        0x3
+                    } else {
+                        let af = f32::from_bits(a);
+                        let bf = f32::from_bits(b);
+                        ((af < bf) as u32) << 3 | ((af == bf) as u32) << 2 | (!(af < bf) as u32) << 1
+                    };
+                    cpu.regs.fpscr = (fpscr0 & !0xF000_0000) | (nzcv << 28);
+                    cpu.regs.fpscr |= fl;
+                }
+                (8, 0xC) | (8, 0x4) => {
+                    // VCVT.f32.s32/u32 (op2[6] = signed). RNE via `as`;
+                    // other RModes need explicit adjust (fpu_round_f32).
+                    if (o2 & 0xFF) != 0xC0 && (o2 & 0xFF) != 0x40 {
+                        return fault(cpu, pc, op1, op2, 4);
+                    }
+                    let signed = (o2 & 0x40) != 0;
+                    let iv = cpu.regs.s[sm];
+                    let v: f64 = if signed { (iv as i32) as f64 } else { iv as f64 };
+                    let (r, inexact) = fpu_round_f32(v, fpu_rmode(fpscr0));
+                    cpu.regs.s[sd] = r;
+                    if inexact {
+                        cpu.regs.fpscr |= FPSCR_IXC;
+                    }
+                }
+                (0xC, 0xC) | (0xD, 0xC) => {
+                    // VCVT.s32/u32.f32 (opc2[0] = signed). RMode rounding,
+                    // saturate + IOC on invalid/overflow.
+                    if (o2 & 0xFF) != 0xC0 {
+                        return fault(cpu, pc, op1, op2, 4);
+                    }
+                    let signed = opc2 == 0xD;
+                    let x = f32::from_bits(fpu_flush(cpu.regs.s[sm], fpscr0)) as f64;
+                    let (r, invalid) = fpu_round_int(x, signed, fpu_rmode(fpscr0));
+                    if invalid {
+                        let sat = if x.is_nan() {
+                            0
+                        } else if x > 0.0 {
+                            if signed { 0x7FFF_FFFF } else { 0xFFFF_FFFF }
+                        } else if signed {
+                            0x8000_0000
+                        } else {
+                            0
+                        };
+                        cpu.regs.s[sd] = sat;
+                        cpu.regs.fpscr |= FPSCR_IOC;
+                    } else {
+                        cpu.regs.s[sd] = r;
+                        // Inexact-but-valid rounding. Signed compare must go
+                        // via i32 (r=0x80000000 as f64 is +2^31, != x=-2^31).
+                        let exact = if signed { (r as i32) as f64 == x } else { r as f64 == x };
+                        if !exact {
+                            cpu.regs.fpscr |= FPSCR_IXC;
+                        }
+                    }
+                }
+                (0xA, _) | (0xB, _) | (0xE, _) | (0xF, _) => {
+                    // VCVT fixed<->float. frac N = 32-2*imm4-opbit (GAS:
+                    // 0xC8->16, 0xEF->1, 0xC0->32, 0xE0->31, 0xCF->2).
+                    // opc2[2]: 0 = to-float (A/B), 1 = to-fixed (E/F);
+                    // opc2[0]: 0 = signed (A/E), 1 = unsigned (B/F).
+                    let hi = (o2 >> 4) & 0xF;
+                    if hi != 0xC && hi != 0xE {
+                        return fault(cpu, pc, op1, op2, 4);
+                    }
+                    let imm4 = o2 & 0xF;
+                    let n = 32 - 2 * imm4 as i32 - ((o2 >> 5) & 1) as i32;
+                    if n < 1 || n > 32 {
+                        return fault(cpu, pc, op1, op2, 4);
+                    }
+                    let signed = (opc2 & 1) == 0;
+                    let to_fixed = (opc2 & 4) != 0;
+                    // Fixed-point VCVT requires Sd == Sm (GAS rejects
+                    // distinct regs), so the single operand lives in sd.
+                    if !to_fixed {
+                        let iv = cpu.regs.s[sd];
+                        let base: f64 = if signed { (iv as i32) as f64 } else { iv as f64 };
+                        let v = base / 2f64.powi(n);
+                        let (r, inexact) = fpu_round_f32(v, fpu_rmode(fpscr0));
+                        cpu.regs.s[sd] = r;
+                        let mut fl = if inexact { FPSCR_IXC } else { 0 };
+                        fl |= fpu_ou_flags(r);
+                        cpu.regs.fpscr |= fl;
+                    } else {
+                        let x = f32::from_bits(fpu_flush(cpu.regs.s[sd], fpscr0)) as f64 * 2f64.powi(n);
+                        let (r, invalid) = fpu_round_int(x, signed, fpu_rmode(fpscr0));
+                        if invalid {
+                            let sat = if x.is_nan() {
+                                0
+                            } else if x > 0.0 {
+                                if signed { 0x7FFF_FFFF } else { 0xFFFF_FFFF }
+                            } else if signed {
+                                0x8000_0000
+                            } else {
+                                0
+                            };
+                            cpu.regs.s[sd] = sat;
+                            cpu.regs.fpscr |= FPSCR_IOC;
+                        } else {
+                            cpu.regs.s[sd] = r;
+                            let exact = if signed { (r as i32) as f64 == x } else { r as f64 == x };
+                            if !exact {
+                                cpu.regs.fpscr |= FPSCR_IXC;
+                            }
+                        }
+                    }
+                }
+                (2, 6) | (2, 0xE) | (3, 6) | (3, 0xE) => {
+                    // VCVT f16<->f32. opc2[0]: 0 = f16->f32, 1 = f32->f16;
+                    // op: 6 = bottom half, 0xE = top half.
+                    let from_half = opc2 == 2;
+                    let top = opb == 0xE;
+                    if from_half {
+                        let sh = cpu.regs.s[sm];
+                        let h = if top { (sh >> 16) as u16 } else { sh as u16 };
+                        if (h & 0x7C00) == 0x7C00 && (h & 0x3FF) != 0 && (h & 0x200) == 0 {
+                            cpu.regs.fpscr |= FPSCR_IOC; // f16 SNaN
+                        }
+                        let r = f16_to_f32_bits(h);
+                        cpu.regs.s[sd] = fpu_dn(r, fpscr0);
+                    } else {
+                        let w = fpu_flush(cpu.regs.s[sm], fpscr0);
+                        if f32_snan(w) {
+                            cpu.regs.fpscr |= FPSCR_IOC;
+                        }
+                        let (h, fl) = f32_to_f16_bits(w, fpu_rmode(fpscr0));
+                        // DN: a NaN narrow result becomes the default NaN
+                        // (sign preserved).
+                        let hn = if (h & 0x7C00) == 0x7C00 && (h & 0x3FF) != 0 && fpscr0 & (1 << 25) != 0 {
+                            (h & 0x8000) | 0x7E00
+                        } else {
+                            h
+                        };
+                        let dst = cpu.regs.s[sd];
+                        cpu.regs.s[sd] = if top {
+                            (dst & 0xFFFF) | ((hn as u32) << 16)
+                        } else {
+                            (dst & 0xFFFF_0000) | hn as u32
+                        };
+                        cpu.regs.fpscr |= fl;
+                    }
+                }
+                _ => return fault(cpu, pc, op1, op2, 4),
+            }
+            cpu.regs.control |= 4;
+            adv(cpu, pc, 4);
+            return true;
+        }
+        } // end EE prefix gate
+        // ---- EC/ED: VLDM/VSTM/VPUSH/VPOP (multi) vs VLDR/VSTR (single) ----
+        // Selected by P/U/W, not by prefix: IA (P=0,U=1) multiples happen
+        // to assemble under EC, DB (P=1,U=0, needs W=1) under ED, and the
+        // offset single (P=1,U=1,W=0) under ED. GAS-probed: DB without W
+        // and VLDR/VSTR writeback forms do not exist.
+        if (o1 & 0xFF00) == 0xEC00 || (o1 & 0xFF00) == 0xED00 {
+            // VMOV Rt,Rt2,Dm / Dm,Rt,Rt2 (EC-only, op1[20] selects direction;
+            // Dm = M:Vm <= 15). Must precede the P/U/W logic (P=0,U=0 here).
+            if (o1 & 0xFFF0) == 0xEC50 || (o1 & 0xFFF0) == 0xEC40 {
+                if (o2 & 0xD0) != 0x10 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                let dm = (mbit << 4) | (o2 & 0xF) as usize;
+                let rt2 = (o1 & 0xF) as usize;
+                if dm > 15 || vd4 == 13 || vd4 == 15 || rt2 == 13 || rt2 == 15 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                if (o1 & 0xFFF0) == 0xEC50 {
+                    cpu.regs.r[vd4] = cpu.regs.s[2 * dm];
+                    cpu.regs.r[rt2] = cpu.regs.s[2 * dm + 1];
+                } else {
+                    cpu.regs.s[2 * dm] = rr(cpu, vd4, pc);
+                    cpu.regs.s[2 * dm + 1] = rr(cpu, rt2, pc);
+                }
+                cpu.regs.control |= 4;
+                adv(cpu, pc, 4);
+                return true;
+            }
+            let p = (o1 >> 8) & 1;
+            let u = (o1 >> 7) & 1;
+            let w = (o1 >> 5) & 1;
+            let l = (o1 >> 4) & 1;
+            let rn = (o1 & 0xF) as usize;
+            let single = (o2 >> 8) & 1 == 0;
+            let imm8 = (o2 & 0xFF) as usize;
+            if p == 1 && u == 1 && w == 0 {
+                // VLDR / VSTR (offset-only). Rn=15: literal (pc+4)&!3.
+                let off = ((o2 & 0xFF) * 4) as u32;
+                let base = rr(cpu, rn, pc);
+                let addr = if u == 1 { base.wrapping_add(off) } else { base.wrapping_sub(off) };
+                if single {
+                    if l == 1 {
+                        cpu.regs.s[sd] = mem.read32(addr);
+                    } else {
+                        mem.write32(addr, cpu.regs.s[sd]);
+                    }
+                } else {
+                    let d = (dbit << 4) | vd4;
+                    if d > 15 {
+                        return fault(cpu, pc, op1, op2, 4);
+                    }
+                    if l == 1 {
+                        cpu.regs.s[2 * d] = mem.read32(addr);
+                        cpu.regs.s[2 * d + 1] = mem.read32(addr.wrapping_add(4));
+                    } else {
+                        mem.write32(addr, cpu.regs.s[2 * d]);
+                        mem.write32(addr.wrapping_add(4), cpu.regs.s[2 * d + 1]);
+                    }
+                }
+                cpu.regs.control |= 4;
+                adv(cpu, pc, 4);
+                return true;
+            }
+            if !((p == 0 && u == 1) || (p == 1 && u == 0 && w == 1)) {
+                return fault(cpu, pc, op1, op2, 4);
+            }
+            if rn == 15 {
+                return fault(cpu, pc, op1, op2, 4);
+            }
+            // Work in S slots: D-reg d == S(2d)/S(2d+1).
+            let (s0slot, nslots) = if single {
+                if imm8 == 0 || sd + imm8 > 32 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                (sd, imm8)
+            } else {
+                if imm8 == 0 || imm8 & 1 != 0 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                let d = (dbit << 4) | vd4;
+                if d + imm8 / 2 > 16 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                (2 * d, imm8)
+            };
+            let base = rr(cpu, rn, pc);
+            let addr = if p == 0 { base } else { base.wrapping_sub(4 * nslots as u32) };
+            for i in 0..nslots {
+                let a = addr.wrapping_add(4 * i as u32);
+                if l == 1 {
+                    cpu.regs.s[s0slot + i] = mem.read32(a);
+                } else {
+                    mem.write32(a, cpu.regs.s[s0slot + i]);
+                }
+            }
+            if w == 1 {
+                cpu.regs.r[rn] = if p == 0 {
+                    base.wrapping_add(4 * nslots as u32)
+                } else {
+                    addr
+                };
+            }
+            cpu.regs.control |= 4;
+            adv(cpu, pc, 4);
+            return true;
+        }
+        // (c) EE data-processing (B-group misc + 3-reg arith) lands here.
         return fault(cpu, pc, op1, op2, 4);
     } else {
         fault(cpu, pc, op1, op2, 4)

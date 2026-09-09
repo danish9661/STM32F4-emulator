@@ -942,3 +942,432 @@ fn lsr_reg_zero_noop() {
     cpu.run(sys, &mut mem, 1);
     assert_eq!(cpu.regs.r[3], 0x12345678);
 }
+
+#[test]
+fn fpu_mvfr_and_cpacr_reset() {
+    // M4F ID values (M4F TRM) + CPACR/FPSCR/S-file reset state. Grounds the
+    // FPU bring-up: guests probe MVFR0-2 at 0xE000EF40-48 and enable CP10/11
+    // via CPACR before the first VFP insn.
+    let _g = lock_boot();
+    let (cpu, mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    assert_eq!(mem.read32(0xE000EF40), 0x1011_0021, "MVFR0");
+    assert_eq!(mem.read32(0xE000EF44), 0x1100_0011, "MVFR1");
+    assert_eq!(mem.read32(0xE000EF48), 0x0000_0040, "MVFR2");
+    assert_eq!(mem.read32(0xE000ED88), 0, "CPACR reset disables FPU");
+    assert_eq!(mem.read32(0xE000EF34) & 0xC000_0000, 0xC000_0000, "FPCCR ASPEN|LSPEN");
+    assert_eq!(cpu.regs.fpscr, 0, "FPSCR reset");
+    assert!(cpu.regs.s.iter().all(|&w| w == 0), "S-file reset");
+}
+
+#[test]
+fn fpu_nocp_faults_and_latches_ufsr() {
+    // vmov.f32 s0, #1.0 (EEB7 0A00) with CPACR==0: loud fault (no delivery
+    // in tests) + UFSR NOCP latched (CFSR bit 19). Non-FPU coproc (0xC)
+    // faults regardless of CPACR. One locked boot: the latch lives in the
+    // process-global model, so no fresh boot may intervene before the read.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    mem.write32(0xE000ED88, 0); // do not rely on reset: parallel tests share SYS
+    mem.write16(0x20002000, 0xEEB7);
+    mem.write16(0x20002002, 0x0A00);
+    cpu.regs.r[15] = 0x20002001;
+    let sys = crate::sys();
+    cpu.run(sys, &mut mem, 1);
+    assert!(cpu.fault.is_some(), "FPU insn without CPACR must fault");
+    assert_ne!(mem.read32(0xE000ED28) & 0x0008_0000, 0, "UFSR NOCP latched");
+    // coproc 0xC (not FPU) faults even with CPACR fully enabled.
+    mem.write32(0xE000ED88, 0x00F0_0000);
+    cpu.fault = None;
+    mem.write16(0x20002000, 0xEEC7);
+    mem.write16(0x20002002, 0x0C00);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    assert!(cpu.fault.is_some(), "non-FPU coproc must fault");
+}
+
+/// FPU snippet runner: fresh boot, CPACR full access (explicit: SYS is
+/// process-global), S-file/FPSCR seeding, run, return owned state. Model
+/// state must not be read after return (another test may re-boot); cpu and
+/// RAM results are stable.
+fn run_fpu_snippet(code: &[u16], regs: &[(usize, u32)], sregs: &[(usize, u32)], fpscr: u32, n: u32) -> (Cpu, FlatMemory) {
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    mem.write32(0xE000ED88, 0x00F0_0000); // CP10+CP11 full access
+    for (i, w) in code.iter().enumerate() {
+        mem.write16(0x20002000 + (i as u32) * 2, *w);
+    }
+    for &(r, v) in regs {
+        cpu.regs.r[r] = v;
+    }
+    for &(r, v) in sregs {
+        cpu.regs.s[r] = v;
+    }
+    cpu.regs.fpscr = fpscr;
+    cpu.regs.r[15] = 0x20002001;
+    let sys = crate::sys();
+    cpu.run(sys, &mut mem, n);
+    assert!(cpu.fault.is_none(), "fpu fault: pc={:08x} op1={:04x} op2={:04x}",
+        cpu.fault.map(|f| f.pc).unwrap_or(0), cpu.fault.map(|f| f.op1).unwrap_or(0),
+        cpu.fault.map(|f| f.op2).unwrap_or(0));
+    (cpu, mem)
+}
+
+#[test]
+fn fpu_vmov_imm() {
+    // GAS: vmov.f32 s0,#1.0=EEB7 0A00; vmov.f32 s5,#-0.5=EEFE 2A00;
+    // vmov.f32 s0,#6.75=EEB1 0A0B (VFPExpandImm pins).
+    let (cpu, _) = run_fpu_snippet(&[0xEEB7, 0x0A00], &[], &[], 0, 1);
+    assert_eq!(cpu.regs.s[0], 0x3F80_0000);
+    let (cpu, _) = run_fpu_snippet(&[0xEEFE, 0x2A00], &[], &[], 0, 1);
+    assert_eq!(cpu.regs.s[5], 0xBF00_0000);
+    let (cpu, _) = run_fpu_snippet(&[0xEEB1, 0x0A0B], &[], &[], 0, 1);
+    assert_eq!(cpu.regs.s[0], 0x40D8_0000);
+    assert_ne!(cpu.regs.control & 4, 0, "FPCA set by FPU use");
+}
+
+#[test]
+fn fpu_vmov_reg_and_core() {
+    // vmov.f32 s0,s1=EEB0 0A60; vmov s4,r5=EE02 5A10; vmov r4,s5=EE12 4A90.
+    let (cpu, _) = run_fpu_snippet(&[0xEEB0, 0x0A60], &[], &[(1, 0x4049_0FDB)], 0, 1);
+    assert_eq!(cpu.regs.s[0], 0x4049_0FDB);
+    let (cpu, _) = run_fpu_snippet(&[0xEE02, 0x5A10], &[(5, 0xDEAD_BEEF)], &[], 0, 1);
+    assert_eq!(cpu.regs.s[4], 0xDEAD_BEEF);
+    let (cpu, _) = run_fpu_snippet(&[0xEE12, 0x4A90], &[], &[(5, 0x1234_5678)], 0, 1);
+    assert_eq!(cpu.regs.r[4], 0x1234_5678);
+    // High regs: vmov s20,r4=EE0A 4A10; vmov r4,s20=EE1A 4A10.
+    let (cpu, _) = run_fpu_snippet(&[0xEE0A, 0x4A10], &[(4, 0xA5A5_A5A5)], &[], 0, 1);
+    assert_eq!(cpu.regs.s[20], 0xA5A5_A5A5);
+    let (cpu, _) = run_fpu_snippet(&[0xEE1A, 0x4A10], &[], &[(20, 0x5A5A_5A5A)], 0, 1);
+    assert_eq!(cpu.regs.r[4], 0x5A5A_5A5A);
+}
+
+#[test]
+fn fpu_vmov_double_pair() {
+    // vmov r4,r5,d6=EC55 4B16 (r4=S12, r5=S13); reverse EC45 4B16.
+    let (cpu, _) = run_fpu_snippet(&[0xEC55, 0x4B16], &[], &[(12, 0x1111_1111), (13, 0x2222_2222)], 0, 1);
+    assert_eq!(cpu.regs.r[4], 0x1111_1111);
+    assert_eq!(cpu.regs.r[5], 0x2222_2222);
+    let (cpu, _) = run_fpu_snippet(&[0xEC45, 0x4B16], &[(4, 0x3333_3333), (5, 0x4444_4444)], &[], 0, 1);
+    assert_eq!(cpu.regs.s[12], 0x3333_3333);
+    assert_eq!(cpu.regs.s[13], 0x4444_4444);
+}
+
+#[test]
+fn fpu_vmrs_vmsr() {
+    // vmrs APSR_nzcv,fpscr=EEF1 FA10 imports NZCV only; vmrs r0,fpscr=EEF1
+    // 0A10 moves the whole word; vmsr fpscr,r0=EEE1 0A10 is masked.
+    let (cpu, _) = run_fpu_snippet(&[0xEEF1, 0xFA10], &[], &[], 0xE000_0000, 1);
+    assert_eq!(cpu.regs.xpsr & 0xF000_0000, 0xE000_0000);
+    let (cpu, _) = run_fpu_snippet(&[0xEEF1, 0x0A10], &[], &[], 0x1234_5678, 1);
+    assert_eq!(cpu.regs.r[0], 0x1234_5678);
+    let (cpu, _) = run_fpu_snippet(&[0xEEE1, 0x0A10], &[(0, 0xFFFF_FFFF)], &[], 0, 1);
+    assert_eq!(cpu.regs.fpscr, 0xFFC0_01FF, "VMSR writes NZCVQC+AHP/DN/FZ/RMode+enables/flags only");
+}
+
+#[test]
+fn fpu_vldr_vstr() {
+    // GAS: vstr s4,[r5,#8]=ED85 2A02; vldr s4,[r5,#8]=ED95 2A02;
+    // vldr s5,[r0]=EDD0 2A00. Store+reload in ONE boot (RAM is zeroed fresh).
+    let (cpu, mem) = run_fpu_snippet(
+        &[0xED85, 0x2A02, 0xED95, 0x2A02, 0xEDD0, 0x2A00],
+        &[(5, 0x2000_3000), (0, 0x2000_3008)], &[(4, 0x4049_0FDB)], 0, 3);
+    assert_eq!(mem.read32(0x2000_3008), 0x4049_0FDB, "vstr wrote RAM");
+    assert_eq!(cpu.regs.s[4], 0x4049_0FDB, "reload via vldr s4");
+    assert_eq!(cpu.regs.s[5], 0x4049_0FDB, "high-reg vldr s5");
+    // Double: vldr d1,[r0]=ED90 1B00 / vstr d1,[r0]=ED80 1B00 round-trip.
+    let (cpu, mem) = run_fpu_snippet(&[0xED80, 0x1B00, 0xED90, 0x1B00], &[(0, 0x2000_3100)], &[(2, 0xAAAAAAAA), (3, 0xBBBB_BBBB)], 0, 2);
+    assert_eq!(mem.read32(0x2000_3100), 0xAAAAAAAA);
+    assert_eq!(mem.read32(0x2000_3104), 0xBBBB_BBBB);
+    assert_eq!((cpu.regs.s[2], cpu.regs.s[3]), (0xAAAAAAAA, 0xBBBB_BBBB));
+}
+
+#[test]
+fn fpu_vldm_vstm_push_pop() {
+    // vstmia r4,{s4-s7}=EC84 2A04 / vldmia r4,{s4-s7}=EC94 2A04;
+    // vpush {s0-s3}=ED2D 0A04 / vpop {s0-s3}=ECBD 0A04; D-list EC84
+    // 2B04/EC94 2B04; writeback vstmia r4!,{s16-s19}=ECA4 8A04.
+    let seeds = [(4, 0x1111_1111), (5, 0x2222_2222), (6, 0x3333_3333), (7, 0x4444_4444)];
+    let (cpu, mem) = run_fpu_snippet(&[0xEC84, 0x2A04], &[(4, 0x2000_3200)], &seeds, 0, 1);
+    assert_eq!((mem.read32(0x2000_3200), mem.read32(0x2000_320C)), (0x1111_1111, 0x4444_4444));
+    assert_eq!(cpu.regs.r[4], 0x2000_3200, "no writeback without !");
+    let (cpu, _) = run_fpu_snippet(
+        &[0xEC84, 0x2A04, 0xEC94, 0x2A04], &[(4, 0x2000_3300)], &seeds, 0, 2);
+    assert_eq!((cpu.regs.s[4], cpu.regs.s[5], cpu.regs.s[6], cpu.regs.s[7]),
+        (0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444), "store+reload round-trip");
+    // push/pop round-trip on the real stack.
+    let (cpu, _) = run_fpu_snippet(
+        &[0xED2D, 0x0A04, 0xECBD, 0x0A04], &[(13, 0x2000_4000)],
+        &[(0, 0xAAAAAAAA), (1, 0xBBBB_BBBB), (2, 0xCCCC_CCCC), (3, 0xDDDD_DDDD)], 0, 2);
+    assert_eq!((cpu.regs.s[0], cpu.regs.s[1], cpu.regs.s[2], cpu.regs.s[3]),
+        (0xAAAAAAAA, 0xBBBB_BBBB, 0xCCCC_CCCC, 0xDDDD_DDDD));
+    assert_eq!(cpu.regs.r[13], 0x2000_4000, "push+pop restores SP");
+    // D-list + writeback.
+    let (cpu, _) = run_fpu_snippet(
+        &[0xEC84, 0x2B04, 0xEC94, 0x2B04], &[(4, 0x2000_3400)],
+        &[(4, 0xAAAAAAAA), (5, 0xBBBB_BBBB)], 0, 2);
+    assert_eq!((cpu.regs.s[4], cpu.regs.s[5]), (0xAAAAAAAA, 0xBBBB_BBBB), "d2-d3 round-trip");
+    let (cpu, _) = run_fpu_snippet(&[0xECA4, 0x8A04], &[(4, 0x2000_3500)], &[(16, 1)], 0, 1);
+    assert_eq!(cpu.regs.r[4], 0x2000_3510, "vstmia! writes back +16");
+}
+
+#[test]
+fn fpu_rejects() {
+    // sz=1 data-processing (no f64 on FPv4-SP), DB without writeback, bad
+    // P/U combo, VLDM Rn=PC, D-list overflow, VMOV Rt=PC.
+    for code in [
+        [0xEE30u16, 0x0B81u16], // vadd sz=1
+        [0xEE80, 0x0AD1u16],    // opc1 8 + op 1: no such op
+        [0xEEB4, 0x0A40u16],    // vcmp shape with #0-reg swapped: (4,4) undefined
+        [0xED00, 0x2A04],       // DB store without ! (no such encoding)
+        [0xEC50, 0x0A04],       // P=1,U=1: no such mode (also VMOV-2reg shape? op2 0A04: (0x04&0xD0)=0x00 != 0x10, falls to VLDM -> bad P/U)
+        [0xEC9F, 0x0A04],       // vldmia pc,{s0-s3}
+        [0xEC94, 0xEB08],       // vldmia r4,{d14-d17}: d17 > 15
+        [0xEE10, 0xFA10],       // vmov pc,s0
+    ] {
+        let _g = lock_boot();
+        let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+        mem.write32(0xE000ED88, 0x00F0_0000);
+        for (i, w) in code.iter().enumerate() {
+            mem.write16(0x20002000 + (i as u32) * 2, *w);
+        }
+        cpu.regs.r[15] = 0x20002001;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 1);
+        assert!(cpu.fault.is_some(), "must fault: {:04x} {:04x}", code[0], code[1]);
+    }
+}
+
+
+#[test]
+fn fpu_arith_basic() {
+    // GAS: vadd s4,s5,s6=EE32 2A83; vsub=EE32 2AC3; vmul s4,s5,s6=EE22
+    // 2A83; vdiv=EE82 2A83; vmla s0,s1,s2=EE00 0A81; vmls=EE00 0AC1;
+    // vnmla=EE10 0AC1.
+    let f = |x: f32| x.to_bits();
+    let (cpu, _) = run_fpu_snippet(&[0xEE32, 0x2A83], &[], &[(5, f(2.5)), (6, f(1.5))], 0, 1);
+    assert_eq!(cpu.regs.s[4], f(4.0));
+    assert_eq!(cpu.regs.fpscr & 0x1F, 0, "exact add sets no flags");
+    let (cpu, _) = run_fpu_snippet(&[0xEE32, 0x2AC3], &[], &[(5, f(2.5)), (6, f(5.0))], 0, 1);
+    assert_eq!(cpu.regs.s[4], f(-2.5));
+    let (cpu, _) = run_fpu_snippet(&[0xEE22, 0x2A83], &[], &[(5, f(2.0)), (6, f(1.5))], 0, 1);
+    assert_eq!(cpu.regs.s[4], f(3.0));
+    let (cpu, _) = run_fpu_snippet(&[0xEE82, 0x2A83], &[], &[(5, f(7.0)), (6, f(2.0))], 0, 1);
+    assert_eq!(cpu.regs.s[4], f(3.5));
+    let (cpu, _) = run_fpu_snippet(&[0xEE00, 0x0A81], &[], &[(0, f(1.0)), (1, f(2.0)), (2, f(3.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(7.0), "vmla unfused");
+    let (cpu, _) = run_fpu_snippet(&[0xEE00, 0x0AC1], &[], &[(0, f(10.0)), (1, f(2.0)), (2, f(3.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(4.0), "vmls");
+    let (cpu, _) = run_fpu_snippet(&[0xEE10, 0x0AC1], &[], &[(0, f(1.0)), (1, f(2.0)), (2, f(3.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(-7.0), "vnmla");
+}
+
+#[test]
+fn fpu_arith_specials() {
+    let f = |x: f32| x.to_bits();
+    // Overflow: max+max -> +inf + OFC|IXC.
+    let (cpu, _) = run_fpu_snippet(&[0xEE30, 0x0A81], &[], &[(1, f(f32::MAX)), (2, f(f32::MAX))], 0, 1);
+    assert_eq!(cpu.regs.s[0], 0x7F80_0000);
+    assert_eq!(cpu.regs.fpscr & 0x1F, 0x04 | 0x10, "OFC|IXC");
+    // Divide by zero: 1/0 -> +inf + DZC; 0/0 -> NaN + IOC; inf-inf -> NaN + IOC.
+    let (cpu, _) = run_fpu_snippet(&[0xEE80, 0x0A81], &[], &[(1, f(1.0)), (2, 0)], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7F80_0000, 0x02));
+    let (cpu, _) = run_fpu_snippet(&[0xEE80, 0x0A81], &[], &[(1, 0), (2, 0)], 0, 1);
+    assert_eq!(cpu.regs.fpscr & 0x1F, 0x01, "0/0 IOC");
+    assert_eq!(cpu.regs.s[0], 0x7FC0_0000);
+    let (cpu, _) = run_fpu_snippet(&[0xEE30, 0x0A81], &[], &[(1, 0x7F80_0000), (2, 0xFF80_0000)], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7FC0_0000, 0x01), "inf-inf IOC");
+    // 0*inf -> NaN + IOC.
+    let (cpu, _) = run_fpu_snippet(&[0xEE20, 0x0A81], &[], &[(1, 0), (2, 0x7F80_0000)], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7FC0_0000, 0x01));
+    // QNaN propagates quietly (same bits, no flag); SNaN -> IOC + quieted.
+    let (cpu, _) = run_fpu_snippet(&[0xEE30, 0x0A81], &[], &[(1, 0x7FC0_1234), (2, f(1.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7FC0_1234, 0));
+    let (cpu, _) = run_fpu_snippet(&[0xEE30, 0x0A81], &[], &[(1, 0x7F80_0001), (2, f(1.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7FC0_0001, 0x01), "SNaN quieted + IOC");
+    // DN=1: any NaN result is the default NaN.
+    let (cpu, _) = run_fpu_snippet(&[0xEE30, 0x0A81], &[], &[(1, 0x7FC0_1234), (2, f(1.0))], 1 << 25, 1);
+    assert_eq!(cpu.regs.s[0], 0x7FC0_0000);
+    // FZ=1 flushes subnormal inputs: 2^-127 * 2 -> +0, no flags.
+    let (cpu, _) = run_fpu_snippet(&[0xEE20, 0x0A81], &[], &[(1, 0x0040_0000), (2, f(2.0))], 1 << 24, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0, 0));
+    // Same without FZ: 2^-126 * 0.5 -> 2^-127 subnormal -> UFC (+IXC).
+    let (cpu, _) = run_fpu_snippet(&[0xEE20, 0x0A81], &[], &[(1, 0x0080_0000), (2, f(0.5))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x0040_0000, 0x08 | 0x10));
+    // Exact min-normal needs no flags: 2^-127 * 2 -> 2^-126, exact + normal.
+    let (cpu, _) = run_fpu_snippet(&[0xEE20, 0x0A81], &[], &[(1, 0x0040_0000), (2, f(2.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x0080_0000, 0));
+}
+
+#[test]
+fn fpu_sqrt_abs_neg() {
+    let f = |x: f32| x.to_bits();
+    // GAS: vsqrt s0,s1=EEB1 0AE0; vabs=EEB0 0AE0; vneg s0,s1=EEB1 0A60.
+    let (cpu, _) = run_fpu_snippet(&[0xEEB1, 0x0AE0], &[], &[(1, f(4.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(2.0));
+    let (cpu, _) = run_fpu_snippet(&[0xEEB1, 0x0AE0], &[], &[(1, f(2.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], 0x3FB5_04F3, "sqrt(2)");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB1, 0x0AE0], &[], &[(1, f(-1.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7FC0_0000, 0x01), "sqrt(-1) IOC");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB0, 0x0AE0], &[], &[(1, f(-3.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(3.0));
+    let (cpu, _) = run_fpu_snippet(&[0xEEB1, 0x0A60], &[], &[(1, f(1.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(-1.0));
+    // ABS/NEG never raise, even on SNaN (bit ops).
+    let (cpu, _) = run_fpu_snippet(&[0xEEB0, 0x0AE0], &[], &[(1, 0xFF80_0001)], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7F80_0001, 0));
+}
+
+#[test]
+fn fpu_vcmp() {
+    let f = |x: f32| x.to_bits();
+    // GAS: vcmp s0,s1=EEB4 0A60; vcmp s0,#0=EEB5 0A40; vmrs=EEF1 FA10.
+    // LT -> 0x8, EQ -> 0x6, GT -> 0x2, unordered -> 0x3 in FPSCR+APSR.
+    for (a, b, want) in [(1.0f32, 2.0, 0x8u32), (1.0, 1.0, 0x6), (2.0, 1.0, 0x2)] {
+        let (cpu, _) = run_fpu_snippet(
+            &[0xEEB4, 0x0A60, 0xEEF1, 0xFA10], &[], &[(0, f(a)), (1, f(b))], 0, 2);
+        assert_eq!(cpu.regs.fpscr & 0xF000_0000, want << 28, "fpscr {a} vs {b}");
+        assert_eq!(cpu.regs.xpsr & 0xF000_0000, want << 28, "apsr {a} vs {b}");
+    }
+    // -0 == +0.
+    let (cpu, _) = run_fpu_snippet(&[0xEEB5, 0x0A40], &[], &[(0, f(-0.0))], 0, 1);
+    assert_eq!(cpu.regs.fpscr & 0xF000_0000, 0x6000_0000);
+    // QNaN: unordered, no flag. SNaN: unordered + IOC.
+    let (cpu, _) = run_fpu_snippet(&[0xEEB4, 0x0A60], &[], &[(0, 0x7FC0_0000), (1, f(1.0))], 0, 1);
+    assert_eq!((cpu.regs.fpscr & 0xF000_0000, cpu.regs.fpscr & 0x1F), (0x3000_0000, 0));
+    let (cpu, _) = run_fpu_snippet(&[0xEEB4, 0x0A60], &[], &[(0, 0x7F80_0001), (1, f(1.0))], 0, 1);
+    assert_eq!((cpu.regs.fpscr & 0xF000_0000, cpu.regs.fpscr & 0x1F), (0x3000_0000, 0x01));
+}
+
+#[test]
+fn fpu_vcvt_int() {
+    let f = |x: f32| x.to_bits();
+    // GAS: vcvt.s32.f32=EEBD 0AC0; vcvt.u32.f32=EEBC 0AC0;
+    // vcvt.f32.s32=EEB8 0AC0; vcvt.f32.u32=EEB8 0A40.
+    // RNE ties-to-even: 1.5->2, 2.5->2 (not 3!), -1.5->-2, 0.5->0.
+    for (x, want) in [(1.5f32, 2u32), (2.5, 2), (-1.5, 0xFFFF_FFFEu32), (0.5, 0), (2.6, 3)] {
+        let (cpu, _) = run_fpu_snippet(&[0xEEBD, 0x0AC0], &[], &[(0, f(x))], 0, 1);
+        assert_eq!(cpu.regs.s[0], want, "s32({x})");
+    }
+    let (cpu, _) = run_fpu_snippet(&[0xEEBC, 0x0AC0], &[], &[(0, f(1.5))], 0, 1);
+    assert_eq!(cpu.regs.s[0], 2);
+    // Invalid: NaN->0, +overflow saturates, -overflow saturates, all + IOC.
+    let (cpu, _) = run_fpu_snippet(&[0xEEBD, 0x0AC0], &[], &[(0, 0x7FC0_0000)], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0, 0x01));
+    let (cpu, _) = run_fpu_snippet(&[0xEEBD, 0x0AC0], &[], &[(0, f(1e20))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7FFF_FFFF, 0x01));
+    let (cpu, _) = run_fpu_snippet(&[0xEEBD, 0x0AC0], &[], &[(0, f(-1e20))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x8000_0000, 0x01));
+    let (cpu, _) = run_fpu_snippet(&[0xEEBC, 0x0AC0], &[], &[(0, f(4294967295.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0xFFFF_FFFF, 0x01), "u32 range");
+    // Exact: i32::MIN is valid and exact (no IXC); 1.5 is inexact (IXC).
+    let (cpu, _) = run_fpu_snippet(&[0xEEBD, 0x0AC0], &[], &[(0, f(-2147483648.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x8000_0000, 0));
+    let (cpu, _) = run_fpu_snippet(&[0xEEBD, 0x0AC0], &[], &[(0, f(1.5))], 0, 1);
+    assert_eq!(cpu.regs.fpscr & 0x1F, 0x10, "inexact IXC");
+    // int->float: exact (no IXC) vs inexact (IXC).
+    let (cpu, _) = run_fpu_snippet(&[0xEEB8, 0x0AC0], &[], &[(0, 42)], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (f(42.0), 0));
+    let (cpu, _) = run_fpu_snippet(&[0xEEB8, 0x0AC0], &[], &[(0, 0x1234_5678)], 0, 1);
+    assert_eq!(cpu.regs.s[0], (0x1234_5678i32 as f32).to_bits());
+    assert_eq!(cpu.regs.fpscr & 0x1F, 0x10);
+    // RMode via VMSR: toward-zero turns 1.9 into 1 (RNE would give 2).
+    let (cpu, _) = run_fpu_snippet(
+        &[0xEEE1, 0x0A10, 0xEEBD, 0x0AC0], &[(0, 3 << 22)], &[(0, f(1.9))], 0, 2);
+    assert_eq!(cpu.regs.s[0], 1);
+}
+
+#[test]
+fn fpu_vcvt_fixed() {
+    let f = |x: f32| x.to_bits();
+    // GAS: vcvt.f32.s32 #16=EEBA 0AC8; vcvt.s32.f32 #16=EEBE 0AC8;
+    // vcvt.f32.u32 #16=EEBB 0AC8; vcvt.f32.s32 #1=EEBA 0AEF.
+    let (cpu, _) = run_fpu_snippet(&[0xEEBA, 0x0AC8], &[], &[(0, 0x0001_0000)], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(1.0), "Q16.16 1.0");
+    let (cpu, _) = run_fpu_snippet(&[0xEEBE, 0x0AC8], &[], &[(0, f(1.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], 0x0001_0000);
+    let (cpu, _) = run_fpu_snippet(&[0xEEBA, 0x0AEF], &[], &[(0, 3)], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(1.5), "#1 frac");
+    let (cpu, _) = run_fpu_snippet(&[0xEEBB, 0x0AC8], &[], &[(0, 0x0001_0000)], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(1.0), "unsigned Q16.16");
+    // Negative fixed stays negative; overflow saturates + IOC.
+    let (cpu, _) = run_fpu_snippet(&[0xEEBA, 0x0AC8], &[], &[(0, 0xFFFF_0000u32)], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(-1.0));
+    let (cpu, _) = run_fpu_snippet(&[0xEEBE, 0x0AC8], &[], &[(0, f(100000.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7FFF_FFFF, 0x01), "s32 #16 saturate");
+}
+
+#[test]
+fn fpu_vcvt_f16() {
+    let f = |x: f32| x.to_bits();
+    // GAS: vcvtb.f32.f16=EEB2 0A60; vcvtt.f32.f16=EEB2 0AE0;
+    // vcvtb.f16.f32=EEB3 0A60; vcvtt.f16.f32=EEB3 0AE0.
+    let (cpu, _) = run_fpu_snippet(&[0xEEB2, 0x0A60], &[], &[(1, 0x3C00)], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(1.0), "bottom half");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB2, 0x0AE0], &[], &[(1, 0x3C00_0000)], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(1.0), "top half");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB2, 0x0A60], &[], &[(1, 0x0001)], 0, 1);
+    assert_eq!(cpu.regs.s[0], 0x3380_0000, "f16 subnormal 2^-24");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB2, 0x0A60], &[], &[(1, 0x7C00)], 0, 1);
+    assert_eq!(cpu.regs.s[0], 0x7F80_0000, "f16 inf");
+    // f32->f16: 1.0->0x3C00 (low half, high preserved), 100000->inf+OFC|IXC.
+    let (cpu, _) = run_fpu_snippet(&[0xEEB3, 0x0A60], &[], &[(0, 0xABCD_0000), (1, f(1.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0xABCD_3C00, 0));
+    let (cpu, _) = run_fpu_snippet(&[0xEEB3, 0x0AE0], &[], &[(1, f(6.75))], 0, 1);
+    assert_eq!(cpu.regs.s[0] >> 16, 0x46C0, "top-half 6.75");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB3, 0x0A60], &[], &[(1, f(100000.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0] & 0xFFFF, cpu.regs.fpscr & 0x1F), (0x7C00, 0x04 | 0x10));
+    // Tiny: 1e-5 -> f16 subnormal 0xA8 + UFC|IXC.
+    let (cpu, _) = run_fpu_snippet(&[0xEEB3, 0x0A60], &[], &[(1, f(1e-5))], 0, 1);
+    assert_eq!((cpu.regs.s[0] & 0xFFFF, cpu.regs.fpscr & 0x1F), (0x00A8, 0x08 | 0x10));
+    // f16 SNaN -> IOC (both directions); f32 SNaN narrows quieted.
+    let (cpu, _) = run_fpu_snippet(&[0xEEB2, 0x0A60], &[], &[(1, 0x7C01)], 0, 1);
+    assert_eq!(cpu.regs.fpscr & 0x1F, 0x01);
+    assert_eq!(cpu.regs.s[0] & 0x7FFF_FFFF, 0x7FC0_2000, "SNaN widened+quieted");
+    let (cpu, _) = run_fpu_snippet(&[0xEEB3, 0x0A60], &[], &[(1, 0x7F80_0001)], 0, 1);
+    assert_eq!(cpu.regs.fpscr & 0x1F, 0x01);
+    assert_eq!((cpu.regs.s[0] >> 10) & 0x1F, 0x1F, "narrowed NaN exp all-ones");
+    assert_ne!(cpu.regs.s[0] & 0x3FF, 0, "narrowed NaN keeps payload");
+}
+
+
+#[test]
+fn fpu_fma_fused() {
+    let f = |x: f32| x.to_bits();
+    // GAS (fpu11.s): vfma s0,s1,s2=EEA0 0A81; vfms=EEA0 0AC1;
+    // vfnma s0,s1,s2=EE90 0AC1; vfnms=EE90 0A81.
+    let (cpu, _) = run_fpu_snippet(&[0xEEA0, 0x0A81], &[], &[(0, f(1.0)), (1, f(2.0)), (2, f(3.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(7.0));
+    let (cpu, _) = run_fpu_snippet(&[0xEEA0, 0x0AC1], &[], &[(0, f(10.0)), (1, f(2.0)), (2, f(3.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(4.0), "vfms");
+    let (cpu, _) = run_fpu_snippet(&[0xEE90, 0x0AC1], &[], &[(0, f(1.0)), (1, f(2.0)), (2, f(3.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(-7.0), "vfnma");
+    let (cpu, _) = run_fpu_snippet(&[0xEE90, 0x0A81], &[], &[(0, f(10.0)), (1, f(2.0)), (2, f(3.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(-4.0), "vfnms");
+    // THE fused-vs-unfused discriminator: a=b=1+2^-23, acc=-(1+2^-22).
+    // Unfused rounds a*b to 1+2^-22 first, then acc+p = 0. Fused keeps the
+    // exact 2^-46 square term: result 2^-46 (exp 81-127, 0x28800000).
+    let e = 2f32.powi(-23);
+    let (cpu, _) = run_fpu_snippet(&[0xEEA0, 0x0A81], &[], &[(0, f(-(1.0 + 2.0 * e))), (1, f(1.0 + e)), (2, f(1.0 + e))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x2880_0000, 0), "fused keeps eps^2");
+    // Same inputs through UNfused vmla give exactly 0 (control case).
+    let (cpu, _) = run_fpu_snippet(&[0xEE00, 0x0A81], &[], &[(0, f(-(1.0 + 2.0 * e))), (1, f(1.0 + e)), (2, f(1.0 + e))], 0, 1);
+    assert_eq!(cpu.regs.s[0], 0x0000_0000, "unfused rounds first");
+    // Specials mirror unfused: 0*inf -> IOC; inf-inf -> IOC; QNaN quiet.
+    let (cpu, _) = run_fpu_snippet(&[0xEEA0, 0x0A81], &[], &[(0, f(1.0)), (1, 0), (2, 0x7F80_0000)], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7FC0_0000, 0x01));
+    let (cpu, _) = run_fpu_snippet(&[0xEEA0, 0x0A81], &[], &[(0, 0xFF80_0000), (1, 0x7F80_0000), (2, f(1.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7FC0_0000, 0x01), "inf-inf IOC");
+    let (cpu, _) = run_fpu_snippet(&[0xEEA0, 0x0A81], &[], &[(0, 0x7FC0_1234), (1, f(1.0)), (2, f(2.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7FC0_1234, 0));
+    // Overflow: max*2 + max -> +inf + OFC|IXC.
+    let (cpu, _) = run_fpu_snippet(&[0xEEA0, 0x0A81], &[], &[(0, f(f32::MAX)), (1, f(f32::MAX)), (2, f(2.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0x7F80_0000, 0x04 | 0x10));
+    // Exact cancellation: acc == a*b -> +0, no flags.
+    let (cpu, _) = run_fpu_snippet(&[0xEEA0, 0x0AC1], &[], &[(0, f(6.0)), (1, f(2.0)), (2, f(3.0))], 0, 1);
+    assert_eq!((cpu.regs.s[0], cpu.regs.fpscr & 0x1F), (0, 0), "vfms exact zero");
+    // Zero addend: single-rounding product (vfms negates it).
+    let (cpu, _) = run_fpu_snippet(&[0xEEA0, 0x0A81], &[], &[(0, 0), (1, f(2.0)), (2, f(3.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(6.0));
+    let (cpu, _) = run_fpu_snippet(&[0xEEA0, 0x0AC1], &[], &[(0, 0), (1, f(2.0)), (2, f(3.0))], 0, 1);
+    assert_eq!(cpu.regs.s[0], f(-6.0), "vfms zero-acc negates");
+}

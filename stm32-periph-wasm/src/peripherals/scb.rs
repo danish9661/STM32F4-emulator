@@ -15,7 +15,10 @@ pub struct Scb {
     mmfar: u32,      // 0x34
     bfar: u32,       // 0x38
     afsr: u32,       // 0x3C
-    cpacr: u32,      // 0x88
+    cpacr: u32,      // 0x88 (0x0 in the SVD's split FPU_CPACR slot)
+    /// The SVD splits CPACR into its own `FPU_CPACR` peripheral at
+    /// 0xE000ED88; that slot is a CPACR-only view (offset 0 == CPACR).
+    cpacr_slot: bool,
 }
 
 impl Default for Scb {
@@ -31,7 +34,13 @@ impl Default for Scb {
 
 impl Scb {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
-        if name == "SCB" || name == "SCB_Trusted" { Some(Box::new(Self::default())) } else { None }
+        if name == "SCB" || name == "SCB_Trusted" {
+            Some(Box::new(Self::default()))
+        } else if name == "FPU_CPACR" {
+            Some(Box::new(Self { cpacr_slot: true, ..Self::default() }))
+        } else {
+            None
+        }
     }
 
     pub fn vtor(&self) -> u32 { self.vtor }
@@ -74,6 +83,12 @@ impl Scb {
 impl Peripheral for Scb {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
+        if self.cpacr_slot {
+            return match offset {
+                0 => self.cpacr,
+                _ => 0,
+            };
+        }
         match offset {
             0x00 => {
                 // CPUID - r0p1 of Cortex-M4
@@ -110,6 +125,12 @@ impl Peripheral for Scb {
     }
 
     fn write(&mut self, sys: &System, offset: u32, value: u32) {
+        if self.cpacr_slot {
+            if offset == 0 {
+                self.cpacr = value & 0x00F0_0000;
+            }
+            return;
+        }
         match offset {
             0x04 => self.write_icsr(value, sys),
             0x08 => self.vtor = value & 0xFFFF_FC00,
@@ -126,7 +147,7 @@ impl Peripheral for Scb {
             0x34 => self.mmfar = value,
             0x38 => self.bfar = value,
             0x3C => self.afsr = value,
-            0x88 => self.cpacr = value & 0x0F00_0000,
+            0x88 => self.cpacr = value & 0x00F0_0000,
             _ => {}
         }
     }

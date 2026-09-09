@@ -9,6 +9,11 @@ pub struct Regs {
     /// tasks by writing PSP via MRS/MSR while in handler mode.
     pub msp: u32,
     pub psp: u32,
+    /// VFPv4-SP single-precision file S0-S31 (raw f32 bits; Dd aliases
+    /// S(2d)/S(2d+1)). Reset to 0 (hardware UNKNOWN; zero is the sane pick).
+    pub s: [u32; 32],
+    /// FPSCR (NZCV/QC/DN/FZ/RMode/exception flags). Reset 0.
+    pub fpscr: u32,
 }
 
 impl Regs {
@@ -17,6 +22,6 @@ impl Regs {
         r[13] = sp;
         r[14] = 0xFFFFFFFD;
         r[15] = pc | 1;
-        Self { r, xpsr: 0x01000000, primask: 0, control: 0, msp: sp, psp: 0 }
+        Self { r, xpsr: 0x01000000, primask: 0, control: 0, msp: sp, psp: 0, s: [0u32; 32], fpscr: 0 }
     }
 }

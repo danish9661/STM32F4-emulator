@@ -32,6 +32,7 @@ pub mod cryp;
 pub mod hash;
 pub mod eth;
 pub mod qspi;
+pub mod fpu;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -49,6 +50,7 @@ use cryp::Cryp;
 use hash::Hash;
 use eth::EthernetMac;
 use qspi::Qspi;
+use fpu::Fpu;
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
@@ -204,6 +206,10 @@ impl Peripherals {
             let size = extract_svd_max_offset(resolved).max(0x10).min(0x400);
             let (start, end) = if name.as_str() == "FSMC" {
                 (0x6000_0000, 0xA000_1000)
+            } else if name.as_str() == "FPU" {
+                // The SVD only describes FPCCR/FPCAR/FPDSCR (0x10 bytes) but
+                // the MVFR0-2 ID regs follow at +0xC/+0x10/+0x14: claim them.
+                (0xE000_EF34, 0xE000_EF34 + 0x18)
             } else {
                 (p.base_address as u32, p.base_address as u32 + size)
             };
@@ -241,6 +247,7 @@ impl Peripherals {
                 .or_else(|| Dbgmcu::new(name))
                 .or_else(|| EthernetMac::new(name))
                 .or_else(|| Qspi::new(name))
+                .or_else(|| Fpu::new(name))
             ;
 
             if let Some(peri) = peri {
@@ -323,6 +330,7 @@ impl Peripherals {
             // model it anyway at its conventional base for completeness.
             (0xA000_1000, "QUADSPI"),
             (0xE000_E000, "NVIC"), (0xE000_E010, "SysTick"), (0xE000_ED00, "SCB"),
+            (0xE000_EF34, "FPU"),
             (0xE004_2000, "DBGMCU"),
         ];
 
@@ -366,6 +374,7 @@ impl Peripherals {
                 .or_else(|| Dbgmcu::new(name))
                 .or_else(|| EthernetMac::new(name))
                 .or_else(|| Qspi::new(name))
+                .or_else(|| Fpu::new(name))
             ;
 
             if let Some(p) = p {

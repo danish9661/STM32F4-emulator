@@ -2753,3 +2753,91 @@ post-step `tick_n`, so same-step firmware checks saw frozen state.
   (`../../$name`) and moved logs to `.pw-scratch/`.
 - `pkg/cli.mjs` debug kept: `DBG_TX` (len + 48 B), `RX_HEX`, `DBG_RX`;
   the case-specific `DBG_RXDESC`/`RXT` traces were removed after use.
+
+---
+
+## 25. VFPv4-SP FPU (single-precision, 2026-09-09)
+
+The Rust core now executes the M4F floating-point unit: S0–S31 + FPSCR in
+the CPU (`cpu/regs.rs`), VFP data-processing + moves + load/store in the
+decoder (`cpu/thumb.rs`), and the system side (FPCCR/FPCAR/FPDSCR/MVFR0–2,
+CPACR gating) in the model (`peripherals/fpu.rs`, `scb.rs`). Census of all
+shipped firmware shows 0 VFP insns, so this is green-field coverage for
+"professional" use — validated by 17 native unit tests
+(`cpu/tests.rs`, `run_fpu_snippet` helper: CPACR enable + S/FPSCR seeding),
+cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
+
+### What is implemented
+- Moves: vmov-imm/reg, core<->S, 2-core<->D, vmrs (APSR_nzcv + Rt) / vmsr
+  (masked `0xFFC001FF`: NZCVQC+AHP/DN/FZ/RMode+enables/flags).
+- Memory: vldr/vstr (offset-only; GAS rejects writeback — fault on P=0/W=1),
+  vldm/vstm/vpush/vpop (IA: P=0,U=1,W optional; DB: P=1,U=0, W REQUIRED —
+  both GAS-probed rejections; D-lists gated to D0–D15, imm8 odd faults).
+- Arithmetic: add/sub/mul/div/mla/mls/nmul/nmla/nmls (UNFUSED, never
+  `mul_add`), vsqrt, vabs/vneg (pure bit ops, never raise — even SNaN).
+- Fused VFMA/VFMS/VFNMA/VFNMS: SINGLE rounding, exact via u128 integer
+  accumulation (never f64 — double-rounds near boundaries). The money test:
+  a=b=1+2^-23, acc=-(1+2^-22) gives exactly 2^-46 fused vs 0 unfused.
+- vcvt int<->float (RNE ties-even: 2.5->2, not 3), fixed<->float
+  (frac N = 32-2*imm4-opbit; FIXED FORMS REQUIRE Sd==Sm — GAS rejects
+  distinct regs), f16<->f32 both halves (manual bit logic, top/bottom
+  preserving, subnormal/overflow/underflow paths).
+- vcmp (+#0): NZCV into FPSCR (never xPSR); unordered = C|V; SNaN -> IOC.
+- IEEE state: FZ (sign-preserving flush), DN (default NaN), RMode honored
+  for vcvt/vcvtf16/fused (arithmetic/sqrt use RNE — documented), cumulative
+  IOC/DZC/OFC/UFC/IXC (UFC v1 rule: subnormal result; IXC v1: vcvt/f16 +
+  OFC/UFC only), CONTROL.FPCA set on first FPU use.
+- VFPExpandImm pinned by GAS: 0x70->1.0, 0x00->2.0, 0xE0->-0.5, 0x1B->6.75.
+
+### Encoding rules (all GAS-probed, probes in `.pw-scratch/tmp/dsp/fpu*.s`)
+- Sd=(Vd<<1)|D, Sn=(Vn<<1)|N, Sm=(Vm<<1)|M (extension bit is the LOW bit).
+  D-lists use D:Vd with D HIGH. VLDM counts imm8 S-regs / imm8/2 D-regs.
+- VCMP's first source is the Sd FIELD (op1[19:16] is opc2=4/5, not Vn).
+- VMOV-imm opc1 is 1D11 (0xB/0xF — D=1 form is 0xF, e.g. EEFE 2A00).
+- 3-reg (opc1,op2[6]): (3,0)ADD (3,1)SUB (2,0)MUL (2,1)NMUL (8,0)DIV
+  (0,0)MLA (0,1)MLS (1,1)NMLA (1,0)NMLS; fused (0xA,0)FMA (0xA,1)FMS
+  (0x9,1)FNMA (0x9,0)FNMS. sz (op2[8]) must be 0 throughout.
+- B-group (opc1 MUST be 0xB — fused ops share op2 shapes and would
+  otherwise misdecode): (0,E)ABS (1,6)NEG (1,E)SQRT (4,6)CMP (5,4)CMP#0,
+  int->float (8, C-signed/4-unsigned via op2[6]) + float->int (C/D, opc2[0]
+  = signed, op2lo fixed 0xC0), fixed (A/B,to-float)/(E/F,to-fixed,
+  opc2[0]=signed, opc2[2]=direction), f16 (2,6/E)b/t->f32 (3,6/E)f32->b/t.
+
+### Model/decoder gotchas found implementing this (do not re-break)
+- The SVD splits CPACR into its own `FPU_CPACR` peripheral at 0xE000ED88
+  (slot was dropped — CPACR reads 0 forever). Served by a CPACR-only SCB
+  view (`cpacr_slot`, offset 0 == CPACR). The SVD SCB itself ends at AFSR
+  (0x3C); the SVD FPU block (0xE000EF34) has only FPCCR/FPCAR/FPDSCR, so
+  `from_svd` special-cases the FPU slot to +0x18 to cover MVFR0–2, and
+  `new_wasm` gained the `(0xE000EF34, "FPU")` entry (dedicated `fpu.rs`).
+- CPACR write mask was `0x0F00_0000` (bits 24–27) — zeroes CP10/11 (bits
+  23:20). Correct mask `0x00F00000` (pre-existing bug, fixed in both SCB
+  write arms). Debugging note: the write arm RAN with the right value but
+  the mask ate it — always verify masks when "writes vanish".
+- EE decode arms need the EE prefix gate: VPOP (ECBD 0A04) matches the
+  VMOV-imm shape (opc1==0xB via o1[7:4], op2lo-hi==0). VMOV-core (EE10/EE00
+  op1) is shared with VNMLA/VNMLS/VMLA/VMLS — gate on the FULL shape
+  (op2lo 0x10/0x90) and fall through otherwise (faulting there broke vmla).
+- Hex-literal vigilance: f32 exp mask is `0x7F800000` (8 digits) — a
+  7-digit `0x7F80_0000` (= 0x07F80000) silently breaks every NaN/inf test;
+  `0x4400|0x2C0 = 0x46C0`, not 0x46E0; 2^-126 (0x00800000) is min-NORMAL,
+  not subnormal (UFC test needs 2^-127 x 0.5).
+- `fpu_fma`: product mantissa is 48-bit (scale 2^(p_exp-46)) — the addend
+  needs `<<23` to the same scale, final exp is E'-22. acc==0 must shortcut
+  to `fpu_mul` (fpu_norm(0) is garbage). Magnitude-subtract sign: larger
+  magnitude's sign wins (`cm>=pm -> sa`, not `pm>=cm -> sa`).
+- VMSR mask must include RMode (0xFFC001FF, not 0xFF0001FF) or the RMode
+  test silently runs RNE.
+- Fixed-VCVT direction bit is opc2[2] (value 4): A/B to-float, E/F
+  to-fixed. Bit 1 is set in all four — `(opc2&2)` is always true.
+
+### Deliberate v1 limitations (documented in code)
+- No lazy stacking: exception entry stacks the 8-word integer frame only;
+  handlers must not use FPU regs (true of all shipped firmware). FPCCR
+  ASPEN/LSPEN reset set like hardware; FPDSCR stored only.
+- Arithmetic/sqrt use RNE regardless of RMode (vcvt/vcvtf16/fused honor it).
+- IXC only for vcvt/f16 (+OFC/UFC accompaniment); plain-rounding
+  arithmetic leaves it clear. MVFR reads via MRC ID encodings fault (use
+  the MMIO 0xE000EF40–48, like CMSIS does).
+- S/D files and FPSCR are core-side only (not exposed to the JS driver or
+  wasm bindings yet).
