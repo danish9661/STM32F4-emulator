@@ -49,6 +49,57 @@ static void uart_x32(unsigned int v) {
     }
 }
 
+// Multi-register + parallel-DSP execution coverage (inline asm so the
+// exact forms execute; GAS verifies every encoding at build time).
+// noinline + core-reg-only operands keep the compiler's allocator out of
+// the picture (S-regs are caller-saved, so no clobber declarations needed
+// for the S-file traffic inside).
+__attribute__((noinline)) static void multi_S(float *buf, unsigned *o) {
+    __asm__ volatile (
+        "vmov.f32 s4, #1.0\n\t"
+        "vmov.f32 s5, #2.0\n\t"
+        "vmov.f32 s6, #4.0\n\t"
+        "vmov.f32 s7, #8.0\n\t"
+        "vstmia %4, {s4-s7}\n\t"
+        "vldmia %4, {s8-s11}\n\t"
+        "vmov %0, s8\n\t"
+        "vmov %1, s9\n\t"
+        "vmov %2, s10\n\t"
+        "vmov %3, s11\n\t"
+        : "=&r" (o[0]), "=&r" (o[1]), "=&r" (o[2]), "=&r" (o[3])
+        : "r" (buf)
+        : "memory");
+}
+
+__attribute__((noinline)) static void dm_single(float *buf, unsigned *o) {
+    __asm__ volatile (
+        "vmov.f32 s2, #1.0\n\t"
+        "vmov.f32 s3, #2.0\n\t"
+        "vstr d1, [%2]\n\t"
+        "vmov s2, %3\n\t"
+        "vmov s3, %3\n\t"
+        "vldr d1, [%2]\n\t"
+        "vmov %0, s2\n\t"
+        "vmov %1, s3\n\t"
+        : "=&r" (o[0]), "=&r" (o[1])
+        : "r" (buf), "r" (0)
+        : "memory");
+}
+
+__attribute__((noinline)) static void dsp_ops(unsigned *o) {
+    __asm__ volatile (
+        "qadd8 %0, %4, %5\n\t"   // 127+1 saturates per lane -> 0x7F7F7F7F
+        "shadd16 %1, %6, %7\n\t" // (2+2)/2 per lane -> 0x00020002
+        "smlad %2, %8, %9, %10\n\t" // 1*3+2*4+16 = 27
+        "usada8 %3, %11, %12, %13\n\t" // 4x|1-2|+16 = 20
+        : "=&r" (o[0]), "=&r" (o[1]), "=&r" (o[2]), "=&r" (o[3])
+        : "r" (0x7F7F7F7F), "r" (0x01010101),
+          "r" (0x00020002), "r" (0x00020002),
+          "r" (0x00010002), "r" (0x00030004), "r" (16),
+          "r" (0x01010101), "r" (0x02020202), "r" (16)
+        :);
+}
+
 static unsigned int fbits(float f) {
     union { float f; unsigned int u; } u;
     u.f = f;
@@ -151,6 +202,55 @@ int main(void) {
     // 1..20 with a0 replaced by 1.5x => 210.5 (0x43528000).
     for (int i = 0; i < 20; i++) Vvals[i] = (float)(i + 1);
     check("SPILL", fbits(spill_call((float *)Vvals)), 0x43528000);
+
+    // S-list multi-transfer round-trip (vstmia/vldmia s-forms).
+    {
+        static float mbuf[8];
+        unsigned o[5];
+        multi_S(mbuf, o);
+        if (o[0] != 0x3F800000 || o[1] != 0x40000000 || o[2] != 0x40800000 || o[3] != 0x41000000) {
+            uart_puts("VLDM ");
+            uart_x32(o[0]); uart_putchar(' ');
+            uart_x32(o[3]); uart_puts(" FAIL\r\n");
+            fails++;
+        } else {
+            uart_puts("VLDM OK\r\n");
+        }
+    }
+
+    // D-single VLDR/VSTR round-trip.
+    {
+        static float dbuf[2];
+        unsigned o[2];
+        dm_single(dbuf, o);
+        if (o[0] != 0x3F800000 || o[1] != 0x40000000) {
+            uart_puts("VLDR-D FAIL\r\n");
+            fails++;
+        } else {
+            uart_puts("VLDR-D OK\r\n");
+        }
+    }
+
+    // Parallel DSP (saturate / halve / dual-mul-acc / byte-acc + Q flag).
+    {
+        unsigned o[5];
+        dsp_ops(o);
+        unsigned apsr = 0;
+        __asm__ volatile ("mrs %0, apsr" : "=r"(apsr));
+        if (o[0] != 0x7F7F7F7F || o[1] != 0x00020002 || o[2] != 27 || o[3] != 20) {
+            uart_puts("DSP ");
+            uart_x32(o[0]); uart_putchar(' ');
+            uart_x32(o[1]); uart_putchar(' ');
+            uart_x32(o[2]); uart_putchar(' ');
+            uart_x32(o[3]); uart_puts(" FAIL\r\n");
+            fails++;
+        } else if (((apsr >> 27) & 1) != 1) {
+            uart_puts("DSP-Q FAIL\r\n");
+            fails++;
+        } else {
+            uart_puts("DSP OK\r\n");
+        }
+    }
 
     if (fails == 0) uart_puts("FPU all PASS\r\n");
     uart_puts("FPU done\r\n");

@@ -259,6 +259,13 @@ pub fn is_watchdog_reset_requested() -> bool {
     system::is_watchdog_reset_requested()
 }
 
+/// True while the guest holds MPU_CTRL.ENABLE. Protection is not modeled,
+/// so the driver halts (running on unprotected would be silently wrong).
+#[wasm_bindgen]
+pub fn is_mpu_enabled() -> bool {
+    system::is_mpu_enabled()
+}
+
 #[wasm_bindgen]
 pub fn iwdg_reset_flag() -> bool {
     system::iwdg_reset_flag()

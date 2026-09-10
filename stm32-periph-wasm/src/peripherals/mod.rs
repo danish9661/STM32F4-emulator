@@ -33,6 +33,7 @@ pub mod hash;
 pub mod eth;
 pub mod qspi;
 pub mod fpu;
+pub mod mpu;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -51,6 +52,7 @@ use hash::Hash;
 use eth::EthernetMac;
 use qspi::Qspi;
 use fpu::Fpu;
+use mpu::Mpu;
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
@@ -102,6 +104,32 @@ impl Peripherals {
                 use crate::peripherals::pwr::Pwr;
                 if let Some(pwr) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Pwr>() {
                     pwr.wakeup();
+                }
+                break;
+            }
+        }
+    }
+
+    /// FPEXC.EN shadow for the VMRS/VMSR path (see cpu/thumb.rs). Effective
+    /// FPU enable is CPACR-full && this bit; reset set (CPACR gates alone
+    /// out of reset, matching every M4 startup sequence).
+    pub fn fpu_fpexc_en(&self) -> bool {
+        for slot in &self.peripherals {
+            if slot.start == 0xE000_EF34 {
+                if let Some(fpu) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Fpu>() {
+                    return fpu.fpexc_en();
+                }
+                break;
+            }
+        }
+        true
+    }
+
+    pub fn set_fpu_fpexc_en(&self, v: bool) {
+        for slot in &self.peripherals {
+            if slot.start == 0xE000_EF34 {
+                if let Some(fpu) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Fpu>() {
+                    fpu.set_fpexc_en(v);
                 }
                 break;
             }
@@ -210,6 +238,10 @@ impl Peripherals {
                 // The SVD only describes FPCCR/FPCAR/FPDSCR (0x10 bytes) but
                 // the MVFR0-2 ID regs follow at +0xC/+0x10/+0x14: claim them.
                 (0xE000_EF34, 0xE000_EF34 + 0x18)
+            } else if name.as_str() == "FPU_CPACR" {
+                // Single register (CPACR at +0x0); the SVD-derived 0x10
+                // would overlap the MPU slot at 0xE000ED90 (hard fault).
+                (0xE000_ED88, 0xE000_ED8C)
             } else {
                 (p.base_address as u32, p.base_address as u32 + size)
             };
@@ -247,6 +279,7 @@ impl Peripherals {
                 .or_else(|| Dbgmcu::new(name))
                 .or_else(|| EthernetMac::new(name))
                 .or_else(|| Qspi::new(name))
+                .or_else(|| Mpu::new(name))
                 .or_else(|| Fpu::new(name))
             ;
 
@@ -330,6 +363,7 @@ impl Peripherals {
             // model it anyway at its conventional base for completeness.
             (0xA000_1000, "QUADSPI"),
             (0xE000_E000, "NVIC"), (0xE000_E010, "SysTick"), (0xE000_ED00, "SCB"),
+            (0xE000_ED90, "MPU"),
             (0xE000_EF34, "FPU"),
             (0xE004_2000, "DBGMCU"),
         ];
@@ -374,6 +408,7 @@ impl Peripherals {
                 .or_else(|| Dbgmcu::new(name))
                 .or_else(|| EthernetMac::new(name))
                 .or_else(|| Qspi::new(name))
+                .or_else(|| Mpu::new(name))
                 .or_else(|| Fpu::new(name))
             ;
 

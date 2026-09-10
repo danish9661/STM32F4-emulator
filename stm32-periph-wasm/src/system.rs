@@ -22,6 +22,13 @@ pub static INSTRUCTION_COUNT: AtomicU64 = AtomicU64::new(0);
 pub fn instruction_count() -> u64 { INSTRUCTION_COUNT.load(Ordering::Relaxed) }
 
 static WATCHDOG_RESET_EVENT: AtomicBool = AtomicBool::new(false);
+// MPU master-enable latch (MPU_CTRL.ENABLE write). Level semantics follow
+// the register: clearing ENABLE clears this. The driver halts while set —
+// protection is not enforced, so running on would be silently wrong.
+static MPU_ENABLED: AtomicBool = AtomicBool::new(false);
+/// True while the guest holds MPU_CTRL.ENABLE (protection unmodeled).
+pub fn is_mpu_enabled() -> bool { MPU_ENABLED.load(Ordering::Acquire) }
+pub fn set_mpu_enabled(v: bool) { MPU_ENABLED.store(v, Ordering::Release); }
 // Persistent reset-cause bits, latched on watchdog expiry until the firmware
 // clears them via RCC->CSR RMVF. Bit 29 (IWDGRSTF) / bit 30 (WWDGRSTF).
 static IWDG_RESET_FLAG: AtomicBool = AtomicBool::new(false);
@@ -700,6 +707,7 @@ pub fn reset_globals() {
     DMA_READ_ACTIVE.store(false, Relaxed);
     FLASH_PROGRAMMING.store(false, Relaxed);
     WATCHDOG_RESET_EVENT.store(false, Relaxed);
+    MPU_ENABLED.store(false, Relaxed);
     ETH_TX_POLL.store(false, Relaxed);
     ETH_RX_POLL.store(false, Relaxed);
     ETH_DONE.store(0, Relaxed);

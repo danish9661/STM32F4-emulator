@@ -3000,10 +3000,12 @@ pub fn exec32(
             5 => {
                 // SMMUL (o2[15:12]==F, no accumulate) / SMMLA (elsewhere):
                 // Rd = top32(Rn*Rn... precisely RoundDown(Rn*Rm) [+ Ra].
-                // R=o2[4] rounds via +0x80000000 before the shift.
+                // R=o2[4] rounds via +0x80000000 before the shift. Rd/Ra are
+                // data (o2[15:8]) — the gate must NOT include them (faulted
+                // every nonzero-Rd form; firmware-found).
                 // GAS: `smmul r0,r1,r2`=fb51 f002, `smmulr`=fb51 f012,
                 // `smmla r0,r1,r2,r3`=fb51 3002, `smmlar`=fb51 3012.
-                if o2 & 0x0FE0 != 0x0000 && o2 & 0x0FE0 != 0x0010 {
+                if o2 & 0x00E0 != 0x0000 {
                     return fault(cpu, pc, op1, op2, 4);
                 }
                 let round = (o2 & 0x10) != 0;
@@ -3022,8 +3024,9 @@ pub fn exec32(
             }
             6 => {
                 // SMMLS/SMMLSR: Rd = Ra - RoundDown(Rn*Rm) (R=o2[4] rounds).
+                // Rd/Ra are data — gate excludes them (see op 5 note).
                 // GAS: `smmls r0,r1,r2,r3`=fb61 3002, `smmlsr`=fb61 3012.
-                if o2 & 0x0FE0 != 0x0000 && o2 & 0x0FE0 != 0x0010 {
+                if o2 & 0x00E0 != 0x0000 {
                     return fault(cpu, pc, op1, op2, 4);
                 }
                 let round = (o2 & 0x10) != 0;
@@ -3039,9 +3042,11 @@ pub fn exec32(
             }
             7 => {
                 // USAD8 (o2[15:12]==F: no accumulate) / USADA8 (elsewhere):
-                // Rd = sum |Rn.byte[i]-Rm.byte[i]| (+ Ra). o2[7:4]==0.
+                // Rd = sum |Rn.byte[i]-Rm.byte[i]| (+ Ra). Rd/Ra are data
+                // (o2[15:8]) — the gate must NOT include them (faulted every
+                // nonzero-Rd form; firmware-found via usada8 r4,r1,lr,r3).
                 // GAS: `usad8 r0,r1,r2`=fb71 f002, `usada8 r0,r1,r2,r3`=fb71 3002.
-                if o2 & 0x0FF0 != 0x0000 && o2 & 0x0FF0 != 0x0010 {
+                if o2 & 0x00F0 != 0x0000 {
                     return fault(cpu, pc, op1, op2, 4);
                 }
                 let an = rr(cpu, rn, pc);
@@ -3356,15 +3361,14 @@ pub fn exec32(
         if (o2 >> 8) & 0xF != 0xA && (o2 >> 8) & 0xF != 0xB {
             return fault(cpu, pc, op1, op2, 4);
         }
-        // CPACR gate: CP10+CP11 need full access, else UsageFault NOCP
-        // (UFSR bit 3 = CFSR bit 19 latched; without delivery this is a
-        // loud fault like SVC — polling firmware never touches the FPU
-        // without enabling it, so hitting this is a bug worth surfacing).
-        // NOTE: no lazy stacking in v1 (take_exception stacks the 8-word
-        // integer frame only): handlers must not use FPU regs (true of all
-        // shipped firmware incl. the FreeRTOS port). Each successful FPU
-        // arm sets CONTROL.FPCA like hardware.
-        if sys.p.read(sys, 0xE000ED88, 4) & 0x00F0_0000 != 0x00F0_0000 {
+        // CPACR gate: CP10+CP11 need full access AND FPEXC.EN set, else
+        // UsageFault NOCP (UFSR bit 3 = CFSR bit 19 latched; without
+        // delivery this is a loud fault like SVC — polling firmware never
+        // touches the FPU without enabling it, so hitting this is a bug
+        // worth surfacing). Each successful FPU arm sets CONTROL.FPCA
+        // like hardware (drives lazy stacking on exception entry).
+        let cpacr_ok = sys.p.read(sys, 0xE000ED88, 4) & 0x00F0_0000 == 0x00F0_0000;
+        if !cpacr_ok || !sys.p.fpu_fpexc_en() {
             let cfsr = sys.p.read(sys, 0xE000ED28, 4);
             sys.p.write(sys, 0xE000ED28, 4, cfsr | 0x0008_0000);
             if !cpu.deliver_irqs {
@@ -3408,13 +3412,18 @@ pub fn exec32(
         // VMRS / VMSR (op1 selects the register — GAS fpu16.s — AND op2lo
         // == 0x10 AND sz == 0; Rt = Vd field, 0xF = APSR_nzcv for FPSCR).
         // op1: EEE1 = VMSR FPSCR; EEF1 = VMRS FPSCR; EEF7 = MVFR0;
-        // EEF6 = MVFR1 (M4F ID values, same consts as the MMIO block).
-        // FPEXC (EEF8) is NOT served (faults via the B-group fallthrough):
-        // M4 guests use CPACR, and inventing EN/EX bits is worse than loud.
+        // EEF6 = MVFR1; EEF5 = MVFR2 (M4F IDs, same consts as MMIO);
+        // EEF8/EEE8 = VMRS/VMSR FPEXC.
+        // FPEXC: bit 31 (EX) is live LSPACT (outstanding lazy state);
+        // bit 30 (EN) is CPACR-full && the VMSR-writable EN shadow (reset
+        // set). Clearing EN bricks FPU access until reset — including the
+        // VMSR that would re-enable it — which is exactly what silicon
+        // does (a disabled coprocessor faults ALL cp10/11 insns).
         // Full-shape gate (as with VMOV-core): B-group ops with a high odd
-        // dest (e.g. vsqrt s17,s18 = EEF1 8AC9) share the EEF1 op1 and must
+        // dest (e.g. vsqrt s17,s18 = EEF1 8AC9) share these op1s and must
         // fall through (same lesson as VMOV-core vs VMLA below).
-        if (o1 == 0xEEF1 || o1 == 0xEEE1 || o1 == 0xEEF7 || o1 == 0xEEF6)
+        if (o1 == 0xEEF1 || o1 == 0xEEE1 || o1 == 0xEEF7 || o1 == 0xEEF6
+            || o1 == 0xEEF5 || o1 == 0xEEF8 || o1 == 0xEEE8)
             && (o2 & 0xFF) == 0x10
             && (o2 >> 8) & 1 == 0
         {
@@ -3433,16 +3442,35 @@ pub fn exec32(
                 }
                 cpu.regs.fpscr = (cpu.regs.fpscr & !0xFFC0_01FF)
                     | (rr(cpu, vd4, pc) & 0xFFC0_01FF);
+            } else if o1 == 0xEEF8 {
+                // VMRS FPEXC: EX = live LSPACT, EN = effective enable.
+                if vd4 == 13 || vd4 == 15 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                let ex = (sys.p.read(sys, 0xE000EF34, 4) & 1) << 31;
+                let en = u32::from(
+                    sys.p.read(sys, 0xE000ED88, 4) & 0x00F0_0000 == 0x00F0_0000
+                        && sys.p.fpu_fpexc_en(),
+                ) << 30;
+                cpu.regs.r[vd4] = ex | en;
+            } else if o1 == 0xEEE8 {
+                // VMSR FPEXC: only EN (bit 30) is writable.
+                if vd4 == 13 || vd4 == 15 {
+                    return fault(cpu, pc, op1, op2, 4);
+                }
+                sys.p.set_fpu_fpexc_en(rr(cpu, vd4, pc) & (1 << 30) != 0);
             } else {
-                // MVFR0/MVFR1: read-only ID values (no APSR form: Rt=15
+                // MVFR0/1/2: read-only ID values (no APSR form: Rt=15
                 // UNPREDICTABLE here, unlike the FPSCR form above).
                 if vd4 == 13 || vd4 == 15 {
                     return fault(cpu, pc, op1, op2, 4);
                 }
                 cpu.regs.r[vd4] = if o1 == 0xEEF7 {
                     crate::peripherals::fpu::MVFR0
-                } else {
+                } else if o1 == 0xEEF6 {
                     crate::peripherals::fpu::MVFR1
+                } else {
+                    crate::peripherals::fpu::MVFR2
                 };
             }
             cpu.regs.control |= 4;

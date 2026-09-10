@@ -337,11 +337,21 @@ is under test. Results print as raw hex bits with per-check PASS/FAIL.
   CMP OK
   CVT OK
   SPILL 43528000 PASS
+  VLDM OK
+  VLDR-D OK
+  DSP OK
   FPU all PASS
   FPU done
   ```
-- Pass: every marker above, no `FAIL`, no CPU fault. Also wired into
-  `test_browser.mjs` (`FPU all PASS`) and the headed sweep.
+- Pass: every marker above, no `FAIL`, no CPU fault.
+- Gotchas the firmware caught while being written: (1) `usad8` takes 3
+  operands — the 4-operand accumulate form is `usada8` (GAS rejects the
+  former loudly); (2) inline-asm outputs written before later inputs are
+  consumed need `=&r` early-clobbers, or GCC aliases them (observed:
+  qadd8's result landed in usada8's Ra slot, printing 527 instead of 20
+  — the decoder faithfully executed the garbage, which is how the alias
+  was identified).
+- Also wired into `test_browser.mjs` (`FPU all PASS`) and the headed sweep.
 - Gotcha the wiring caught: the firmware dropdown is TWO hardcoded lists
   (native `<option>` + custom `data-value` divs in index.html) —
   `?fw=` boots eth_http silently when the custom div is missing (empty
@@ -370,6 +380,23 @@ restore on return (lazy FP stacking end-to-end).
   FPU IRQ done
   ```
 - Pass: every marker above, IRQ count ≥ 10, no `FAIL`, no CPU fault.
+
+### test_mpu.mjs — MPU enable trap (mpu_test)
+Bare-metal firmware programs two regions CMSIS-style (FLASH RX + SRAM RW)
+with readback verification, then sets CTRL.ENABLE. Protection is not
+enforced by the model, so the driver must halt LOUDLY
+(`modelHaltInfo()` names MPU) instead of running on unprotected.
+- Exercises: MPU TYPE/RNR/RBAR/RASR storage, CTRL.ENABLE sticky,
+  driver halt path (`stopped:true`, no CPU fault).
+- Expected UART:
+  ```
+  === MPU Test ===
+  TYPE 00080800
+  R0BAR 08000010 R0ASR 03000027
+  MPU enabled
+  ```
+  (`MPU SPUN` must never appear.)
+- Pass: markers above + `stopped === true` + modelHalt mentions MPU.
 - Gotcha the firmware caught while being written: the decoder's op
   selector included the D bit (faulted all odd-high-reg arithmetic) and
   the B-group op-nibble baked in the M bit (faulted every even-Sm form).
@@ -424,6 +451,7 @@ save-slot menu → name char 'a' (0x61) + Enter → asserts the firmware's
 | test_rtc | rtc_test | I2C1/regfile | `RTC verify OK`, `RTC time=10:45:30 DOW=3 15/07/26`, temp=27.5 |
 | test_fpu | fpu_test | VFPv4-SP/CPACR | `FPU all PASS`, `FMA 28800000 PASS`, `FPU done` |
 | test_fpuirq | fpu_irq_test | VFPv4-SP/SysTick/NVIC | `FPU IRQ all PASS`, `S0 11111111 ok`, `FPSCR 00000000 ok` |
+| test_mpu | mpu_test | MPU/SCB | `MPU enabled`, stopped, modelHalt mentions MPU |
 
 Plus the Rust unit suite: `cargo test` (94 tests — 68 CPU/decoder incl. 26
 FPU encoding/semantics/stacking tests, plus CAN, SPI/I2C taps, DCMI, WAV,

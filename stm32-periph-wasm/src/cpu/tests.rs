@@ -1721,9 +1721,8 @@ fn fpu_vmrs_id_regs() {
     assert_eq!(cpu.regs.r[0], 0x1011_0021, "MVFR0");
     let (cpu, _) = run_fpu_snippet(&[0xEEF6, 0x4A10], &[], &[], 0, 1);
     assert_eq!(cpu.regs.r[4], 0x1100_0011, "MVFR1");
-    // FPEXC (EEF8) has no served meaning on M4 guests (CPACR country):
-    // loud fault, never a made-up value. MVFR with Rt=13/15 likewise.
-    for code in [[0xEEF8u16, 0x0A10u16], [0xEEF7, 0xFA10u16], [0xEEF6, 0xDA10u16]] {
+    // MVFR with Rt=13/15 faults (no APSR form for ID regs).
+    for code in [[0xEEF7, 0xFA10u16], [0xEEF6, 0xDA10u16]] {
         let _g = lock_boot();
         let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
         mem.write32(0xE000ED88, 0x00F0_0000);
@@ -1735,4 +1734,117 @@ fn fpu_vmrs_id_regs() {
         cpu.run(sys, &mut mem, 1);
         assert!(cpu.fault.is_some(), "must fault: {:04x} {:04x}", code[0], code[1]);
     }
+}
+
+#[test]
+fn fpu_mvfr2_and_fpexc() {
+    // MVFR2 (EEF5, probed via neon-fp-armv8 — GAS rejects the mnemonic on
+    // fpv4-sp, but the encoding is architectural).
+    let (cpu, _) = run_fpu_snippet(&[0xEEF5, 0x5A10], &[], &[], 0, 1);
+    assert_eq!(cpu.regs.r[5], 0x0000_0040, "MVFR2");
+    // FPEXC read: EX=0 (no lazy frame), EN=1 (CPACR full, reset-set shadow).
+    let (cpu, _) = run_fpu_snippet(&[0xEEF8, 0x0A10], &[], &[], 0, 1);
+    assert_eq!(cpu.regs.r[0], 0x4000_0000, "EX=0 EN=1");
+    // With CPACR cleared the gate still faults first (FPEXC read needs the
+    // FPU enabled, like every cp10/11 insn). Single lock for the whole
+    // manual section (shadowed `let _g` does NOT drop the guard early —
+    // re-locking deadlocks).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    mem.write16(0x20002000, 0xEEF8);
+    mem.write16(0x20002002, 0x0A10);
+    cpu.regs.r[15] = 0x20002001;
+    let sys = crate::sys();
+    cpu.run(sys, &mut mem, 1);
+    assert!(cpu.fault.is_some(), "FPEXC without CPACR must fault");
+    // Clearing EN via VMSR bricks FPU access (silicon behavior): the next
+    // VFP insn faults, including a re-enabling VMSR. (Same lock scope —
+    // the boot() below installs a fresh system, no re-lock needed.)
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write32(0xE000ED88, 0x00F0_0000);
+    // vmsr fpexc, r0 (EEE8 0A10) with r0 bit30 clear.
+    mem.write16(0x20002000, 0xEEE8);
+    mem.write16(0x20002002, 0x0A10);
+    cpu.regs.r[0] = 0;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    assert!(cpu.fault.is_none(), "VMSR FPEXC itself runs (EN was set)");
+    // Now every VFP insn faults, and the EX/EN read shows EN=0.
+    mem.write16(0x20002000, 0xEEB7);
+    mem.write16(0x20002002, 0x0A00);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    assert!(cpu.fault.is_some(), "FPU use with EN=0 must fault");
+}
+
+#[test]
+fn fpu_fpexc_ex_tracks_lazy() {
+    // EX (bit 31) is live LSPACT: set while a lazy frame is outstanding,
+    // clear otherwise. NOTE the subtlety this pins: reading FPEXC via
+    // VMRS is itself an FPU use, so it completes the pending stacking
+    // FIRST (like silicon) and then observes EX=0. To see EX=1, read the
+    // model FPCCR directly (no FPU insn involved).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write32(0xE000ED88, 0x00F0_0000);
+    cpu.regs.s[0] = 0xAAAAAAAA;
+    cpu.regs.control |= 4;
+    cpu.take_exception(sys, &mut mem, -2);
+    assert_ne!(mem.read32(0xE000EF34) & 1, 0, "EX outstanding (MMIO view)");
+    // VMRS FPEXC in handler mode: stacks first, so EX reads clear — but
+    // the seeded S0 must have landed in the frame, and EN reads set.
+    mem.write16(0x20002000, 0xEEF8);
+    mem.write16(0x20002002, 0x0A10);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[0], 0x4000_0000, "EX consumed by the read, EN set");
+    let fpcar = mem.read32(0xE000EF38);
+    assert_eq!(mem.read32(fpcar), 0xAAAAAAAA, "read stacked thread S0 first");
+    assert_eq!(mem.read32(0xE000EF34) & 1, 0, "LSPACT consumed");
+}
+
+#[test]
+fn dsp_nonzero_regs() {
+    // Every FB/FA family with nonzero Rd/Ra (GAS regmatrix.s): the old
+    // o2-mask gates faulted all of these (only Rd=0 probes existed).
+    // smmla r4,r1,r2,r3=FB51 3402: (2^30)^2>>32 + 1.
+    let (cpu, _) = run_snippet(&[0xFB51, 0x3402], &[(1, 0x4000_0000), (2, 0x4000_0000), (3, 1)]);
+    assert_eq!(cpu.regs.r[4], 0x1000_0001);
+    // smmls r5,r1,r2,r3=FB61 3502: 1 - 2^28 (wrapping).
+    let (cpu, _) = run_snippet(&[0xFB61, 0x3502], &[(1, 0x4000_0000), (2, 0x4000_0000), (3, 1)]);
+    assert_eq!(cpu.regs.r[5], 0xF000_0001);
+    // smmul r6,r1,r2=FB51 F602 (no accumulate).
+    let (cpu, _) = run_snippet(&[0xFB51, 0xF602], &[(1, 0x4000_0000), (2, 0x4000_0000)]);
+    assert_eq!(cpu.regs.r[6], 0x1000_0000);
+    // usada8 r7,r1,r2,r3=FB71 3702: 4x|1-2| + 16 = 20.
+    let (cpu, _) = run_snippet(&[0xFB71, 0x3702], &[(1, 0x0101_0101), (2, 0x0202_0202), (3, 16)]);
+    assert_eq!(cpu.regs.r[7], 20);
+    // usad8 r8,r1,r2=FB71 F802 (no accumulate).
+    let (cpu, _) = run_snippet(&[0xFB71, 0xF802], &[(1, 0x0101_0101), (2, 0x0202_0202)]);
+    assert_eq!(cpu.regs.r[8], 4);
+    // smlad r9,r1,r2,r3=FB21 3902: 1*3 + 2*4 + 16 = 27.
+    let (cpu, _) = run_snippet(&[0xFB21, 0x3902], &[(1, 0x0001_0002), (2, 0x0003_0004), (3, 16)]);
+    assert_eq!(cpu.regs.r[9], 27);
+    // smulwb/smulwt r10,r1,r2 (B/T half select via o2[4]).
+    let (cpu, _) = run_snippet(&[0xFB31, 0xFA02], &[(1, 0x0004_0000), (2, 0x0003_FFFF)]);
+    assert_eq!(cpu.regs.r[10], 0xFFFF_FFFC, "262144 x -1 >> 16");
+    let (cpu, _) = run_snippet(&[0xFB31, 0xFA12], &[(1, 0x0004_0000), (2, 0x0003_0000)]);
+    assert_eq!(cpu.regs.r[10], 12, "262144 x 3 >> 16");
+    // smlawb/smlawt r11,r1,r2,r3 (accumulate).
+    let (cpu, _) = run_snippet(&[0xFB31, 0x3B02], &[(1, 0x0004_0000), (2, 0x0003_FFFF), (3, 0x100)]);
+    assert_eq!(cpu.regs.r[11], 0xFC);
+    let (cpu, _) = run_snippet(&[0xFB31, 0x3B12], &[(1, 0x0004_0000), (2, 0x0003_0000), (3, 0x100)]);
+    assert_eq!(cpu.regs.r[11], 0x10C);
+    // smlal r8,r9,r1,r2=FBC1 8902 (lo/hi accumulators, high regs).
+    let (cpu, _) = run_snippet(&[0xFBC1, 0x8902], &[(8, 1), (9, 2), (1, 3), (2, 5)]);
+    assert_eq!((cpu.regs.r[8], cpu.regs.r[9]), (0x10, 2));
+    // FA parallel with nonzero Rd: qadd8 + shadd16.
+    let (cpu, _) = run_snippet(&[0xFA85, 0xF416], &[(5, 0x7F7F_7F7F), (6, 0x0101_0101)]);
+    assert_eq!(cpu.regs.r[4], 0x7F7F_7F7F, "saturate, not wrap");
+    assert_ne!(cpu.regs.xpsr & 0x08000000, 0, "Q set");
+    let (cpu, _) = run_snippet(&[0xFA98, 0xF729], &[(8, 0x0004_0004), (9, 0x0002_0002)]);
+    assert_eq!(cpu.regs.r[7], 0x0003_0003, "halving add");
 }

@@ -524,6 +524,7 @@ canvas {
             <div class="custom-select-option" data-value="qspi_test">qspi_test — QUADSPI read/write round-trip</div>
             <div class="custom-select-option" data-value="fpu_test">fpu_test — VFPv4-SP hard-float checks</div>
             <div class="custom-select-option" data-value="fpu_irq_test">fpu_irq_test — FPU state across SysTick IRQs</div>
+            <div class="custom-select-option" data-value="mpu_test">mpu_test — MPU enable trap (loud halt)</div>
             <div class="custom-select-option" data-value="deep_sleep_demo">deep_sleep_demo — WFI/STOP + RTC-alarm wakeup</div>
             <div class="custom-select-option" data-value="test_firmware">test_firmware — TIM2/ADC dump</div>
             <div class="custom-select-group-label">Crypto</div>
@@ -537,7 +538,7 @@ canvas {
     <select id="fwSelect" hidden>
       <option value="eth_http">eth_http</option><option value="eth_dhcp">eth_dhcp</option><option value="eth_test">eth_test</option>
       <option value="blinky">blinky</option><option value="adc_demo">adc_demo</option><option value="dac_demo">dac_demo</option><option value="pwm_demo">pwm_demo</option><option value="blink_serial">blink_serial</option><option value="timer_test">timer_test</option><option value="arduino_test">arduino_test</option><option value="hal_test">hal_test</option>
-      <option value="periph_test">periph_test</option><option value="new_periph_test">new_periph_test</option><option value="deep_periph_test">deep_periph_test</option><option value="comprehensive_test">comprehensive_test</option><option value="eth_irq_test">eth_irq_test</option><option value="edge_test">edge_test</option><option value="i2s_sai_test">i2s_sai_test</option><option value="spi_tft_test">spi_tft_test</option><option value="audio_test">audio_test</option><option value="ltdc_test">ltdc_test</option><option value="oled_test">oled_test</option><option value="tft_test">tft_test</option><option value="buzzer_test">buzzer_test</option><option value="audio_play_test">audio_play_test</option><option value="rtc_test">rtc_test</option><option value="can_test">can_test</option><option value="can_demo">can_demo</option><option value="can_host_rx">can_host_rx</option><option value="watchdog_demo">watchdog_demo</option><option value="wwdg_demo">wwdg_demo</option><option value="wwdg_window_demo">wwdg_window_demo</option><option value="tim_capture_demo">tim_capture_demo</option><option value="qspi_test">qspi_test</option><option value="fpu_test">fpu_test</option><option value="fpu_irq_test">fpu_irq_test</option><option value="deep_sleep_demo">deep_sleep_demo</option><option value="test_firmware">test_firmware</option>
+      <option value="periph_test">periph_test</option><option value="new_periph_test">new_periph_test</option><option value="deep_periph_test">deep_periph_test</option><option value="comprehensive_test">comprehensive_test</option><option value="eth_irq_test">eth_irq_test</option><option value="edge_test">edge_test</option><option value="i2s_sai_test">i2s_sai_test</option><option value="spi_tft_test">spi_tft_test</option><option value="audio_test">audio_test</option><option value="ltdc_test">ltdc_test</option><option value="oled_test">oled_test</option><option value="tft_test">tft_test</option><option value="buzzer_test">buzzer_test</option><option value="audio_play_test">audio_play_test</option><option value="rtc_test">rtc_test</option><option value="can_test">can_test</option><option value="can_demo">can_demo</option><option value="can_host_rx">can_host_rx</option><option value="watchdog_demo">watchdog_demo</option><option value="wwdg_demo">wwdg_demo</option><option value="wwdg_window_demo">wwdg_window_demo</option><option value="tim_capture_demo">tim_capture_demo</option><option value="qspi_test">qspi_test</option><option value="fpu_test">fpu_test</option><option value="fpu_irq_test">fpu_irq_test</option><option value="mpu_test">mpu_test</option><option value="deep_sleep_demo">deep_sleep_demo</option><option value="test_firmware">test_firmware</option>
       <option value="crypto_test">crypto_test</option><option value="crypto_deep_test">crypto_deep_test</option><option value="rx_crypto_test">rx_crypto_test</option>
       <option value="echo_test">echo_test</option><option value="rx_interrupt_test">rx_interrupt_test</option>
     </select>
@@ -669,7 +670,7 @@ canvas {
     · <a href="about.html">About</a>
  </footer>
 
-<script type="module" src="app.js?v=6"></script>
+<script type="module" src="app.js?v=8"></script>
 <script>
 // Custom firmware dropdown (replaces native <select>)
 (() => {

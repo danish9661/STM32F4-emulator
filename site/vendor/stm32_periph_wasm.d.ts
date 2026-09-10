@@ -328,6 +328,12 @@ export function init(): void;
  */
 export function init_svd(svd_xml: string): void;
 
+/**
+ * True while the guest holds MPU_CTRL.ENABLE. Protection is not modeled,
+ * so the driver halts (running on unprotected would be silently wrong).
+ */
+export function is_mpu_enabled(): boolean;
+
 export function is_watchdog_reset_requested(): boolean;
 
 export function iwdg_reset_flag(): boolean;
@@ -487,6 +493,7 @@ export interface InitOutput {
     readonly i2c_take_events: (a: number, b: number, c: number) => void;
     readonly init: () => void;
     readonly init_svd: (a: number, b: number) => void;
+    readonly is_mpu_enabled: () => number;
     readonly is_watchdog_reset_requested: () => number;
     readonly iwdg_reset_flag: () => number;
     readonly ltdc_get_frame_count: () => number;

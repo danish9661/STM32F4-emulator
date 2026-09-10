@@ -50,6 +50,7 @@ export const i2c_register_slave: (a: number, b: number, c: number) => void;
 export const i2c_take_events: (a: number, b: number, c: number) => void;
 export const init: () => void;
 export const init_svd: (a: number, b: number) => void;
+export const is_mpu_enabled: () => number;
 export const is_watchdog_reset_requested: () => number;
 export const iwdg_reset_flag: () => number;
 export const ltdc_get_frame_count: () => number;

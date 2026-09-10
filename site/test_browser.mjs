@@ -19,6 +19,7 @@ const CASES = [
     { label: 'deep_sleep_demo', fw: 'deep_sleep_demo', markers: ['WOKE FROM STOP'],               timeoutMs: 60000 },
     { label: 'fpu_test',        fw: 'fpu_test',        markers: ['FPU all PASS'],                 failMarkers: ['FAIL'], timeoutMs: 60000 },
     { label: 'fpu_irq_test',    fw: 'fpu_irq_test',    markers: ['FPU IRQ all PASS'],             failMarkers: ['FAIL'], timeoutMs: 90000 },
+    { label: 'mpu_test',        fw: 'mpu_test',        markers: ['MPU enabled'],                    failMarkers: ['MPU SPUN'], timeoutMs: 60000 },
 ];
 
 let failed = 0;

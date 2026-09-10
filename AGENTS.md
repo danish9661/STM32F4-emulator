@@ -2630,6 +2630,11 @@ accumulate across same-page boots (§11) and the renderer dies ~boot 6.
   The box was saturated by other users' jobs (esp32 emu @98% CPU) at the
   time; W still passes because 720u is a wall-capped ceiling that hides
   the rate deficit. Rerun on a quiet box before touching any code.
+  **Resolved 2026-09-10:** fresh-box rerun (after a reboot cleared the
+  load) PASSes 11/11 with turn 143.8° — same tree, same harness. The
+  three fails were environmental (a loaded-box sweep in the same window
+  also failed with Page.goto navigation timeouts, and the gateway WS
+  dropped mid-TCP). No code changed.
 - **`doom_sym()` in cpu/tests.rs**: resolves test addresses from
   doom.elf's symtab at test time — hardcoded addresses rot on every
   firmware rebuild (strcasecmp moved twice).
@@ -2787,15 +2792,18 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
 ### What is implemented
 - Moves: vmov-imm/reg, core<->S, 2-core<->D, vmrs (APSR_nzcv + Rt) / vmsr
   (masked `0xFFC001FF`: NZCVQC+AHP/DN/FZ/RMode+enables/flags), vmrs
-  MVFR0/MVFR1 (EEF7/EEF6, GAS fpu16.s; FPEXC faults loudly — M4 guests
-  use CPACR and invented EN/EX bits are worse than a fault).
+  MVFR0/MVFR1/MVFR2 (EEF7/EEF6/EEF5 — MVFR2's nibble-5 selector came from
+  a neon-fp-armv8 probe; GAS rejects the mnemonic on fpv4-sp), VMRS/VMSR
+  FPEXC (EEF8/EEE8: EX=live LSPACT, EN=CPACR-full&&stored-shadow —
+  clearing EN bricks FPU access exactly like silicon, VMSR included).
 - Memory: vldr/vstr (offset-only; GAS rejects writeback — fault on P=0/W=1),
   vldm/vstm/vpush/vpop (IA: P=0,U=1,W optional; DB: P=1,U=0, W REQUIRED —
   both GAS-probed rejections; D-lists gated to D0–D15, imm8 odd faults).
   Compiler-output coverage: fpu_test's SPILL path runs real `vpush.64
   {d8-d10}`/`vpop` through a call/return (GCC never emits S-list
-  multiples — tried; S-lists stay unit+probe-covered, same as
-  parallel-DSP with no compiler emitters).
+  multiples — tried; S-lists execute via inline asm in fpu_test instead,
+  same as the parallel-DSP sample (QADD8/SHADD16/SMLAD/USADA8) and
+  D-single VLDR/VSTR — all GAS-verified at build, bit-checked at run).
 - Arithmetic: add/sub/mul/div/mla/mls/nmul/nmla/nmls (UNFUSED, never
   `mul_add`), vsqrt, vabs/vneg (pure bit ops, never raise — even SNaN).
 - Fused VFMA/VFMS/VFNMA/VFNMS: SINGLE rounding, exact via u128 integer
@@ -2883,6 +2891,12 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   test silently runs RNE.
 - Fixed-VCVT direction bit is opc2[2] (value 4): A/B to-float, E/F
   to-fixed. Bit 1 is set in all four — `(opc2&2)` is always true.
+- FB Rd-gates must exclude Rd/Ra (o2[15:8]): the op5/6/7 masks covered
+  Rd and faulted every nonzero-Rd SMMLA/SMMLS/USADA8 (all GAS probes
+  used Rd=0 — the firmware's `usada8 r4,r1,lr,r3` = FB71 340E caught
+  it). Gate only true op bits (`0x00E0`/`0x00F0`). The FA group never
+  had this bug (fixed-F nibbles, Rd as data — documented at the QADD
+  arm). Regression: `dsp_nonzero_regs` (regmatrix.s GAS vectors).
 - The opc used for 3-reg/fused EXCLUDES D (bit22): the first cut used
   `(o1>>4)&0xF` and misdecoded every odd-high-reg arithmetic op (the
   firmware's `vadd s15,s13,s15` = EE76 7AA7 faulted). All D=0 unit tests
@@ -2919,8 +2933,8 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   flake after the FPU tick-pumping test joined the suite.
 
 ### Deliberate v1 limitations — ALL CLOSED (2026-09-09 sessions)
-- ~~MVFR reads via MRC ID encodings fault~~ — served (EEF7/EEF6, same
-  M4F constants as MMIO; FPEXC still faults by decision, see above).
+- ~~MVFR reads via MRC ID encodings fault~~ — served (EEF7/EEF6/EEF5, same
+  M4F constants as MMIO; FPEXC served too, see above).
 - ~~S/D files and FPSCR are core-side only~~ — exposed: wasm `get_sregs/
   get_fpscr/set_sreg/set_fpscr`, `emu.getFpuState/setSreg/setFpscr`,
   bridge `GET_FPREGS/SET_FPREG` (0x13/0x14 → 0x95/0x96) + remote-emu
@@ -2929,3 +2943,9 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   (u128 long division to 27 quotient bits; Newton isqrt digit-recurrence),
   sharing `fpu_pack` with fused MLA. Overflow clamps per RMode via
   `fpu_overflow` (directed modes take finite max, not inf).
+- ~~MPU unmodeled (silent-ignore)~~ — `mpu.rs` stores TYPE/RNR/RBAR/RASR
+  faithfully; CTRL.ENABLE latches a halt (`modelHaltInfo`) instead of
+  running on unprotected. Proven by `mpu_test/` (region programming +
+  enable → stopped with message). The SVD FPU_CPACR slot (ED88+0x10)
+  overlaps the MPU slot — claimed at +0x4 with a hard overlap assert
+  guarding the map (it fired during bring-up).

@@ -65,7 +65,7 @@ export async function createEmulator(opts) {
         periph_read, periph_write, tick, tick_n, tick_peripherals, get_uart_output,
         dma_get_pending_count, dma_get_pending, dma_set_completed,
         dma_periph_read, dma_periph_write,
-        is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, qspi_register_flash, init_svd,
+        is_watchdog_reset_requested, is_mpu_enabled, add_spi_flash, add_i2c_eeprom, qspi_register_flash, init_svd,
         eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll,
         eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
         get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, uart_rx_byte,
@@ -553,6 +553,9 @@ export async function createEmulator(opts) {
         };
         const rxQueue = [];
         let instCount = 0;
+        // Driver-level halt reason (model-requested stops like MPU enable
+        // that carry no CPU fault). Read via modelHaltInfo().
+        let modelHalt = null;
         // Compact mirrors of processEth/processDma for the wasm memory.
         const wProcessEth = () => {
             if (eth_is_tx_poll()) {
@@ -662,6 +665,13 @@ export async function createEmulator(opts) {
                 try { processDevices(); } catch {}
                 if (ENV.WASM_DBG && rxQueue.length > 0) console.log(`[wasm-step] pc=0x${(cpu.get_pc() >>> 0).toString(16)} rxpoll=${eth_is_rx_poll() ? 1 : 0} q=${rxQueue.length}`);
                 if (is_watchdog_reset_requested()) cpu.reset_cpu(sp0, pc0 | 1);
+                // MPU enabled but protection unmodeled: halt loudly with the
+                // reason on the handle (running on would silently skip the
+                // MemManage faults the guest expects).
+                if (typeof is_mpu_enabled === 'function' && is_mpu_enabled()) {
+                    modelHalt = 'MPU_CTRL.ENABLE set but MPU protection is not modeled';
+                    return { instCount, stopped: true, pc: cpu.get_pc() };
+                }
                 const faulted = cpu.fault_pc() !== 0xFFFFFFFF;
                 return { instCount, stopped: faulted, pc: cpu.get_pc() };
             },
@@ -707,14 +717,18 @@ export async function createEmulator(opts) {
                 try { cpu.wake(); } catch {}
                 cpu.reset_cpu(sp, pc | 1);
                 instCount = 0;
+                modelHalt = null;
             },
             close: () => { try { cpu.free(); } catch {} },
-            reset: () => { cpu.reset_cpu(sp0, pc0 | 1); },
+            reset: () => { modelHalt = null; cpu.reset_cpu(sp0, pc0 | 1); },
             faultInfo: () => {
                 const fpc = cpu.fault_pc() >>> 0;
                 if (fpc === 0xFFFFFFFF) return null;
                 return { pc: fpc, op1: cpu.fault_op1(), op2: cpu.fault_op2(), len: cpu.fault_len() };
             },
+            // Model-requested halt reason (e.g. MPU enabled but unmodeled),
+            // or null when running clean. Complements faultInfo().
+            modelHaltInfo: () => modelHalt,
         };
     }
 }

@@ -11,6 +11,10 @@ pub struct Fpu {
     fpccr: u32,  // +0x0 (reset ASPEN|LSPEN)
     fpcar: u32,  // +0x4
     fpdscr: u32, // +0x8 (default FPSCR; stored only in v1)
+    /// FPEXC.EN shadow (VMSR-writable; reset set). The effective FPU enable
+    /// is CPACR-full && this bit; reads via VMRS report bit 30 accordingly
+    /// and bit 31 (EX) is derived live from LSPACT by the caller.
+    fpexc_en: bool,
 }
 
 /// Cortex-M4F (VFPv4-SP, 32xS + 16xD alias) ID values (M4F TRM; pinned by
@@ -21,7 +25,7 @@ pub const MVFR2: u32 = 0x0000_0040;
 
 impl Default for Fpu {
     fn default() -> Self {
-        Self { fpccr: 0xC000_0000, fpcar: 0, fpdscr: 0 }
+        Self { fpccr: 0xC000_0000, fpcar: 0, fpdscr: 0, fpexc_en: true }
     }
 }
 
@@ -29,6 +33,10 @@ impl Fpu {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
         if name == "FPU" { Some(Box::new(Self::default())) } else { None }
     }
+
+    /// FPEXC.EN shadow for the VMRS/VMSR FPU-exception-register path.
+    pub fn fpexc_en(&self) -> bool { self.fpexc_en }
+    pub fn set_fpexc_en(&mut self, v: bool) { self.fpexc_en = v; }
 }
 
 impl Peripheral for Fpu {

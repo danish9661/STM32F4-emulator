@@ -58,6 +58,7 @@ const firmwares = [
     // VFPv4-SP: real GCC hard-float (vfma/vcmpe/vcvt/vsqrt/D=1 regs)
     ['fpu_test', 'fpu_test/fpu_test.bin', 'fpu_test.bin'],
     ['fpu_irq_test', 'fpu_irq_test/fpu_irq_test.bin', 'fpu_irq_test.bin'],
+    ['mpu_test', 'mpu_test/mpu_test.bin', 'mpu_test.bin'],
     // doom (doomgeneric F407 port; needs doom1.wad served alongside)
     ['doom', 'doom/doom.bin', 'doom.bin'],
 ];
