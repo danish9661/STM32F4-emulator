@@ -47,6 +47,13 @@ pub(crate) fn init_svd_for_test(s: WasmSystem) {
     set_sys(s);
 }
 
+/// Install a system built any other way (e.g. the hardcoded map, for
+/// model-level tests that must not depend on test-data files). Test-only.
+#[cfg(test)]
+pub(crate) fn init_for_test(s: WasmSystem) {
+    set_sys(s);
+}
+
 /// Initialize the emulator with hardcoded peripheral map.
 /// Must be called after adding all ext devices (add_spi_flash, add_i2c_eeprom).
 #[wasm_bindgen]
@@ -373,6 +380,53 @@ pub fn eth_signal_rx_poll(desc_addr: u32) { system::eth_signal_rx_poll(desc_addr
 /// Re-arm the TX poll flag from JS (used when more TX descriptors are pending).
 #[wasm_bindgen]
 pub fn eth_signal_tx_poll(desc_addr: u32) { system::eth_signal_tx_poll(desc_addr); }
+
+/// USB OTG FS host-side test API (the harness plays USB host; see
+/// peripherals/usb.rs). Drive reset -> enum-done -> SETUP/OUT inject,
+/// and drain device-to-host IN blobs with usb_take_in.
+
+/// Simulate a USB bus reset: fresh device session, USBRST latched.
+#[wasm_bindgen]
+pub fn usb_reset() {
+    let sys = crate::sys();
+    sys.p.usb_reset(sys);
+}
+
+/// Simulate enumeration-done at full speed (ENUMDNE + FS speed in DSTS).
+#[wasm_bindgen]
+pub fn usb_enumerated() {
+    let sys = crate::sys();
+    sys.p.usb_enumerated(sys);
+}
+
+/// Inject an 8-byte SETUP packet to EP0.
+#[wasm_bindgen]
+pub fn usb_inject_setup(data: &[u8]) {
+    let sys = crate::sys();
+    sys.p.usb_inject_setup(sys, data);
+}
+
+/// Inject an OUT data packet to an endpoint.
+#[wasm_bindgen]
+pub fn usb_inject_out(ep: u32, data: &[u8]) {
+    let sys = crate::sys();
+    sys.p.usb_inject_out(sys, ep, data);
+}
+
+/// Drain a completed device-to-host IN blob (empty = none pending;
+/// check usb_in_status first to tell ZLP apart).
+#[wasm_bindgen]
+pub fn usb_take_in(ep: u32) -> Vec<u8> {
+    let sys = crate::sys();
+    sys.p.usb_take_in(ep)
+}
+
+/// IN transfer status: 0 none, 1 data ready, 2 STALL handshake.
+#[wasm_bindgen]
+pub fn usb_in_status(ep: u32) -> u32 {
+    let sys = crate::sys();
+    sys.p.usb_in_status(ep)
+}
 
 /// True when the FLASH peripheral is unlocked with PG set and !BSY — the
 /// JS driver applies program writes to guest memory when this is true.

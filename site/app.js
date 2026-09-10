@@ -2,10 +2,11 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=12';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=13';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
-import { FIRMWARES } from './firmware.js?v=8';
+import { createUsbHost } from './usbhost.js';
+import { FIRMWARES } from './firmware.js?v=9';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
 
@@ -25,7 +26,7 @@ const hex = (arr, n = 32) => {
 const hex32 = (v) => '0x' + (v >>> 0).toString(16).padStart(8, '0');
 
 let session = 0;
-let emu = null, netsim = null, running = false;
+let emu = null, netsim = null, usbhost = null, running = false;
 let uartBuf = '', totalInst = 0, t0 = performance.now(), lastInst = 0, lastT = t0;
 let stepsDone = 0;
 let image = null;          // { flash, ram, extraMem, entry, symbols, name, uartAddr }
@@ -325,6 +326,7 @@ const boot = async () => {
     if (bridgeUrl) {
         // ── remote mode: Node runs the emulator, browser is a thin client ──
         netsim = null;
+        usbhost = null;
         gw.tx = 0; gw.rx = 0;
         try {
             emu = await createRemoteEmulator(bridgeUrl, {
@@ -366,19 +368,21 @@ const boot = async () => {
         }
     } else {
         // ── local mode: WASM runs in the browser (default) ──
-        // NOTE (VENDOR_V): vendor asset versions (?v=12) must be bumped together
+        // NOTE (VENDOR_V): vendor asset versions (?v=13) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
-        const svdXml = await fetch('vendor/stm32f407.svd?v=12').then((r) => r.text());
+        const svdXml = await fetch('vendor/stm32f407.svd?v=13').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
+        // Scripted USB host when the demo preset boots locally.
+        usbhost = (!bridgeUrl && image.name === 'usb_cdc_test') ? createUsbHost(bindings) : null;
         gw.tx = 0; gw.rx = 0;
         if (gw.connected) setGwStatus(true, gwLabel());
         emu = await createEmulator({
             firmware: fw,
             bindings,
             svdXml,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=12',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=13',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),
@@ -443,6 +447,11 @@ const loop = async (id) => {
             return;
         }
         appendUart(emu.drainUart());
+        // Scripted USB host for the usb_cdc_test preset (local mode only —
+        // USB has no gateway backend; this is the netsim equivalent).
+        try {
+            if (usbhost && !usbhost.done) usbhost.frame(uartBuf);
+        } catch (e) {}
         await refreshStats();
         await renderLtdc();
         renderDevices();

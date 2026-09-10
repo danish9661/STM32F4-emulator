@@ -20,6 +20,7 @@ const CASES = [
     { label: 'fpu_test',        fw: 'fpu_test',        markers: ['FPU all PASS'],                 failMarkers: ['FAIL'], timeoutMs: 60000 },
     { label: 'fpu_irq_test',    fw: 'fpu_irq_test',    markers: ['FPU IRQ all PASS'],             failMarkers: ['FAIL'], timeoutMs: 90000 },
     { label: 'mpu_test',        fw: 'mpu_test',        markers: ['MPU all PASS', 'MPU done'],   failMarkers: ['FAIL'], timeoutMs: 60000 },
+    { label: 'usb_cdc_test',    fw: 'usb_cdc_test',    markers: ['USB echo OK', 'USB done'],     failMarkers: ['USB FAIL'], timeoutMs: 120000 },
 ];
 
 let failed = 0;

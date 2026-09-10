@@ -432,6 +432,40 @@ export function tim_inject_capture(name: string, ch: number): void;
  */
 export function uart_rx_byte(addr: number, byte: number): boolean;
 
+/**
+ * Simulate enumeration-done at full speed (ENUMDNE + FS speed in DSTS).
+ */
+export function usb_enumerated(): void;
+
+/**
+ * IN transfer status: 0 none, 1 data ready, 2 STALL handshake.
+ */
+export function usb_in_status(ep: number): number;
+
+/**
+ * Inject an OUT data packet to an endpoint.
+ */
+export function usb_inject_out(ep: number, data: Uint8Array): void;
+
+/**
+ * Inject an 8-byte SETUP packet to EP0.
+ */
+export function usb_inject_setup(data: Uint8Array): void;
+
+/**
+ * USB OTG FS host-side test API (the harness plays USB host; see
+ * peripherals/usb.rs). Drive reset -> enum-done -> SETUP/OUT inject,
+ * and drain device-to-host IN blobs with usb_take_in.
+ * Simulate a USB bus reset: fresh device session, USBRST latched.
+ */
+export function usb_reset(): void;
+
+/**
+ * Drain a completed device-to-host IN blob (empty = none pending;
+ * check usb_in_status first to tell ZLP apart).
+ */
+export function usb_take_in(ep: number): Uint8Array;
+
 export function wwdg_reset_flag(): boolean;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -506,6 +540,12 @@ export interface InitOutput {
     readonly tick_peripherals: () => void;
     readonly tim_inject_capture: (a: number, b: number, c: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;
+    readonly usb_enumerated: () => void;
+    readonly usb_in_status: (a: number) => number;
+    readonly usb_inject_out: (a: number, b: number, c: number) => void;
+    readonly usb_inject_setup: (a: number, b: number) => void;
+    readonly usb_reset: () => void;
+    readonly usb_take_in: (a: number, b: number) => void;
     readonly wasmcpu_fault_len: (a: number) => number;
     readonly wasmcpu_fault_op1: (a: number) => number;
     readonly wasmcpu_fault_op2: (a: number) => number;

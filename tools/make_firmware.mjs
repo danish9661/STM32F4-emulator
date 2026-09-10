@@ -59,6 +59,8 @@ const firmwares = [
     ['fpu_test', 'fpu_test/fpu_test.bin', 'fpu_test.bin'],
     ['fpu_irq_test', 'fpu_irq_test/fpu_irq_test.bin', 'fpu_irq_test.bin'],
     ['mpu_test', 'mpu_test/mpu_test.bin', 'mpu_test.bin'],
+    // USB OTG FS device: CDC-ACM echo, enumerated by a harness host
+    ['usb_cdc_test', 'usb_cdc_test/usb_cdc_test.bin', 'usb_cdc_test.bin'],
     // doom (doomgeneric F407 port; needs doom1.wad served alongside)
     ['doom', 'doom/doom.bin', 'doom.bin'],
 ];

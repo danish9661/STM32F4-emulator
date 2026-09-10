@@ -418,7 +418,48 @@ via stacked LR), unprivileged FLASH-RO read (pass), unpriv SRAM-priv store
   (4) the handler's own `push` shifts SP — capture the frame pointer in a
   naked trampoline before any push; (5) PSP must sit strictly inside its
   region (0x20001400 is past a 0x20001000+1KB region's end — even [sp,#4]
-  spills fault). See AGENTS.md §25.
+  spills   fault). See AGENTS.md §25.
+
+---
+
+## USB OTG FS (2026-09-10)
+
+### test_usb.mjs — USB CDC-ACM echo (usb_cdc_test)
+Bare-metal polling firmware (no interrupts) enumerates as a CDC-ACM
+device (VID:PID 0483:5740) against a scripted host — this file plays USB
+host through the model's `usb_*` exports (reset, enum-done, SETUP/OUT
+inject, IN take), the netsim pattern applied to control transfers.
+- Exercises: OTG FS init (PHY power, FDMOD, CSRST + FIFO flushes, FSIZ
+  programming, GINTMSK, EP0 setup), bus reset + ENUMDNE, EP0 control
+  transfers (GET_DESCRIPTOR device/config/string, SET_ADDRESS,
+  SET_CONFIGURATION, GET_STATUS, SET/CLEAR_FEATURE, CDC
+  SET_CONTROL_LINE_STATE + SET_LINE_CODING with 7-byte OUT stage +
+  GET_LINE_CODING), EP1 bulk OUT/IN echo with TX-FIFO flush discipline
+  (word-padded tails must not leak into the next transfer — caught live
+  during bring-up: config desc readback shifted by 2 stale bytes).
+- Expected UART:
+  ```
+  === USB CDC Test ===
+  USB init done
+  USBRST
+  ENUMDNE
+  REQ 0680 ... (one per SETUP)
+  USB enum done
+  USB echo 1
+  USB echo 2
+  USB echo OK
+  USB done
+  ```
+- Pass: every marker above + both echo payloads byte-equal + no `USB FAIL`,
+  no CPU fault. Model notes: IN completes synchronously at EPENA
+  (whole-blob; the host slices by MPSIZ), OUT completes on short packet
+  or drained XFRSIZ, EP0 needs no arming, EPENA clears on complete,
+  NPTXFE/DTXFSTS derive from programmed FSIZ (program first, like
+  silicon). Out of scope: host mode, OTG_HS, SOF/suspend, VBUS, DMA.
+- Browser: `?fw=usb_cdc_test` runs the same script via `site/usbhost.js`
+  (one frame-step per rAF); `test_browser.mjs` asserts `USB echo OK`.
+
+| test_usb | usb_cdc_test | USB_OTG_FS | `USB echo OK`, `USB done`, byte-equal echoes |
 
 ---
 

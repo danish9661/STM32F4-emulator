@@ -3085,19 +3085,52 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
 
 ## 26. Board ports + CPU bug tracker (2026-09-10)
 
-- `boards/microbit-v2/plan.md` and `boards/uno-r4/plan.md` are the work
-  orders for the port agents (both targets verified M4F). Each has a
-  `core/` snapshot of this repo's `stm32-periph-wasm` crate plus the
-  firmware/SVD/probe files its tests need (run `cargo test` inside —
-  133 green proves the snapshot), the chip facts that matter (flash at
-  ZERO on both, FICR/UICR on nRF, clocks+option-bytes+data-flash on RA),
-  the keep/replace/rewire contract, peripheral bring-up order, and the
-  re-sync procedure. Never hand-edit a snapshot's `cpu/` — CPU bugs are
-  main-repo bugs.
+- The `boards/` workspaces were moved out of this repo (their agents work
+  from copies + the plans supplied separately). The keep/replace/rewire
+  contract stands: never hand-edit a snapshot's `cpu/` — CPU bugs are
+  main-repo bugs, filed as below.
 - `cpu_bug.md` (repo root) is the shared tracker: workflow (claim →
   repro with pc/opcode → fix + native test in main repo → report),
   the OPEN/POLICY items (M0+ strict mode is the one known task; the
   rest is policy + watch items), and the new-entry template. Board
-  agents read it first and file there; the maintainer lands fixes and
-  re-syncs snapshots. The closed record stays here in §25 — not
-  duplicated there.
+  agents read it first and file there; the maintainer lands fixes. The
+  closed record stays here in §25 — not duplicated there.
+
+## 27. USB OTG FS device (2026-09-10)
+
+Model (`stm32-periph-wasm/src/peripherals/usb.rs`, combined
+0x50000000–0x50005000 slot covering regs + EP0–3 FIFO strides; the four
+SVD OTG_FS_* entries stay dropped, HS untouched): GOTGCTL/GOTGINT/
+GAHBCFG/GUSBCFG/GRSTCTL (CSRST + TX/RX flush, self-clearing) / GINTSTS+
+GINTMSK (USBRST, ENUMDNE, RXFLVL, NPTXFE, IEPINT, OEPINT; W1C) /
+GRXSTSP(pop)+GRXSTSR(peek) / GRXFSIZ / GNPTXFSIZ+DIEPTXF1-3 / GNPTXSTS /
+GCCFG / device block (DCFG/DCTL/DSTS + ENUMSPD, DIEPMSK/DOEPMSK,
+live DAINT(+MSK), DVBUSDIS/PULSE, DIEPEMPMSK) / EP0–3 IN+OUT
+(CTL/INT(XFRC+EPDISD, W1C)/TSIZ/DMA/DTXFSTS-from-programmed-sizes) /
+PCGCCTL / FIFO window (RXFIFO pop at EP0 slot, TX reads 0, word pushes).
+
+Semantics that matter: IN completes synchronously at EPENA into a
+whole-blob ready slot (harness slices by MPSIZ; ZLP = empty blob);
+EPENA clears on complete (re-arm re-triggers — missing this stalls);
+OUT completes on short packet or drained XFRSIZ (DOEPTSIZ residue IS
+decremented, so both RXFLVL+BCNT and XFRC styles work); EP0 needs no
+arming; STALL tracked per EP; NPTXFE/DTXFSTS derive from programmed
+FSIZ (program first, like silicon); NVIC 67 pends when masked+live
+(for future IRQ firmware — the shipped path polls).
+
+Host side is harness-driven (netsim pattern): `usb_reset`,
+`usb_enumerated(FS)`, `usb_inject_setup(8B)`, `usb_inject_out(ep,
+bytes)`, `usb_take_in(ep)`, `usb_in_status(ep)` (0 none/1 data/2
+stall), all in `lib.rs` + `site/vendor`. Firmware `usb_cdc_test/`
+(CDC-ACM 0483:5740, polling): init → USBRST → ENUMDNE → EP0 control
+(descriptors/address/config/CDC line coding) → 2× EP1 bulk echo.
+Test `site/test_usb.mjs` asserts markers + byte-equal echoes; browser
+preset `?fw=usb_cdc_test` runs the same script via `site/usbhost.js`
+(one frame-step per rAF); `test_browser.mjs` asserts `USB echo OK`.
+
+Out of scope: host mode, OTG_HS, SOF/suspend, VBUS sensing, DMA,
+GNPINNAK gating. Gotchas that bit during bring-up (both fixed same
+day): (1) EPENA must clear on complete or re-arming never re-triggers;
+(2) word-padded FIFO tails leak into the next transfer — flush TX
+before each EP0 IN like stock drivers (the config-desc readback
+shifted by 2 stale bytes before the flush).

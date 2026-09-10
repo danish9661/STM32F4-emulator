@@ -37,6 +37,7 @@ pub mod mpu;
 pub mod dwt;
 pub mod itm;
 pub mod stir;
+pub mod usb;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -59,6 +60,7 @@ use mpu::Mpu;
 use dwt::{Dwt, Demcr};
 use itm::Itm;
 use stir::Stir;
+use usb::UsbFs;
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
@@ -104,6 +106,46 @@ impl Peripherals {
 
     /// Mark the PWR peripheral as having woken from low-power (sets CSR WUF).
     /// Called by the emulator when the core resumes after a WFI/WFE halt.
+    /// Run a closure on the USB OTG FS device model (host-side test API).
+    fn with_usb<R>(&self, f: impl FnOnce(&mut UsbFs) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if slot.start == 0x5000_0000 {
+                use crate::peripherals::usb::UsbFs;
+                if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<UsbFs>() {
+                    return Some(f(u));
+                }
+                break;
+            }
+        }
+        None
+    }
+
+    pub fn usb_reset(&self, sys: &System) {
+        if self.with_usb(|u| u.host_reset(sys)).is_some() {
+            sys.p.nvic.borrow_mut().clear_pending(crate::peripherals::usb::USB_IRQ);
+        }
+    }
+
+    pub fn usb_enumerated(&self, sys: &System) {
+        self.with_usb(|u| u.host_enumerated(sys));
+    }
+
+    pub fn usb_inject_setup(&self, sys: &System, data: &[u8]) {
+        self.with_usb(|u| u.inject_setup(sys, data));
+    }
+
+    pub fn usb_inject_out(&self, sys: &System, ep: u32, data: &[u8]) {
+        self.with_usb(|u| u.inject_out(sys, ep as usize, data));
+    }
+
+    pub fn usb_take_in(&self, ep: u32) -> Vec<u8> {
+        self.with_usb(|u| u.take_in(ep as usize)).unwrap_or_default()
+    }
+
+    pub fn usb_in_status(&self, ep: u32) -> u32 {
+        self.with_usb(|u| u.in_status(ep as usize)).unwrap_or(0)
+    }
+
     /// DWT EXCCNT tick: one exception entry (called from every take path
     /// in the CPU). Gated on DEMCR.TRCENA like the rest of the unit.
     pub fn dwt_count_exc(&self, sys: &System) {
@@ -422,6 +464,16 @@ impl Peripherals {
                 peripheral: RefCell::new(p),
             });
         }
+        // USB OTG FS device block (regs + EP0-3 FIFO strides to 0x50005000).
+        // The four SVD OTG_FS_* entries stay dropped (UsbFs::new only
+        // matches the combined name); HS is out of scope (stays dropped).
+        if let Some(p) = UsbFs::new("USB_OTG_FS") {
+            peripherals.peripherals.push(PeripheralSlot {
+                start: 0x5000_0000,
+                end: 0x5000_5000,
+                peripheral: RefCell::new(p),
+            });
+        }
 
         peripherals.wire_spi_flash_cs_callbacks();
         peripherals.finish_registration();
@@ -562,6 +614,11 @@ impl Peripherals {
         // sizes it via the DEMCR->STIR->FPU adjacency.)
         if let Some(p) = Itm::new("ITM") {
             peripherals.peripherals.push(PeripheralSlot { start: 0xE000_0000, end: 0xE000_0F00, peripheral: RefCell::new(p) });
+        }
+        // USB OTG FS device block (regs + EP0-3 FIFO strides to 0x50005000;
+        // no neighbor anywhere near it on either map).
+        if let Some(p) = UsbFs::new("USB_OTG_FS") {
+            peripherals.peripherals.push(PeripheralSlot { start: 0x5000_0000, end: 0x5000_5000, peripheral: RefCell::new(p) });
         }
 
         // Wire SPI-flash CS pins to GPIO write callbacks so deassert edges

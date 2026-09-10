@@ -1102,6 +1102,74 @@ export function uart_rx_byte(addr, byte) {
 }
 
 /**
+ * Simulate enumeration-done at full speed (ENUMDNE + FS speed in DSTS).
+ */
+export function usb_enumerated() {
+    wasm.usb_enumerated();
+}
+
+/**
+ * IN transfer status: 0 none, 1 data ready, 2 STALL handshake.
+ * @param {number} ep
+ * @returns {number}
+ */
+export function usb_in_status(ep) {
+    const ret = wasm.usb_in_status(ep);
+    return ret >>> 0;
+}
+
+/**
+ * Inject an OUT data packet to an endpoint.
+ * @param {number} ep
+ * @param {Uint8Array} data
+ */
+export function usb_inject_out(ep, data) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.usb_inject_out(ep, ptr0, len0);
+}
+
+/**
+ * Inject an 8-byte SETUP packet to EP0.
+ * @param {Uint8Array} data
+ */
+export function usb_inject_setup(data) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.usb_inject_setup(ptr0, len0);
+}
+
+/**
+ * USB OTG FS host-side test API (the harness plays USB host; see
+ * peripherals/usb.rs). Drive reset -> enum-done -> SETUP/OUT inject,
+ * and drain device-to-host IN blobs with usb_take_in.
+ * Simulate a USB bus reset: fresh device session, USBRST latched.
+ */
+export function usb_reset() {
+    wasm.usb_reset();
+}
+
+/**
+ * Drain a completed device-to-host IN blob (empty = none pending;
+ * check usb_in_status first to tell ZLP apart).
+ * @param {number} ep
+ * @returns {Uint8Array}
+ */
+export function usb_take_in(ep) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.usb_take_in(retptr, ep);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * @returns {boolean}
  */
 export function wwdg_reset_flag() {
