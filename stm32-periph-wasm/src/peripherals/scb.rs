@@ -140,7 +140,7 @@ impl Peripheral for Scb {
             0x18 => self.shpr[0] = value,
             0x1C => self.shpr[1] = value,
             0x20 => self.shpr[2] = value,
-            0x24 => self.shcsr = value & 0xFFFF,
+            0x24 => self.shcsr = value & 0x0007_FFFF,
             0x28 => self.cfsr = value & 0xFFFF_FFFF,
             0x2C => self.hfsr = value & 0x7FFF,
             0x30 => self.dfsr = value & 0xFFFF,

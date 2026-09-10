@@ -2943,9 +2943,27 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   (u128 long division to 27 quotient bits; Newton isqrt digit-recurrence),
   sharing `fpu_pack` with fused MLA. Overflow clamps per RMode via
   `fpu_overflow` (directed modes take finite max, not inf).
-- ~~MPU unmodeled (silent-ignore)~~ — `mpu.rs` stores TYPE/RNR/RBAR/RASR
-  faithfully; CTRL.ENABLE latches a halt (`modelHaltInfo`) instead of
-  running on unprotected. Proven by `mpu_test/` (region programming +
-  enable → stopped with message). The SVD FPU_CPACR slot (ED88+0x10)
-  overlaps the MPU slot — claimed at +0x4 with a hard overlap assert
-  guarding the map (it fired during bring-up).
+- ~~MPU unmodeled (silent-ignore)~~ — full enforcement since 2026-09-10
+  (`mpu.rs` `check_range`: region/AP/XN/subregion/highest-number-wins,
+  background priv-iff-PRIVDEFENA, HFNMI bypass; `Peripherals::mpu_check`
+  scans by slot base; `CURRENT_PRIV/HFNMI` context updated at
+  new/reset/entry/return/MSR-CONTROL with handler-privileged stacking;
+  `mem.rs` `mpu_deny` gates every access with a deferred data-fault channel
+  (first-wins — RAM write32 splits into 4x write8, last-wins would report
+  MMFAR+3); fetch XN precise at loop-top; stacking/unstacking/FPCAR-lazy
+  pre-validated (MSTKERR/MUNSTKERR/MLSPERR, loud halt, no MMFAR);
+  SHCSR write mask widened to `0x0007FFFF` so MEMFAULTENA sticks;
+  `is_mpu_enabled`/`modelHaltInfo` removed (no halt anymore).
+  Proven by `mpu_test/` (5 regions, MemManage with exact MMFSR/MMFAR per
+  probe, stacked-LR XN resume, SVC back — `MPU all PASS`). Firmware-side
+  traps found writing it: (1) stale .bin hid the SHCSR write (escalated to
+  HardFault/Default loop — always touch+rebuild, objdump-verify); (2) GCC
+  14 sinks the volatile resume store below the faulting op AND misplaces
+  `&&label` values after block reordering — handler resumes data faults
+  implicitly (deferred PC already past) and XN via stacked LR, no labels;
+  (3) the handler's own push shifts SP — naked trampoline captures the
+  frame pointer pre-push; (4) PSP must sit strictly inside its region
+  (0x20001400 is past a 0x20001000+1KB region's end — even [sp,#4] spills
+  fault). The SVD FPU_CPACR slot (ED88+0x10) overlaps the MPU slot —
+  claimed at +0x4 with a hard overlap assert guarding the map (it fired
+  during bring-up).

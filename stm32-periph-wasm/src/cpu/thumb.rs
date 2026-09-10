@@ -1756,6 +1756,12 @@ pub fn exec32(
                         }
                     }
                     cpu.regs.control = v;
+                    // Privilege may have changed (nPRIV bit): refresh the
+                    // MPU cache (handlers stay privileged regardless).
+                    crate::system::set_cpu_context(
+                        cpu.ipsr != 0 || (v & 1) == 0,
+                        cpu.ipsr == 2 || cpu.ipsr == 3,
+                    );
                 }
                 _ => return fault(cpu, pc, op1, op2, 4),
             }
@@ -3387,6 +3393,14 @@ pub fn exec32(
             let fpccr = sys.p.read(sys, 0xE000EF34, 4);
             if fpccr & 1 != 0 {
                 let fpcar = sys.p.read(sys, 0xE000EF38, 4);
+                // Pre-validate like exception frames (MLSPERR + loud halt
+                // on violation — same unrecoverable rule).
+                if crate::system::is_mpu_enabled()
+                    && sys.p.mpu_check(fpcar, 64, true, false).is_some()
+                {
+                    crate::system::latch_memmanage_fault(sys, 1 << 5, None);
+                    return fault(cpu, pc, op1, op2, 4);
+                }
                 for i in 0..16 {
                     mem.write32(fpcar.wrapping_add(4 * i as u32), cpu.regs.s[i]);
                 }

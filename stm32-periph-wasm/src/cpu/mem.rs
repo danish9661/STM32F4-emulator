@@ -156,20 +156,54 @@ impl FlatMemory {
             crate::sys().mark_dma_completed(t.stream_idx, true);
         }
     }
+    /// MPU gate for one CPU access (size bytes at addr). Returns true when
+    /// denied (violation latched for the run loop; caller returns dummy /
+    /// drops the access). Fast path is a single predictable-false branch
+    /// when the MPU is off; unmapped addresses never reach here (callers
+    /// check mapped-ness first and keep the legacy bad-address behavior).
+    #[inline]
+    fn mpu_deny(&self, addr: u32, size: u32, write: bool) -> bool {
+        if !crate::system::is_mpu_enabled() {
+            return false;
+        }
+        match crate::sys().p.mpu_check(addr, size, write, false) {
+            Some(_) => {
+                crate::system::pend_mpu_fault(addr, false);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 impl Memory for FlatMemory {
     fn read8(&self, addr: u32) -> u8 {
         if is_periph(addr) {
+            // MPU first: a faulting access must not reach model side
+            // effects (UART TX, RXNE clears, ...).
+            if self.mpu_deny(addr, 1, false) {
+                return 0;
+            }
             // Single width-1 model read (mirrors the JS memReadHook, which
             // takes the low byte). The model aligns internally.
             return crate::sys().p.read(crate::sys(), addr, 1) as u8;
         }
+        // Unmapped addresses keep the legacy behavior (bad-address latch
+        // + 0) and never raise MPU faults; only mapped memory is checked.
         if self.in_flash(addr) {
+            if self.mpu_deny(addr, 1, false) {
+                return 0;
+            }
             self.flash[(addr - self.flash_base) as usize]
         } else if self.in_ram(addr) {
+            if self.mpu_deny(addr, 1, false) {
+                return 0;
+            }
             self.ram[(addr - self.ram_base) as usize]
         } else if let Some(idx) = self.extra_idx(addr) {
+            if self.mpu_deny(addr, 1, false) {
+                return 0;
+            }
             let r = &self.extra[idx];
             r.data[(addr - r.base) as usize]
         } else {
@@ -179,6 +213,9 @@ impl Memory for FlatMemory {
     }
     fn read16(&self, addr: u32) -> u16 {
         if is_periph(addr) {
+            if self.mpu_deny(addr, 2, false) {
+                return 0;
+            }
             return crate::sys().p.read(crate::sys(), addr, 2) as u16;
         }
         let lo = self.read8(addr) as u16;
@@ -187,6 +224,9 @@ impl Memory for FlatMemory {
     }
     fn read32(&self, addr: u32) -> u32 {
         if is_periph(addr) {
+            if self.mpu_deny(addr, 4, false) {
+                return 0;
+            }
             return crate::sys().p.read(crate::sys(), addr, 4);
         }
         let b0 = self.read8(addr) as u32;
@@ -197,6 +237,9 @@ impl Memory for FlatMemory {
     }
     fn write8(&mut self, addr: u32, v: u8) {
         if is_periph(addr) {
+            if self.mpu_deny(addr, 1, true) {
+                return;
+            }
             // Single width-1 model write. Never split a wider guest store
             // into byte RMWs here: each model write can have side effects
             // (a USART DR write emits a UART char), so one guest store must
@@ -206,10 +249,21 @@ impl Memory for FlatMemory {
             return;
         }
         if self.in_flash(addr) {
+            // MPU first (an RX-mapped flash write faults on silicon),
+            // then flash protection: guest stores are ignored (see docs).
+            if self.mpu_deny(addr, 1, true) {
+                return;
+            }
             // flash protection: guest stores are ignored (see struct docs)
         } else if self.in_ram(addr) {
+            if self.mpu_deny(addr, 1, true) {
+                return;
+            }
             self.ram[(addr - self.ram_base) as usize] = v;
         } else if let Some(idx) = self.extra_idx(addr) {
+            if self.mpu_deny(addr, 1, true) {
+                return;
+            }
             let r = &mut self.extra[idx];
             r.data[(addr - r.base) as usize] = v;
         } else {
@@ -218,6 +272,9 @@ impl Memory for FlatMemory {
     }
     fn write16(&mut self, addr: u32, v: u16) {
         if is_periph(addr) {
+            if self.mpu_deny(addr, 2, true) {
+                return;
+            }
             crate::sys().p.write(crate::sys(), addr, 2, v as u32);
             self.service_sync_dma();
             return;
@@ -227,6 +284,9 @@ impl Memory for FlatMemory {
     }
     fn write32(&mut self, addr: u32, v: u32) {
         if is_periph(addr) {
+            if self.mpu_deny(addr, 4, true) {
+                return;
+            }
             crate::sys().p.write(crate::sys(), addr, 4, v);
             self.service_sync_dma();
             return;

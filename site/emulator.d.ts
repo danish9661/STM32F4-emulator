@@ -66,7 +66,6 @@ export interface EmulatorHandle {
   getFpuState(): FpuState;
   setSreg(i: number, v: number): void;
   setFpscr(v: number): void;
-  modelHaltInfo(): string | null;
   read32(addr: number): number;
   write32(addr: number, val: number): void;
   read16(addr: number): number;

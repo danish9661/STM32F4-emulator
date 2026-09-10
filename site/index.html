@@ -524,7 +524,7 @@ canvas {
             <div class="custom-select-option" data-value="qspi_test">qspi_test — QUADSPI read/write round-trip</div>
             <div class="custom-select-option" data-value="fpu_test">fpu_test — VFPv4-SP hard-float checks</div>
             <div class="custom-select-option" data-value="fpu_irq_test">fpu_irq_test — FPU state across SysTick IRQs</div>
-            <div class="custom-select-option" data-value="mpu_test">mpu_test — MPU enable trap (loud halt)</div>
+            <div class="custom-select-option" data-value="mpu_test">mpu_test — MPU enforcement (MemManage + MMFSR/MMFAR)</div>
             <div class="custom-select-option" data-value="deep_sleep_demo">deep_sleep_demo — WFI/STOP + RTC-alarm wakeup</div>
             <div class="custom-select-option" data-value="test_firmware">test_firmware — TIM2/ADC dump</div>
             <div class="custom-select-group-label">Crypto</div>
@@ -670,7 +670,7 @@ canvas {
     · <a href="about.html">About</a>
  </footer>
 
-<script type="module" src="app.js?v=8"></script>
+<script type="module" src="app.js?v=9"></script>
 <script>
 // Custom firmware dropdown (replaces native <select>)
 (() => {

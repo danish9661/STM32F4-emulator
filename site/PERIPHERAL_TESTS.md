@@ -381,26 +381,44 @@ restore on return (lazy FP stacking end-to-end).
   ```
 - Pass: every marker above, IRQ count ≥ 10, no `FAIL`, no CPU fault.
 
-### test_mpu.mjs — MPU enable trap (mpu_test)
-Bare-metal firmware programs two regions CMSIS-style (FLASH RX + SRAM RW)
-with readback verification, then sets CTRL.ENABLE. Protection is not
-enforced by the model, so the driver must halt LOUDLY
-(`modelHaltInfo()` names MPU) instead of running on unprotected.
-- Exercises: MPU TYPE/RNR/RBAR/RASR storage, CTRL.ENABLE sticky,
-  driver halt path (`stopped:true`, no CPU fault).
+### test_mpu.mjs — MPU enforcement (mpu_test)
+Bare-metal firmware programs five regions (R0 FLASH 1MB RX RO-both, R1 SRAM
+128KB RW-priv/XN, R2 peripherals 512MB FULL/XN, R3 1KB scratch FULL, R4 32B
+no-access), sets SHCSR.MEMFAULTENA + CTRL.ENABLE|PRIVDEFENA, then probes:
+legal SRAM R/W, no-access store (DACCVIOL+MMFAR), XN branch (IACCVIOL, resume
+via stacked LR), unprivileged FLASH-RO read (pass), unpriv SRAM-priv store
+(DACCVIOL), unpriv PPB read (DACCVIOL, no exemption), unpriv scratch store
+(pass), SVC back to privileged MSP.
+- Exercises: MPU region/AP/XN/subregion checks, privilege + HFNMI context,
+  deferred data faults vs precise fetch faults, MemManage/HardFault routing
+  via SHCSR, MSTKERR/MUNSTKERR/MLSPERR pre-validation, MMFSR/MMFAR latching.
 - Expected UART:
   ```
   === MPU Test ===
-  TYPE 00080800
-  R0BAR 08000010 R0ASR 03000027
-  MPU enabled
+  REGIONS OK
+  MPU enabled CTRL=00000005 R4ASR=00000009
+  LEGAL OK
+  NOACC 00000001 PASS
+  XNEXEC 00000001 PASS
+  UPRIV-RO OK
+  UPRIV-W 00000001 PASS
+  UPRIV-PPB 00000001 PASS
+  UPRIV-FULL OK
+  MPU all PASS
+  MPU done
   ```
-  (`MPU SPUN` must never appear.)
-- Pass: markers above + `stopped === true` + modelHalt mentions MPU.
-- Gotcha the firmware caught while being written: the decoder's op
-  selector included the D bit (faulted all odd-high-reg arithmetic) and
-  the B-group op-nibble baked in the M bit (faulted every even-Sm form).
-  Both fixed; see AGENTS.md §25 and `docs/encodings/`.
+- Pass: every marker above, no `FAIL`, no CPU fault, emulator never stops.
+- Gotchas the firmware caught while being written: (1) RAM write32 splits
+  into 4x write8 — the fault channel must be first-wins or MMFAR reports the
+  last byte; (2) stale .bin (missing SHCSR write) escalates everything to
+  HardFault — always `touch` + rebuild after editing; (3) GCC sinks the
+  volatile resume-pointer store below the faulting access AND misplaces
+  `&&label` values after block reordering — the handler resumes data faults
+  implicitly (deferred PC already past) and XN via stacked LR, no labels;
+  (4) the handler's own `push` shifts SP — capture the frame pointer in a
+  naked trampoline before any push; (5) PSP must sit strictly inside its
+  region (0x20001400 is past a 0x20001000+1KB region's end — even [sp,#4]
+  spills fault). See AGENTS.md §25.
 
 ---
 
@@ -451,11 +469,11 @@ save-slot menu → name char 'a' (0x61) + Enter → asserts the firmware's
 | test_rtc | rtc_test | I2C1/regfile | `RTC verify OK`, `RTC time=10:45:30 DOW=3 15/07/26`, temp=27.5 |
 | test_fpu | fpu_test | VFPv4-SP/CPACR | `FPU all PASS`, `FMA 28800000 PASS`, `FPU done` |
 | test_fpuirq | fpu_irq_test | VFPv4-SP/SysTick/NVIC | `FPU IRQ all PASS`, `S0 11111111 ok`, `FPSCR 00000000 ok` |
-| test_mpu | mpu_test | MPU/SCB | `MPU enabled`, stopped, modelHalt mentions MPU |
+| test_mpu | mpu_test | MPU/SCB | `MPU all PASS`, `MPU done`, exact MMFSR/MMFAR per probe |
 
-Plus the Rust unit suite: `cargo test` (94 tests — 68 CPU/decoder incl. 26
-FPU encoding/semantics/stacking tests, plus CAN, SPI/I2C taps, DCMI, WAV,
-LTDC, register files — 94/94 green).
+Plus the Rust unit suite: `cargo test` (99 tests — CPU/decoder incl. FPU
+encoding/semantics/stacking tests, plus CAN, SPI/I2C taps, DCMI, WAV,
+LTDC, register files — 99/99 green).
 
 ## Gotchas
 

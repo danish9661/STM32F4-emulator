@@ -29,6 +29,52 @@ static MPU_ENABLED: AtomicBool = AtomicBool::new(false);
 /// True while the guest holds MPU_CTRL.ENABLE (protection unmodeled).
 pub fn is_mpu_enabled() -> bool { MPU_ENABLED.load(Ordering::Acquire) }
 pub fn set_mpu_enabled(v: bool) { MPU_ENABLED.store(v, Ordering::Release); }
+// Current CPU context for the MPU check (FlatMemory has no CPU handle).
+// Updated at Cpu::new/reset, exception entry/return, and MSR CONTROL —
+// the only points where (ipsr, CONTROL) change, so there is zero
+// per-instruction cost. Relaxed: single-threaded producer/consumer.
+static CURRENT_PRIV: AtomicBool = AtomicBool::new(true);
+static CURRENT_HFNMI: AtomicBool = AtomicBool::new(false);
+pub fn current_privileged() -> bool { CURRENT_PRIV.load(Ordering::Relaxed) }
+pub fn current_hfnmi() -> bool { CURRENT_HFNMI.load(Ordering::Relaxed) }
+pub fn set_cpu_context(priv_: bool, hfnmi: bool) {
+    CURRENT_PRIV.store(priv_, Ordering::Relaxed);
+    CURRENT_HFNMI.store(hfnmi, Ordering::Relaxed);
+}
+// Deferred MPU data-fault channel (see cpu/mod.rs): FlatMemory latches a
+// violation (returning dummy/dropping the access); the run loop raises it
+// before the next fetch. One instruction may complete with dummy data —
+// documented imprecision; fault vector/flags/address are exact.
+static MPU_FAULT_VALID: AtomicBool = AtomicBool::new(false);
+static MPU_FAULT_ADDR: AtomicU32 = AtomicU32::new(0);
+static MPU_FAULT_EXEC: AtomicBool = AtomicBool::new(false);
+pub fn pend_mpu_fault(addr: u32, exec: bool) {
+    // First fault wins: a split access (RAM write32 = 4x write8) pends once
+    // per byte; the last byte must not overwrite the faulting address
+    // (silicon reports the access; the PPB probe needs the base address).
+    if MPU_FAULT_VALID.load(Ordering::Relaxed) {
+        return;
+    }
+    MPU_FAULT_ADDR.store(addr, Ordering::Relaxed);
+    MPU_FAULT_EXEC.store(exec, Ordering::Relaxed);
+    MPU_FAULT_VALID.store(true, Ordering::Release);
+}
+pub fn take_mpu_fault() -> Option<(u32, bool)> {
+    if MPU_FAULT_VALID.swap(false, Ordering::Acquire) {
+        Some((MPU_FAULT_ADDR.load(Ordering::Relaxed), MPU_FAULT_EXEC.load(Ordering::Relaxed)))
+    } else {
+        None
+    }
+}
+/// Latch MemManage fault state (CFSR MMFSR bits + MMFAR) via read-modify-
+/// write, preserving any BusFault/UsageFault bits already latched.
+pub fn latch_memmanage_fault(sys: &WasmSystem, mmfsr_bits: u32, mmfar: Option<u32>) {
+    let cfsr = sys.p.read(sys, 0xE000ED28, 4);
+    sys.p.write(sys, 0xE000ED28, 4, cfsr | (mmfsr_bits & 0xFF));
+    if let Some(a) = mmfar {
+        sys.p.write(sys, 0xE000ED34, 4, a);
+    }
+}
 // Persistent reset-cause bits, latched on watchdog expiry until the firmware
 // clears them via RCC->CSR RMVF. Bit 29 (IWDGRSTF) / bit 30 (WWDGRSTF).
 static IWDG_RESET_FLAG: AtomicBool = AtomicBool::new(false);
@@ -708,6 +754,9 @@ pub fn reset_globals() {
     FLASH_PROGRAMMING.store(false, Relaxed);
     WATCHDOG_RESET_EVENT.store(false, Relaxed);
     MPU_ENABLED.store(false, Relaxed);
+    MPU_FAULT_VALID.store(false, Relaxed);
+    CURRENT_PRIV.store(true, Relaxed);
+    CURRENT_HFNMI.store(false, Relaxed);
     ETH_TX_POLL.store(false, Relaxed);
     ETH_RX_POLL.store(false, Relaxed);
     ETH_DONE.store(0, Relaxed);

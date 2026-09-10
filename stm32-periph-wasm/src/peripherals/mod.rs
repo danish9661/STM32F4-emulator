@@ -135,6 +135,30 @@ impl Peripherals {
             }
         }
     }
+
+    /// MPU access check for a CPU access range. Returns Some(true) on an
+    /// execute violation, Some(false) on data, None when allowed (or when
+    /// the MPU is disabled / has no slot — fail-open, the pre-MPU path).
+    /// Fast gate first: one predictable-false branch when disabled.
+    pub fn mpu_check(&self, addr: u32, size: u32, write: bool, exec: bool) -> Option<bool> {
+        if !crate::system::is_mpu_enabled() {
+            return None;
+        }
+        let priv_ = crate::system::current_privileged();
+        let hfnmi = crate::system::current_hfnmi();
+        // The MPU slot is found by its fixed base, NOT by the access
+        // address (which usually lives in RAM/FLASH, not in any slot).
+        for slot in &self.peripherals {
+            if slot.start == 0xE000_ED90 {
+                if let Some(mpu) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Mpu>() {
+                    return mpu.check_range(addr, size, write, exec, priv_, hfnmi);
+                }
+                break;
+            }
+        }
+        // No MPU slot (minimal map): fail open.
+        None
+    }
 }
 
 fn extract_svd_max_offset(p: &PeripheralInfo) -> u32 {

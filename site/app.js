@@ -2,10 +2,10 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=3';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=4';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
-import { FIRMWARES } from './firmware.js?v=7';
+import { FIRMWARES } from './firmware.js?v=8';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
 
@@ -43,7 +43,7 @@ const ETH_RX_MAP = {
 // Interrupt-driven firmware: the emulator pumps guest IRQ handlers (USART RXNE
 // etc.). OFF for ETH firmware — the driver signals completion via SRAM
 // irq_flag and the guest ETH_IRQHandler would double-process DMASR/rx_desc.
-const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehensive_test', 'eth_irq_test', 'edge_test', 'periph_test', 'fpu_irq_test']);
+const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehensive_test', 'eth_irq_test', 'edge_test', 'periph_test', 'fpu_irq_test', 'mpu_test']);
 
 // Interrupt-driven ETH firmware: the guest ETH_IRQHandler (run by the pump)
 // reads DMASR and scans rx_desc itself, so the driver must not write the
@@ -366,9 +366,9 @@ const boot = async () => {
         }
     } else {
         // ── local mode: WASM runs in the browser (default) ──
-        // NOTE (VENDOR_V): vendor asset versions (?v=3) must be bumped together
+        // NOTE (VENDOR_V): vendor asset versions (?v=4) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
-        const svdXml = await fetch('vendor/stm32f407.svd?v=3').then((r) => r.text());
+        const svdXml = await fetch('vendor/stm32f407.svd?v=4').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
@@ -378,7 +378,7 @@ const boot = async () => {
             firmware: fw,
             bindings,
             svdXml,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=3',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=4',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),

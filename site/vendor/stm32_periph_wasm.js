@@ -878,16 +878,6 @@ export function init_svd(svd_xml) {
 }
 
 /**
- * True while the guest holds MPU_CTRL.ENABLE. Protection is not modeled,
- * so the driver halts (running on unprotected would be silently wrong).
- * @returns {boolean}
- */
-export function is_mpu_enabled() {
-    const ret = wasm.is_mpu_enabled();
-    return ret !== 0;
-}
-
-/**
  * @returns {boolean}
  */
 export function is_watchdog_reset_requested() {

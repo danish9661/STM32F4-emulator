@@ -106,6 +106,12 @@ pub struct Cpu {
 
 impl Cpu {
     pub fn new(sp: u32, pc: u32) -> Self {
+        // Fresh CPU boots privileged in thread mode (CONTROL reset = 0).
+        crate::system::set_cpu_context(true, false);
+        // Native tests share one process: a previous test's MPU state must
+        // not leak into this instance (the fresh SYS has CTRL=0 regions).
+        crate::system::set_mpu_enabled(false);
+        let _ = crate::system::take_mpu_fault();
         Self {
             regs: Regs::new(sp, pc),
             cycles: 0,
@@ -135,6 +141,9 @@ impl Cpu {
         self.it_stack.clear();
         self.fp_stack.clear();
         self.sleeping = false;
+        crate::system::set_cpu_context(true, false);
+        // A reboot must not inherit a deferred fault from the old run.
+        let _ = crate::system::take_mpu_fault();
     }
 
     /// Current stack pointer (r13 always mirrors it).
@@ -184,6 +193,40 @@ impl Cpu {
     /// unmodified, including FreeRTOS SVC/PendSV/SysTick handlers.
     pub fn take_exception(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, irq: i32) {
         let vector = (16 + irq) as u32;
+        // Bank the thread stack, then run the handler on MSP. The frame
+        // goes onto the CURRENT stack (PSP if thread+PSP, else MSP) — this
+        // is what makes FreeRTOS task stacks work.
+        let was_psp = self.ipsr == 0 && self.regs.control & 2 != 0;
+        if was_psp {
+            self.regs.psp = self.regs.r[13];
+        } else if self.ipsr == 0 {
+            self.regs.msp = self.regs.r[13];
+        }
+        let mut sp = self.regs.r[13];
+        // Lazy FP stacking decision (model read, no mem writes yet):
+        // CONTROL.FPCA (thread uses the FPU) + FPCCR.ASPEN select the
+        // 26-word extended frame; otherwise the classic 8-word frame.
+        let fpccr0 = sys.p.read(sys, 0xE000EF34, 4);
+        let fp_ext = self.regs.control & 4 != 0 && fpccr0 & (1 << 31) != 0;
+        // ARM frame layout (low->high): R0-R3, R12, LR, PC, xPSR (+0..28),
+        // then (extended only) S0-S15 (+32..92), FPSCR (+96), RESERVED.
+        sp = sp.wrapping_sub(if fp_ext { 104 } else { 32 });
+        // Stacking is privileged even when the thread is unprivileged
+        // (silicon rule), so publish handler context BEFORE the
+        // pre-validation: the frame check must use handler privilege.
+        crate::system::set_cpu_context(true, irq == -13 || irq == -14);
+        // Pre-validate the whole frame when the MPU is on: a stacking
+        // write into denied memory latches MSTKERR (no MMFAR) and halts
+        // loudly BEFORE anything is pushed or written (delivery is
+        // impossible — the stack needed to take an exception is itself
+        // broken, unrecoverable by construction).
+        if crate::system::is_mpu_enabled()
+            && sys.p.mpu_check(sp, if fp_ext { 104 } else { 32 }, true, false).is_some()
+        {
+            crate::system::latch_memmanage_fault(sys, 1 << 4, None);
+            self.fault = Some(CpuFault { pc: self.regs.r[15] & !1, op1: 0xDEAD, op2: 0, len: 2 });
+            return;
+        }
         // Save IT state; the handler starts with a clean ITSTATE.
         self.it_stack.push(SavedIt {
             cond: self.it_cond,
@@ -201,24 +244,6 @@ impl Cpu {
             lspact: prev_fpccr & 1 != 0,
             fpcar: sys.p.read(sys, 0xE000EF38, 4),
         });
-        // Bank the thread stack, then run the handler on MSP. The frame
-        // goes onto the CURRENT stack (PSP if thread+PSP, else MSP) — this
-        // is what makes FreeRTOS task stacks work.
-        let was_psp = self.ipsr == 0 && self.regs.control & 2 != 0;
-        if was_psp {
-            self.regs.psp = self.regs.r[13];
-        } else if self.ipsr == 0 {
-            self.regs.msp = self.regs.r[13];
-        }
-        let mut sp = self.regs.r[13];
-        // Lazy FP stacking decision FIRST (model read, no mem writes yet):
-        // CONTROL.FPCA (thread uses the FPU) + FPCCR.ASPEN select the
-        // 26-word extended frame; otherwise the classic 8-word frame.
-        let fpccr0 = sys.p.read(sys, 0xE000EF34, 4);
-        let fp_ext = self.regs.control & 4 != 0 && fpccr0 & (1 << 31) != 0;
-        // ARM frame layout (low->high): R0-R3, R12, LR, PC, xPSR (+0..28),
-        // then (extended only) S0-S15 (+32..92), FPSCR (+96), RESERVED.
-        sp = sp.wrapping_sub(if fp_ext { 104 } else { 32 });
         mem.write32(sp, self.regs.r[0]);
         mem.write32(sp.wrapping_add(4), self.regs.r[1]);
         mem.write32(sp.wrapping_add(8), self.regs.r[2]);
@@ -272,6 +297,8 @@ impl Cpu {
             }
         }
         self.ipsr = vector;
+        // (CPU privilege context was already published as handler-privileged
+        // before the stacking pre-validation above.)
         sys.p.nvic.borrow_mut().set_in_interrupt(true);
         // Load handler PC through VTOR (model SCB, default 0x08000000).
         let vtor = sys.p.read(sys, 0xE000ED08, 4);
@@ -308,6 +335,16 @@ impl Cpu {
         // variants (ED/E9) select the same bank as their FType=1 twins.
         let to_psp = exc == EXC_RETURN_PSP || exc == EXC_RETURN_PSP_FP;
         let mut sp = if to_psp { self.regs.psp } else { self.regs.msp };
+        // Pre-validate the whole frame when the MPU is on (same
+        // unrecoverable-halt rule as entry: MUNSTKERR, no MMFAR). Unstack
+        // READS the frame, so this is a read check.
+        if crate::system::is_mpu_enabled()
+            && sys.p.mpu_check(sp, if extended { 104 } else { 32 }, false, false).is_some()
+        {
+            crate::system::latch_memmanage_fault(sys, 1 << 3, None);
+            self.fault = Some(CpuFault { pc, op1: 0xDEAD, op2: 0, len: 2 });
+            return false;
+        }
         // In handler mode r13 == MSP; if returning to MSP it must match.
         // (If a buggy handler moved MSP, trust the bank per ARM.)
         let r0 = mem.read32(sp);
@@ -376,6 +413,9 @@ impl Cpu {
         }
         self.exc_stack.pop();
         self.ipsr = 0;
+        // Thread privilege follows CONTROL.nPRIV from here on (handlers
+        // always return to unprivileged-safe state only via explicit MSR).
+        crate::system::set_cpu_context((self.regs.control & 1) == 0, false);
         sys.p.nvic.borrow_mut().set_in_interrupt(false);
         // Chained PendSV/SVC tail? No tail-chaining in v1; the run loop
         // delivers the next pending exception on the next iteration.
@@ -386,6 +426,30 @@ impl Cpu {
         // Thumb state; Unicorn accepts this and the firmware is proven on
         // it, so we force |1 like hardware does for the PC load.
         true
+    }
+
+    /// Raise a MemManage (or escalated HardFault) for an MPU violation.
+    /// SHCSR.MEMFAULTENA clear escalates to HardFault (silicon rule).
+    /// With delivery on the exception is taken (precise for fetch faults
+    /// raised pre-execution; deferred-by-one for data faults — see
+    /// mem.rs); with delivery off it is a loud CPU halt like SVC/NOCP.
+    /// Any stale deferred fault is discarded first (a synchronous raise
+    /// supersedes it).
+    fn raise_memmanage(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, addr: u32, exec: bool) {
+        let _ = crate::system::take_mpu_fault();
+        let (bits, mar) = if exec {
+            (1 << 0, Some(addr)) // IACCVIOL + MMARVALID
+        } else {
+            (1 << 1, Some(addr)) // DACCVIOL + MMARVALID
+        };
+        crate::system::latch_memmanage_fault(sys, bits | (1 << 7), mar);
+        let shcsr = sys.p.read(sys, 0xE000ED24, 4);
+        let irq = if shcsr & (1 << 16) != 0 { -12 } else { -13 };
+        if self.deliver_irqs {
+            self.take_exception(sys, mem, irq);
+        } else {
+            self.fault = Some(CpuFault { pc: self.regs.r[15] & !1, op1: 0xDEAD, op2: 0, len: 2 });
+        }
     }
 
     pub fn run(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, budget: u32) -> u32 {
@@ -404,12 +468,38 @@ impl Cpu {
             if self.sleeping {
                 break;
             }
+            // Deferred MPU data fault from the previous instruction (see
+            // mem.rs): raise before fetching the next one. Takes precedence
+            // over new interrupt delivery (the fault is older).
+            if let Some((addr, exec)) = crate::system::take_mpu_fault() {
+                self.raise_memmanage(sys, mem, addr, exec);
+                // raise_memmanage either takes an exception (continues
+                // below) or records a loud halt (breaks next check).
+                if self.fault.is_some() {
+                    break;
+                }
+                continue;
+            }
             let pc = self.regs.r[15] & !1;
             if TRACE_ON.load(Ordering::Relaxed) {
                 TRACE_BUF.lock().unwrap().push(pc);
             }
             let op = mem.read16(pc);
             let l = thumb::len(op);
+            // Precise instruction-fetch XN check (MPU-enabled only; state
+            // is clean here so violations raise synchronously, unlike the
+            // deferred data path). Covers both halfwords of wide insns.
+            if crate::system::is_mpu_enabled() {
+                let bad = sys.p.mpu_check(pc, 2, false, true).is_some()
+                    || (l == 4 && sys.p.mpu_check(pc.wrapping_add(2), 2, false, true).is_some());
+                if bad {
+                    self.raise_memmanage(sys, mem, pc, true);
+                    if self.fault.is_some() {
+                        break;
+                    }
+                    continue;
+                }
+            }
             let ok = if l == 2 {
                 thumb::exec16(self, sys, mem, op, pc)
             } else {
