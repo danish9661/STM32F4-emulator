@@ -2578,3 +2578,129 @@ fn usersetmpend_gates_unprivileged_pends() {
     mem.write32(0xE000ED04, 1 << 28);
     assert!(sys.p.nvic.borrow().irq_pending(-2), "USERSETMPEND allows");
 }
+
+#[test]
+fn busfault_unmapped_data_access() {
+    // Wild data read (0x0, null deref) takes BusFault with PRECISERR +
+    // BFARVALID + BFAR when BUSFAULTENA is set (vector A), else escalates
+    // to HardFault (vector B). ldr r0,[r1,#0] is 0x6808 (GAS).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000ED24, 1 << 17); // SHCSR.BUSFAULTENA
+    mem.write16(0x20002000, 0x6808); // ldr r0,[r1,#0]
+    mem.write16(0x20002002, 0xE7FE);
+    cpu.regs.r[1] = 0;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 12);
+    assert!(cpu.fault.is_none(), "cpu faulted: {:?}", cpu.fault);
+    assert_eq!(cpu.ipsr, 0, "BusFault handler returned");
+    assert_eq!(mem.read32(0x20001000), 1, "BusFault vector (A) ran");
+    assert_eq!(mem.read32(0xE000ED28) & 0x8200, 0x8200, "PRECISERR+BFARVALID");
+    assert_eq!(mem.read32(0xE000ED38), 0, "BFAR is the wild address");
+
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write16(0x20002000, 0x6808);
+    mem.write16(0x20002002, 0xE7FE);
+    cpu.regs.r[1] = 0;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 12);
+    assert!(cpu.fault.is_none(), "cpu faulted: {:?}", cpu.fault);
+    assert_eq!(mem.read32(0x20001004), 1, "escalated HardFault (B) ran");
+    assert_eq!(mem.read32(0xE000ED28) & 0x8200, 0x8200, "flags latched anyway");
+}
+
+#[test]
+fn busfault_unmapped_fetch() {
+    // Branching into the void faults the fetch (IACCVIOL flavor + BFAR).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000ED24, 1 << 17); // SHCSR.BUSFAULTENA
+    mem.write16(0x20002000, 0x4700); // bx r0
+    cpu.regs.r[0] = 0x30000001;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 12);
+    assert!(cpu.fault.is_none(), "cpu faulted: {:?}", cpu.fault);
+    assert_eq!(mem.read32(0xE000ED28) & 0x8100, 0x8100, "IACCVIOL+BFARVALID");
+    assert_eq!(mem.read32(0xE000ED38), 0x30000000, "BFAR is the wild PC");
+    // Handler returns into the wild PC and faults again (each round
+    // re-latches the same values), so count-at-least-once, not exactly.
+    assert!(mem.read32(0x20001000) >= 1, "BusFault vector (A) ran");
+}
+
+#[test]
+fn nonbasethrdena_faults_boosted_thread_return() {
+    // CCR.NONBASETHRDENA=1: returning to Thread while BASEPRI-boosted
+    // faults INVPC into UsageFault (vector A); without the bit the same
+    // return succeeds.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000ED24, 1 << 18); // USGFAULTENA
+    mem.write32(0xE000ED14, 0x201); // CCR: STKALIGN + NONBASETHRDENA
+    cpu.regs.basepri = 0x50; // boosted: thread return must fault
+    cpu.take_exception(sys, &mut mem, 0);
+    cpu.regs.r[15] = 0x08000100; // park PC at the main spin: the aborted
+    // return never ran anything, so without this the replacement fault
+    // would stack (and resume into) handler code.
+    let lr = cpu.regs.r[14];
+    assert!(cpu.exception_return(sys, &mut mem, lr, cpu.regs.r[15] & !1));
+    no_fault(&cpu, &mem);
+    // Boosted return is cancelled (no unstack) and replaced by the fault:
+    // nothing is active anymore, so UsageFault takes fresh and returns.
+    // (The handler itself needs a run to execute; budget covers exactly
+    // one round — the boost persists, so every later return re-faults
+    // the same way, silicon-identical.)
+    cpu.run(sys, &mut mem, 7);
+    no_fault(&cpu, &mem);
+    assert_eq!(mem.read32(0x20001000), 1, "UsageFault vector (A) ran");
+    assert_ne!(mem.read32(0xE000ED28) & (1 << 10), 0, "INVPC sticky");
+    assert_eq!(cpu.ipsr, 6, "re-faulted into UsageFault (boost persists)");
+}
+
+#[test]
+fn itm_port0_console_gated() {
+    // ITM STIM0 writes reach UART output only with TCR.ITMENA + TER[0].
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    let _ = (cpu, sys);
+    crate::system::get_uart_output().lock().unwrap().clear();
+    mem.write8(0xE0000000, b'Q'); // gated off: dropped
+    assert!(!crate::system::get_uart_output().lock().unwrap().contains('Q'));
+    mem.write32(0xE0000E80, 1); // TCR.ITMENA
+    mem.write32(0xE0000E00, 1); // TER[0]
+    assert_ne!(mem.read32(0xE0000000) & 1, 0, "STIM0 reads ready when on");
+    mem.write8(0xE0000000, b'A');
+    mem.write8(0xE0000000, b'B');
+    let out = crate::system::get_uart_output().lock().unwrap().clone();
+    assert!(out.contains('A') && out.contains('B'), "console got {}", out);
+}
+
+#[test]
+fn dwt_exccnt_counts_takes() {
+    // EXCCNT ticks once per taken exception while DEMCR.TRCENA is set.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    cpu.take_exception(sys, &mut mem, 0);
+    assert_eq!(mem.read32(0xE000100C), 0, "frozen without TRCENA");
+    mem.write32(0xE000EDFC, 1 << 24); // DEMCR.TRCENA
+    let lr = cpu.regs.r[14];
+    assert!(cpu.exception_return(sys, &mut mem, lr, cpu.regs.r[15] & !1));
+    cpu.take_exception(sys, &mut mem, 1);
+    let lr = cpu.regs.r[14];
+    assert!(cpu.exception_return(sys, &mut mem, lr, cpu.regs.r[15] & !1));
+    cpu.take_exception(sys, &mut mem, 1);
+    let lr = cpu.regs.r[14];
+    assert!(cpu.exception_return(sys, &mut mem, lr, cpu.regs.r[15] & !1));
+    no_fault(&cpu, &mem);
+    assert_eq!(mem.read32(0xE000100C), 2, "two TRCENA-gated takes counted");
+}

@@ -13,15 +13,26 @@ pub struct Dwt {
     ctrl: u32,
     cyccnt: u32,
     last: u64,
+    /// Exception-overhead event counter (0x100C): exact take count, gated
+    /// on TRCENA like the rest of the unit. FOLD/CPI/SLEEP/LSU are NOT
+    /// modeled (fold/branch penalties would be fabricated in an
+    /// interpreter; sleep isn't cycle-counted; LSU would tax every
+    /// access for a counter nobody reads yet).
+    exccnt: u8,
 }
 
 impl Dwt {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
         if name == "DWT" {
-            Some(Box::new(Self { ctrl: 0, cyccnt: 0, last: 0 }))
+            Some(Box::new(Self { ctrl: 0, cyccnt: 0, last: 0, exccnt: 0 }))
         } else {
             None
         }
+    }
+
+    /// Count one exception entry (called from every take path).
+    pub fn count_exc(&mut self) {
+        self.exccnt = self.exccnt.wrapping_add(1);
     }
 
     fn trcena(sys: &System) -> bool {
@@ -48,6 +59,7 @@ impl Peripheral for Dwt {
                 self.sync(sys);
                 self.cyccnt
             }
+            0xC => self.exccnt as u32,
             _ => 0,
         }
     }

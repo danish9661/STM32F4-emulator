@@ -4,6 +4,16 @@ pub trait Memory {
     fn read8(&self, addr: u32) -> u8;
     fn read16(&self, addr: u32) -> u16;
     fn read32(&self, addr: u32) -> u32;
+    /// Instruction fetch (exactly like read16, except an unmapped fetch
+    /// pends an execute-class bus fault instead of a data-class one, and
+    /// no MPU data check runs — the loop-top XN check owns execute
+    /// permission, which is also the more correct fault class there).
+    fn fetch16(&self, addr: u32) -> u16;
+    /// Mapped for any access (peripheral space, flash, RAM, extras).
+    /// The run loop pre-checks fetches with this so a wild PC faults
+    /// precisely instead of executing a dummy NOP (which would advance PC
+    /// and let the re-fault clobber BFAR).
+    fn is_mapped(&self, addr: u32) -> bool;
     fn write8(&mut self, addr: u32, v: u8);
     fn write16(&mut self, addr: u32, v: u16);
     fn write32(&mut self, addr: u32, v: u32);
@@ -16,7 +26,10 @@ pub struct MemRegion {
 
 fn is_periph(addr: u32) -> bool {
     (addr >= 0x40000000 && addr < 0x51000000)
-        || (addr >= 0x60000000 && addr < 0x62000000)
+        // Full FSMC window (banks 1-4 every 0x10000000 up to 0xA0000000):
+        // untapped banks must reach the model (inert 0), not the bus-fault
+        // arms — the fsmc_test BANK4 probe depends on it.
+        || (addr >= 0x60000000 && addr < 0xA0000000)
         || (addr >= 0xA0000000 && addr < 0xA2000000)
         || (addr >= 0xE0000000 && addr < 0xE1000000)
 }
@@ -156,13 +169,40 @@ impl FlatMemory {
             crate::sys().mark_dma_completed(t.stream_idx, true);
         }
     }
-    /// CCR.UNALIGN_TRP gate for multi-byte normal-memory accesses. The
-    /// periph path returns before this (Device-memory unaligned stays
-    /// lenient — no silicon rule to match without a bus matrix). Like the
-    /// MPU data path the faulting access completes dropped and raises
-    /// before the next fetch (flags exact, PC deferred by one).
+    /// Fetch one byte without any MPU check (execute permission belongs to
+    /// the loop-top XN check). Unmapped bytes pend an execute-class bus
+    /// fault (first-wins keeps the lowest faulting address).
+    fn fetch_byte(&self, addr: u32) -> Option<u8> {        if self.in_flash(addr) {
+            Some(self.flash[(addr - self.flash_base) as usize])
+        } else if self.in_ram(addr) {
+            Some(self.ram[(addr - self.ram_base) as usize])
+        } else if let Some(idx) = self.extra_idx(addr) {
+            let r = &self.extra[idx];
+            Some(r.data[(addr - r.base) as usize])
+        } else {
+            self.bad.set(Some(addr));
+            crate::system::pend_bus_fault(addr, true);
+            None
+        }
+    }
+
+    /// True for mapped normal memory (flash/RAM/extra). Periph accesses
+    /// return earlier; anything else falls to the bus-fault bad-arms.
     #[inline]
-    fn unaligned_deny(addr: u32, size: u32) -> bool {
+    fn mapped(&self, addr: u32) -> bool {
+        is_periph(addr) || self.in_flash(addr) || self.in_ram(addr) || self.extra_idx(addr).is_some()
+    }
+
+    /// CCR.UNALIGN_TRP gate for multi-byte normal-memory accesses. Skipped
+    /// when unmapped (the bus-fault arms own those) and on the periph path
+    /// (Device-memory unaligned stays lenient). Like the MPU data path the
+    /// faulting access completes dropped and raises before the next fetch
+    /// (flags exact, PC deferred by one).
+    #[inline]
+    fn unaligned_deny(&self, addr: u32, size: u32) -> bool {
+        if !self.mapped(addr) {
+            return false;
+        }
         if size > 1 && (addr & (size - 1)) != 0 && crate::system::unalign_trp() {
             crate::system::pend_align_fault(addr);
             true
@@ -222,9 +262,30 @@ impl Memory for FlatMemory {
             let r = &self.extra[idx];
             r.data[(addr - r.base) as usize]
         } else {
+            // Unmapped memory: legacy bad-address latch plus a precise
+            // BusFault (silicon faults wild accesses; the 0-return alone
+            // used to hide null derefs and overruns). Peripheral-space
+            // holes never reach here (the model returns 0 for those).
             self.bad.set(Some(addr));
+            crate::system::pend_bus_fault(addr, false);
             0
         }
+    }
+    fn fetch16(&self, addr: u32) -> u16 {
+        if is_periph(addr) {
+            // No MPU data check: the loop-top XN check owns execute
+            // permission (and reports the correct IACCVIOL-class fault).
+            return crate::sys().p.read(crate::sys(), addr, 2) as u16;
+        }
+        // Bounds-checked per byte (a fetch straddling a region end faults
+        // on the first unmapped byte instead of panicking the host).
+        match (self.fetch_byte(addr), self.fetch_byte(addr.wrapping_add(1))) {
+            (Some(lo), Some(hi)) => (lo as u16) | ((hi as u16) << 8),
+            _ => 0,
+        }
+    }
+    fn is_mapped(&self, addr: u32) -> bool {
+        self.mapped(addr)
     }
     fn read16(&self, addr: u32) -> u16 {
         if is_periph(addr) {
@@ -233,7 +294,7 @@ impl Memory for FlatMemory {
             }
             return crate::sys().p.read(crate::sys(), addr, 2) as u16;
         }
-        if Self::unaligned_deny(addr, 2) {
+        if self.unaligned_deny(addr, 2) {
             return 0;
         }
         let lo = self.read8(addr) as u16;
@@ -247,7 +308,7 @@ impl Memory for FlatMemory {
             }
             return crate::sys().p.read(crate::sys(), addr, 4);
         }
-        if Self::unaligned_deny(addr, 4) {
+        if self.unaligned_deny(addr, 4) {
             return 0;
         }
         let b0 = self.read8(addr) as u32;
@@ -288,7 +349,10 @@ impl Memory for FlatMemory {
             let r = &mut self.extra[idx];
             r.data[(addr - r.base) as usize] = v;
         } else {
+            // Unmapped store: bad-address latch plus a precise BusFault
+            // (read arm documents the split with peripheral holes).
             self.bad.set(Some(addr));
+            crate::system::pend_bus_fault(addr, false);
         }
     }
     fn write16(&mut self, addr: u32, v: u16) {
@@ -300,7 +364,7 @@ impl Memory for FlatMemory {
             self.service_sync_dma();
             return;
         }
-        if Self::unaligned_deny(addr, 2) {
+        if self.unaligned_deny(addr, 2) {
             return;
         }
         self.write8(addr, (v & 0xFF) as u8);
@@ -315,7 +379,7 @@ impl Memory for FlatMemory {
             self.service_sync_dma();
             return;
         }
-        if Self::unaligned_deny(addr, 4) {
+        if self.unaligned_deny(addr, 4) {
             return;
         }
         self.write8(addr, (v & 0xFF) as u8);

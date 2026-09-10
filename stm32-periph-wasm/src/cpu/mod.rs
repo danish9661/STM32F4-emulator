@@ -135,6 +135,7 @@ impl Cpu {
         crate::system::set_unalign_trp(false);
         let _ = crate::system::take_mpu_fault();
         let _ = crate::system::take_align_fault();
+        let _ = crate::system::take_bus_fault();
         Self {
             regs: Regs::new(sp, pc),
             cycles: 0,
@@ -171,6 +172,7 @@ impl Cpu {
         // A reboot must not inherit a deferred fault from the old run.
         let _ = crate::system::take_mpu_fault();
         let _ = crate::system::take_align_fault();
+        let _ = crate::system::take_bus_fault();
     }
 
     /// Current stack pointer (r13 always mirrors it).
@@ -546,6 +548,7 @@ impl Cpu {
         let vtor = sys.p.read(sys, 0xE000ED08, 4);
         let handler = mem.read32(vtor.wrapping_add(vector * 4));
         self.regs.r[15] = handler | 1;
+        sys.p.dwt_count_exc(sys);
     }
 
     /// Perform an exception return for an EXC_RETURN value in `exc`.
@@ -631,8 +634,21 @@ impl Cpu {
         // A thread return (F9/FD) with a live outer handler means a forged
         // LR: fault (INVPC) before touching memory, so the escalated
         // handler stacks a clean context instead of half-unstacked regs.
+        // NONBASETHRDENA (CCR bit 0) likewise faults a return to Thread
+        // while boosted (PRIMASK/FAULTMASK/BASEPRI): Thread may only be
+        // entered at base priority with the bit set.
         if !to_handler && !self.exc_stack.is_empty() {
             Self::latch_invpc(sys);
+            self.abandon_return(sys);
+            self.raise_sync(sys, mem, Self::usage_target(sys));
+            return self.fault.is_none();
+        }
+        if !to_handler
+            && sys.p.read(sys, 0xE000ED14, 4) & 1 != 0
+            && (self.regs.primask != 0 || self.regs.faultmask || self.regs.basepri != 0)
+        {
+            Self::latch_invpc(sys);
+            self.abandon_return(sys);
             self.raise_sync(sys, mem, Self::usage_target(sys));
             return self.fault.is_none();
         }
@@ -705,6 +721,7 @@ impl Cpu {
                 None => {
                     // F1 with nothing active: forged LR, fault loudly.
                     Self::latch_invpc(sys);
+                    self.abandon_return(sys);
                     self.raise_sync(sys, mem, Self::usage_target(sys));
                     return self.fault.is_none();
                 }
@@ -746,6 +763,18 @@ impl Cpu {
         // Thumb state; Unicorn accepts this and the firmware is proven on
         // it, so we force |1 like hardware does for the PC load.
         true
+    }
+
+    /// Abandon an exception return for a fault raised before unstacking
+    /// (forged LR, NONBASETHRDENA): the popped entry is already gone, so
+    /// the CPU is logically back in thread mode — publish that BEFORE
+    /// raising, or the replacement fault would nest under a stale ipsr
+    /// and loop on F1 forever.
+    fn abandon_return(&mut self, sys: &WasmSystem) {
+        self.ipsr = 0;
+        crate::system::set_cpu_context((self.regs.control & 1) == 0, false);
+        crate::system::set_current_ipsr(0);
+        sys.p.nvic.borrow_mut().set_in_interrupt(false);
     }
 
     /// Latch UFSR.INVPC (attempted return with a bad EXC_RETURN/frame).
@@ -858,6 +887,7 @@ impl Cpu {
         } else if irq == -1 {
             sys.p.write(sys, 0xE000ED04, 4, 1 << 25); // SYSTICKCLR
         }
+        sys.p.dwt_count_exc(sys);
         crate::system::set_cpu_context(true, irq == -13 || irq == -14);
         sys.p.nvic.borrow_mut().set_in_interrupt(true);
         let vtor = sys.p.read(sys, 0xE000ED08, 4);
@@ -865,7 +895,21 @@ impl Cpu {
         self.regs.r[15] = handler | 1;
     }
 
-    /// Raise a MemManage (or escalated HardFault) for an MPU violation.
+    /// Raise a bus fault: latch BFSR (PRECISERR for data, IACCVIOL for
+    /// fetch) + BFARVALID + BFAR, then route by SHCSR.BUSFAULTENA
+    /// (default escalates to HardFault).
+    fn raise_bus(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, addr: u32, exec: bool) {
+        let bfsr = if exec { (1 << 8) | (1 << 15) } else { (1 << 9) | (1 << 15) };
+        let cfsr = sys.p.read(sys, 0xE000ED28, 4);
+        sys.p.write(sys, 0xE000ED28, 4, cfsr | bfsr);
+        sys.p.write(sys, 0xE000ED38, 4, addr); // BFAR
+        let target = if sys.p.read(sys, 0xE000ED24, 4) & (1 << 17) != 0 {
+            -11
+        } else {
+            -13
+        };
+        self.raise_sync(sys, mem, target);
+    }
     /// SHCSR.MEMFAULTENA clear escalates to HardFault (silicon rule);
     /// priority gating/escalation runs through raise_sync. With delivery
     /// off this is a loud CPU halt like SVC/NOCP. Any stale deferred fault
@@ -923,11 +967,30 @@ impl Cpu {
                 }
                 continue;
             }
+            // Deferred wild access (data path, or a straddling/o2 fetch the
+            // pre-check below could not see): raise with the latched class.
+            if let Some((addr, exec)) = crate::system::take_bus_fault() {
+                self.raise_bus(sys, mem, addr, exec);
+                if self.fault.is_some() {
+                    break;
+                }
+                continue;
+            }
             let pc = self.regs.r[15] & !1;
             if TRACE_ON.load(Ordering::Relaxed) {
                 TRACE_BUF.lock().unwrap().push(pc);
             }
-            let op = mem.read16(pc);
+            // Precise bus fault on a wild fetch: raise before executing
+            // anything (a deferred dummy-NOP would advance PC and let the
+            // re-fault clobber BFAR).
+            if !mem.is_mapped(pc) {
+                self.raise_bus(sys, mem, pc, true);
+                if self.fault.is_some() {
+                    break;
+                }
+                continue;
+            }
+            let op = mem.fetch16(pc);
             let l = thumb::len(op);
             // Precise instruction-fetch XN check (MPU-enabled only; state
             // is clean here so violations raise synchronously, unlike the
@@ -946,7 +1009,7 @@ impl Cpu {
             let ok = if l == 2 {
                 thumb::exec16(self, sys, mem, op, pc)
             } else {
-                let o2 = mem.read16(pc + 2);
+                let o2 = mem.fetch16(pc + 2);
                 thumb::exec32(self, sys, mem, op, o2, pc)
             };
             if !ok {

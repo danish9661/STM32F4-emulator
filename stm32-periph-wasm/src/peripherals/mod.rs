@@ -35,6 +35,7 @@ pub mod qspi;
 pub mod fpu;
 pub mod mpu;
 pub mod dwt;
+pub mod itm;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -55,6 +56,7 @@ use qspi::Qspi;
 use fpu::Fpu;
 use mpu::Mpu;
 use dwt::{Dwt, Demcr};
+use itm::Itm;
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
@@ -100,8 +102,24 @@ impl Peripherals {
 
     /// Mark the PWR peripheral as having woken from low-power (sets CSR WUF).
     /// Called by the emulator when the core resumes after a WFI/WFE halt.
-    pub fn pwr_wakeup(&self) {
+    /// DWT EXCCNT tick: one exception entry (called from every take path
+    /// in the CPU). Gated on DEMCR.TRCENA like the rest of the unit.
+    pub fn dwt_count_exc(&self, sys: &System) {
+        if sys.p.read(sys, 0xE000EDFC, 4) & (1 << 24) == 0 {
+            return;
+        }
         for slot in &self.peripherals {
+            if slot.start == 0xE000_1000 {
+                use crate::peripherals::dwt::Dwt;
+                if let Some(dwt) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Dwt>() {
+                    dwt.count_exc();
+                }
+                break;
+            }
+        }
+    }
+
+    pub fn pwr_wakeup(&self) {        for slot in &self.peripherals {
             if slot.start == 0x4000_7000 {
                 use crate::peripherals::pwr::Pwr;
                 if let Some(pwr) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Pwr>() {
@@ -347,6 +365,15 @@ impl Peripherals {
                 peripheral: RefCell::new(p),
             });
         }
+        // ITM stimulus console (absent from the SVD too): one slot covering
+        // STIM0-31 plus TER/TPR/TCR. No neighbor anywhere near it.
+        if let Some(p) = Itm::new("ITM") {
+            peripherals.peripherals.push(PeripheralSlot {
+                start: 0xE000_0000,
+                end: 0xE000_0F00,
+                peripheral: RefCell::new(p),
+            });
+        }
 
         peripherals.wire_spi_flash_cs_callbacks();
         peripherals.finish_registration();
@@ -475,6 +502,12 @@ impl Peripherals {
         // FSMC has a huge range (0x6000_0000-0xA000_1000), register separately
         if let Some(p) = Fsmc::new("FSMC", ext_devices) {
             peripherals.peripherals.push(PeripheralSlot { start: 0x6000_0000, end: 0xA000_1000, peripheral: RefCell::new(p) });
+        }
+
+        // ITM stimulus console: STIM block + TER/TPR/TCR in one slot
+        // (nothing else lives in 0xE0000000-0xE0000F00 on either map).
+        if let Some(p) = Itm::new("ITM") {
+            peripherals.peripherals.push(PeripheralSlot { start: 0xE000_0000, end: 0xE000_0F00, peripheral: RefCell::new(p) });
         }
 
         // Wire SPI-flash CS pins to GPIO write callbacks so deassert edges

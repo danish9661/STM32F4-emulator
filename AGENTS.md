@@ -2506,6 +2506,14 @@ deliberate, all documented, none reachable by compiler-emitted code.
   (DIVBYZERO sticky, all three divide arms); FPCCR.USER gates unpriv FPU
   (plus FPCCR mask fix: THREAD is bit 3, not 2); MSR CONTROL ignores
   nPRIV/SPSEL from unprivileged; USERSETMPEND gates unpriv ICSR pends.
+- Closed in the third pass (same method, each tested): precise + deferred
+  BusFault for wild memory (PRECISERR/IACCVIOL + BFARVALID + BFAR,
+  BUSFAULTENA routing, HardFault escalation; peripheral-space holes stay
+  benign-0 by design); NONBASETHRDENA faults boosted thread returns
+  (INVPC, with an abandon-return helper so the replacement fault nests
+  cleanly); ITM port-0 stimulus to the UART console when TCR.ITMENA +
+  TER[0] (gated, zero effect otherwise); DWT EXCCNT counts takes under
+  TRCENA.
 - Loud-by-policy (fault stops the run instead of taking a guest fault —
   surfaces decoder/model gaps instead of hanging in a default handler):
   UNDEFINSTR (bad opcode), BKPT. Any valid encoding that reaches these
@@ -2513,22 +2521,29 @@ deliberate, all documented, none reachable by compiler-emitted code.
 - What remains unimplemented, and why (three buckets — nothing here is
   reachable by compiler-emitted code; see the contract below):
   1. Vacuous without hardware (implementing would be dead code, not
-     fidelity): BusFault can never occur (no bus matrix exists to
-     error); MPU memory types ignored (no caches, so types are
-     unobservable); exclusive monitors always succeed (single core);
-     DWT counters beyond CYCCNT read 0 (cycle-accurate fold/CPI/sleep/
-     exception/LSU counts would be fake precision in an interpreter —
-     CYCCNT-as-instruction-clock is the only honest counter);
-     SysTick CALIB reads 0, which means "no calibration data" and
-     correctly steers firmware to the LOAD path; FPB/ETM/TPIU
-     unmapped-benign (debugger fabric with no debugger attached);
-     ITM RAZ/WI (see above); endianness is LE-only (the F4 has no
-     big-endian mode).
+     fidelity): MPU memory types ignored (no caches, so types are
+     unobservable — except Device-ness for unaligned faults, which is
+     itself an uncertain rule, see below); exclusive monitors always
+     succeed (single core); DWT FOLD/CPI counters would be fake
+     precision in an interpreter (CYCCNT-as-clock plus the exact EXC
+     event count are the honest ones); SysTick CALIB reads
+     0, which means "no calibration data" and correctly steers
+     firmware to the LOAD path; FPB/ETM/TPIU unmapped-benign
+     (debugger fabric with no debugger attached); endianness is LE-only
+     (the F4 has no big-endian mode).
   2. Deliberate policy (silicon behavior would be worse for a dev tool):
-     UNDEFINSTR/BKPT halt loudly with pc+opcode (above).
-  3. Genuinely uncertain (one item — will not be implemented from
-     memory): SCB.NONBASETHRDENA, the boosted-thread-return rule.
-     Guessing wrong would be worse than the documented gap.
+     UNDEFINSTR/BKPT halt loudly with pc+opcode (above); peripheral-
+     space holes read-as-0 instead of BusFaulting (HALs probe
+     reserved registers; wild *memory* still BusFaults — the split is
+     documented at the channel). The FSMC window (0x60000000-0xA0000000)
+     is routed to the model, not the fault arms: untapped banks must
+     read inert-0 (the fsmc_test BANK4 probe), which caught an
+     `is_periph` window that was 128KB short the moment BusFaults went
+     live — proof the battery earns its keep.
+  3. Genuinely uncertain (will not be implemented from memory):
+     unaligned *Device* access (needs MPU type info plus a rule nobody
+     can cite exactly); SEVONPEND's pending-without-entry edge (entry-
+     always-sets covers every taken interrupt).
   Also documented as checked-and-correct (not gaps): MPU subregions
   below 256B are UNPREDICTABLE on silicon and deny-closed here; reset
   values match silicon (VTOR/CONTROL/PRIMASK/BASEPRI/FAULTMASK/FPSCR/

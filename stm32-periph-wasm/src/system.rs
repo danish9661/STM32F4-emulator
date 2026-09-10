@@ -78,6 +78,30 @@ pub fn take_align_fault() -> Option<u32> {
         None
     }
 }
+// Deferred bus-fault channel (unmapped access = precise BusFault on
+// silicon): same deferred shape as the MPU/align paths (access completes
+// dummy, flags exact, PC one behind). Peripheral-space holes are NOT
+// routed here — unlisted SVD devices read-as-0 by design (many are
+// documented-reserved; HALs probe them), so only the mem.rs bad-arms
+// (wild memory: null derefs, overruns, gaps) pend.
+static BUS_FAULT_VALID: AtomicBool = AtomicBool::new(false);
+static BUS_FAULT_ADDR: AtomicU32 = AtomicU32::new(0);
+static BUS_FAULT_EXEC: AtomicBool = AtomicBool::new(false);
+pub fn pend_bus_fault(addr: u32, exec: bool) {
+    if BUS_FAULT_VALID.load(Ordering::Relaxed) {
+        return;
+    }
+    BUS_FAULT_ADDR.store(addr, Ordering::Relaxed);
+    BUS_FAULT_EXEC.store(exec, Ordering::Relaxed);
+    BUS_FAULT_VALID.store(true, Ordering::Release);
+}
+pub fn take_bus_fault() -> Option<(u32, bool)> {
+    if BUS_FAULT_VALID.swap(false, Ordering::Acquire) {
+        Some((BUS_FAULT_ADDR.load(Ordering::Relaxed), BUS_FAULT_EXEC.load(Ordering::Relaxed)))
+    } else {
+        None
+    }
+}
 // Deferred MPU data-fault channel (see cpu/mod.rs): FlatMemory latches a
 // violation (returning dummy/dropping the access); the run loop raises it
 // before the next fetch. One instruction may complete with dummy data —
@@ -793,6 +817,7 @@ pub fn reset_globals() {
     MPU_ENABLED.store(false, Relaxed);
     MPU_FAULT_VALID.store(false, Relaxed);
     ALIGN_FAULT_VALID.store(false, Relaxed);
+    BUS_FAULT_VALID.store(false, Relaxed);
     UNALIGN_TRP.store(false, Relaxed);
     set_mpu_force_unpriv(false);
     CURRENT_PRIV.store(true, Relaxed);
