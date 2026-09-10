@@ -74,11 +74,24 @@ impl Scb {
 
     fn write_icsr(&mut self, value: u32, sys: &System) {
         use crate::peripherals::nvic::irq;
+        // USERSETMPEND (CCR bit 1) gates unprivileged software pends: with
+        // it clear, unprivileged PENDSVSET/PENDSTSET writes are ignored
+        // (privileged writes always work). Reads CCR from self: going back
+        // through the model here would re-borrow this slot (RefCell panic).
+        let usersetmpend = self.ccr & 2 != 0;
+        let unpriv_sw = !crate::system::current_privileged() && !usersetmpend;
+        // A gated unprivileged write is ignored entirely (neither pends
+        // nor records the SET bit — otherwise ICSR would read pending
+        // with an empty model queue).
+        let mut value = value;
+        if unpriv_sw {
+            value &= !((1 << 28) | (1 << 26));
+        }
         // Set-pending
-        if value & (1 << 28) != 0 {
+        if value & (1 << 28) != 0 && !unpriv_sw {
             sys.p.nvic.borrow_mut().set_intr_pending(irq::PENDSV);
         }
-        if value & (1 << 26) != 0 {
+        if value & (1 << 26) != 0 && !unpriv_sw {
             sys.p.nvic.borrow_mut().set_intr_pending(irq::SYSTICK);
         }
         // Clear-pending (also clears the stored SET bit so ICSR reads track
@@ -161,7 +174,10 @@ impl Peripheral for Scb {
             0x08 => self.vtor = value & 0xFFFF_FC00,
             0x0C => self.write_aircr(value),
             0x10 => self.scr = value & 0x1E,
-            0x14 => self.ccr = value & 0xFFFF,
+            0x14 => {
+                self.ccr = value & 0xFFFF;
+                crate::system::set_unalign_trp(value & 8 != 0);
+            }
             0x18 => self.shpr[0] = value,
             0x1C => self.shpr[1] = value,
             0x20 => self.shpr[2] = value,

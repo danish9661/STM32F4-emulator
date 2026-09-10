@@ -39,3 +39,4 @@ Key derivations are written up in AGENTS.md §25 (encoding rules + gotchas).
 | `batch.s`, `var.s` | SMLALD/SMLSLD/UMAAL/SMMUL/USAD8 family encodings |
 | `ex.s`, `ex2.s`–`ex4.s` | LDREX/STREX size/offset forms (incl. the offset-word nibble edge case) |
 | `sh.s` | Shift-register flag setting, SXTAB16/UXTAB16 shadowing |
+| `tform.s`, `tform2.s` | LDRT/STRT family: op2[11:8]==0xE marks as-unprivileged (privileged PUW uses 0xB/0xC/0xF); the decoder's MPU privilege override keys off exactly this nibble |

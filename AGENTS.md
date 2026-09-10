@@ -2499,20 +2499,27 @@ deliberate, all documented, none reachable by compiler-emitted code.
   take/return; ICSR.VECTACTIVE via a tracked-IPSR global; ICSR SET-bit
   staleness (take clears stored bit, reads compose live model state);
   NVIC IPR word arms (single-byte arm dropped bytes 1-3).
+- Closed in the follow-up pass (same method, each tested): LDRT/STRT
+  probe as-unprivileged (op2[11:8]==0xE gate, GAS tform.s probes, Drop
+  guard holds a force-unpriv flag for exactly one access); opt-in traps
+  UNALIGN_TRP (deferred channel, UNALIGNED sticky) and DIV_0_TRP
+  (DIVBYZERO sticky, all three divide arms); FPCCR.USER gates unpriv FPU
+  (plus FPCCR mask fix: THREAD is bit 3, not 2); MSR CONTROL ignores
+  nPRIV/SPSEL from unprivileged; USERSETMPEND gates unpriv ICSR pends.
 - Loud-by-policy (fault stops the run instead of taking a guest fault —
   surfaces decoder/model gaps instead of hanging in a default handler):
   UNDEFINSTR (bad opcode), BKPT. Any valid encoding that reaches these
   is a bug in us, not the firmware.
 - Ignored opt-in traps (default behavior is bit-exact; firmware must
-  opt in, none does): CCR.UNALIGN_TRP / DIV_0_TRP, FPCCR.USER (unpriv FPU
-  always allowed), SCB.USERSETMPEND / NONBASETHRDENA.
-- Structural simplifications: LDRT/STRT execute as privileged LDR/STR
-  (compilers never emit them; only hand-written MPU kernels differ);
-  BusFault can never occur (no bus matrix to error); exclusive monitors
-  always succeed (single core); MPU memory types ignored (no caches);
-  PRIGROUP/BASEPRI compared raw in group space (exact under the CMSIS
-  shifted-value convention); SEVONPEND subsumed by entry-always-sets
-  (differs only for pending-without-entry before WFE).
+  opt in, none does): SCB.NONBASETHRDENA (only one left — the boosted-
+  thread-return rule is genuinely ambiguous from memory, so it stays
+  out rather than guessing wrong).
+- Structural simplifications: BusFault can never occur (no bus matrix
+  to error); exclusive monitors always succeed (single core); MPU memory
+  types ignored (no caches); PRIGROUP/BASEPRI compared raw in group
+  space (exact under the CMSIS shifted-value convention); SEVONPEND
+  subsumed by entry-always-sets (differs only for pending-without-entry
+  before WFE).
 - Debug/trace (no consumer in this emulator): DWT counters beyond CYCCNT
   read 0, FPB/ETM/TPIU unmapped-benign, ITM RAZ/WI (see above), STIR
   unmapped-benign (writes ignored, no fault — revisit if firmware ever

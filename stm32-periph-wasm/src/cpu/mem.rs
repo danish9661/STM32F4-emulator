@@ -156,6 +156,21 @@ impl FlatMemory {
             crate::sys().mark_dma_completed(t.stream_idx, true);
         }
     }
+    /// CCR.UNALIGN_TRP gate for multi-byte normal-memory accesses. The
+    /// periph path returns before this (Device-memory unaligned stays
+    /// lenient — no silicon rule to match without a bus matrix). Like the
+    /// MPU data path the faulting access completes dropped and raises
+    /// before the next fetch (flags exact, PC deferred by one).
+    #[inline]
+    fn unaligned_deny(addr: u32, size: u32) -> bool {
+        if size > 1 && (addr & (size - 1)) != 0 && crate::system::unalign_trp() {
+            crate::system::pend_align_fault(addr);
+            true
+        } else {
+            false
+        }
+    }
+
     /// MPU gate for one CPU access (size bytes at addr). Returns true when
     /// denied (violation latched for the run loop; caller returns dummy /
     /// drops the access). Fast path is a single predictable-false branch
@@ -218,6 +233,9 @@ impl Memory for FlatMemory {
             }
             return crate::sys().p.read(crate::sys(), addr, 2) as u16;
         }
+        if Self::unaligned_deny(addr, 2) {
+            return 0;
+        }
         let lo = self.read8(addr) as u16;
         let hi = self.read8(addr + 1) as u16;
         lo | (hi << 8)
@@ -228,6 +246,9 @@ impl Memory for FlatMemory {
                 return 0;
             }
             return crate::sys().p.read(crate::sys(), addr, 4);
+        }
+        if Self::unaligned_deny(addr, 4) {
+            return 0;
         }
         let b0 = self.read8(addr) as u32;
         let b1 = self.read8(addr + 1) as u32;
@@ -279,6 +300,9 @@ impl Memory for FlatMemory {
             self.service_sync_dma();
             return;
         }
+        if Self::unaligned_deny(addr, 2) {
+            return;
+        }
         self.write8(addr, (v & 0xFF) as u8);
         self.write8(addr + 1, (v >> 8) as u8);
     }
@@ -289,6 +313,9 @@ impl Memory for FlatMemory {
             }
             crate::sys().p.write(crate::sys(), addr, 4, v);
             self.service_sync_dma();
+            return;
+        }
+        if Self::unaligned_deny(addr, 4) {
             return;
         }
         self.write8(addr, (v & 0xFF) as u8);

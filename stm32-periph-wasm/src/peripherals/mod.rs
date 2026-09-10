@@ -148,6 +148,9 @@ impl Peripherals {
         }
         let priv_ = crate::system::current_privileged();
         let hfnmi = crate::system::current_hfnmi();
+        // LDRT/STRT probe as-unprivileged even in handler mode (the decoder
+        // holds the override for exactly one access).
+        let priv_ = priv_ && !crate::system::mpu_force_unpriv();
         // The MPU slot is found by its fixed base, NOT by the access
         // address (which usually lives in RAM/FLASH, not in any slot).
         for slot in &self.peripherals {

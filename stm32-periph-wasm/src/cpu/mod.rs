@@ -131,7 +131,10 @@ impl Cpu {
         // Native tests share one process: a previous test's MPU state must
         // not leak into this instance (the fresh SYS has CTRL=0 regions).
         crate::system::set_mpu_enabled(false);
+        crate::system::set_mpu_force_unpriv(false);
+        crate::system::set_unalign_trp(false);
         let _ = crate::system::take_mpu_fault();
+        let _ = crate::system::take_align_fault();
         Self {
             regs: Regs::new(sp, pc),
             cycles: 0,
@@ -167,6 +170,7 @@ impl Cpu {
         crate::system::set_current_ipsr(0);
         // A reboot must not inherit a deferred fault from the old run.
         let _ = crate::system::take_mpu_fault();
+        let _ = crate::system::take_align_fault();
     }
 
     /// Current stack pointer (r13 always mirrors it).
@@ -349,13 +353,14 @@ impl Cpu {
         best.map(|(_, _, irq)| irq)
     }
 
-    /// Raise a synchronous exception (SVC insn, precise fetch/MPU fault,
-    /// UsageFault): take it when its priority permits activation, else
-    /// escalate a precise fault to HardFault, or pend a deferred one for
-    /// later delivery. A blocked HardFault is lockup: loud halt. With
-    /// delivery off everything halts loudly (polling firmware never raises).
+    /// Raise a synchronous exception (SVC insn, MPU fault, UsageFault):
+    /// take it when its priority permits activation, else escalate to
+    /// HardFault (a synchronous fault cannot wait — silicon escalates; the
+    /// model's one-instruction deferral of data faults does not change
+    /// that). A blocked HardFault is lockup: loud halt. With delivery off
+    /// everything halts loudly (polling firmware never raises).
     /// `pub(crate)` for the thumb decoder's SVC/NOCP arms.
-    pub(crate) fn raise_sync(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, irq: i32, precise: bool) {
+    pub(crate) fn raise_sync(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, irq: i32) {
         if !self.deliver_irqs {
             self.fault = Some(CpuFault { pc: self.regs.r[15] & !1, op1: 0xDEAD, op2: 0, len: 2 });
             return;
@@ -373,14 +378,7 @@ impl Cpu {
                 self.fault = Some(CpuFault { pc: self.regs.r[15] & !1, op1: 0xDEAD, op2: 0, len: 2 });
                 return;
             }
-            if precise {
-                // A synchronous fault cannot wait: escalate to HardFault.
-                self.raise_sync(sys, mem, -13, true);
-                return;
-            }
-            // Deferred faults pend and the current instruction stream
-            // continues; delivery happens once unmasked (run-loop top).
-            sys.p.nvic.borrow_mut().set_intr_pending(irq);
+            self.raise_sync(sys, mem, -13);
             return;
         }
         sys.p.nvic.borrow_mut().take_pending_irq(irq);
@@ -581,13 +579,13 @@ impl Cpu {
             Some(e) => e.fp_ext,
             None => {
                 Self::latch_invpc(sys);
-                self.raise_sync(sys, mem, Self::usage_target(sys), true);
+                self.raise_sync(sys, mem, Self::usage_target(sys));
                 return self.fault.is_none();
             }
         };
         if extended != recorded_ext {
             Self::latch_invpc(sys);
-            self.raise_sync(sys, mem, Self::usage_target(sys), true);
+            self.raise_sync(sys, mem, Self::usage_target(sys));
             return self.fault.is_none();
         }
         // Unstack from the bank selected by EXC_RETURN (using CURRENT bank
@@ -635,7 +633,7 @@ impl Cpu {
         // handler stacks a clean context instead of half-unstacked regs.
         if !to_handler && !self.exc_stack.is_empty() {
             Self::latch_invpc(sys);
-            self.raise_sync(sys, mem, Self::usage_target(sys), true);
+            self.raise_sync(sys, mem, Self::usage_target(sys));
             return self.fault.is_none();
         }
         // Pre-validate the whole frame when the MPU is on (same
@@ -707,7 +705,7 @@ impl Cpu {
                 None => {
                     // F1 with nothing active: forged LR, fault loudly.
                     Self::latch_invpc(sys);
-                    self.raise_sync(sys, mem, Self::usage_target(sys), true);
+                    self.raise_sync(sys, mem, Self::usage_target(sys));
                     return self.fault.is_none();
                 }
             }
@@ -790,8 +788,9 @@ impl Cpu {
     }
 
     /// UsageFault target honoring SHCSR.USGFAULTENA (bit 18): without it
-    /// the fault escalates to HardFault (silicon rule).
-    fn usage_target(sys: &WasmSystem) -> i32 {
+    /// the fault escalates to HardFault (silicon rule). `pub(crate)` for
+    /// the thumb decoder's fault arms.
+    pub(crate) fn usage_target(sys: &WasmSystem) -> i32 {
         if sys.p.read(sys, 0xE000ED24, 4) & (1 << 18) != 0 {
             -10
         } else {
@@ -868,8 +867,7 @@ impl Cpu {
 
     /// Raise a MemManage (or escalated HardFault) for an MPU violation.
     /// SHCSR.MEMFAULTENA clear escalates to HardFault (silicon rule);
-    /// priority gating/escalation runs through raise_sync (a masked
-    /// deferred fault pends, a masked precise one escalates). With delivery
+    /// priority gating/escalation runs through raise_sync. With delivery
     /// off this is a loud CPU halt like SVC/NOCP. Any stale deferred fault
     /// is discarded first (a synchronous raise supersedes it).
     fn raise_memmanage(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, addr: u32, exec: bool) {
@@ -882,7 +880,7 @@ impl Cpu {
         crate::system::latch_memmanage_fault(sys, bits | (1 << 7), mar);
         let shcsr = sys.p.read(sys, 0xE000ED24, 4);
         let irq = if shcsr & (1 << 16) != 0 { -12 } else { -13 };
-        self.raise_sync(sys, mem, irq, exec);
+        self.raise_sync(sys, mem, irq);
     }
 
     pub fn run(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, budget: u32) -> u32 {
@@ -908,6 +906,18 @@ impl Cpu {
                 self.raise_memmanage(sys, mem, addr, exec);
                 // raise_memmanage either takes an exception (continues
                 // below) or records a loud halt (breaks next check).
+                if self.fault.is_some() {
+                    break;
+                }
+                continue;
+            }
+            // Same channel for CCR.UNALIGN_TRP: latch UNALIGNED and raise
+            // through the UsageFault/HardFault routing (UsageFaults carry
+            // no fault address register, so only presence matters).
+            if crate::system::take_align_fault().is_some() {
+                let cfsr = sys.p.read(sys, 0xE000ED28, 4);
+                sys.p.write(sys, 0xE000ED28, 4, cfsr | (1 << 24));
+                self.raise_sync(sys, mem, Self::usage_target(sys));
                 if self.fault.is_some() {
                     break;
                 }

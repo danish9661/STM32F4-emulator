@@ -2364,3 +2364,217 @@ fn icsr_vectactive_and_set_clear() {
     cpu.take_exception(sys, &mut mem, -2);
     assert_eq!(mem.read32(0xE000ED04) & (1 << 28), 0, "SET cleared by take");
 }
+
+/// Program one MPU SRAM region + enable (PRIVDEFENA for background).
+fn mpu_sram_test_setup(mem: &mut FlatMemory) {
+    mem.write32(0xE000ED98, 1);
+    mem.write32(0xE000ED9C, 0x20000011); // R1: SRAM 128KB base
+    mem.write32(0xE000EDA0, 0x01000021); // RW-priv, XN clear (snippets run from SRAM)
+    mem.write32(0xE000ED24, mem.read32(0xE000ED24) | (1 << 16)); // MEMFAULTENA
+    mem.write32(0xE000ED94, 0x5); // ENABLE|PRIVDEFENA
+}
+
+#[test]
+fn ldrt_probes_as_unprivileged() {
+    // GAS tform.s: ldrt r2,[r5,#4] = F855 2E04 (op2[11:8]==0xE). From a
+    // privileged handler, LDRT into a priv-only region must fault
+    // (DACCVIOL + MMFAR, escalated past equal-priority MemManage to a
+    // taken HardFault); plain LDR to the same address passes; LDRT into
+    // a FULL region passes with the right value.
+    let _g = lock_boot();
+    // Phase A: denied (escalates: MemManage prio 0 can't preempt prio 0).
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0x20000100, 0xA5A5A5A5);
+    mpu_sram_test_setup(&mut mem);
+    cpu.take_exception(sys, &mut mem, 0);
+    mem.write16(0x20002000, 0xF855);
+    mem.write16(0x20002002, 0x2E04); // ldrt r2,[r5,#4]
+    mem.write16(0x20002004, 0xE7FE);
+    cpu.regs.r[5] = 0x200000FC; // +#4 -> 0x20000100
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 6);
+    no_fault(&cpu, &mem);
+    assert_eq!(mem.read32(0xE000ED28) & 0x82, 0x82, "DACCVIOL+MMARVALID");
+    assert_eq!(mem.read32(0xE000ED34), 0x20000100, "MMFAR is the probe");
+    assert_eq!(cpu.ipsr, 3, "escalated to taken HardFault");
+
+    // Phase B: privileged LDR to the same address passes in-handler.
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0x20000100, 0xA5A5A5A5);
+    mpu_sram_test_setup(&mut mem);
+    cpu.take_exception(sys, &mut mem, 0);
+    mem.write16(0x20002000, 0xF8D5);
+    mem.write16(0x20002002, 0x2004); // ldr.w r2,[r5,#4] (priv, GAS tform)
+    mem.write16(0x20002004, 0xE7FE);
+    cpu.regs.r[5] = 0x200000FC; // +#4 -> 0x20000100
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 4);
+    no_fault(&cpu, &mem);
+assert_eq!(cpu.regs.r[2], 0xA5A5A5A5, "privileged load passes");
+    assert_eq!(cpu.ipsr, 16, "no fault taken");
+
+    // Phase C: LDRT into a FULL region passes with the value.
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0x20001200, 0x11223344);
+    mpu_sram_test_setup(&mut mem);
+    mem.write32(0xE000ED98, 3);
+    mem.write32(0xE000ED9C, 0x20001003); // R3: scratch 1KB base
+    mem.write32(0xE000EDA0, 0x13000013); // FULL access
+    cpu.take_exception(sys, &mut mem, 0);
+    mem.write16(0x20002000, 0xF855);
+    mem.write16(0x20002002, 0x2E04); // ldrt r2,[r5,#4]
+    mem.write16(0x20002004, 0xE7FE);
+    cpu.regs.r[5] = 0x200011FC; // +#4 -> 0x20001200
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 4);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[2], 0x11223344, "unpriv load from FULL region");
+    assert_eq!(cpu.ipsr, 16, "no fault taken");
+}
+
+#[test]
+fn unalign_trp_traps_odd_access() {
+    // CCR.UNALIGN_TRP=1: odd halfword access takes UsageFault (UNALIGNED
+    // sticky) via vector A; trap clear reads through fine. ldrh.w r2,[r5,#1]
+    // is F8B5 2001 (GAS tform probe).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000ED24, 1 << 18); // USGFAULTENA
+    mem.write16(0x20002000, 0xF8B5);
+    mem.write16(0x20002002, 0x2001); // ldrh.w r2,[r5,#1]
+    mem.write16(0x20002004, 0xE7FE);
+    mem.write16(0x20000101, 0xBEEF); // halfword straddling .101/.102
+    cpu.regs.r[5] = 0x20000100;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 4); // trap clear: odd access reads through
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[2], 0xBEEF, "trap clear: odd access reads through");
+    mem.write32(0xE000ED14, 0x208); // keep STKALIGN, add UNALIGN_TRP
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 12);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 0, "UsageFault handler returned");
+    assert_eq!(mem.read32(0x20001000), 1, "UsageFault vector (A) ran");
+    assert_ne!(mem.read32(0xE000ED28) & (1 << 24), 0, "UNALIGNED sticky");
+}
+
+#[test]
+fn div0_trp_traps_zero_divisor() {
+    // CCR.DIV_0_TRP=1: sdiv by zero takes UsageFault (DIVBYZERO sticky);
+    // trap clear returns 0. sdiv r0,r1,r2 is FB91 F0F2 (GAS).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000ED24, 1 << 18); // USGFAULTENA
+    mem.write16(0x20002000, 0xFB91);
+    mem.write16(0x20002002, 0xF0F2); // sdiv r0,r1,r2
+    mem.write16(0x20002004, 0xE7FE);
+    cpu.regs.r[1] = 100;
+    cpu.regs.r[2] = 0;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 4); // trap clear
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[0], 0, "divide-by-zero returns 0 by default");
+    mem.write32(0xE000ED14, 0x210); // STKALIGN + DIV_0_TRP
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 12);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 0, "UsageFault handler returned");
+    assert_eq!(mem.read32(0x20001000), 1, "UsageFault vector (A) ran");
+    assert_ne!(mem.read32(0xE000ED28) & (1 << 25), 0, "DIVBYZERO sticky");
+}
+
+#[test]
+fn fpu_fpccr_user_gates_unprivileged() {
+    // Unprivileged FPU without FPCCR.USER faults NOCP; with USER=1 the
+    // same access works. vmov s0,r0 is EE00 0A10 (existing FPU tests).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000ED88, 0x00F00000); // CPACR full (guest boot did this)
+    mem.write32(0xE000ED24, 1 << 18); // USGFAULTENA
+    mem.write16(0x20002000, 0xF380);
+    mem.write16(0x20002002, 0x8814); // msr control,r0 (drop privilege next)
+    mem.write16(0x20002004, 0xEE00);
+    mem.write16(0x20002006, 0x0A10); // vmov s0,r0
+    mem.write16(0x20002008, 0xE7FE);
+    cpu.regs.r[0] = 0x11111111;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1); // MSR only: now unprivileged
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.control & 1, 1, "dropped to unprivileged");
+    cpu.run(sys, &mut mem, 8); // vmov faults NOCP (USER=0)
+    no_fault(&cpu, &mem);
+    assert_eq!(mem.read32(0x20001000), 1, "UsageFault vector (A) ran");
+    assert_ne!(mem.read32(0xE000ED28) & 0x00080000, 0, "NOCP sticky");
+    mem.write32(0xE000EF34, mem.read32(0xE000EF34) | 2); // FPCCR.USER
+    cpu.regs.r[0] = 0x11111111; // A clobbered r0; restore the sample
+    cpu.regs.r[15] = 0x20002004; // the vmov again, still unprivileged
+    cpu.run(sys, &mut mem, 4);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.s[0], 0x11111111, "unpriv FPU works with USER=1");
+    assert_eq!(mem.read32(0x20001000), 1, "no second fault");
+}
+
+#[test]
+fn msr_control_ignores_unprivileged_escalation() {
+    // Unprivileged MSR CONTROL cannot clear nPRIV (or flip SPSEL).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    mem.write16(0x20002000, 0xF380);
+    mem.write16(0x20002002, 0x8814); // msr control,r0
+    mem.write16(0x20002004, 0xE7FE);
+    cpu.regs.r[0] = 1;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.control & 1, 1, "privileged drop works");
+    assert!(!crate::system::current_privileged(), "context unprivileged");
+    cpu.regs.r[0] = 0;
+    cpu.run(sys, &mut mem, 1); // unprivileged MSR CONTROL=0: ignored
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.control & 1, 1, "nPRIV sticky from unprivileged");
+    assert!(!crate::system::current_privileged(), "still unprivileged");
+}
+
+#[test]
+fn usersetmpend_gates_unprivileged_pends() {
+    // CCR.USERSETMPEND=0: unprivileged ICSR PENDSVSET writes are ignored;
+    // with the bit set (or privileged) they pend.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    mem.write16(0x20002000, 0xF380);
+    mem.write16(0x20002002, 0x8814); // msr control,r0
+    mem.write16(0x20002004, 0xE7FE);
+    cpu.regs.r[0] = 1;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1); // drop to unprivileged (CCR bit1 clear)
+    // Unprivileged ICSR write still reaches the model (MPU off here), but
+    // the pend itself must be suppressed.
+    mem.write32(0xE000ED04, 1 << 28);
+    assert!(!sys.p.nvic.borrow().irq_pending(-2), "unpriv pend ignored");
+    // Same write privileged pends (control case for the gate).
+    cpu.regs.control &= !1;
+    crate::system::set_cpu_context(true, false);
+    mem.write32(0xE000ED04, 1 << 28);
+    assert!(sys.p.nvic.borrow().irq_pending(-2), "privileged pend works");
+    sys.p.nvic.borrow_mut().clear_pending(-2);
+    // With USERSETMPEND set, unprivileged pends work again.
+    mem.write32(0xE000ED14, 0x202); // STKALIGN + USERSETMPEND
+    cpu.regs.control |= 1;
+    crate::system::set_cpu_context(false, false);
+    mem.write32(0xE000ED04, 1 << 28);
+    assert!(sys.p.nvic.borrow().irq_pending(-2), "USERSETMPEND allows");
+}

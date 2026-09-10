@@ -55,8 +55,8 @@ impl Peripheral for Fpu {
 
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
         match offset {
-            // ASPEN|LSPEN + THREAD|USER|LSPACT only.
-            0x0 => self.fpccr = value & 0xC000_0007,
+            // ASPEN|LSPEN + THREAD|USER|LSPACT only (bit 2 is reserved).
+            0x0 => self.fpccr = value & 0xC000_000B,
             0x4 => self.fpcar = value & !7,
             // AHP|DN|FZ|RMode only.
             0x8 => self.fpdscr = value & 0x07C0_0000,

@@ -47,6 +47,37 @@ pub fn set_cpu_context(priv_: bool, hfnmi: bool) {
 static CURRENT_IPSR: AtomicU32 = AtomicU32::new(0);
 pub fn current_ipsr() -> u32 { CURRENT_IPSR.load(Ordering::Relaxed) }
 pub fn set_current_ipsr(v: u32) { CURRENT_IPSR.store(v, Ordering::Relaxed); }
+// Force the next MPU check(s) to unprivileged, for LDRT/STRT (which probe
+// memory as-unprivileged even in handler mode). Set/cleared around the
+// single access by a Drop guard in the decoder, so no path leaks it.
+static MPU_FORCE_UNPRIV: AtomicBool = AtomicBool::new(false);
+pub fn set_mpu_force_unpriv(v: bool) { MPU_FORCE_UNPRIV.store(v, Ordering::Relaxed); }
+pub(crate) fn mpu_force_unpriv() -> bool { MPU_FORCE_UNPRIV.load(Ordering::Relaxed) }
+// CCR.UNALIGN_TRP cache for the access hot path (mem.rs must not do a
+// model read per access): refreshed on every SCB CCR write. Reset state
+// is clear, matching CCR reset.
+static UNALIGN_TRP: AtomicBool = AtomicBool::new(false);
+pub fn set_unalign_trp(v: bool) { UNALIGN_TRP.store(v, Ordering::Relaxed); }
+pub(crate) fn unalign_trp() -> bool { UNALIGN_TRP.load(Ordering::Relaxed) }
+// Deferred alignment-fault channel: like the MPU data path, the faulting
+// access completes dropped and the UsageFault raises before the next
+// fetch (one-instruction imprecision, documented; flags exact).
+static ALIGN_FAULT_VALID: AtomicBool = AtomicBool::new(false);
+static ALIGN_FAULT_ADDR: AtomicU32 = AtomicU32::new(0);
+pub fn pend_align_fault(addr: u32) {
+    if ALIGN_FAULT_VALID.load(Ordering::Relaxed) {
+        return;
+    }
+    ALIGN_FAULT_ADDR.store(addr, Ordering::Relaxed);
+    ALIGN_FAULT_VALID.store(true, Ordering::Release);
+}
+pub fn take_align_fault() -> Option<u32> {
+    if ALIGN_FAULT_VALID.swap(false, Ordering::Acquire) {
+        Some(ALIGN_FAULT_ADDR.load(Ordering::Relaxed))
+    } else {
+        None
+    }
+}
 // Deferred MPU data-fault channel (see cpu/mod.rs): FlatMemory latches a
 // violation (returning dummy/dropping the access); the run loop raises it
 // before the next fetch. One instruction may complete with dummy data —
@@ -761,6 +792,9 @@ pub fn reset_globals() {
     WATCHDOG_RESET_EVENT.store(false, Relaxed);
     MPU_ENABLED.store(false, Relaxed);
     MPU_FAULT_VALID.store(false, Relaxed);
+    ALIGN_FAULT_VALID.store(false, Relaxed);
+    UNALIGN_TRP.store(false, Relaxed);
+    set_mpu_force_unpriv(false);
     CURRENT_PRIV.store(true, Relaxed);
     CURRENT_HFNMI.store(false, Relaxed);
     CURRENT_IPSR.store(0, Relaxed);

@@ -2,7 +2,7 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=7';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=8';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
 import { FIRMWARES } from './firmware.js?v=8';
@@ -366,9 +366,9 @@ const boot = async () => {
         }
     } else {
         // ── local mode: WASM runs in the browser (default) ──
-        // NOTE (VENDOR_V): vendor asset versions (?v=7) must be bumped together
+        // NOTE (VENDOR_V): vendor asset versions (?v=8) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
-        const svdXml = await fetch('vendor/stm32f407.svd?v=7').then((r) => r.text());
+        const svdXml = await fetch('vendor/stm32f407.svd?v=8').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
@@ -378,7 +378,7 @@ const boot = async () => {
             firmware: fw,
             bindings,
             svdXml,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=7',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=8',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),

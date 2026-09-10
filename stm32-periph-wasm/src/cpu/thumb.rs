@@ -758,6 +758,36 @@ fn fault(c: &mut Cpu, pc: u32, op1: u16, op2: u16, l: u8) -> bool {
     c.fault = Some(super::CpuFault { pc, op1, op2, len: l });
     false
 }
+/// CCR.DIV_0_TRP handling for SDIV/UDIV with a zero divisor: latch
+/// DIVBYZERO (UFSR bit 9) and raise; trap clear returns 0 like silicon.
+/// Returns true when the divide must not execute (caller returns the
+/// fault state). PC is advanced first: the fault is precise at the next
+/// instruction, matching the other synchronous raises.
+fn div0_trap(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, pc: u32) -> bool {
+    if sys.p.read(sys, 0xE000ED14, 4) & (1 << 4) == 0 {
+        return false;
+    }
+    let cfsr = sys.p.read(sys, 0xE000ED28, 4);
+    sys.p.write(sys, 0xE000ED28, 4, cfsr | (1 << 25));
+    adv(cpu, pc, 4);
+    cpu.raise_sync(sys, mem, Cpu::usage_target(sys));
+    true
+}
+/// Holds the MPU unprivileged-override for exactly one access (LDRT/STRT
+/// probe as-unprivileged even in handler mode). Drop clears it, so every
+/// exit path — including the rt==15 faults/branches below — is covered.
+struct UnprivAccess;
+impl UnprivAccess {
+    fn arm() -> Self {
+        crate::system::set_mpu_force_unpriv(true);
+        Self
+    }
+}
+impl Drop for UnprivAccess {
+    fn drop(&mut self) {
+        crate::system::set_mpu_force_unpriv(false);
+    }
+}
 /// Interworking branch. An EXC_RETURN value performs an exception return
 /// through the stacked context instead. The mask ignores bit 4 (FType):
 /// FP-extended returns (0xFFFFFFE9/0xFFFFFFED) must route here exactly like
@@ -1405,7 +1435,7 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
             return fault(cpu, pc, op, 0, 2);
         }
         adv(cpu, pc, 2);
-        cpu.raise_sync(sys, mem, -5, true);
+        cpu.raise_sync(sys, mem, -5);
         return cpu.fault.is_none();
     }
     if o & 0xFF00 == 0xDE00 {
@@ -1776,8 +1806,14 @@ pub fn exec32(
                 }
                 20 => {
                     // MSR CONTROL: an SPSEL change switches the current stack
-                    // (hardware swaps r13 with the other bank).
-                    let v = v & 3;
+                    // (hardware swaps r13 with the other bank). From
+                    // unprivileged Thread mode the nPRIV/SPSEL bits are
+                    // ignored (no escalation by MSR); privileged writes go
+                    // through (the MPU-test unpriv/priv dance proves both).
+                    let mut v = v & 3;
+                    if cpu.ipsr == 0 && cpu.regs.control & 1 != 0 {
+                        v = cpu.regs.control & 3;
+                    }
                     if (v ^ cpu.regs.control) & 2 != 0 {
                         if v & 2 != 0 {
                             cpu.regs.msp = cpu.regs.r[13];
@@ -2152,7 +2188,11 @@ pub fn exec32(
             adv(cpu, pc, 4);
             return true;
         }
-        // imm8 P/U/W form
+        // imm8 P/U/W form. op2[11:8]==0xE marks the unprivileged T-variants
+        // (LDRBT/LDRHT/STRBT/STRHT/LDRT/STRT/LDRSBT/LDRSHT — GAS tform.s:
+        // privileged PUW uses 0xB/0xC/0xF, never 0xE), which probe memory
+        // as-unprivileged even in handler mode. Address/direction decode
+        // identically; only the MPU privilege differs.
         let p = (o2 >> 10) & 1;
         let u = (o2 >> 9) & 1;
         let w = (o2 >> 8) & 1;
@@ -2160,6 +2200,7 @@ pub fn exec32(
         let off = if u == 1 { imm8 } else { imm8.wrapping_neg() };
         let base = rr(cpu, rn, pc);
         let addr = if p == 1 { base.wrapping_add(off) } else { base };
+        let _unpriv = if (o2 & 0xF00) == 0xE00 { Some(UnprivAccess::arm()) } else { None };
         if is_load {
             let v = match size {
                 1 => mem.read8(addr) as u32,
@@ -2890,6 +2931,9 @@ pub fn exec32(
                 // dividend itself — DOOM's (10*168/10) stayed 1680).
                 if o2 & 0xF0F0 == 0xF0F0 {
                     let b = rr(cpu, rm, pc) as i32;
+                    if b == 0 && div0_trap(cpu, sys, mem, pc) {
+                        return cpu.fault.is_none();
+                    }
                     cpu.regs.r[rd] = if b == 0 {
                         0
                     } else {
@@ -2922,6 +2966,9 @@ pub fn exec32(
                 // UDIV (1111_Rd_1111_Rm) or UMLAL
                 if o2 & 0xF0F0 == 0xF0F0 {
                     let b = rr(cpu, rm, pc);
+                    if b == 0 && div0_trap(cpu, sys, mem, pc) {
+                        return cpu.fault.is_none();
+                    }
                     cpu.regs.r[rd] = if b == 0 { 0 } else { rr(cpu, rn, pc) / b };
                     adv(cpu, pc, 4);
                     return true;
@@ -2976,6 +3023,9 @@ pub fn exec32(
                 // SDIV or SMLSLD: SDIV has the same F:F op2 shape
                 if o2 & 0xF0F0 == 0xF0F0 {
                     let b = rr(cpu, rm, pc) as i32;
+                    if b == 0 && div0_trap(cpu, sys, mem, pc) {
+                        return cpu.fault.is_none();
+                    }
                     cpu.regs.r[rd] = if b == 0 {
                         0
                     } else {
@@ -3399,15 +3449,18 @@ pub fn exec32(
         if (o2 >> 8) & 0xF != 0xA && (o2 >> 8) & 0xF != 0xB {
             return fault(cpu, pc, op1, op2, 4);
         }
-        // CPACR gate: CP10+CP11 need full access AND FPEXC.EN set, else
-        // UsageFault NOCP (UFSR bit 3 = CFSR bit 19 latched; without
-        // delivery this is a loud fault like SVC — polling firmware never
-        // touches the FPU without enabling it, so hitting this is a bug
-        // worth surfacing). Without SHCSR.USGFAULTENA it escalates to
-        // HardFault. Each successful FPU arm sets CONTROL.FPCA
-        // like hardware (drives lazy stacking on exception entry).
+        // CPACR gate: CP10+CP11 need full access AND FPEXC.EN set, plus
+        // FPCCR.USER for unprivileged use — else UsageFault NOCP (UFSR
+        // bit 3 = CFSR bit 19 latched; without delivery this is a loud
+        // fault like SVC — polling firmware never touches the FPU without
+        // enabling it, so hitting this is a bug worth surfacing). Without
+        // SHCSR.USGFAULTENA it escalates to HardFault. Each successful FPU
+        // arm sets CONTROL.FPCA like hardware (drives lazy stacking on
+        // exception entry).
         let cpacr_ok = sys.p.read(sys, 0xE000ED88, 4) & 0x00F0_0000 == 0x00F0_0000;
-        if !cpacr_ok || !sys.p.fpu_fpexc_en() {
+        let fpccr = sys.p.read(sys, 0xE000EF34, 4);
+        let user_ok = crate::system::current_privileged() || fpccr & 2 != 0;
+        if !cpacr_ok || !sys.p.fpu_fpexc_en() || !user_ok {
             let cfsr = sys.p.read(sys, 0xE000ED28, 4);
             sys.p.write(sys, 0xE000ED28, 4, cfsr | 0x0008_0000);
             if !cpu.deliver_irqs {
@@ -3415,7 +3468,7 @@ pub fn exec32(
             }
             adv(cpu, pc, 4);
             let target = if sys.p.read(sys, 0xE000ED24, 4) & (1 << 18) != 0 { -10 } else { -13 };
-            cpu.raise_sync(sys, mem, target, true);
+            cpu.raise_sync(sys, mem, target);
             return cpu.fault.is_none();
         }
         // Lazy-stacking completion: a pending lazy FP context (LSPACT set
