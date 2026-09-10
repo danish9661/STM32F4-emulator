@@ -127,6 +127,7 @@ impl Cpu {
     pub fn new(sp: u32, pc: u32) -> Self {
         // Fresh CPU boots privileged in thread mode (CONTROL reset = 0).
         crate::system::set_cpu_context(true, false);
+        crate::system::set_current_ipsr(0);
         // Native tests share one process: a previous test's MPU state must
         // not leak into this instance (the fresh SYS has CTRL=0 regions).
         crate::system::set_mpu_enabled(false);
@@ -163,6 +164,7 @@ impl Cpu {
         self.sleeping = false;
         self.event_register = false;
         crate::system::set_cpu_context(true, false);
+        crate::system::set_current_ipsr(0);
         // A reboot must not inherit a deferred fault from the old run.
         let _ = crate::system::take_mpu_fault();
     }
@@ -418,6 +420,14 @@ impl Cpu {
         // ARM frame layout (low->high): R0-R3, R12, LR, PC, xPSR (+0..28),
         // then (extended only) S0-S15 (+32..92), FPSCR (+96), RESERVED.
         sp = sp.wrapping_sub(if fp_ext { 104 } else { 32 });
+        // STKALIGN (CCR bit 9, silicon reset 1): 8-byte-align the frame,
+        // padding one word below it and flagging xPSR bit 9 (the return
+        // path skips the pad from the stacked xPSR).
+        let mut pad = 0u32;
+        if sys.p.read(sys, 0xE000ED14, 4) & (1 << 9) != 0 && sp & 4 != 0 {
+            sp = sp.wrapping_sub(4);
+            pad = 4;
+        }
         // Stacking is privileged even when the thread is unprivileged
         // (silicon rule), so publish handler context BEFORE the
         // pre-validation: the frame check must use handler privilege.
@@ -428,12 +438,15 @@ impl Cpu {
         // impossible — the stack needed to take an exception is itself
         // broken, unrecoverable by construction).
         if crate::system::is_mpu_enabled()
-            && sys.p.mpu_check(sp, if fp_ext { 104 } else { 32 }, true, false).is_some()
+            && sys.p.mpu_check(sp, (if fp_ext { 104 } else { 32 }) + pad, true, false).is_some()
         {
             crate::system::latch_memmanage_fault(sys, 1 << 4, None);
             self.fault = Some(CpuFault { pc: self.regs.r[15] & !1, op1: 0xDEAD, op2: 0, len: 2 });
             return;
         }
+        // Frame base sits above the pad word (all store offsets below are
+        // from here; r13/MSP keep the post-pad SP so the return advance
+        // covers frame+pad together).
         // Save IT state; the handler starts with a clean ITSTATE.
         self.it_stack.push(SavedIt {
             cond: self.it_cond,
@@ -459,8 +472,9 @@ impl Cpu {
         mem.write32(sp.wrapping_add(16), self.regs.r[12]);
         mem.write32(sp.wrapping_add(20), self.regs.r[14]);
         mem.write32(sp.wrapping_add(24), self.regs.r[15]);
-        // xPSR with the T-bit set (R0 landed lowest, xPSR highest).
-        let xpsr = self.regs.xpsr | 0x01000000;
+        // xPSR with the T-bit set (R0 landed lowest, xPSR highest), plus
+        // the ALIGN pad flag (bit 9) when STKALIGN padded above.
+        let xpsr = self.regs.xpsr | 0x01000000 | if pad != 0 { 0x200 } else { 0 };
         mem.write32(sp.wrapping_add(28), xpsr);
         // Handler mode always runs on MSP.
         self.regs.r[13] = self.regs.msp;
@@ -518,6 +532,15 @@ impl Cpu {
         // Exception entry sets the local event register (a WFE after this
         // ISR must observe the event and skip sleep).
         self.event_register = true;
+        crate::system::set_current_ipsr(vector);
+        Self::set_shcsr_active(sys, irq);
+        // Activation clears a stored ICSR SET-pending bit (the model
+        // pending bit cleared at take time; without this ICSR reads stale).
+        if irq == -2 {
+            sys.p.write(sys, 0xE000ED04, 4, 1 << 27); // PENDSVCLR
+        } else if irq == -1 {
+            sys.p.write(sys, 0xE000ED04, 4, 1 << 25); // SYSTICKCLR
+        }
         // (CPU privilege context was already published as handler-privileged
         // before the stacking pre-validation above.)
         sys.p.nvic.borrow_mut().set_in_interrupt(true);
@@ -591,6 +614,7 @@ impl Cpu {
         }
         let returned = self.exc_stack.pop().unwrap();
         sys.p.nvic.borrow_mut().clear_active(returned.irq);
+        Self::clear_shcsr_active(sys, returned.irq);
         // Tail-chain: a ready exception reuses this frame instead of paying
         // unstack + re-stack (silicon skips both). Only when the incoming
         // handler needs the same frame size the returnee reserved; an FP
@@ -634,7 +658,9 @@ impl Cpu {
         let lr = mem.read32(sp.wrapping_add(20));
         let retpc = mem.read32(sp.wrapping_add(24));
         let xpsr = mem.read32(sp.wrapping_add(28));
-        sp = sp.wrapping_add(32);
+        // STKALIGN pad word below the frame, flagged by stacked xPSR bit 9
+        // (set on entry when the pre-push SP was only 4-aligned).
+        sp = sp.wrapping_add(32 + if xpsr & 0x200 != 0 { 4 } else { 0 });
         if extended {
             // FP-extended frame: S0-S15 at sp+0..60, FPSCR at sp+64 (sp
             // already advanced past the integer 8 words). Lazy-never-
@@ -673,7 +699,11 @@ impl Cpu {
             // Nested return: the outer handler is still active (r13 stays
             // MSP, CONTROL.SPSEL untouched — handler mode either way).
             match self.exc_stack.last() {
-                Some(outer) => self.ipsr = (16 + outer.irq) as u32,
+                Some(outer) => {
+                    let outer_vector = (16 + outer.irq) as u32;
+                    self.ipsr = outer_vector;
+                    crate::system::set_current_ipsr(outer_vector);
+                }
                 None => {
                     // F1 with nothing active: forged LR, fault loudly.
                     Self::latch_invpc(sys);
@@ -700,6 +730,7 @@ impl Cpu {
             self.regs.control &= !2;
         }
         self.ipsr = 0;
+        crate::system::set_current_ipsr(0);
         // Thread privilege follows CONTROL.nPRIV from here on (handlers
         // always return to unprivileged-safe state only via explicit MSR).
         crate::system::set_cpu_context((self.regs.control & 1) == 0, false);
@@ -723,6 +754,39 @@ impl Cpu {
     fn latch_invpc(sys: &WasmSystem) {
         let cfsr = sys.p.read(sys, 0xE000ED28, 4);
         sys.p.write(sys, 0xE000ED28, 4, cfsr | (1 << 10));
+    }
+
+    /// SHCSR active bit for a system handler (MemManage bit 0, BusFault 1,
+    /// UsageFault 3, SVCall 7, PendSV 10, SysTick 11). External IRQs use
+    /// NVIC IABR instead (maintained separately).
+    fn shcsr_act_bit(irq: i32) -> u32 {
+        match irq {
+            -12 => 1 << 0,
+            -11 => 1 << 1,
+            -10 => 1 << 3,
+            -5 => 1 << 7,
+            -2 => 1 << 10,
+            -1 => 1 << 11,
+            _ => 0,
+        }
+    }
+
+    /// Set/clear the SHCSR active bit on entry/return (read-modify-write
+    /// so guest-written SHCSR bits are preserved).
+    fn set_shcsr_active(sys: &WasmSystem, irq: i32) {
+        let b = Self::shcsr_act_bit(irq);
+        if b != 0 {
+            let s = sys.p.read(sys, 0xE000ED24, 4);
+            sys.p.write(sys, 0xE000ED24, 4, s | b);
+        }
+    }
+
+    fn clear_shcsr_active(sys: &WasmSystem, irq: i32) {
+        let b = Self::shcsr_act_bit(irq);
+        if b != 0 {
+            let s = sys.p.read(sys, 0xE000ED24, 4);
+            sys.p.write(sys, 0xE000ED24, 4, s & !b);
+        }
     }
 
     /// UsageFault target honoring SHCSR.USGFAULTENA (bit 18): without it
@@ -788,6 +852,13 @@ impl Cpu {
         };
         self.ipsr = vector;
         self.event_register = true;
+        crate::system::set_current_ipsr(vector);
+        Self::set_shcsr_active(sys, irq);
+        if irq == -2 {
+            sys.p.write(sys, 0xE000ED04, 4, 1 << 27); // PENDSVCLR
+        } else if irq == -1 {
+            sys.p.write(sys, 0xE000ED04, 4, 1 << 25); // SYSTICKCLR
+        }
         crate::system::set_cpu_context(true, irq == -13 || irq == -14);
         sys.p.nvic.borrow_mut().set_in_interrupt(true);
         let vtor = sys.p.read(sys, 0xE000ED08, 4);

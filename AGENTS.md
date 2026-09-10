@@ -2479,10 +2479,45 @@ register-shift-by-0 is a no-op (not imm-#0-means-32).
   low half AND the store mask kept the high half — PRIGROUP/SYSRESETREQ
   never applied); SEV event register modeled (SEV sets, WFE consumes,
   entry/return set; wake stays eager, entry predicate-gated). 5 more
-  native tests (16 total). Deliberately still out: ITM (dropped
+  native tests (16 interrupt tests; 21 with the audit pass below). Deliberately still out: ITM (dropped
   reads-as-0, writes ignored — matches a debugger-disconnected target:
   CMSIS ITM_SendChar gates on TCR/TER, both reset 0 here, so stimulus can
   neither send nor spin; no trace port exists to sink packets into).
+
+### M4 CPU completeness audit (2026-09-10) — method + verdict
+Prompted by reuse for micro:bit v2 (nRF52833, M4F) and UNO R4 (RA4M1;
+verified M4F, not M33). Method: family-by-family decoder census against
+the ARMv7-M set (every parallel/Q/saturating/DSP/ext-add/mul/misc family
+grep-verified as GAS-probed implementations, e.g. QASX/SHASX, SMLALD/
+SMLSLD, UMAAL, SXTAH16-class, SEL, RBIT, CLZ) plus system-item checks in
+code, closed by the execution battery (cargo + full device sweep).
+Verdict: the M4 core is complete except the approximations below — all
+deliberate, all documented, none reachable by compiler-emitted code.
+- Closed in this pass (each with a native test): CPS F-target went to
+  PRIMASK instead of FAULTMASK; STKALIGN (CCR reset now 0x200, align-down
+  on take, xPSR[9] pad, skip on return); SHCSR active bits RMW on
+  take/return; ICSR.VECTACTIVE via a tracked-IPSR global; ICSR SET-bit
+  staleness (take clears stored bit, reads compose live model state);
+  NVIC IPR word arms (single-byte arm dropped bytes 1-3).
+- Loud-by-policy (fault stops the run instead of taking a guest fault —
+  surfaces decoder/model gaps instead of hanging in a default handler):
+  UNDEFINSTR (bad opcode), BKPT. Any valid encoding that reaches these
+  is a bug in us, not the firmware.
+- Ignored opt-in traps (default behavior is bit-exact; firmware must
+  opt in, none does): CCR.UNALIGN_TRP / DIV_0_TRP, FPCCR.USER (unpriv FPU
+  always allowed), SCB.USERSETMPEND / NONBASETHRDENA.
+- Structural simplifications: LDRT/STRT execute as privileged LDR/STR
+  (compilers never emit them; only hand-written MPU kernels differ);
+  BusFault can never occur (no bus matrix to error); exclusive monitors
+  always succeed (single core); MPU memory types ignored (no caches);
+  PRIGROUP/BASEPRI compared raw in group space (exact under the CMSIS
+  shifted-value convention); SEVONPEND subsumed by entry-always-sets
+  (differs only for pending-without-entry before WFE).
+- Debug/trace (no consumer in this emulator): DWT counters beyond CYCCNT
+  read 0, FPB/ETM/TPIU unmapped-benign, ITM RAZ/WI (see above), STIR
+  unmapped-benign (writes ignored, no fault — revisit if firmware ever
+  software-triggers IRQs), SysTick CALIB reads 0 (nobody uses it;
+  Arduino/Nordic time from LOAD + core clock).
 - Native tests: `exception_svc_roundtrip`, `freertos_tasks_run` (SVC start,
   PendSV switches, TIM2 ISR sem, TASK1/2 ticks); `cargo test` 55/55.
 - `site/probe_freertos_wasm.mjs`: PROBE PASS (4 TCBs; 37k batches + 3×500-inst

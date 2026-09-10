@@ -1321,10 +1321,17 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         adv(cpu, pc, 2);
         return true;
     }
-    // CPS (primask). SETEND faults (never emitted by firmware).
+    // CPS (PRIMASK/FAULTMASK). Bit 4 is the value (id=1/ie=0), bit 0 the
+    // target (i=PRIMASK/f=FAULTMASK): cpsid f is B673, cpsie i is B662.
+    // SETEND faults (never emitted by firmware).
     if o & 0xFF00 == 0xB600 {
         if o & 0x20 != 0 {
-            cpu.regs.primask = (o >> 4) & 1;
+            let v = (o >> 4) & 1;
+            if o & 1 != 0 {
+                cpu.regs.faultmask = v != 0;
+            } else {
+                cpu.regs.primask = v;
+            }
             adv(cpu, pc, 2);
             return true;
         }

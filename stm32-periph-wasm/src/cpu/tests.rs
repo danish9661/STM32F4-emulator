@@ -2253,3 +2253,114 @@ fn exception_entry_return_sets_event() {
     assert!(cpu.exception_return(sys, &mut mem, lr, cpu.regs.r[15] & !1));
     assert!(cpu.event_register, "return sets the event");
 }
+
+#[test]
+fn cps_faultmask_target() {
+    // CPSID F (B673) sets FAULTMASK, leaving PRIMASK alone; CPSIE I (B662)
+    // still drives PRIMASK. Bit 4 is the value, bit 0 the target.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write16(0x20002000, 0xB673); // cpsid f
+    mem.write16(0x20002002, 0xB663); // cpsie f
+    mem.write16(0x20002004, 0xB672); // cpsid i
+    mem.write16(0x20002006, 0xE7FE);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    no_fault(&cpu, &mem);
+    assert!(cpu.regs.faultmask, "CPSID F sets FAULTMASK");
+    assert_eq!(cpu.regs.primask, 0, "PRIMASK untouched by F-target");
+    cpu.run(sys, &mut mem, 1);
+    assert!(!cpu.regs.faultmask, "CPSIE F clears FAULTMASK");
+    cpu.run(sys, &mut mem, 1);
+    assert_eq!(cpu.regs.primask, 1, "CPSID I still drives PRIMASK");
+}
+
+#[test]
+fn stkalign_pads_and_roundtrips() {
+    // CCR reset carries STKALIGN=1: an entry from a 4-but-not-8-aligned PSP
+    // pads one word (xPSR bit 9 set) and the return skips it exactly.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    assert_ne!(mem.read32(0xE000ED14) & (1 << 9), 0, "STKALIGN reset set");
+    cpu.deliver_irqs = true;
+    cpu.regs.control |= 2;
+    cpu.regs.psp = 0x200013E4;
+    cpu.regs.r[13] = 0x200013E4;
+    cpu.regs.r[0] = 0xDEADBEEF;
+    cpu.take_exception(sys, &mut mem, 0);
+    assert_eq!(cpu.regs.r[13] & 7, 0, "post-push SP 8-aligned");
+    // Frame R0 sits at the aligned SP; stacked xPSR flags the pad.
+    assert_eq!(mem.read32(0x200013C0), 0xDEADBEEF, "R0 at aligned base");
+    assert_ne!(mem.read32(0x200013DC) & 0x200, 0, "xPSR ALIGN bit");
+    let lr = cpu.regs.r[14];
+    assert_eq!(lr, super::EXC_RETURN_PSP, "PSP thread entry");
+    assert!(cpu.exception_return(sys, &mut mem, lr, cpu.regs.r[15] & !1));
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[13], 0x200013E4, "SP fully restored past pad");
+    assert_eq!(cpu.regs.r[0], 0xDEADBEEF, "regs round-tripped");
+    assert_eq!(cpu.ipsr, 0);
+}
+
+#[test]
+fn stkalign_disabled_no_pad() {
+    // With STKALIGN cleared, odd-aligned entry stacks tight, no pad flag.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000ED14, 0); // clear STKALIGN
+    cpu.regs.control |= 2;
+    cpu.regs.psp = 0x200013E4;
+    cpu.regs.r[13] = 0x200013E4;
+    cpu.regs.r[0] = 0x12345678;
+    cpu.take_exception(sys, &mut mem, 0);
+    assert_eq!(mem.read32(0x200013C4), 0x12345678, "R0 at unpadded base");
+    assert_eq!(mem.read32(0x200013E0) & 0x200, 0, "no ALIGN flag");
+    let lr = cpu.regs.r[14];
+    assert!(cpu.exception_return(sys, &mut mem, lr, cpu.regs.r[15] & !1));
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[13], 0x200013E4, "SP restored");
+}
+
+#[test]
+fn shcsr_active_bits_track_handlers() {
+    // SHCSR active bits set on entry, clear on return (PendSV bit 10 here).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    assert_eq!(mem.read32(0xE000ED24) & (1 << 10), 0, "PENDSVACT reset clear");
+    cpu.take_exception(sys, &mut mem, -2);
+    assert_ne!(mem.read32(0xE000ED24) & (1 << 10), 0, "PENDSVACT set on entry");
+    // Guest-written SHCSR bits elsewhere survive the RMW.
+    mem.write32(0xE000ED24, mem.read32(0xE000ED24) | (1 << 16));
+    let lr = cpu.regs.r[14];
+    assert!(cpu.exception_return(sys, &mut mem, lr, cpu.regs.r[15] & !1));
+    no_fault(&cpu, &mem);
+    let shcsr = mem.read32(0xE000ED24);
+    assert_eq!(shcsr & (1 << 10), 0, "PENDSVACT clear on return");
+    assert_ne!(shcsr & (1 << 16), 0, "MEMFAULTENA preserved");
+}
+
+#[test]
+fn icsr_vectactive_and_set_clear() {
+    // ICSR low bits show the live exception; taking PendSV clears a stored
+    // PENDSVSET bit instead of going stale.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    assert_eq!(mem.read32(0xE000ED04) & 0x1FF, 0, "thread VECTACTIVE=0");
+    cpu.take_exception(sys, &mut mem, -2);
+    assert_eq!(mem.read32(0xE000ED04) & 0x1FF, 14, "VECTACTIVE=PendSV");
+    let lr = cpu.regs.r[14];
+    assert!(cpu.exception_return(sys, &mut mem, lr, cpu.regs.r[15] & !1));
+    assert_eq!(mem.read32(0xE000ED04) & 0x1FF, 0, "back to thread");
+    // Stored SET bit clears on activation (was stale-forever before).
+    mem.write32(0xE000ED04, 1 << 28); // PENDSVSET via ICSR
+    assert_ne!(mem.read32(0xE000ED04) & (1 << 28), 0, "SET bit stored");
+    cpu.take_exception(sys, &mut mem, -2);
+    assert_eq!(mem.read32(0xE000ED04) & (1 << 28), 0, "SET cleared by take");
+}

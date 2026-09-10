@@ -41,6 +41,12 @@ pub fn set_cpu_context(priv_: bool, hfnmi: bool) {
     CURRENT_PRIV.store(priv_, Ordering::Relaxed);
     CURRENT_HFNMI.store(hfnmi, Ordering::Relaxed);
 }
+// Live exception number for ICSR.VECTACTIVE (SCB reads have no CPU
+// handle, like the privilege cache above). Updated at every take/chain/
+// return alongside ipsr; 0 in thread mode.
+static CURRENT_IPSR: AtomicU32 = AtomicU32::new(0);
+pub fn current_ipsr() -> u32 { CURRENT_IPSR.load(Ordering::Relaxed) }
+pub fn set_current_ipsr(v: u32) { CURRENT_IPSR.store(v, Ordering::Relaxed); }
 // Deferred MPU data-fault channel (see cpu/mod.rs): FlatMemory latches a
 // violation (returning dummy/dropping the access); the run loop raises it
 // before the next fetch. One instruction may complete with dummy data —
@@ -757,6 +763,7 @@ pub fn reset_globals() {
     MPU_FAULT_VALID.store(false, Relaxed);
     CURRENT_PRIV.store(true, Relaxed);
     CURRENT_HFNMI.store(false, Relaxed);
+    CURRENT_IPSR.store(0, Relaxed);
     ETH_TX_POLL.store(false, Relaxed);
     ETH_RX_POLL.store(false, Relaxed);
     ETH_DONE.store(0, Relaxed);

@@ -27,6 +27,11 @@ impl Default for Scb {
             vtor: 0x0800_0000,
             aircr: 0xFA05_0000,
             shcsr: 0x0000_0000,
+            // CCR reset: STKALIGN=1 (bit 9) like silicon — exception entry
+            // 8-byte-aligns the stack. UNALIGN_TRP/DIV_0_TRP reset 0 (our
+            // lenient divide/unaligned behavior matches that default; the
+            // opt-in trap bits are accepted on write but not enforced).
+            ccr: 0x0000_0200,
             ..unsafe { std::mem::zeroed() }
         }
     }
@@ -76,12 +81,15 @@ impl Scb {
         if value & (1 << 26) != 0 {
             sys.p.nvic.borrow_mut().set_intr_pending(irq::SYSTICK);
         }
-        // Clear-pending
+        // Clear-pending (also clears the stored SET bit so ICSR reads track
+        // the model instead of going stale after a take).
         if value & (1 << 25) != 0 {
             sys.p.nvic.borrow_mut().clear_pending(irq::SYSTICK);
+            self.icsr &= !(1 << 26);
         }
         if value & (1 << 27) != 0 {
             sys.p.nvic.borrow_mut().clear_pending(irq::PENDSV);
+            self.icsr &= !(1 << 28);
         }
         self.icsr = (self.icsr & 0xE01F_FFFF) | (value & 0x1FE0_0000) | (value & 0x1FF);
     }
@@ -106,9 +114,19 @@ impl Peripheral for Scb {
                 (implementer << 24) | (variant << 20) | (part << 4) | revision
             }
             0x04 => {
-                // ICSR: current pending vector, etc.
+                // ICSR: live VECTACTIVE (low 9 bits, from the CPU's tracked
+                // IPSR) plus the stored flag bits and current pend vector.
+                // SET-pending bits track live model state (a stored SET bit
+                // alone would read stale after a take cleared the model).
                 let mut v = self.icsr & 0xE01F_FFFF;
                 v |= (_sys.p.nvic.borrow().get_pending_vector()) << 16;
+                v |= crate::system::current_ipsr() & 0x1FF;
+                if _sys.p.nvic.borrow().irq_pending(-2) {
+                    v |= 1 << 28; // PENDSVSET live
+                }
+                if _sys.p.nvic.borrow().irq_pending(-1) {
+                    v |= 1 << 26; // SYSTICKSET live
+                }
                 v
             }
             0x08 => self.vtor,
