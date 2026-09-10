@@ -1478,14 +1478,21 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
             return true;
         }
         // WFE: like WFI, but a registered event (SEV, or a recent exception
-        // entry/return) means clear-and-continue with no sleep.
+        // entry/return) means clear-and-continue with no sleep. SEVONPEND
+        // (SCR bit 4) additionally wakes on any enabled-pending exception,
+        // even one that could never be entered from here.
         if op == 0xBF20 {
             adv(cpu, pc, 2);
             if cpu.deliver_irqs {
                 if cpu.event_register {
                     cpu.event_register = false;
-                } else if cpu.select_pending_for_sleep(sys) {
-                    cpu.sleeping = true;
+                } else {
+                    let sevonpend = sys.p.read(sys, 0xE000ED10, 4) & (1 << 4) != 0;
+                    let pending_wake =
+                        sevonpend && sys.p.nvic.borrow().has_pending();
+                    if !pending_wake && cpu.select_pending_for_sleep(sys) {
+                        cpu.sleeping = true;
+                    }
                 }
             }
             return true;

@@ -2704,3 +2704,58 @@ fn dwt_exccnt_counts_takes() {
     no_fault(&cpu, &mem);
     assert_eq!(mem.read32(0xE000100C), 2, "two TRCENA-gated takes counted");
 }
+
+#[test]
+fn unaligned_device_faults_without_trap() {
+    // MPU Device region (TEX=0,C=0,B=1), TRP clear: an odd halfword access
+    // still faults (the one observable memory-type rule). strh.w r2,[r5,#1]
+    // is F8A5 2001 (GAS: T2 imm12 class, like ldrh.w F8B5 2001).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000ED24, 1 << 18); // USGFAULTENA
+    mem.write32(0xE000ED98, 4);
+    mem.write32(0xE000ED9C, 0x20002004); // R4: 32B @0x20002000
+    mem.write32(0xE000EDA0, 0x03010009); // FULL, TEX=0,C=0,B=1 Device
+    mem.write32(0xE000ED94, 0x5); // ENABLE|PRIVDEFENA
+    mem.write16(0x20002100, 0xF8A5);
+    mem.write16(0x20002102, 0x2001); // strh.w r2,[r5,#1]
+    mem.write16(0x20002104, 0xE7FE);
+    cpu.regs.r[5] = 0x20002000;
+    cpu.regs.r[2] = 0xBE;
+    cpu.regs.r[15] = 0x20002101;
+    cpu.run(sys, &mut mem, 12);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 0, "UsageFault handler returned");
+    assert_eq!(mem.read32(0x20001000), 1, "UsageFault vector (A) ran");
+    assert_ne!(mem.read32(0xE000ED28) & (1 << 24), 0, "UNALIGNED sticky");
+}
+
+#[test]
+fn sevonpend_pending_wakes_wfe() {
+    // SEVONPEND=1: a masked-but-enabled pending IRQ wakes WFE (no sleep,
+    // no take); with the bit clear the same setup sleeps. WFE=BF20.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000E100, 0x2); // ISER0: IRQ1
+    mem.write32(0xE000E400, 0x00004000); // IPR: B=0x40
+    sys.p.nvic.borrow_mut().set_intr_pending(1);
+    cpu.regs.basepri = 0x40; // masks B (group-equal)
+    mem.write32(0xE000ED10, 1 << 4); // SCR.SEVONPEND
+    mem.write16(0x20002000, 0xBF20); // wfe
+    mem.write16(0x20002002, 0xE7FE);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 2);
+    no_fault(&cpu, &mem);
+    assert!(!cpu.sleeping, "SEVONPEND pending wakes WFE");
+    assert_eq!(cpu.regs.r[15] & !1, 0x20002002, "continued past WFE");
+    assert_eq!(cpu.ipsr, 0, "masked IRQ not taken");
+    mem.write32(0xE000ED10, 0); // SEVONPEND clear
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 2);
+    no_fault(&cpu, &mem);
+    assert!(cpu.sleeping, "same setup sleeps without SEVONPEND");
+}

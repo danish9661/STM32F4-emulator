@@ -2514,6 +2514,13 @@ deliberate, all documented, none reachable by compiler-emitted code.
   cleanly); ITM port-0 stimulus to the UART console when TCR.ITMENA +
   TER[0] (gated, zero effect otherwise); DWT EXCCNT counts takes under
   TRCENA.
+- Closed in the fourth pass (the "nothing is impossible" sweep — each
+  residue re-examined, each survivor implemented or else proven
+  vacuous): unaligned *Device* access faults via the MPU TEX/S/C/B
+  attribute (the one observable memory-type rule — shareable Device
+  TEX=0,C=0,B=1 or Device TEX=2; background is Normal); SEVONPEND
+  pending-wakes-WFE (SCR bit 4 + any enabled-pending exception skips
+  sleep, no take needed).
 - Loud-by-policy (fault stops the run instead of taking a guest fault —
   surfaces decoder/model gaps instead of hanging in a default handler):
   UNDEFINSTR (bad opcode), BKPT. Any valid encoding that reaches these
@@ -2540,10 +2547,9 @@ deliberate, all documented, none reachable by compiler-emitted code.
      read inert-0 (the fsmc_test BANK4 probe), which caught an
      `is_periph` window that was 128KB short the moment BusFaults went
      live — proof the battery earns its keep.
-  3. Genuinely uncertain (will not be implemented from memory):
-     unaligned *Device* access (needs MPU type info plus a rule nobody
-     can cite exactly); SEVONPEND's pending-without-entry edge (entry-
-     always-sets covers every taken interrupt).
+  3. Genuinely uncertain: nothing left. The last two candidates
+     (unaligned-Device rule, SEVONPEND pending edge) were both resolved
+     above — the bucket is empty by construction now, not by declaration.
   Also documented as checked-and-correct (not gaps): MPU subregions
   below 256B are UNPREDICTABLE on silicon and deny-closed here; reset
   values match silicon (VTOR/CONTROL/PRIMASK/BASEPRI/FAULTMASK/FPSCR/

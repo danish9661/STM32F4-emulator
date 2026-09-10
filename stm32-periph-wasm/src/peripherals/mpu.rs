@@ -70,6 +70,29 @@ impl Mpu {
         None
     }
 
+    /// Device-memory attribute of the highest matching region, from RASR
+    /// TEX/S/C/B: shareable Device (TEX=0,C=0,B=1) or Device (TEX=2).
+    /// The only observable use of memory types in an interpreter is the
+    /// unaligned-Device rule (no caches exist to do anything else with
+    /// them); everything else stays type-blind by design.
+    fn region_is_device(&self, idx: usize) -> bool {
+        let rasr = self.rasr[idx];
+        let tex = (rasr >> 19) & 7;
+        let c = (rasr >> 17) & 1;
+        let b = (rasr >> 16) & 1;
+        (tex == 0 && c == 0 && b == 1) || tex == 2
+    }
+
+    /// Whether `addr` is Device memory under the highest matching region
+    /// (false with the MPU off or unmatched — background Normal for the
+    /// memory paths that consult this).
+    pub fn is_device(&self, addr: u32) -> bool {
+        match self.highest_match(addr) {
+            Some(i) => self.region_is_device(i),
+            None => false,
+        }
+    }
+
     /// AP-field permission: (read/write x priv) per ARMv7-M. 0b100
     /// (UNPREDICTABLE) and 0b111 (reserved) deny everything.
     fn ap_allows(ap: u32, write: bool, priv_: bool) -> bool {

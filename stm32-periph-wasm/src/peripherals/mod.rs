@@ -182,6 +182,24 @@ impl Peripherals {
         // No MPU slot (minimal map): fail open.
         None
     }
+
+    /// Device-memory query for the unaligned-Device rule (see Mpu): false
+    /// with the MPU off, unmatched, or slotless (background Normal for
+    /// the memory paths that consult this).
+    pub fn mpu_is_device(&self, addr: u32) -> bool {
+        if !crate::system::is_mpu_enabled() {
+            return false;
+        }
+        for slot in &self.peripherals {
+            if slot.start == 0xE000_ED90 {
+                if let Some(mpu) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Mpu>() {
+                    return mpu.is_device(addr);
+                }
+                break;
+            }
+        }
+        false
+    }
 }
 
 fn extract_svd_max_offset(p: &PeripheralInfo) -> u32 {

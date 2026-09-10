@@ -471,15 +471,15 @@ save-slot menu → name char 'a' (0x61) + Enter → asserts the firmware's
 | test_fpuirq | fpu_irq_test | VFPv4-SP/SysTick/NVIC | `FPU IRQ all PASS`, `S0 11111111 ok`, `FPSCR 00000000 ok` |
 | test_mpu | mpu_test | MPU/SCB | `MPU all PASS`, `MPU done`, exact MMFSR/MMFAR per probe |
 
-Plus the Rust unit suite: `cargo test` (131 tests — CPU/decoder incl. FPU
-encoding/semantics/stacking tests and 32 interrupt/system-fidelity tests
+Plus the Rust unit suite: `cargo test` (133 tests — CPU/decoder incl. FPU
+encoding/semantics/stacking tests and 34 interrupt/system-fidelity tests
 (BASEPRI/FAULTMASK, priority order, nesting, tail-chain, SLEEPONEXIT, DWT,
 SVC/UsageFault escalation, PRIGROUP split, SEV/WFE event, CPS, STKALIGN,
 SHCSR/ICSR, LDRT, UNALIGN_TRP, DIV_0_TRP, FPCCR.USER, CONTROL, USERSETMPEND,
-BusFault, NONBASETHRDENA, ITM, EXCCNT),
+BusFault, NONBASETHRDENA, ITM, EXCCNT, Device-unaligned, SEVONPEND),
 plus CAN,
 SPI/I2C taps, DCMI, WAV,
-LTDC, register files — 131/131 green).
+LTDC, register files — 133/133 green).
 
 ## Gotchas
 

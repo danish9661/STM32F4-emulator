@@ -195,15 +195,19 @@ impl FlatMemory {
 
     /// CCR.UNALIGN_TRP gate for multi-byte normal-memory accesses. Skipped
     /// when unmapped (the bus-fault arms own those) and on the periph path
-    /// (Device-memory unaligned stays lenient). Like the MPU data path the
-    /// faulting access completes dropped and raises before the next fetch
-    /// (flags exact, PC deferred by one).
+    /// (Device-memory unaligned stays lenient). Unaligned *Device* access
+    /// faults regardless of the trap (the one observable MPU type rule).
+    /// Like the MPU data path the faulting access completes dropped and
+    /// raises before the next fetch (flags exact, PC deferred by one).
     #[inline]
     fn unaligned_deny(&self, addr: u32, size: u32) -> bool {
         if !self.mapped(addr) {
             return false;
         }
-        if size > 1 && (addr & (size - 1)) != 0 && crate::system::unalign_trp() {
+        if size <= 1 || (addr & (size - 1)) == 0 {
+            return false;
+        }
+        if crate::system::unalign_trp() || crate::sys().p.mpu_is_device(addr) {
             crate::system::pend_align_fault(addr);
             true
         } else {
