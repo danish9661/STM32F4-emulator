@@ -878,7 +878,7 @@ fn cond_ok(c: &Cpu, cc: u32) -> bool {
 /// Always consumes one IT slot. GAS-verified rule: slot j>=2 uses `cond`
 /// iff mask bit (5-j) equals cond bit 0, else the inverse condition.
 /// Slot 1 always uses `cond`. `n = 4 - trailing_zeros(mask)`.
-fn it_ok(c: &mut Cpu) -> bool {
+fn it_ok(c: &mut Cpu, sys: &WasmSystem) -> bool {
     if c.it_n == 0 {
         return true;
     }
@@ -897,6 +897,10 @@ fn it_ok(c: &mut Cpu) -> bool {
     if c.it_idx >= c.it_n {
         c.it_n = 0;
         c.it_idx = 0;
+    }
+    if !take {
+        // Predicated-skipped slot: zero guest cycles on silicon (DWT FOLD).
+        sys.p.dwt_count_fold(sys);
     }
     take
 }
@@ -986,7 +990,7 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
     cpu.it_pred = cpu.it_n > 0;
     // IT predication: a not-taken instruction is still a 2-byte NOP for PC
     // purposes (and still consumes its IT slot).
-    if !it_ok(cpu) {
+    if !it_ok(cpu, sys) {
         adv(cpu, pc, 2);
         return true;
     }
@@ -1696,7 +1700,7 @@ pub fn exec32(
     let o1 = op1 as u32;
     let o2 = op2 as u32;
     cpu.it_pred = cpu.it_n > 0;
-    if !it_ok(cpu) {
+    if !it_ok(cpu, sys) {
             adv(cpu, pc, 4);
             return true;
         }

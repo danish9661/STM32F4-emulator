@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use super::Peripheral;
 
 const IRQ_COUNT: usize = 97;
+pub(crate) const NVIC_IRQ_COUNT: usize = IRQ_COUNT;
 const IRQ_OFFSET: i32 = 16;
 const REG_WORDS: usize = (IRQ_COUNT + 31) / 32;
 

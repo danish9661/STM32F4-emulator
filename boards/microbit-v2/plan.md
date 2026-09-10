@@ -48,7 +48,7 @@ firmware binaries/SVD/probes its tests need (run `cargo test` in
 - `core/stm32-periph-wasm/src/cpu/` — THE reuse target: `thumb.rs`
   (decoder), `mod.rs` (Cpu, stepping, exception entry/return, delivery),
   `mem.rs` (`Memory` trait + `FlatMemory`), `regs.rs` (incl. S0–S31/FPSCR).
-  Snapshot matches parent-repo commit `1be3eeb` (verify drift with
+  Snapshot matches parent-repo commit `8a97498` (verify drift with
   `git log --oneline -1` at the repo root).
 - `core/stm32-periph-wasm/src/peripherals/` — reference implementations
   (copy the *patterns*, e.g. `tim.rs`, `usart.rs`, `i2c.rs`; most STM32

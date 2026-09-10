@@ -2759,3 +2759,61 @@ fn sevonpend_pending_wakes_wfe() {
     no_fault(&cpu, &mem);
     assert!(cpu.sleeping, "same setup sleeps without SEVONPEND");
 }
+
+#[test]
+fn stir_pends_and_gates() {
+    // STIR write pends the low-9-bit IRQ (taken with ISER); unprivileged
+    // writes are ignored without USERSETMPEND; out-of-range ignored; reads 0.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    assert_eq!(mem.read32(0xE000EF00), 0, "STIR reads 0 (WO)");
+    mem.write32(0xE000E100, 0x3); // ISER0: IRQ0+IRQ1
+    mem.write32(0xE000EF00, 0); // STIR -> IRQ0
+    assert!(sys.p.nvic.borrow().irq_pending(0), "STIR pends");
+    cpu.run(sys, &mut mem, 12);
+    no_fault(&cpu, &mem);
+    assert_eq!(mem.read32(0x20001000), 1, "pended IRQ0 ran (A)");
+    // Unprivileged without USERSETMPEND: ignored.
+    cpu.regs.control |= 1;
+    crate::system::set_cpu_context(false, false);
+    mem.write32(0xE000EF00, 1);
+    assert!(!sys.p.nvic.borrow().irq_pending(1), "unpriv STIR ignored");
+    // Same write privileged works (control case).
+    cpu.regs.control &= !1;
+    crate::system::set_cpu_context(true, false);
+    mem.write32(0xE000EF00, 1);
+    assert!(sys.p.nvic.borrow().irq_pending(1), "priv STIR pends");
+    sys.p.nvic.borrow_mut().clear_pending(1);
+    // With USERSETMPEND, unprivileged works again.
+    mem.write32(0xE000ED14, 0x202); // STKALIGN + USERSETMPEND
+    cpu.regs.control |= 1;
+    crate::system::set_cpu_context(false, false);
+    mem.write32(0xE000EF00, 1);
+    assert!(sys.p.nvic.borrow().irq_pending(1), "USERSETMPEND allows");
+    // Out-of-range (>=97) ignored, no panic, nothing pended.
+    let before = sys.p.nvic.borrow().pending_bits();
+    mem.write32(0xE000EF00, 500);
+    assert_eq!(sys.p.nvic.borrow().pending_bits(), before, "range-checked");
+}
+
+#[test]
+fn dwt_foldcnt_counts_skipped_slots() {
+    // ite eq with Z set: moveq executes, movne folds (FOLDCNT+1, zero
+    // guest cycles). GAS: cmp=4289 ite=BF0C moveq=2001 movne=2002.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write32(0xE000EDFC, 1 << 24); // DEMCR.TRCENA
+    mem.write16(0x20002000, 0x4289); // cmp r1,r1 (Z=1)
+    mem.write16(0x20002002, 0xBF0C); // ite eq
+    mem.write16(0x20002004, 0x2001); // moveq r0,#1
+    mem.write16(0x20002006, 0x2002); // movne r0,#2 (skipped)
+    mem.write16(0x20002008, 0xE7FE);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 6);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[0], 1, "taken slot executed");
+    assert_eq!(mem.read32(0xE0001018), 1, "one folded slot counted");
+}
