@@ -36,6 +36,7 @@ pub mod fpu;
 pub mod mpu;
 pub mod dwt;
 pub mod itm;
+pub mod stir;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -57,6 +58,7 @@ use fpu::Fpu;
 use mpu::Mpu;
 use dwt::{Dwt, Demcr};
 use itm::Itm;
+use stir::Stir;
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
@@ -119,7 +121,25 @@ impl Peripherals {
         }
     }
 
-    pub fn pwr_wakeup(&self) {        for slot in &self.peripherals {
+    /// DWT FOLDCNT tick: one predicated-skipped instruction (called from
+    /// the decoder's IT machinery). Same TRCENA gate.
+    pub fn dwt_count_fold(&self, sys: &System) {
+        if sys.p.read(sys, 0xE000EDFC, 4) & (1 << 24) == 0 {
+            return;
+        }
+        for slot in &self.peripherals {
+            if slot.start == 0xE000_1000 {
+                use crate::peripherals::dwt::Dwt;
+                if let Some(dwt) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Dwt>() {
+                    dwt.count_fold();
+                }
+                break;
+            }
+        }
+    }
+
+    pub fn pwr_wakeup(&self) {
+        for slot in &self.peripherals {
             if slot.start == 0x4000_7000 {
                 use crate::peripherals::pwr::Pwr;
                 if let Some(pwr) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Pwr>() {
@@ -348,6 +368,7 @@ impl Peripherals {
                 .or_else(|| Fpu::new(name))
                 .or_else(|| Dwt::new(name))
                 .or_else(|| Demcr::new(name))
+                .or_else(|| Stir::new(name))
             ;
 
             if let Some(peri) = peri {
@@ -372,7 +393,7 @@ impl Peripherals {
         if let Some(p) = Dwt::new("DWT") {
             peripherals.peripherals.push(PeripheralSlot {
                 start: 0xE000_1000,
-                end: 0xE000_1010,
+                end: 0xE000_1020,
                 peripheral: RefCell::new(p),
             });
         }
@@ -389,6 +410,15 @@ impl Peripherals {
             peripherals.peripherals.push(PeripheralSlot {
                 start: 0xE000_0000,
                 end: 0xE000_0F00,
+                peripheral: RefCell::new(p),
+            });
+        }
+        // STIR software trigger (absent from the SVD too): one word at
+        // 0xE000EF00, clear of DEMCR (..EE00) and FPU (EF34..).
+        if let Some(p) = Stir::new("STIR") {
+            peripherals.peripherals.push(PeripheralSlot {
+                start: 0xE000_EF00,
+                end: 0xE000_EF04,
                 peripheral: RefCell::new(p),
             });
         }
@@ -461,7 +491,10 @@ impl Peripherals {
             (0xE000_ED90, "MPU"),
             // DEMCR lives in its own 4-byte slot: the SCB slots end before
             // EDFC and a wider claim would overlap MPU/FPU (assert-guarded).
+            // STIR follows for the same reason (it sizes DEMCR to 4 bytes;
+            // second explicit push below would double-cover it).
             (0xE000_EDFC, "DEMCR"),
+            (0xE000_EF00, "STIR"),
             (0xE000_EF34, "FPU"),
             (0xE004_2000, "DBGMCU"),
         ];
@@ -510,6 +543,7 @@ impl Peripherals {
                 .or_else(|| Fpu::new(name))
                 .or_else(|| Dwt::new(name))
                 .or_else(|| Demcr::new(name))
+                .or_else(|| Stir::new(name))
             ;
 
             if let Some(p) = p {
@@ -524,6 +558,8 @@ impl Peripherals {
 
         // ITM stimulus console: STIM block + TER/TPR/TCR in one slot
         // (nothing else lives in 0xE0000000-0xE0000F00 on either map).
+        // (STIR needs no explicit push here: the regs table above already
+        // sizes it via the DEMCR->STIR->FPU adjacency.)
         if let Some(p) = Itm::new("ITM") {
             peripherals.peripherals.push(PeripheralSlot { start: 0xE000_0000, end: 0xE000_0F00, peripheral: RefCell::new(p) });
         }

@@ -2520,7 +2520,9 @@ deliberate, all documented, none reachable by compiler-emitted code.
   attribute (the one observable memory-type rule — shareable Device
   TEX=0,C=0,B=1 or Device TEX=2; background is Normal); SEVONPEND
   pending-wakes-WFE (SCR bit 4 + any enabled-pending exception skips
-  sleep, no take needed).
+  sleep, no take needed); STIR software-trigger (own 4-byte slot +
+  USERSETMPEND gating); DWT FOLDCNT (exact IT-skip counts via the
+  decoder hook).
 - Loud-by-policy (fault stops the run instead of taking a guest fault —
   surfaces decoder/model gaps instead of hanging in a default handler):
   UNDEFINSTR (bad opcode), BKPT. Any valid encoding that reaches these
