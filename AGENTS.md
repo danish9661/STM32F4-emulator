@@ -3134,3 +3134,19 @@ day): (1) EPENA must clear on complete or re-arming never re-triggers;
 (2) word-padded FIFO tails leak into the next transfer — flush TX
 before each EP0 IN like stock drivers (the config-desc readback
 shifted by 2 stale bytes before the flush).
+
+---
+
+## 28. Board variants (2026-09-11)
+
+All supported boards are Cortex-M4F — one shared CPU core, no decoder
+work per board. A variant is: SVD (`site/vendor/stm32f*.svd`, Keil DFP
+3.1.1; wasm-pack deletes the dir on rebuild — restore + drop its
+`.gitignore` like the F407 one), sizes + label in `site/boards.js`
+(`BOARD_OF_FIRMWARE`, default F407), firmware with the right link
+script/SP/top RAM + the board's real LED pin, a Node harness through
+that board's SVD map, dropdown entries, and `test_browser` markers.
+Coverage rule: diff the chip's SVD names against the model claims —
+F401/F411 need zero new models; F429 needs DMA2D only (GPIOK free).
+`is_periph` covers the whole FSMC window (0x60000000-0xA0000000) so all
+FSMC-banked boards route; peripheral-space holes stay benign-0.

@@ -460,6 +460,26 @@ inject, IN take), the netsim pattern applied to control transfers.
   (one frame-step per rAF); `test_browser.mjs` asserts `USB echo OK`.
 
 | test_usb | usb_cdc_test | USB_OTG_FS | `USB echo OK`, `USB done`, byte-equal echoes |
+| test_blinky_f401/411/f407g/nucleo/f429 | blinky_* | per-board SVD | board banner + LED ODR toggles on the board's pin |
+
+## Board variants (2026-09-11)
+
+All listed boards are Cortex-M4F — one shared CPU core, per-board SVD +
+flash/RAM sizes + firmware (`site/boards.js`). Coverage diff vs the
+model (SVD names): F401/F411 need zero new models (gaps: `DBG`,
+`OTG_FS_HOST` only); F429 adds `DMA2D` (+`GPIOJ/K`, free via the GPIO
+prefix match). Bring-up per board is a blinky (own link script + real
+LED pin) asserting banner + ODR toggles through that board's SVD map:
+
+| Preset | Board | SVD | Sizes | LED |
+|---|---|---|---|---|
+| blinky_f401 | BlackPill F401CC | stm32f401 | 256K/64K | PC13 |
+| blinky_f411 | BlackPill F411CE | stm32f411 | 512K/128K | PC13 |
+| blinky_f407g | Discovery F407VG | stm32f407 | 1M/128K | PD12 |
+| blinky_nucleo_f401 | Nucleo-F401RE | stm32f401 | 256K/64K | PA5 |
+| blinky_nucleo_f411 | Nucleo-F411RE | stm32f411 | 512K/128K | PA5 |
+| blinky_f429 | Discovery F429ZI | stm32f429 | 2M/256K | PG13 |
+| blinky_f407ve/ze | F407VE/ZE black | stm32f407 | 512K/128K | markers only (pinout varies) |
 
 ---
 

@@ -11,6 +11,15 @@ const firmwares = [
     ['eth_test', 'eth_test/eth_test.bin', 'eth_test.bin'],
     // bare-metal demos
     ['blinky', 'blinky/blinky.bin', 'blinky.bin'],
+    // board variants (own link scripts/sizes/LEDs; VE/ZE share the stock bin)
+    ['blinky_f401', 'blinky_f401/blinky_f401.bin', 'blinky_f401.bin'],
+    ['blinky_f411', 'blinky_f411/blinky_f411.bin', 'blinky_f411.bin'],
+    ['blinky_f407g', 'blinky_f407g/blinky_f407g.bin', 'blinky_f407g.bin'],
+    ['blinky_nucleo_f401', 'blinky_nucleo_f401/blinky_nucleo_f401.bin', 'blinky_nucleo_f401.bin'],
+    ['blinky_nucleo_f411', 'blinky_nucleo_f411/blinky_nucleo_f411.bin', 'blinky_nucleo_f411.bin'],
+    ['blinky_f429', 'blinky_f429/blinky_f429.bin', 'blinky_f429.bin'],
+    ['blinky_f407ve', 'blinky/blinky.bin', 'blinky.bin'],
+    ['blinky_f407ze', 'blinky/blinky.bin', 'blinky.bin'],
     // demo firmwares (new peripheral showcases)
     ['adc_demo', 'adc_demo/adc_demo.bin', 'adc_demo.bin'],
     ['dac_demo', 'dac_demo/dac_demo.bin', 'dac_demo.bin'],

@@ -21,6 +21,12 @@ const CASES = [
     { label: 'fpu_irq_test',    fw: 'fpu_irq_test',    markers: ['FPU IRQ all PASS'],             failMarkers: ['FAIL'], timeoutMs: 90000 },
     { label: 'mpu_test',        fw: 'mpu_test',        markers: ['MPU all PASS', 'MPU done'],   failMarkers: ['FAIL'], timeoutMs: 60000 },
     { label: 'usb_cdc_test',    fw: 'usb_cdc_test',    markers: ['USB echo OK', 'USB done'],     failMarkers: ['USB FAIL'], timeoutMs: 120000 },
+    { label: 'blinky_f401',     fw: 'blinky_f401',     markers: ['Blinky F401 done'],             timeoutMs: 60000 },
+    { label: 'blinky_f411',     fw: 'blinky_f411',     markers: ['Blinky F411 done'],             timeoutMs: 60000 },
+    { label: 'blinky_f407g',    fw: 'blinky_f407g',    markers: ['Blinky F407G done'],            timeoutMs: 60000 },
+    { label: 'blinky_f429',     fw: 'blinky_f429',     markers: ['Blinky F429 done'],             timeoutMs: 60000 },
+    { label: 'blinky_nucleo_f401', fw: 'blinky_nucleo_f401', markers: ['Blinky Nucleo-F401 done'], timeoutMs: 60000 },
+    { label: 'blinky_nucleo_f411', fw: 'blinky_nucleo_f411', markers: ['Blinky Nucleo-F411 done'], timeoutMs: 60000 },
 ];
 
 let failed = 0;

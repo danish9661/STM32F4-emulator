@@ -6,7 +6,8 @@ import * as bindings from './vendor/stm32_periph_wasm.js?v=13';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
-import { FIRMWARES } from './firmware.js?v=9';
+import { boardFor } from './boards.js';
+import { FIRMWARES } from './firmware.js?v=10';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
 
@@ -368,9 +369,11 @@ const boot = async () => {
         }
     } else {
         // ── local mode: WASM runs in the browser (default) ──
+        // Board variant per firmware preset (SVD + flash/RAM sizes).
         // NOTE (VENDOR_V): vendor asset versions (?v=13) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
-        const svdXml = await fetch('vendor/stm32f407.svd?v=13').then((r) => r.text());
+        const board = boardFor(image.name);
+        const svdXml = await fetch('vendor/' + board.svd + '?v=13').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
@@ -382,6 +385,8 @@ const boot = async () => {
             firmware: fw,
             bindings,
             svdXml,
+            flash_size: board.flash_size,
+            ram_size: board.ram_size,
             wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=13',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,

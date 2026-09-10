@@ -15,7 +15,7 @@
 //
 // Serve from site/ (python3 -m http.server 8123 --directory site) — the page
 // fetches the WAD + SVD + wasm at runtime (file:// won't work).
-import { FIRMWARES } from './firmware.js?v=9';
+import { FIRMWARES } from './firmware.js?v=10';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
@@ -78,7 +78,7 @@ window.__doomLog = () => dbgLog.slice();
 window.__pace = () => window.__lastPace || null;
 // Build stamp: type __doomVer in the console — if it doesn't print the
 // number below, the tab runs a cached copy (hard-refresh: Ctrl+Shift+R).
-window.__doomVer = 57;
+window.__doomVer = 58;
 // Keys pressed before the worker boots would be eaten (nothing listens
 // yet) — the old "wait before touching anything" ritual. Instead they queue
 // here and flush on 'booted', so press ahead: the game catches up. The
@@ -466,7 +466,7 @@ async function boot() {
 
         // Bump ?v= on every doom-worker.js edit — worker scripts cache as hard
         // as module scripts, and a stale copy looks exactly like a bug.
-        worker = new Worker('doom-worker.js?v=30', { type: 'module' });
+        worker = new Worker('doom-worker.js?v=31', { type: 'module' });
         worker.onmessage = onWorkerMessage;
         worker.onerror = (e) => {
             setStatus('worker failed: ' + (e.message || 'load error'), 'error');
