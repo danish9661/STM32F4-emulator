@@ -2141,3 +2141,115 @@ fn usagefault_nocp_escalates_past_basepri() {
     assert_eq!(mem.read32(0x20001004), 1, "HardFault vector (B) ran");
     assert_ne!(mem.read32(0xE000ED28) & 0x00080000, 0, "NOCP sticky latched");
 }
+
+#[test]
+fn aircr_vectkey_gate() {
+    // AIRCR writes need the VECTKEY in the HIGH halfword; the old gate
+    // checked the low half, so PRIGROUP/SYSRESETREQ never applied.
+    let _g = lock_boot();
+    let (_, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    assert_eq!((mem.read32(0xE000ED0C) >> 8) & 7, 0, "reset PRIGROUP=0");
+    mem.write32(0xE000ED0C, 0x05FA0300); // valid key, PRIGROUP=3
+    assert_eq!((mem.read32(0xE000ED0C) >> 8) & 7, 3, "PRIGROUP write applies");
+    mem.write32(0xE000ED0C, 0x00000300); // bad key: ignored
+    assert_eq!((mem.read32(0xE000ED0C) >> 8) & 7, 3, "bad key ignored");
+    mem.write32(0xE000ED0C, 0x05FA0000); // back to 0
+    assert_eq!((mem.read32(0xE000ED0C) >> 8) & 7, 0);
+    let _ = sys;
+}
+
+#[test]
+fn prigroup_subpriority_ignores_preemption() {
+    // PRIGROUP=0: A=0x41 and B=0x40 share group 0x20 — subpriority never
+    // preempts, so B must NOT preempt running A (full-value compare would).
+    // B=0x3F (group 0x1F) does preempt.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(true));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000ED0C, 0x05FA0000); // PRIGROUP=0 explicitly
+    mem.write32(0xE000E100, 0x3);
+    mem.write32(0xE000E400, 0x00004041); // A=0x41, B=0x40
+    sys.p.nvic.borrow_mut().set_intr_pending(0);
+    cpu.run(sys, &mut mem, 50);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 16, "in A handler");
+    sys.p.nvic.borrow_mut().set_intr_pending(1);
+    cpu.run(sys, &mut mem, 50);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 16, "same-group subpriority must not preempt");
+    assert!(sys.p.nvic.borrow().irq_pending(1), "B stays pending");
+    mem.write8(0xE000E401, 0x3F); // B=0x3F: group 0x1F < 0x20
+    cpu.run(sys, &mut mem, 50);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 17, "lower group preempts");
+}
+
+#[test]
+fn basepri_masks_by_group() {
+    // BASEPRI compares in group space: with PRIGROUP=0, BASEPRI=0x41
+    // (group 0x20) masks B=0x40 (group 0x20) — full-value compare would
+    // let it through (0x40 < 0x41). BASEPRI=0x60 (group 0x30) releases it.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000ED0C, 0x05FA0000);
+    mem.write32(0xE000E100, 0x2);
+    mem.write32(0xE000E400, 0x00004000);
+    sys.p.nvic.borrow_mut().set_intr_pending(1);
+    cpu.regs.basepri = 0x41;
+    cpu.run(sys, &mut mem, 100);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 0, "group-masked IRQ must not activate");
+    assert_eq!(mem.read32(0x20001004), 0);
+    assert!(sys.p.nvic.borrow().irq_pending(1), "stays pending");
+    cpu.regs.basepri = 0x60;
+    cpu.run(sys, &mut mem, 100);
+    no_fault(&cpu, &mem);
+    assert_eq!(mem.read32(0x20001004), 1, "released by higher group");
+}
+
+#[test]
+fn sev_wfe_event_register() {
+    // SEV then WFE: event registered -> clear-and-continue, no sleep.
+    // Bare WFE: sleeps. Encodings: SEV=BF40, WFE=BF20, b .=E7FE.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write16(0x20002000, 0xBF40);
+    mem.write16(0x20002002, 0xBF20);
+    mem.write16(0x20002004, 0xE7FE);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 3);
+    no_fault(&cpu, &mem);
+    assert!(!cpu.sleeping, "SEV-armed WFE must not sleep");
+    assert_eq!(cpu.regs.r[15] & !1, 0x20002004, "past the WFE");
+
+    let (mut cpu2, mut mem2) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys2 = crate::sys();
+    cpu2.deliver_irqs = true;
+    mem2.write16(0x20002000, 0xBF20);
+    mem2.write16(0x20002002, 0xE7FE);
+    cpu2.regs.r[15] = 0x20002001;
+    cpu2.run(sys2, &mut mem2, 2);
+    no_fault(&cpu2, &mem2);
+    assert!(cpu2.sleeping, "bare WFE sleeps with no event");
+}
+
+#[test]
+fn exception_entry_return_sets_event() {
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    assert!(!cpu.event_register, "reset clears the event register");
+    cpu.take_exception(sys, &mut mem, 0);
+    assert!(cpu.event_register, "entry sets the event");
+    cpu.event_register = false;
+    let lr = cpu.regs.r[14];
+    assert!(cpu.exception_return(sys, &mut mem, lr, cpu.regs.r[15] & !1));
+    assert!(cpu.event_register, "return sets the event");
+}

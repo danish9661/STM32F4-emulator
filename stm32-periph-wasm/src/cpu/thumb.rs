@@ -1425,11 +1425,11 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
             adv(cpu, pc, 2);
             return true;
         }
-        // WFI/WFE: with delivery on, halt until an interrupt is pending
+        // WFI: with delivery on, halt until an interrupt is pending
         // (JS advances virtual time and wakes us). The instruction is
         // complete at halt, so on wake we resume AFTER it. Without
         // delivery this is a plain nop (polling path).
-        if op == 0xBF30 || op == 0xBF20 {
+        if op == 0xBF30 {
             adv(cpu, pc, 2);
             if cpu.deliver_irqs {
                 // A pending exception that could preempt right now means no
@@ -1438,6 +1438,26 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
                     cpu.sleeping = true;
                 }
             }
+            return true;
+        }
+        // WFE: like WFI, but a registered event (SEV, or a recent exception
+        // entry/return) means clear-and-continue with no sleep.
+        if op == 0xBF20 {
+            adv(cpu, pc, 2);
+            if cpu.deliver_irqs {
+                if cpu.event_register {
+                    cpu.event_register = false;
+                } else if cpu.select_pending_for_sleep(sys) {
+                    cpu.sleeping = true;
+                }
+            }
+            return true;
+        }
+        // SEV: set the event register (a following WFE clears it and skips
+        // sleep; single core, so there is no cross-core event to send).
+        if op == 0xBF40 {
+            adv(cpu, pc, 2);
+            cpu.event_register = true;
             return true;
         }
         // YIELD/WFE/WFI/SEV/SEVL(/other reserved hints): no-op for the

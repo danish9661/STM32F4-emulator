@@ -2471,11 +2471,18 @@ register-shift-by-0 is a no-op (not imm-#0-means-32).
   clock when CYCCNTENA+TRCENA (new `dwt.rs`: DWT + DEMCR slots, both maps).
   Synchronous SVC/UsageFault/MPU faults escalate to HardFault past masks,
   pend when deferred-and-masked, lock up loudly when HardFault is blocked.
-  11 native tests (synthetic vector-table image in tests.rs). Deliberately
-  still out: PRIGROUP subpriority split (all-preemption compare — matches
-  FreeRTOS config), ITM (dropped reads-as-0, writes ignored), SEV event
-  register for WFE (sleeps like WFI; wake is eager-any-pending, entry is
-  predicate-gated — matches silicon wake-vs-entry split).
+  11 native tests (synthetic vector-table image in tests.rs). Priority
+  fidelity, part 2 (2026-09-10): AIRCR.PRIGROUP split is real (group
+  decides preemption + BASEPRI masking, subpriority only tie-breaks —
+  selection order is unchanged by construction, so old tests hold);
+  fixing it exposed a double-stacked AIRCR bug (VECTKEY gate checked the
+  low half AND the store mask kept the high half — PRIGROUP/SYSRESETREQ
+  never applied); SEV event register modeled (SEV sets, WFE consumes,
+  entry/return set; wake stays eager, entry predicate-gated). 5 more
+  native tests (16 total). Deliberately still out: ITM (dropped
+  reads-as-0, writes ignored — matches a debugger-disconnected target:
+  CMSIS ITM_SendChar gates on TCR/TER, both reset 0 here, so stimulus can
+  neither send nor spin; no trace port exists to sink packets into).
 - Native tests: `exception_svc_roundtrip`, `freertos_tasks_run` (SVC start,
   PendSV switches, TIM2 ISR sem, TASK1/2 ticks); `cargo test` 55/55.
 - `site/probe_freertos_wasm.mjs`: PROBE PASS (4 TCBs; 37k batches + 3×500-inst

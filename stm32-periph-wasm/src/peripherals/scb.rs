@@ -46,8 +46,15 @@ impl Scb {
     pub fn vtor(&self) -> u32 { self.vtor }
 
     fn write_aircr(&mut self, value: u32) {
-        if (value & 0xFFFF) == 0x05FA {
-            self.aircr = (value & 0xFFFF_0000) | 0x05FA_0000;
+        // VECTKEY lives in the HIGH halfword (bits 31:16); the old gate
+        // checked the LOW half, so no AIRCR write ever applied (PRIGROUP
+        // stuck at reset 0, SYSRESETREQ dead).
+        if (value >> 16) & 0xFFFF == 0x05FA {
+            // Keep only the writable low bits (PRIGROUP [10:8]); the high
+            // half always reads VECTKEYSTAT (0xFA05). The old mask kept the
+            // high halfword instead, which silently dropped PRIGROUP even
+            // past a correct key (second half of the dead-AIRCR bug).
+            self.aircr = (0xFA05 << 16) | (value & 0x0000_0F00);
             let vectkey = (value >> 16) & 0xFFFF;
             if vectkey == 0x05FA {
                 let sysreset = (value >> 2) & 1;

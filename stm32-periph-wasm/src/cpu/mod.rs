@@ -116,6 +116,11 @@ pub struct Cpu {
     /// via `wake()` when an interrupt is pending. Only set when
     /// `deliver_irqs` is on; otherwise WFI is a nop.
     pub sleeping: bool,
+    /// Local event register for WFE/SEV: SEV sets it; WFE with it set
+    /// clears it and skips sleep; exception entry/return set it (silicon
+    /// rule — an ISR running means a later WFE must not nap). Single-core,
+    /// so no cross-core event fabric is needed.
+    pub event_register: bool,
 }
 
 impl Cpu {
@@ -141,6 +146,7 @@ impl Cpu {
             fp_stack: Vec::new(),
             deliver_irqs: false,
             sleeping: false,
+            event_register: false,
         }
     }
     pub fn reset(&mut self, sp: u32, pc: u32) {
@@ -155,6 +161,7 @@ impl Cpu {
         self.it_stack.clear();
         self.fp_stack.clear();
         self.sleeping = false;
+        self.event_register = false;
         crate::system::set_cpu_context(true, false);
         // A reboot must not inherit a deferred fault from the old run.
         let _ = crate::system::take_mpu_fault();
@@ -204,9 +211,7 @@ impl Cpu {
     /// Fixed -2/-1 for NMI/HardFault; SHPR bytes for system handlers;
     /// NVIC IPR bytes for external IRQs. Raw bytes throughout: firmware
     /// writes its shifted values to both IPR and BASEPRI, so raw compare
-    /// orders identically to silicon's top-bits compare. PRIGROUP
-    /// subpriority is not split out (all-preemption semantics, which is
-    /// what FreeRTOS configures); ties break by exception number.
+    /// orders identically to silicon's top-bits compare.
     fn exc_priority(sys: &WasmSystem, irq: i32) -> i32 {
         match irq {
             -14 => -2, // NMI
@@ -224,45 +229,90 @@ impl Cpu {
         }
     }
 
-    /// Execution priority: the innermost active handler's priority, or 256
+    /// AIRCR.PRIGROUP split point (0-7): subpriority occupies the low
+    /// PRIGROUP+1 bits, group (preemption) priority the rest. Reset 0
+    /// (7 group + 1 sub); FreeRTOS writes 7 (all subpriority within the
+    /// implemented bits, so nothing preempts and BASEPRI masks uniformly).
+    fn aircr_prigroup(sys: &WasmSystem) -> u32 {
+        (sys.p.read(sys, 0xE000ED0C, 4) >> 8) & 7
+    }
+
+    /// Group (preemption) priority: raw byte shifted past the subpriority
+    /// field. Fixed negatives pass through (NMI/HardFault have no split).
+    /// Only the group decides preemption and BASEPRI masking (silicon
+    /// rule); the subpriority only tie-breaks simultaneously-pending
+    /// exceptions of the same group.
+    fn exc_group(sys: &WasmSystem, irq: i32) -> i32 {
+        let raw = Self::exc_priority(sys, irq);
+        if raw < 0 {
+            raw
+        } else {
+            (raw as u32 >> (Self::aircr_prigroup(sys) + 1)) as i32
+        }
+    }
+
+    /// Subpriority (tie-break within a group): the low PRIGROUP+1 bits.
+    fn exc_sub(sys: &WasmSystem, irq: i32) -> u32 {
+        let raw = Self::exc_priority(sys, irq);
+        if raw < 0 {
+            return 0;
+        }
+        let bits = Self::aircr_prigroup(sys) + 1;
+        if bits >= 8 {
+            raw as u32
+        } else {
+            (raw as u32) & ((1 << bits) - 1)
+        }
+    }
+
+    /// BASEPRI compared in group space (same split as priorities: firmware
+    /// writes shifted values to both, so group-vs-group matches silicon's
+    /// masked-set exactly under the CMSIS convention).
+    fn basepri_group(&self, sys: &WasmSystem) -> i32 {
+        (self.regs.basepri as u32 >> (Self::aircr_prigroup(sys) + 1)) as i32
+    }
+
+    /// Execution priority: the innermost active handler's group, or 256
     /// (idle, lower than any programmable 0..255) in thread mode.
     fn execution_priority(&self, sys: &WasmSystem) -> i32 {
         match self.exc_stack.last() {
-            Some(e) => Self::exc_priority(sys, e.irq),
+            Some(e) => Self::exc_group(sys, e.irq),
             None => 256,
         }
     }
 
     /// Whether an exception is masked right now (PRIMASK/FAULTMASK/BASEPRI).
     /// NMI is never masked; HardFault (-1) is only stopped by FAULTMASK.
-    fn exception_masked(&self, irq: i32, prio: i32) -> bool {
+    fn exception_masked(&self, sys: &WasmSystem, irq: i32) -> bool {
         if irq == -14 {
             return false;
         }
         if self.regs.faultmask {
             return true;
         }
-        if prio < 0 {
+        let group = Self::exc_group(sys, irq);
+        if group < 0 {
             return false;
         }
         if self.regs.primask != 0 {
             return true;
         }
-        if self.regs.basepri != 0 && prio >= self.regs.basepri as i32 {
+        if self.regs.basepri != 0 && group >= self.basepri_group(sys) {
             return true;
         }
         false
     }
 
     /// Best pending exception: enabled, unmasked, and urgent enough to
-    /// preempt current execution. Priority asc, then exception number asc
-    /// (silicon order). Late arrival needs no special case: selection runs
-    /// at every instruction boundary, so the most urgent pending exception
-    /// always wins before any handler's first instruction.
+    /// preempt current execution. Group asc, then subpriority asc, then
+    /// exception number asc (silicon order). Late arrival needs no special
+    /// case: selection runs at every instruction boundary, so the most
+    /// urgent pending exception always wins before any handler's first
+    /// instruction.
     fn select_pending(&self, sys: &WasmSystem) -> Option<i32> {
         let exec_prio = self.execution_priority(sys);
         let bits = sys.p.nvic.borrow().pending_bits();
-        let mut best: Option<(i32, i32)> = None; // (priority, irq)
+        let mut best: Option<(i32, u32, i32)> = None; // (group, sub, irq)
         let mut b = bits;
         while b != 0 {
             let bit = b.trailing_zeros() as i32;
@@ -277,23 +327,24 @@ impl Cpu {
             if !enabled {
                 continue;
             }
-            let prio = Self::exc_priority(sys, irq);
             // Mask gates (PRIMASK/FAULTMASK/BASEPRI) + preemption gate.
-            if self.exception_masked(irq, prio) {
+            if self.exception_masked(sys, irq) {
                 continue;
             }
-            if prio >= exec_prio {
+            let group = Self::exc_group(sys, irq);
+            if group >= exec_prio {
                 continue;
             }
+            let sub = Self::exc_sub(sys, irq);
             let better = match best {
                 None => true,
-                Some((bp, bi)) => (prio, irq) < (bp, bi),
+                Some((bg, bs, bi)) => (group, sub, irq) < (bg, bs, bi),
             };
             if better {
-                best = Some((prio, irq));
+                best = Some((group, sub, irq));
             }
         }
-        best.map(|(_, irq)| irq)
+        best.map(|(_, _, irq)| irq)
     }
 
     /// Raise a synchronous exception (SVC insn, precise fetch/MPU fault,
@@ -312,8 +363,8 @@ impl Cpu {
             sys.p.nvic.borrow_mut().set_intr_pending(irq);
             return;
         }
-        let prio = Self::exc_priority(sys, irq);
-        let blocked = self.exception_masked(irq, prio) || prio >= self.execution_priority(sys);
+        let blocked =
+            self.exception_masked(sys, irq) || Self::exc_group(sys, irq) >= self.execution_priority(sys);
         if blocked {
             if irq == -13 || irq == -14 {
                 // Even HardFault is blocked (FAULTMASK): silicon lockup.
@@ -464,6 +515,9 @@ impl Cpu {
             }
         }
         self.ipsr = vector;
+        // Exception entry sets the local event register (a WFE after this
+        // ISR must observe the event and skip sleep).
+        self.event_register = true;
         // (CPU privilege context was already published as handler-privileged
         // before the stacking pre-validation above.)
         sys.p.nvic.borrow_mut().set_in_interrupt(true);
@@ -629,6 +683,9 @@ impl Cpu {
             }
             crate::system::set_cpu_context(true, false);
             sys.p.nvic.borrow_mut().set_in_interrupt(true);
+            // Exception return sets the event register (a WFE sequenced
+            // after this return must not nap).
+            self.event_register = true;
             self.regs.r[15] = retpc | 1;
             return true;
         }
@@ -647,6 +704,7 @@ impl Cpu {
         // always return to unprivileged-safe state only via explicit MSR).
         crate::system::set_cpu_context((self.regs.control & 1) == 0, false);
         sys.p.nvic.borrow_mut().set_in_interrupt(false);
+        self.event_register = true;
         self.regs.r[15] = retpc | 1;
         // SLEEPONEXIT (SCR bit 1): a return to thread naps the core until
         // the next deliverable interrupt, like a WFI right after the `bx lr`.
@@ -729,6 +787,7 @@ impl Cpu {
             EXC_RETURN_MSP
         };
         self.ipsr = vector;
+        self.event_register = true;
         crate::system::set_cpu_context(true, irq == -13 || irq == -14);
         sys.p.nvic.borrow_mut().set_in_interrupt(true);
         let vtor = sys.p.read(sys, 0xE000ED08, 4);
