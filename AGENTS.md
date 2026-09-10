@@ -3078,3 +3078,24 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   fault). The SVD FPU_CPACR slot (ED88+0x10) overlaps the MPU slot —
   claimed at +0x4 with a hard overlap assert guarding the map (it fired
   during bring-up).
+
+---
+
+## 26. Board ports + CPU bug tracker (2026-09-10)
+
+- `boards/microbit-v2/plan.md` and `boards/uno-r4/plan.md` are the work
+  orders for the port agents (both targets verified M4F). Each has a
+  `core/` snapshot of this repo's `stm32-periph-wasm` crate plus the
+  firmware/SVD/probe files its tests need (run `cargo test` inside —
+  133 green proves the snapshot), the chip facts that matter (flash at
+  ZERO on both, FICR/UICR on nRF, clocks+option-bytes+data-flash on RA),
+  the keep/replace/rewire contract, peripheral bring-up order, and the
+  re-sync procedure. Never hand-edit a snapshot's `cpu/` — CPU bugs are
+  main-repo bugs.
+- `cpu_bug.md` (repo root) is the shared tracker: workflow (claim →
+  repro with pc/opcode → fix + native test in main repo → report),
+  the OPEN/POLICY items (M0+ strict mode is the one known task; the
+  rest is policy + watch items), and the new-entry template. Board
+  agents read it first and file there; the maintainer lands fixes and
+  re-syncs snapshots. The closed record stays here in §25 — not
+  duplicated there.
