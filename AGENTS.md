@@ -2510,21 +2510,43 @@ deliberate, all documented, none reachable by compiler-emitted code.
   surfaces decoder/model gaps instead of hanging in a default handler):
   UNDEFINSTR (bad opcode), BKPT. Any valid encoding that reaches these
   is a bug in us, not the firmware.
-- Ignored opt-in traps (default behavior is bit-exact; firmware must
-  opt in, none does): SCB.NONBASETHRDENA (only one left — the boosted-
-  thread-return rule is genuinely ambiguous from memory, so it stays
-  out rather than guessing wrong).
-- Structural simplifications: BusFault can never occur (no bus matrix
-  to error); exclusive monitors always succeed (single core); MPU memory
-  types ignored (no caches); PRIGROUP/BASEPRI compared raw in group
-  space (exact under the CMSIS shifted-value convention); SEVONPEND
-  subsumed by entry-always-sets (differs only for pending-without-entry
-  before WFE).
-- Debug/trace (no consumer in this emulator): DWT counters beyond CYCCNT
-  read 0, FPB/ETM/TPIU unmapped-benign, ITM RAZ/WI (see above), STIR
+- What remains unimplemented, and why (three buckets — nothing here is
+  reachable by compiler-emitted code; see the contract below):
+  1. Vacuous without hardware (implementing would be dead code, not
+     fidelity): BusFault can never occur (no bus matrix exists to
+     error); MPU memory types ignored (no caches, so types are
+     unobservable); exclusive monitors always succeed (single core);
+     DWT counters beyond CYCCNT read 0 (cycle-accurate fold/CPI/sleep/
+     exception/LSU counts would be fake precision in an interpreter —
+     CYCCNT-as-instruction-clock is the only honest counter);
+     SysTick CALIB reads 0, which means "no calibration data" and
+     correctly steers firmware to the LOAD path; FPB/ETM/TPIU
+     unmapped-benign (debugger fabric with no debugger attached);
+     ITM RAZ/WI (see above); endianness is LE-only (the F4 has no
+     big-endian mode).
+  2. Deliberate policy (silicon behavior would be worse for a dev tool):
+     UNDEFINSTR/BKPT halt loudly with pc+opcode (above).
+  3. Genuinely uncertain (one item — will not be implemented from
+     memory): SCB.NONBASETHRDENA, the boosted-thread-return rule.
+     Guessing wrong would be worse than the documented gap.
+  Also documented as checked-and-correct (not gaps): MPU subregions
+  below 256B are UNPREDICTABLE on silicon and deny-closed here; reset
+  values match silicon (VTOR/CONTROL/PRIMASK/BASEPRI/FAULTMASK/FPSCR/
+  IPSR zero, CCR 0x200, S-regs zeroed where silicon says UNKNOWN);
+  stacked xPSR reserved bits dropped and LR constants exact on every
+  take; SVC from unprivileged is allowed (it IS the privilege gate);
+  synchronous faults escalate when blocked, never pend (a blocked
+  deferred fault pending forever was wrong — fixed with the LDRT work);
+  PRIGROUP/BASEPRI compared raw in group space (exact under the CMSIS
+  shifted-value convention); SEVONPEND subsumed by entry-always-sets
+  (differs only for pending-without-entry before WFE); STIR stays
   unmapped-benign (writes ignored, no fault — revisit if firmware ever
-  software-triggers IRQs), SysTick CALIB reads 0 (nobody uses it;
-  Arduino/Nordic time from LOAD + core clock).
+  software-triggers IRQs).
+- Contract for board agents (micro:bit v2, UNO R4): the residue above is
+  unreachable by compiler-emitted code, so a port should never trip it.
+  If one ever does, it fails LOUDLY with the exact pc/opcode (never a
+  silent wrong result) — send that failure back and it gets implemented
+  with a native test, same method as this audit.
 - Native tests: `exception_svc_roundtrip`, `freertos_tasks_run` (SVC start,
   PendSV switches, TIM2 ISR sem, TASK1/2 ticks); `cargo test` 55/55.
 - `site/probe_freertos_wasm.mjs`: PROBE PASS (4 TCBs; 37k batches + 3×500-inst
