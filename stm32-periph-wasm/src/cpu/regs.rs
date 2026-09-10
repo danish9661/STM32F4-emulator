@@ -3,6 +3,12 @@ pub struct Regs {
     pub r: [u32; 16],
     pub xpsr: u32,
     pub primask: u32,
+    /// BASEPRI mask value, raw as written (firmware writes its shifted
+    /// priority, e.g. 0x50 for 4-bit fields). 0 = mask disabled. Compared
+    /// raw against raw priority bytes, which orders identically.
+    pub basepri: u8,
+    /// FAULTMASK: when set, only NMI can activate.
+    pub faultmask: bool,
     pub control: u32,
     /// Banked stacks. `r[13]` always mirrors the CURRENT SP (MSP in handler
     /// mode; MSP or PSP per CONTROL.SPSEL in thread mode). FreeRTOS switches
@@ -22,6 +28,6 @@ impl Regs {
         r[13] = sp;
         r[14] = 0xFFFFFFFD;
         r[15] = pc | 1;
-        Self { r, xpsr: 0x01000000, primask: 0, control: 0, msp: sp, psp: 0, s: [0u32; 32], fpscr: 0 }
+        Self { r, xpsr: 0x01000000, primask: 0, basepri: 0, faultmask: false, control: 0, msp: sp, psp: 0, s: [0u32; 32], fpscr: 0 }
     }
 }

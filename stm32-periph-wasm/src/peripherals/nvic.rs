@@ -72,6 +72,51 @@ impl Nvic {
         self.pending & (1u128 << (IRQ_OFFSET + irq)) != 0
     }
 
+    /// Raw pending bitmap for the CPU's priority-ordered selection
+    /// (mod.rs): bit (16+irq) per exception, system exceptions included.
+    pub fn pending_bits(&self) -> u128 {
+        self.pending
+    }
+
+    /// Deliverability gate for one exception: system exceptions are always
+    /// enabled; external IRQs need their ISER bit.
+    pub fn is_enabled(&self, irq: i32) -> bool {
+        if irq < 0 {
+            return true;
+        }
+        match Self::irq_reg_idx(irq) {
+            Some((idx, mask)) => self.enable[idx] & mask != 0,
+            None => false,
+        }
+    }
+
+    /// Programmed IPR priority byte for an external IRQ (raw as written;
+    /// firmware writes its shifted values, ordered consistently).
+    pub fn ext_priority(&self, irq: i32) -> u8 {
+        if irq >= 0 && (irq as usize) < IRQ_COUNT {
+            self.priority[irq as usize]
+        } else {
+            0
+        }
+    }
+
+    /// Take one pending exception by IRQ number: clears its pending bit
+    /// and sets ACTIVE (external IRQs, readable via IABR).
+    pub fn take_pending_irq(&mut self, irq: i32) {
+        self.pending &= !(1u128 << (IRQ_OFFSET + irq));
+        if let Some((idx, mask)) = Self::irq_reg_idx(irq) {
+            self.pending_reg[idx] &= !mask;
+            self.active[idx] |= mask;
+        }
+    }
+
+    /// Clear the ACTIVE bit on exception return (external IRQs).
+    pub fn clear_active(&mut self, irq: i32) {
+        if let Some((idx, mask)) = Self::irq_reg_idx(irq) {
+            self.active[idx] &= !mask;
+        }
+    }
+
     /// True iff a pending exception can actually be taken: system exceptions
     /// always can, external IRQs only when the ISER bit is set.
     pub fn has_pending(&self) -> bool {
@@ -190,10 +235,18 @@ impl Peripheral for Nvic {
                 self.active[i]
             }
             0x300..=0x4EF => {
-                let byte_idx = (offset - 0x300) as usize;
-                if byte_idx < IRQ_COUNT {
-                    self.priority[byte_idx] as u32
-                } else { 0 }
+                // IPR: the model always receives an aligned full word (the
+                // bus layer merged byte/halfword accesses already), so
+                // unpack all four priority bytes — writing only byte 0
+                // here used to drop IRQ5-7 (and misplace byte writes).
+                let base = (offset - 0x300) as usize;
+                let mut w = 0u32;
+                for i in 0..4 {
+                    let idx = base + i;
+                    let b = if idx < IRQ_COUNT { self.priority[idx] as u32 } else { 0 };
+                    w |= b << (8 * i);
+                }
+                w
             }
             _ => 0,
         }
@@ -243,9 +296,12 @@ impl Peripheral for Nvic {
                 // IABR - Active Bit Register (read-only by software writes)
             }
             0x300..=0x4EF => {
-                let byte_idx = (offset - 0x300) as usize;
-                if byte_idx < IRQ_COUNT {
-                    self.priority[byte_idx] = (value & 0xFF) as u8;
+                let base = (offset - 0x300) as usize;
+                for i in 0..4 {
+                    let idx = base + i;
+                    if idx < IRQ_COUNT {
+                        self.priority[idx] = ((value >> (8 * i)) & 0xFF) as u8;
+                    }
                 }
             }
             _ => {}

@@ -34,6 +34,7 @@ pub mod eth;
 pub mod qspi;
 pub mod fpu;
 pub mod mpu;
+pub mod dwt;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -53,6 +54,7 @@ use eth::EthernetMac;
 use qspi::Qspi;
 use fpu::Fpu;
 use mpu::Mpu;
+use dwt::{Dwt, Demcr};
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
@@ -305,6 +307,8 @@ impl Peripherals {
                 .or_else(|| Qspi::new(name))
                 .or_else(|| Mpu::new(name))
                 .or_else(|| Fpu::new(name))
+                .or_else(|| Dwt::new(name))
+                .or_else(|| Demcr::new(name))
             ;
 
             if let Some(peri) = peri {
@@ -321,6 +325,22 @@ impl Peripherals {
             peripherals.peripherals.push(PeripheralSlot {
                 start: 0xA000_1000,
                 end: 0xA000_1400,
+                peripheral: RefCell::new(p),
+            });
+        }
+        // Same for the DWT cycle counter + DEMCR TRCENA gate (both absent
+        // from the SVD; tight slots — the map asserts on overlaps).
+        if let Some(p) = Dwt::new("DWT") {
+            peripherals.peripherals.push(PeripheralSlot {
+                start: 0xE000_1000,
+                end: 0xE000_1010,
+                peripheral: RefCell::new(p),
+            });
+        }
+        if let Some(p) = Demcr::new("DEMCR") {
+            peripherals.peripherals.push(PeripheralSlot {
+                start: 0xE000_EDFC,
+                end: 0xE000_EE00,
                 peripheral: RefCell::new(p),
             });
         }
@@ -386,8 +406,14 @@ impl Peripherals {
             // QUADSPI is not in the F407 SVD (the F4 family lacks it), but we
             // model it anyway at its conventional base for completeness.
             (0xA000_1000, "QUADSPI"),
+            // DWT cycle counter (not in the SVD either): explicit slot sized
+            // to end before SysTick (the map asserts on overlaps).
+            (0xE000_1000, "DWT"),
             (0xE000_E000, "NVIC"), (0xE000_E010, "SysTick"), (0xE000_ED00, "SCB"),
             (0xE000_ED90, "MPU"),
+            // DEMCR lives in its own 4-byte slot: the SCB slots end before
+            // EDFC and a wider claim would overlap MPU/FPU (assert-guarded).
+            (0xE000_EDFC, "DEMCR"),
             (0xE000_EF34, "FPU"),
             (0xE004_2000, "DBGMCU"),
         ];
@@ -434,6 +460,8 @@ impl Peripherals {
                 .or_else(|| Qspi::new(name))
                 .or_else(|| Mpu::new(name))
                 .or_else(|| Fpu::new(name))
+                .or_else(|| Dwt::new(name))
+                .or_else(|| Demcr::new(name))
             ;
 
             if let Some(p) = p {

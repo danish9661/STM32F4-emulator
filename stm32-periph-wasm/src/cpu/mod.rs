@@ -9,15 +9,18 @@ use crate::system::WasmSystem;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-/// EXC_RETURN values we support (thread mode). F1 (return to handler) is
-/// nested-interrupt territory and faults loudly for now.
+/// EXC_RETURN values we support: thread returns (F9/FD, +FP twins E9/ED)
+/// and handler returns for nested preemption (F1/E1).
 pub const EXC_RETURN_MSP: u32 = 0xFFFFFFF9;
 pub const EXC_RETURN_PSP: u32 = 0xFFFFFFFD;
 pub const EXC_RETURN_HANDLER: u32 = 0xFFFFFFF1;
 /// Same, with an FP-extended frame (EXC_RETURN bit 4 == 0): issued when the
-/// thread uses the FPU (CONTROL.FPCA) and FPCCR.ASPEN is set.
+/// stacked frame reserved S0-S15.
 pub const EXC_RETURN_MSP_FP: u32 = 0xFFFFFFE9;
 pub const EXC_RETURN_PSP_FP: u32 = 0xFFFFFFED;
+/// Return to handler mode (nested preemption): unstacks from MSP and
+/// resumes the outer handler. FP variant for an FP-extended frame.
+pub const EXC_RETURN_HANDLER_FP: u32 = 0xFFFFFFE1;
 
 /// PC trace for execution debugging: when
 /// enabled, every executed instruction appends its PC. Bounded by the
@@ -68,6 +71,16 @@ struct SavedFp {
     fpcar: u32,
 }
 
+/// One entered exception: the IRQ (for IPSR restore on nested returns and
+/// NVIC active-bit hygiene), the stack its frame went onto, and the frame
+/// size the eventual return must unstack (tail-chain reuses it instead).
+#[derive(Clone, Copy, Debug)]
+struct ExcEntry {
+    irq: i32,
+    to_psp: bool,
+    fp_ext: bool,
+}
+
 pub struct Cpu {
     pub regs: Regs,
     pub cycles: u64,
@@ -87,8 +100,9 @@ pub struct Cpu {
     pub it_pred: bool,
     /// Exception number currently executing (0 = thread mode). Mirrors IPSR.
     pub ipsr: u32,
-    /// IRQ numbers of entered exceptions (for NVIC active-bit hygiene).
-    exc_stack: Vec<i32>,
+    /// Entered exceptions (innermost last): drives IPSR, execution
+    /// priority, and tail-chain frame reuse.
+    exc_stack: Vec<ExcEntry>,
     /// Saved IT states, parallel to exc_stack.
     it_stack: Vec<SavedIt>,
     /// Saved lazy-FP states, parallel to exc_stack.
@@ -186,11 +200,153 @@ impl Cpu {
         }
     }
 
+    /// Programmed priority of an exception (lower number = more urgent).
+    /// Fixed -2/-1 for NMI/HardFault; SHPR bytes for system handlers;
+    /// NVIC IPR bytes for external IRQs. Raw bytes throughout: firmware
+    /// writes its shifted values to both IPR and BASEPRI, so raw compare
+    /// orders identically to silicon's top-bits compare. PRIGROUP
+    /// subpriority is not split out (all-preemption semantics, which is
+    /// what FreeRTOS configures); ties break by exception number.
+    fn exc_priority(sys: &WasmSystem, irq: i32) -> i32 {
+        match irq {
+            -14 => -2, // NMI
+            -13 => -1, // HardFault
+            -12 | -11 | -10 => {
+                let shpr1 = sys.p.read(sys, 0xE000ED18, 4);
+                ((shpr1 >> (8 * (irq + 12) as u32)) & 0xFF) as i32
+            }
+            -5 => ((sys.p.read(sys, 0xE000ED1C, 4) >> 24) & 0xFF) as i32, // SVCall
+            -4 => ((sys.p.read(sys, 0xE000ED20, 4)) & 0xFF) as i32,       // DebugMon
+            -2 => ((sys.p.read(sys, 0xE000ED20, 4) >> 16) & 0xFF) as i32, // PendSV
+            -1 => ((sys.p.read(sys, 0xE000ED20, 4) >> 24) & 0xFF) as i32, // SysTick
+            _ if irq >= 0 => sys.p.nvic.borrow().ext_priority(irq) as i32,
+            _ => 0, // reserved system slots (-3,-6..-9): never generated
+        }
+    }
+
+    /// Execution priority: the innermost active handler's priority, or 256
+    /// (idle, lower than any programmable 0..255) in thread mode.
+    fn execution_priority(&self, sys: &WasmSystem) -> i32 {
+        match self.exc_stack.last() {
+            Some(e) => Self::exc_priority(sys, e.irq),
+            None => 256,
+        }
+    }
+
+    /// Whether an exception is masked right now (PRIMASK/FAULTMASK/BASEPRI).
+    /// NMI is never masked; HardFault (-1) is only stopped by FAULTMASK.
+    fn exception_masked(&self, irq: i32, prio: i32) -> bool {
+        if irq == -14 {
+            return false;
+        }
+        if self.regs.faultmask {
+            return true;
+        }
+        if prio < 0 {
+            return false;
+        }
+        if self.regs.primask != 0 {
+            return true;
+        }
+        if self.regs.basepri != 0 && prio >= self.regs.basepri as i32 {
+            return true;
+        }
+        false
+    }
+
+    /// Best pending exception: enabled, unmasked, and urgent enough to
+    /// preempt current execution. Priority asc, then exception number asc
+    /// (silicon order). Late arrival needs no special case: selection runs
+    /// at every instruction boundary, so the most urgent pending exception
+    /// always wins before any handler's first instruction.
+    fn select_pending(&self, sys: &WasmSystem) -> Option<i32> {
+        let exec_prio = self.execution_priority(sys);
+        let bits = sys.p.nvic.borrow().pending_bits();
+        let mut best: Option<(i32, i32)> = None; // (priority, irq)
+        let mut b = bits;
+        while b != 0 {
+            let bit = b.trailing_zeros() as i32;
+            b &= !(1u128 << bit);
+            let irq = bit - 16;
+            // Enabled gate (external IRQs need ISER; system always on).
+            let enabled = if irq < 0 {
+                true
+            } else {
+                sys.p.nvic.borrow().is_enabled(irq)
+            };
+            if !enabled {
+                continue;
+            }
+            let prio = Self::exc_priority(sys, irq);
+            // Mask gates (PRIMASK/FAULTMASK/BASEPRI) + preemption gate.
+            if self.exception_masked(irq, prio) {
+                continue;
+            }
+            if prio >= exec_prio {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some((bp, bi)) => (prio, irq) < (bp, bi),
+            };
+            if better {
+                best = Some((prio, irq));
+            }
+        }
+        best.map(|(_, irq)| irq)
+    }
+
+    /// Raise a synchronous exception (SVC insn, precise fetch/MPU fault,
+    /// UsageFault): take it when its priority permits activation, else
+    /// escalate a precise fault to HardFault, or pend a deferred one for
+    /// later delivery. A blocked HardFault is lockup: loud halt. With
+    /// delivery off everything halts loudly (polling firmware never raises).
+    /// `pub(crate)` for the thumb decoder's SVC/NOCP arms.
+    pub(crate) fn raise_sync(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, irq: i32, precise: bool) {
+        if !self.deliver_irqs {
+            self.fault = Some(CpuFault { pc: self.regs.r[15] & !1, op1: 0xDEAD, op2: 0, len: 2 });
+            return;
+        }
+        // External synchronous raises must be enabled; else pend and wait.
+        if irq >= 0 && !sys.p.nvic.borrow().is_enabled(irq) {
+            sys.p.nvic.borrow_mut().set_intr_pending(irq);
+            return;
+        }
+        let prio = Self::exc_priority(sys, irq);
+        let blocked = self.exception_masked(irq, prio) || prio >= self.execution_priority(sys);
+        if blocked {
+            if irq == -13 || irq == -14 {
+                // Even HardFault is blocked (FAULTMASK): silicon lockup.
+                self.fault = Some(CpuFault { pc: self.regs.r[15] & !1, op1: 0xDEAD, op2: 0, len: 2 });
+                return;
+            }
+            if precise {
+                // A synchronous fault cannot wait: escalate to HardFault.
+                self.raise_sync(sys, mem, -13, true);
+                return;
+            }
+            // Deferred faults pend and the current instruction stream
+            // continues; delivery happens once unmasked (run-loop top).
+            sys.p.nvic.borrow_mut().set_intr_pending(irq);
+            return;
+        }
+        sys.p.nvic.borrow_mut().take_pending_irq(irq);
+        self.take_exception(sys, mem, irq);
+    }
+
+    /// WFI/WFE sleep-entry rule for the thumb decoder (`pub(crate)`): sleep
+    /// unless an exception could be taken right now. Wake is deliberately
+    /// eager (any pending, via the driver's has_pending check): silicon
+    /// wakes WFI on pending-enabled interrupts even when masked, then
+    /// continues past the WFI without entering them.
+    pub(crate) fn select_pending_for_sleep(&self, sys: &WasmSystem) -> bool {
+        self.select_pending(sys).is_none()
+    }
+
     /// Take an exception: stack the context, load the handler from the
     /// vector table (via VTOR), set EXC_RETURN. Works for system exceptions
-    /// (negative irq) and external IRQs. No nesting in v1 (only called from
-    /// thread mode), but the stacking is fully hardware-shaped so ISRs run
-    /// unmodified, including FreeRTOS SVC/PendSV/SysTick handlers.
+    /// (negative irq) and external IRQs, thread or nested (an IRQ taken in
+    /// handler mode runs on MSP and returns via F1 to the outer handler).
     pub fn take_exception(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, irq: i32) {
         let vector = (16 + irq) as u32;
         // Bank the thread stack, then run the handler on MSP. The frame
@@ -236,7 +392,8 @@ impl Cpu {
         });
         self.it_n = 0;
         self.it_idx = 0;
-        self.exc_stack.push(irq);
+        let nested = self.ipsr != 0;
+        self.exc_stack.push(ExcEntry { irq, to_psp: was_psp, fp_ext });
         // Save the lazy-FP state for nesting (an inner reserve clobbers the
         // model's LSPACT/FPCAR; the pop on return restores the outer frame).
         let prev_fpccr = sys.p.read(sys, 0xE000EF34, 4);
@@ -256,14 +413,24 @@ impl Cpu {
         mem.write32(sp.wrapping_add(28), xpsr);
         // Handler mode always runs on MSP.
         self.regs.r[13] = self.regs.msp;
-        // LR = EXC_RETURN selecting the thread stack we came from, with
-        // bit 4 (FType) clear when an FP-extended frame was reserved.
-        self.regs.r[14] = match (was_psp, fp_ext) {
-            (false, false) => EXC_RETURN_MSP,
-            (true, false) => EXC_RETURN_PSP,
-            (false, true) => EXC_RETURN_MSP_FP,
-            (true, true) => EXC_RETURN_PSP_FP,
+        // LR = EXC_RETURN for where this handler returns to: a nested take
+        // (preemption) returns via F1 to the outer handler; a thread take
+        // selects the thread stack it came from. FType bit follows the
+        // reserved frame size.
+        self.regs.r[14] = match (nested, was_psp, fp_ext) {
+            (true, _, false) => EXC_RETURN_HANDLER,
+            (true, _, true) => EXC_RETURN_HANDLER_FP,
+            (false, false, false) => EXC_RETURN_MSP,
+            (false, true, false) => EXC_RETURN_PSP,
+            (false, false, true) => EXC_RETURN_MSP_FP,
+            (false, true, true) => EXC_RETURN_PSP_FP,
         };
+        // FAULTMASK clears on every exception entry except NMI (silicon:
+        // a fault handler must be able to fault again, or nothing would
+        // ever escalate twice).
+        if irq != -14 {
+            self.regs.faultmask = false;
+        }
         // ^ BUG: r13 must be the POST-PUSH sp, not stale msp! Fix below.
         self.regs.r[13] = sp;
         self.regs.msp = sp;
@@ -307,7 +474,11 @@ impl Cpu {
     }
 
     /// Perform an exception return for an EXC_RETURN value in `exc`.
-    /// Returns false (with fault recorded) for unsupported returns.
+    /// Handles thread returns (F9/FD + FP twins, IPSR back to 0) and nested
+    /// handler returns (F1/E1, IPSR back to the outer vector). Returns false
+    /// (with fault recorded) for unsupported values. On a return that
+    /// leaves a pendable exception ready, tail-chains straight into it
+    /// instead of unstacking (the frame is reused, like silicon).
     pub fn exception_return(
         &mut self,
         sys: &WasmSystem,
@@ -315,26 +486,80 @@ impl Cpu {
         exc: u32,
         pc: u32,
     ) -> bool {
-        if exc == EXC_RETURN_HANDLER {
-            // Return to handler mode (nested) — not supported in v1.
-            self.fault = Some(CpuFault { pc, op1: 0x4770, op2: 0, len: 2 });
-            return false;
-        }
         // EXC_RETURN bit 4 (FType): 0 = FP-extended 26-word frame.
         let extended = exc & 0x10 == 0;
+        let to_handler = exc == EXC_RETURN_HANDLER || exc == EXC_RETURN_HANDLER_FP;
         if exc != EXC_RETURN_MSP
             && exc != EXC_RETURN_PSP
             && exc != EXC_RETURN_MSP_FP
             && exc != EXC_RETURN_PSP_FP
+            && !to_handler
         {
             self.fault = Some(CpuFault { pc, op1: 0x4770, op2: 0, len: 2 });
             return false;
         }
+        // The top entry owns the top frame: FType must agree with the
+        // recorded frame size (silicon INVPC), and a return needs a frame.
+        let recorded_ext = match self.exc_stack.last() {
+            Some(e) => e.fp_ext,
+            None => {
+                Self::latch_invpc(sys);
+                self.raise_sync(sys, mem, Self::usage_target(sys), true);
+                return self.fault.is_none();
+            }
+        };
+        if extended != recorded_ext {
+            Self::latch_invpc(sys);
+            self.raise_sync(sys, mem, Self::usage_target(sys), true);
+            return self.fault.is_none();
+        }
         // Unstack from the bank selected by EXC_RETURN (using CURRENT bank
         // values — a PendSV task switch updates PSP mid-handler). The FP
-        // variants (ED/E9) select the same bank as their FType=1 twins.
+        // variants (ED/E9) select the same bank as their FType=1 twins;
+        // F1/E1 always unstack from MSP (handler mode runs on MSP).
         let to_psp = exc == EXC_RETURN_PSP || exc == EXC_RETURN_PSP_FP;
         let mut sp = if to_psp { self.regs.psp } else { self.regs.msp };
+        // Pop the returning entry's saved state first (its IT/FP context is
+        // done; the outer frame owns the model FP state again). The FP pop
+        // is unconditional: every take pushes exactly one save, so every
+        // return pops one — 8-word returns used to leak these.
+        if let Some(saved) = self.it_stack.pop() {
+            self.it_cond = saved.cond;
+            self.it_mask = saved.mask;
+            self.it_n = saved.n;
+            self.it_idx = saved.idx;
+        }
+        if let Some(saved) = self.fp_stack.pop() {
+            let cur = sys.p.read(sys, 0xE000EF34, 4);
+            let restored = if saved.lspact { cur | 1 } else { cur & !1 };
+            sys.p.write(sys, 0xE000EF34, 4, restored);
+            sys.p.write(sys, 0xE000EF38, 4, saved.fpcar);
+        }
+        let returned = self.exc_stack.pop().unwrap();
+        sys.p.nvic.borrow_mut().clear_active(returned.irq);
+        // Tail-chain: a ready exception reuses this frame instead of paying
+        // unstack + re-stack (silicon skips both). Only when the incoming
+        // handler needs the same frame size the returnee reserved; an FP
+        // mismatch falls through to the normal unstack and the run loop
+        // delivers next iteration (always correct, just one stack cycle).
+        if self.deliver_irqs {
+            if let Some(irq) = self.select_pending(sys) {
+                let fpccr = sys.p.read(sys, 0xE000EF34, 4);
+                let need_fp = self.regs.control & 4 != 0 && fpccr & (1 << 31) != 0;
+                if need_fp == returned.fp_ext {
+                    self.enter_chained(sys, mem, irq, returned.to_psp, returned.fp_ext);
+                    return self.fault.is_none();
+                }
+            }
+        }
+        // A thread return (F9/FD) with a live outer handler means a forged
+        // LR: fault (INVPC) before touching memory, so the escalated
+        // handler stacks a clean context instead of half-unstacked regs.
+        if !to_handler && !self.exc_stack.is_empty() {
+            Self::latch_invpc(sys);
+            self.raise_sync(sys, mem, Self::usage_target(sys), true);
+            return self.fault.is_none();
+        }
         // Pre-validate the whole frame when the MPU is on (same
         // unrecoverable-halt rule as entry: MUNSTKERR, no MMFAR). Unstack
         // READS the frame, so this is a read check.
@@ -371,14 +596,6 @@ impl Cpu {
                 self.regs.fpscr = mem.read32(sp.wrapping_add(64));
             }
             sp = sp.wrapping_add(72);
-            // Pop the nesting state back into the model (an inner reserve
-            // clobbered LSPACT/FPCAR; the outer frame owns them again now).
-            if let Some(saved) = self.fp_stack.pop() {
-                let cur = sys.p.read(sys, 0xE000EF34, 4);
-                let restored = if saved.lspact { cur | 1 } else { cur & !1 };
-                sys.p.write(sys, 0xE000EF34, 4, restored);
-                sys.p.write(sys, 0xE000EF38, 4, saved.fpcar);
-            }
         }
         self.regs.r[0] = r0;
         self.regs.r[1] = r1;
@@ -389,10 +606,31 @@ impl Cpu {
         // Restore flags (APSR) + IT/ICI bits live in xPSR; T-bit stays set.
         self.regs.xpsr = (xpsr & 0xF8000000) | 0x01000000;
         self.regs.r[13] = sp;
+        // Write the advanced SP back to its bank (both paths: the F1 branch
+        // below returns before the thread-only CONTROL update, but the MSP
+        // bank must still advance past the popped inner frame — otherwise a
+        // later return unstacks the same frame twice).
         if to_psp {
             self.regs.psp = sp;
         } else {
             self.regs.msp = sp;
+        }
+        if to_handler {
+            // Nested return: the outer handler is still active (r13 stays
+            // MSP, CONTROL.SPSEL untouched — handler mode either way).
+            match self.exc_stack.last() {
+                Some(outer) => self.ipsr = (16 + outer.irq) as u32,
+                None => {
+                    // F1 with nothing active: forged LR, fault loudly.
+                    Self::latch_invpc(sys);
+                    self.raise_sync(sys, mem, Self::usage_target(sys), true);
+                    return self.fault.is_none();
+                }
+            }
+            crate::system::set_cpu_context(true, false);
+            sys.p.nvic.borrow_mut().set_in_interrupt(true);
+            self.regs.r[15] = retpc | 1;
+            return true;
         }
         // Exception return selects the thread stack AND updates CONTROL.SPSEL
         // to match (hardware keeps them coherent; without this every
@@ -404,22 +642,17 @@ impl Cpu {
         } else {
             self.regs.control &= !2;
         }
-        // Restore the pre-exception IT state.
-        if let Some(saved) = self.it_stack.pop() {
-            self.it_cond = saved.cond;
-            self.it_mask = saved.mask;
-            self.it_n = saved.n;
-            self.it_idx = saved.idx;
-        }
-        self.exc_stack.pop();
         self.ipsr = 0;
         // Thread privilege follows CONTROL.nPRIV from here on (handlers
         // always return to unprivileged-safe state only via explicit MSR).
         crate::system::set_cpu_context((self.regs.control & 1) == 0, false);
         sys.p.nvic.borrow_mut().set_in_interrupt(false);
-        // Chained PendSV/SVC tail? No tail-chaining in v1; the run loop
-        // delivers the next pending exception on the next iteration.
         self.regs.r[15] = retpc | 1;
+        // SLEEPONEXIT (SCR bit 1): a return to thread naps the core until
+        // the next deliverable interrupt, like a WFI right after the `bx lr`.
+        if self.deliver_irqs && sys.p.read(sys, 0xE000ED10, 4) & 2 != 0 {
+            self.sleeping = true;
+        }
         // NOTE: no even-retpc fault here. FreeRTOS's M4 port deliberately
         // stores the task entry with bit0 CLEAR (`bic r1, #1` in
         // pxPortInitialiseStack) and relies on exception return forcing
@@ -428,13 +661,87 @@ impl Cpu {
         true
     }
 
+    /// Latch UFSR.INVPC (attempted return with a bad EXC_RETURN/frame).
+    fn latch_invpc(sys: &WasmSystem) {
+        let cfsr = sys.p.read(sys, 0xE000ED28, 4);
+        sys.p.write(sys, 0xE000ED28, 4, cfsr | (1 << 10));
+    }
+
+    /// UsageFault target honoring SHCSR.USGFAULTENA (bit 18): without it
+    /// the fault escalates to HardFault (silicon rule).
+    fn usage_target(sys: &WasmSystem) -> i32 {
+        if sys.p.read(sys, 0xE000ED24, 4) & (1 << 18) != 0 {
+            -10
+        } else {
+            -13
+        }
+    }
+
+    /// Enter a tail-chained exception reusing the just-returned frame (no
+    /// stacking, no unstacking): push fresh nesting state, point at the new
+    /// handler, and set LR for the frame's eventual owner (outer handler
+    /// via F1, else the thread stack the frame came from).
+    fn enter_chained(
+        &mut self,
+        sys: &WasmSystem,
+        mem: &mut dyn Memory,
+        irq: i32,
+        to_psp: bool,
+        fp_ext: bool,
+    ) {
+        sys.p.nvic.borrow_mut().take_pending_irq(irq);
+        self.it_stack.push(SavedIt {
+            cond: self.it_cond,
+            mask: self.it_mask,
+            n: self.it_n,
+            idx: self.it_idx,
+        });
+        self.it_n = 0;
+        self.it_idx = 0;
+        let prev_fpccr = sys.p.read(sys, 0xE000EF34, 4);
+        self.fp_stack.push(SavedFp {
+            lspact: prev_fpccr & 1 != 0,
+            fpcar: sys.p.read(sys, 0xE000EF38, 4),
+        });
+        self.exc_stack.push(ExcEntry { irq, to_psp, fp_ext });
+        // The chained handler needs no FP reserve of its own here: the
+        // reused frame already spans it (sizes matched), and a lazy reserve
+        // just reuses FPCAR (the first-FPU-use hook stacks into the frame).
+        let vector = (16 + irq) as u32;
+        // Outer handler still active (stack deeper than this entry) means
+        // the eventual return goes back to handler mode via F1.
+        let nested = self.exc_stack.len() > 1;
+        self.regs.r[14] = if nested {
+            if fp_ext {
+                EXC_RETURN_HANDLER_FP
+            } else {
+                EXC_RETURN_HANDLER
+            }
+        } else if to_psp {
+            if fp_ext {
+                EXC_RETURN_PSP_FP
+            } else {
+                EXC_RETURN_PSP
+            }
+        } else if fp_ext {
+            EXC_RETURN_MSP_FP
+        } else {
+            EXC_RETURN_MSP
+        };
+        self.ipsr = vector;
+        crate::system::set_cpu_context(true, irq == -13 || irq == -14);
+        sys.p.nvic.borrow_mut().set_in_interrupt(true);
+        let vtor = sys.p.read(sys, 0xE000ED08, 4);
+        let handler = mem.read32(vtor.wrapping_add(vector * 4));
+        self.regs.r[15] = handler | 1;
+    }
+
     /// Raise a MemManage (or escalated HardFault) for an MPU violation.
-    /// SHCSR.MEMFAULTENA clear escalates to HardFault (silicon rule).
-    /// With delivery on the exception is taken (precise for fetch faults
-    /// raised pre-execution; deferred-by-one for data faults — see
-    /// mem.rs); with delivery off it is a loud CPU halt like SVC/NOCP.
-    /// Any stale deferred fault is discarded first (a synchronous raise
-    /// supersedes it).
+    /// SHCSR.MEMFAULTENA clear escalates to HardFault (silicon rule);
+    /// priority gating/escalation runs through raise_sync (a masked
+    /// deferred fault pends, a masked precise one escalates). With delivery
+    /// off this is a loud CPU halt like SVC/NOCP. Any stale deferred fault
+    /// is discarded first (a synchronous raise supersedes it).
     fn raise_memmanage(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, addr: u32, exec: bool) {
         let _ = crate::system::take_mpu_fault();
         let (bits, mar) = if exec {
@@ -445,11 +752,7 @@ impl Cpu {
         crate::system::latch_memmanage_fault(sys, bits | (1 << 7), mar);
         let shcsr = sys.p.read(sys, 0xE000ED24, 4);
         let irq = if shcsr & (1 << 16) != 0 { -12 } else { -13 };
-        if self.deliver_irqs {
-            self.take_exception(sys, mem, irq);
-        } else {
-            self.fault = Some(CpuFault { pc: self.regs.r[15] & !1, op1: 0xDEAD, op2: 0, len: 2 });
-        }
+        self.raise_sync(sys, mem, irq, exec);
     }
 
     pub fn run(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, budget: u32) -> u32 {
@@ -532,20 +835,19 @@ impl Cpu {
                 }
             }
             self.cycles += 1;
-            // Inline interrupt delivery (no ISR pump needed): take the next
-            // deliverable exception when in thread mode with PRIMASK clear.
-            // Stacking is exact, so the mid-`str` PENDSVSET hazard of
-            // AGENTS.md §9 cannot occur — the store completes, PC advances,
-            // then we stack the next PC.)
-            if self.deliver_irqs && self.ipsr == 0 && self.regs.primask == 0 {
-                let pending = sys.p.nvic.borrow().has_pending();
-                if pending {
+            // Inline interrupt delivery with priority preemption (no ISR
+            // pump needed): after every instruction, take the best pending
+            // exception that is enabled, unmasked, and urgent enough to
+            // preempt — in thread mode or nested inside a handler. Stacking
+            // is exact, so the mid-`str` PENDSVSET hazard of AGENTS.md §9
+            // cannot occur — the store completes, PC advances, then we
+            // stack the next PC.)
+            if self.deliver_irqs {
+                if let Some(irq) = self.select_pending(sys) {
                     // Bind first: `if let` would extend the borrow_mut guard
                     // through the body and take_exception would re-borrow.
-                    let next = sys.p.nvic.borrow_mut().get_and_clear_next_intr_pending();
-                    if let Some(irq) = next {
-                        self.take_exception(sys, mem, irq);
-                    }
+                    sys.p.nvic.borrow_mut().take_pending_irq(irq);
+                    self.take_exception(sys, mem, irq);
                 }
             }
         }

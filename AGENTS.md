@@ -2459,9 +2459,23 @@ register-shift-by-0 is a no-op (not imm-#0-means-32).
 ### Exceptions + FreeRTOS + WFI on wasm (2026-09-04, branch `feature/wasm-cpu`)
 - Inline delivery (`deliver_irqs`, set via `enable_irqs`/`irq_eth`/`freertos`/
   `lowpower`): SVC/PendSV/SysTick entry (exact stacking, handler on MSP) +
-  `exception_return` (F9/FD; F1 faults) with PSP/MSP banking, CONTROL.SPSEL
+  `exception_return` (F9/FD/F1+E1 with PSP/MSP banking, CONTROL.SPSEL
   coherence (return + MSR swap), post-frame PSP advance, even-stacked-PC
   tolerance (FreeRTOS stores task entries BIC'd), per-instruction bank sync.
+- Priority fidelity (2026-09-10): BASEPRI/FAULTMASK masking is real (MRS/MSR
+  wired, MAX raise-only); selection is priority-then-vector order (the old
+  vector-order scan is gone); preemptive nesting (F1 returns, ipsr restore
+  from the entry stack, FAULTMASK cleared on entry except NMI);
+  tail-chaining (frame reuse when sizes match, else unstack+deliver);
+  SLEEPONEXIT naps on thread return; DWT CYCCNT counts the instruction
+  clock when CYCCNTENA+TRCENA (new `dwt.rs`: DWT + DEMCR slots, both maps).
+  Synchronous SVC/UsageFault/MPU faults escalate to HardFault past masks,
+  pend when deferred-and-masked, lock up loudly when HardFault is blocked.
+  11 native tests (synthetic vector-table image in tests.rs). Deliberately
+  still out: PRIGROUP subpriority split (all-preemption compare — matches
+  FreeRTOS config), ITM (dropped reads-as-0, writes ignored), SEV event
+  register for WFE (sleeps like WFI; wake is eager-any-pending, entry is
+  predicate-gated — matches silicon wake-vs-entry split).
 - Native tests: `exception_svc_roundtrip`, `freertos_tasks_run` (SVC start,
   PendSV switches, TIM2 ISR sem, TASK1/2 ticks); `cargo test` 55/55.
 - `site/probe_freertos_wasm.mjs`: PROBE PASS (4 TCBs; 37k batches + 3×500-inst
@@ -2931,6 +2945,11 @@ cargo 85/85, greenboard 3/3, sweep 41/41, doom 11/11, gateway trio.
   spurious fire). Single-threaded `last <= n` always holds, so the fix
   changes no production behavior. Found as a 1-in-3 `freertos_tasks_run`
   flake after the FPU tick-pumping test joined the suite.
+- NVIC IPR arms must unpack/pack the full word: the bus layer merges
+  byte/halfword accesses into an aligned word before dispatch, so a
+  single-byte arm silently sets only IRQ[n*4] and drops the rest (every
+  IPR1+ write landed wrong; only SHPR users like FreeRTOS ever worked).
+  Found while writing the priority-order tests.
 
 ### Deliberate v1 limitations — ALL CLOSED (2026-09-09 sessions)
 - ~~MVFR reads via MRC ID encodings fault~~ — served (EEF7/EEF6/EEF5, same

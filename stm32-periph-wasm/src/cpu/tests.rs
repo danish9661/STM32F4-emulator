@@ -1848,3 +1848,296 @@ fn dsp_nonzero_regs() {
     let (cpu, _) = run_snippet(&[0xFA98, 0xF729], &[(8, 0x0004_0004), (9, 0x0002_0002)]);
     assert_eq!(cpu.regs.r[7], 0x0003_0003, "halving add");
 }
+
+/// Synthetic interrupt-test image: vector table + main spin + two handlers.
+/// IRQ0 -> A @0x110 (cntA++), IRQ1 -> B @0x120 (order=cntA snapshot, cntB++).
+/// NMI/SVC/SysTick -> A, HardFault -> B; everything else -> A. Counters at
+/// 0x20001000 (A) / 0x20001004 (B), order slot at 0x20001008. With
+/// `spinning`, both handlers are branch-to-self loops (for nesting tests,
+/// where a returning handler would close the preemption window).
+fn irq_test_image(spinning: bool) -> Vec<u8> {
+    let mut img = vec![0u8; 0x200];
+    fn w32(img: &mut Vec<u8>, off: usize, v: u32) {
+        img[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    fn w16(img: &mut Vec<u8>, off: usize, v: u16) {
+        img[off..off + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    w32(&mut img, 0x00, 0x20002000); // SP
+    w32(&mut img, 0x04, 0x08000101); // reset -> main
+    for v in 2..16u32 {
+        w32(&mut img, (v * 4) as usize, if v == 3 { 0x08000121 } else { 0x08000111 });
+    }
+    w32(&mut img, 0x40, 0x08000111); // IRQ0 -> A
+    w32(&mut img, 0x44, 0x08000121); // IRQ1 -> B
+    w16(&mut img, 0x100, 0xE7FE); // main: b .
+    if spinning {
+        w16(&mut img, 0x110, 0xE7FE);
+        w16(&mut img, 0x120, 0xE7FE);
+    } else {
+        // A: ldr r0,[pc,#8](0x11C); ldr r1,[r0]; adds r1,#1; str r1,[r0]; bx lr
+        for (o, v) in [(0x110, 0x4802u16), (0x112, 0x6801), (0x114, 0x3101), (0x116, 0x6001), (0x118, 0x4770), (0x11A, 0xBF00)] {
+            w16(&mut img, o, v);
+        }
+        w32(&mut img, 0x11C, 0x20001000);
+        // B: order=cntA; cntB++
+        for (o, v) in [(0x120, 0x4804u16), (0x122, 0x6801), (0x124, 0x4A04), (0x126, 0x6011), (0x128, 0x4804), (0x12A, 0x6801), (0x12C, 0x3101), (0x12E, 0x6001), (0x130, 0x4770), (0x132, 0xBF00)] {
+            w16(&mut img, o, v);
+        }
+        w32(&mut img, 0x134, 0x20001000);
+        w32(&mut img, 0x138, 0x20001008);
+        w32(&mut img, 0x13C, 0x20001004);
+    }
+    img
+}
+
+#[test]
+fn irq_priority_order() {
+    // B (prio 0x40) must run before A (prio 0xC0) when both pend: the old
+    // vector-order selection ran A first (order slot would read 1).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000E100, 0x3); // ISER0: IRQ0+IRQ1
+    mem.write32(0xE000E400, 0x000040C0); // IPR0: A=0xC0 (low), B=0x40 (high)
+    sys.p.nvic.borrow_mut().set_intr_pending(0);
+    sys.p.nvic.borrow_mut().set_intr_pending(1);
+    cpu.run(sys, &mut mem, 300);
+    no_fault(&cpu, &mem);
+    assert_eq!(mem.read32(0x20001008), 0, "B must run before A (order slot)");
+    assert_eq!(mem.read32(0x20001000), 1, "A ran");
+    assert_eq!(mem.read32(0x20001004), 1, "B ran");
+    assert_eq!(cpu.ipsr, 0, "back in thread mode");
+}
+
+#[test]
+fn basepri_masks_and_unmasks() {
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000E100, 0x2); // ISER0: IRQ1 only
+    mem.write32(0xE000E400, 0x00004000); // IPR0: B=0x40
+    sys.p.nvic.borrow_mut().set_intr_pending(1);
+    cpu.regs.basepri = 0x40; // masks prio >= 0x40, i.e. B
+    cpu.run(sys, &mut mem, 100);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 0, "masked IRQ must not activate");
+    assert_eq!(mem.read32(0x20001004), 0, "B handler must not run");
+    assert!(sys.p.nvic.borrow().irq_pending(1), "masked IRQ stays pending");
+    cpu.regs.basepri = 0; // unmask
+    cpu.run(sys, &mut mem, 100);
+    no_fault(&cpu, &mem);
+    assert_eq!(mem.read32(0x20001004), 1, "B runs after unmask");
+    assert!(!sys.p.nvic.borrow().irq_pending(1), "pending cleared by take");
+}
+
+#[test]
+fn faultmask_blocks_all_but_nmi() {
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000E100, 0x2);
+    mem.write32(0xE000E400, 0x00004000);
+    sys.p.nvic.borrow_mut().set_intr_pending(1);
+    sys.p.nvic.borrow_mut().set_intr_pending(-14); // NMI
+    cpu.regs.faultmask = true;
+    cpu.run(sys, &mut mem, 200);
+    no_fault(&cpu, &mem);
+    assert_eq!(mem.read32(0x20001000), 1, "NMI (vector->A) runs through FAULTMASK");
+    assert_eq!(mem.read32(0x20001004), 0, "B stays masked");
+    assert!(sys.p.nvic.borrow().irq_pending(1), "B still pending");
+    cpu.regs.faultmask = false;
+    cpu.run(sys, &mut mem, 100);
+    no_fault(&cpu, &mem);
+    assert_eq!(mem.read32(0x20001004), 1, "B runs after clear");
+}
+
+#[test]
+fn nesting_preempts_upward() {
+    // Spinning A (prio 0xC0) is preempted by B (prio 0x00): ipsr moves 16->17.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(true));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000E100, 0x3);
+    mem.write32(0xE000E400, 0x000000C0); // A=0xC0, B=0x00
+    sys.p.nvic.borrow_mut().set_intr_pending(0);
+    cpu.run(sys, &mut mem, 50);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 16, "in A handler");
+    sys.p.nvic.borrow_mut().set_intr_pending(1);
+    cpu.run(sys, &mut mem, 50);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 17, "B preempted A");
+}
+
+#[test]
+fn nesting_blocks_downward() {
+    // Spinning B (prio 0x00) is NOT preempted by A (prio 0xC0).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(true));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000E100, 0x3);
+    mem.write32(0xE000E400, 0x000000C0);
+    sys.p.nvic.borrow_mut().set_intr_pending(1);
+    cpu.run(sys, &mut mem, 50);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 17, "in B handler");
+    sys.p.nvic.borrow_mut().set_intr_pending(0);
+    cpu.run(sys, &mut mem, 50);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 17, "A must not preempt B");
+    assert!(sys.p.nvic.borrow().irq_pending(0), "A stays pending");
+}
+
+#[test]
+fn tail_chain_reuses_frame() {
+    // Direct-drive: take A, pend B, return -> must chain into B (ipsr 17,
+    // handler PC, one live entry) instead of unstacking to thread.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000E100, 0x3);
+    mem.write32(0xE000E400, 0x000040C0);
+    cpu.take_exception(sys, &mut mem, 0);
+    assert_eq!(cpu.ipsr, 16);
+    sys.p.nvic.borrow_mut().set_intr_pending(1);
+    let lr_a = cpu.regs.r[14];
+    assert!(cpu.exception_return(sys, &mut mem, lr_a, cpu.regs.r[15] & !1));
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 17, "chained into B, not returned to thread");
+    assert_eq!(cpu.regs.r[15] & !1, 0x08000120, "at B handler");
+    assert_eq!(cpu.exc_stack.len(), 1, "one live entry (pop+push)");
+    // B's LR returns to the thread the reused frame came from (F9: the
+    // stack held only A, so the frame owner is thread-on-MSP).
+    assert_eq!(cpu.regs.r[14], super::EXC_RETURN_MSP, "chained LR targets thread MSP frame");
+    let lr_b = cpu.regs.r[14];
+    assert!(cpu.exception_return(sys, &mut mem, lr_b, cpu.regs.r[15] & !1));
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 0, "back in thread mode");
+    assert!(cpu.exc_stack.is_empty(), "stack drained");
+}
+
+#[test]
+fn sleeponexit_naps_on_thread_return() {
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000E100, 0x1);
+    mem.write32(0xE000ED10, 0x2); // SCR.SLEEPONEXIT
+    cpu.take_exception(sys, &mut mem, 0);
+    let lr = cpu.regs.r[14];
+    assert!(!cpu.sleeping, "not asleep mid-handler");
+    assert!(cpu.exception_return(sys, &mut mem, lr, cpu.regs.r[15] & !1));
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 0);
+    assert!(cpu.sleeping, "SLEEPONEXIT naps the core on return to thread");
+}
+
+#[test]
+fn dwt_cyccnt_counts_instructions() {
+    // 100 spinning instructions must read back as exactly 100 counts; with
+    // TRCENA clear the counter stays frozen.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write16(0x20002000, 0xE7FE); // b . spin in SRAM
+    cpu.regs.r[15] = 0x20002001;
+    mem.write32(0xE000EDFC, 1 << 24); // DEMCR.TRCENA
+    mem.write32(0xE0001000, 1); // DWT_CTRL.CYCCNTENA
+    cpu.run(sys, &mut mem, 100);
+    no_fault(&cpu, &mem);
+    assert_eq!(mem.read32(0xE0001004), 100, "CYCCNT tracks instructions 1:1");
+    mem.write32(0xE000EDFC, 0); // TRCENA clear freezes
+    cpu.run(sys, &mut mem, 50);
+    assert_eq!(mem.read32(0xE0001004), 100, "frozen without TRCENA");
+}
+
+#[test]
+fn msr_basepri_max_semantics() {
+    // MSR BASEPRI,R0 (F380 8812) sets the mask; BASEPRI_MAX (F380 8813)
+    // only ever raises it; MRS (F3E0 8112) reads it back.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    mem.write16(0x20002000, 0xF380);
+    mem.write16(0x20002002, 0x8812); // msr basepri, r0
+    mem.write16(0x20002004, 0xF380);
+    mem.write16(0x20002006, 0x8813); // msr basepri_max, r0
+    mem.write16(0x20002008, 0xF3E0);
+    mem.write16(0x2000200A, 0x8112); // mrs r1, basepri
+    mem.write16(0x2000200C, 0xE7FE);
+    cpu.regs.r[0] = 0x40;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 1);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.basepri, 0x40, "MSR BASEPRI writes through");
+    cpu.regs.r[0] = 0x20;
+    cpu.run(sys, &mut mem, 1);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.basepri, 0x40, "BASEPRI_MAX never lowers");
+    cpu.regs.r[0] = 0x80;
+    cpu.regs.r[15] = 0x20002004; // re-run the MAX insn
+    cpu.run(sys, &mut mem, 1);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.basepri, 0x80, "BASEPRI_MAX raises");
+    cpu.regs.r[15] = 0x20002008; // MRS insn
+    cpu.run(sys, &mut mem, 1);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[1], 0x80, "MRS BASEPRI reads back");
+}
+
+#[test]
+fn svc_taken_and_escalated() {
+    // Unmasked SVC takes the SVC vector; FAULTMASK-locked SVC halts
+    // (lockup: even HardFault is blocked), it does not ghost-take.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write16(0x20002000, 0xDF00); // svc #0
+    mem.write16(0x20002002, 0xE7FE); // b .
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 20);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 0, "SVC handler returned");
+    assert_eq!(mem.read32(0x20001000), 1, "SVC vector (A) ran");
+
+    let (mut cpu2, mut mem2) = boot(&irq_test_image(false));
+    let sys2 = crate::sys();
+    cpu2.deliver_irqs = true;
+    cpu2.regs.faultmask = true;
+    mem2.write16(0x20002000, 0xDF00);
+    mem2.write16(0x20002002, 0xE7FE);
+    cpu2.regs.r[15] = 0x20002001;
+    cpu2.run(sys2, &mut mem2, 20);
+    assert!(cpu2.fault.is_some(), "FAULTMASK-locked SVC must lock up loudly");
+}
+
+#[test]
+fn usagefault_nocp_escalates_past_basepri() {
+    // NOCP with USGFAULTENA + low UsageFault priority under BASEPRI must
+    // escalate to a TAKEN HardFault (vector B), with the NOCP sticky set.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000ED24, 1 << 18); // SHCSR.USGFAULTENA
+    mem.write8(0xE000ED1A, 0x80); // SHPR1 UsageFault byte = 0x80
+    cpu.regs.basepri = 0x40; // masks 0x80, not HardFault (-1)
+    mem.write16(0x20002000, 0xEEF1); // vsqrt s17,s18 (needs CPACR=FPU)
+    mem.write16(0x20002002, 0x8AC9);
+    mem.write16(0x20002004, 0xE7FE);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 30);
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.ipsr, 0, "HardFault handler returned");
+    assert_eq!(mem.read32(0x20001004), 1, "HardFault vector (B) ran");
+    assert_ne!(mem.read32(0xE000ED28) & 0x00080000, 0, "NOCP sticky latched");
+}

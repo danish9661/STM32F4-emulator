@@ -1389,16 +1389,17 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
     if o & 0xFF00 == 0xBE00 {
         return fault(cpu, pc, op, 0, 2);
     }
-    // SVC: synchronous exception. With delivery on, take it inline (exact
-    // stacking, handler runs on MSP); otherwise loud fault (polling
-    // firmware never SVCs, so hitting one is a bug worth surfacing).
+    // SVC: synchronous exception. With delivery on, raise it through the
+    // priority gate (an SVC that cannot preempt escalates to HardFault,
+    // silicon rule); otherwise loud fault (polling firmware never SVCs,
+    // so hitting one is a bug worth surfacing).
     if o & 0xFF00 == 0xDF00 {
         if !cpu.deliver_irqs {
             return fault(cpu, pc, op, 0, 2);
         }
         adv(cpu, pc, 2);
-        cpu.take_exception(sys, mem, -5);
-        return true;
+        cpu.raise_sync(sys, mem, -5, true);
+        return cpu.fault.is_none();
     }
     if o & 0xFF00 == 0xDE00 {
         return fault(cpu, pc, op, 0, 2);
@@ -1431,9 +1432,9 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         if op == 0xBF30 || op == 0xBF20 {
             adv(cpu, pc, 2);
             if cpu.deliver_irqs {
-                // A pending interrupt with PRIMASK clear means no sleep
-                // (the exception is taken on the next run-loop iteration).
-                if !(sys.p.nvic.borrow().has_pending() && cpu.regs.primask == 0) {
+                // A pending exception that could preempt right now means no
+                // sleep (it is taken on the next run-loop iteration instead).
+                if cpu.select_pending_for_sleep(sys) {
                     cpu.sleeping = true;
                 }
             }
@@ -1718,10 +1719,8 @@ pub fn exec32(
                 8 => cpu.read_msp(),
                 9 => cpu.read_psp(),
                 16 => cpu.regs.primask,                 // PRIMASK
-                17 | 18 => 0,                           // FAULTMASK/BASEPRI
-                // BASEPRI_MAX reads BASEPRI (always 0 here: priority
-                // masking is not modeled, like FAULTMASK above).
-                19 => 0,
+                17 => cpu.regs.faultmask as u32,        // FAULTMASK (real state now)
+                18 | 19 => cpu.regs.basepri as u32,     // BASEPRI(+_MAX reads BASEPRI)
                 20 => cpu.regs.control,                 // CONTROL
                 _ => return fault(cpu, pc, op1, op2, 4),
             };
@@ -1739,9 +1738,15 @@ pub fn exec32(
                 8 => cpu.write_msp(v),
                 9 => cpu.write_psp(v),
                 16 => cpu.regs.primask = v & 1,
-                // FAULTMASK/BASEPRI/BASEPRI_MAX: accepted, priority masking
-                // itself is not modeled (see MRS note above).
-                17 | 18 | 19 => {}
+                17 => cpu.regs.faultmask = v & 1 != 0, // FAULTMASK
+                18 => cpu.regs.basepri = (v & 0xFF) as u8, // BASEPRI
+                // BASEPRI_MAX raises the mask only (never lowers it).
+                19 => {
+                    let b = (v & 0xFF) as u8;
+                    if b > cpu.regs.basepri {
+                        cpu.regs.basepri = b;
+                    }
+                }
                 20 => {
                     // MSR CONTROL: an SPSEL change switches the current stack
                     // (hardware swaps r13 with the other bank).
@@ -3371,7 +3376,8 @@ pub fn exec32(
         // UsageFault NOCP (UFSR bit 3 = CFSR bit 19 latched; without
         // delivery this is a loud fault like SVC — polling firmware never
         // touches the FPU without enabling it, so hitting this is a bug
-        // worth surfacing). Each successful FPU arm sets CONTROL.FPCA
+        // worth surfacing). Without SHCSR.USGFAULTENA it escalates to
+        // HardFault. Each successful FPU arm sets CONTROL.FPCA
         // like hardware (drives lazy stacking on exception entry).
         let cpacr_ok = sys.p.read(sys, 0xE000ED88, 4) & 0x00F0_0000 == 0x00F0_0000;
         if !cpacr_ok || !sys.p.fpu_fpexc_en() {
@@ -3381,8 +3387,9 @@ pub fn exec32(
                 return fault(cpu, pc, op1, op2, 4);
             }
             adv(cpu, pc, 4);
-            cpu.take_exception(sys, mem, -10); // UsageFault
-            return true;
+            let target = if sys.p.read(sys, 0xE000ED24, 4) & (1 << 18) != 0 { -10 } else { -13 };
+            cpu.raise_sync(sys, mem, target, true);
+            return cpu.fault.is_none();
         }
         // Lazy-stacking completion: a pending lazy FP context (LSPACT set
         // by exception entry) stacks S0-S15 into the FPCAR frame on the
