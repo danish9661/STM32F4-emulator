@@ -464,6 +464,12 @@ impl Peripherals {
                 peripheral: RefCell::new(p),
             });
         }
+        // Core ARM system block: some SVDs (Keil DFP family files) omit
+        // every system peripheral (no SCB/MPU/SysTick/FPU). Register whichever
+        // bases came up empty, with the same windows new_wasm uses — without
+        // this, VTOR reads 0 and every interrupt vectors into the void.
+        // (SVDs that describe them, like monox, hit the skip rule instead.)
+        peripherals.ensure_core_system_slots();
         // USB OTG FS device block (regs + EP0-3 FIFO strides to 0x50005000).
         // The four SVD OTG_FS_* entries stay dropped (UsbFs::new only
         // matches the combined name); HS is out of scope (stays dropped).
@@ -638,6 +644,38 @@ impl Peripherals {
             mosi: mosi.to_string(),
         };
         SoftwareSpi::register(config, &mut self.gpio.borrow_mut(), ext_devices);
+    }
+
+    /// Register core ARM system slots (SysTick/SCB/MPU/FPU) whose bases
+    /// came up empty — for SVDs that omit the system block entirely (Keil
+    /// DFP family files). Skips any base an SVD entry already claims, so
+    /// fully-described maps (monox) are untouched. Windows mirror new_wasm.
+    fn ensure_core_system_slots(&mut self) {
+        let want: [(u32, u32, &str); 4] = [
+            (0xE000_E010, 0xE000_E020, "SysTick"),
+            (0xE000_ED00, 0xE000_ED90, "SCB"),
+            (0xE000_ED90, 0xE000_EDFC, "MPU"),
+            (0xE000_EF34, 0xE000_EF50, "FPU"),
+        ];
+        for (start, end, name) in want {
+            if self.peripherals.iter().any(|p| p.start == start) {
+                continue;
+            }
+            let peri: Option<Box<dyn Peripheral>> = match name {
+                "SysTick" => SysTick::new(name),
+                "SCB" => Scb::new(name),
+                "MPU" => Mpu::new(name),
+                "FPU" => Fpu::new(name),
+                _ => None,
+            };
+            if let Some(p) = peri {
+                self.peripherals.push(PeripheralSlot {
+                    start,
+                    end,
+                    peripheral: RefCell::new(p),
+                });
+            }
+        }
     }
 
     fn finish_registration(&mut self) {

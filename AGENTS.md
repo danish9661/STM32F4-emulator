@@ -3150,3 +3150,22 @@ Coverage rule: diff the chip's SVD names against the model claims —
 F401/F411 need zero new models; F429 needs DMA2D only (GPIOK free).
 `is_periph` covers the whole FSMC window (0x60000000-0xA0000000) so all
 FSMC-banked boards route; peripheral-space holes stay benign-0.
+Keil DFP SVDs contain NO system peripherals (`0xE000Exxx` absent), so
+`from_svd` maps have no SCB/MPU/SysTick/FPU until `ensure_core_system_slots()`
+(2026-09-11, `peripherals/mod.rs`) registers the core windows whenever their
+bases are empty — without it VTOR reads 0 and every vector fetch BusFaults
+(immediate STOP, empty UART, `pc=0`). Sizes must be exact per chip, from the
+datasheet not memory: F401RE is 512K/96K (0x80000/0x18000 — NOT 256K/64K like
+the CC), F407VG/VE/ZE all 192K RAM, F429ZI 2M/256K. `_estack` in the ELF is
+the authority (`nm ... | grep _estack`).
+
+### Real-firmware board validation (2026-09-11)
+`arduino_board/arduino_board.ino` (Serial prints + LED blink + SysTick
+`delay()`) compiles under Arduino-Core for all 8 targets
+(`.pw-scratch/build_arduino.sh`, FQBNs `GenF4:BLACKPILL_F401CC/F411CE,
+BLACK_F407VE/ZE`, `Nucleo_64:NUCLEO_F401RE/F411RE`, `Disco:DISCO_F407VG/F429ZI`;
+binaries in `arduino_board/build-<key>/`), and `site/test_arduino_boards.mjs`
+(wired into `npm test`) runs each against its board SVD + sizes, asserting
+boot banner + `tick 0 LED=ON` + `tick 2 LED=OFF` + `Arduino done` + ≥2 ODR
+toggles + no fault. 8/8 PASS — full Arduino stack (SystemInit PLL, .data/.bss,
+GPIO, SysTick IRQs, USART TX) on every variant.
