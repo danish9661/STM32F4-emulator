@@ -87,6 +87,29 @@ Exact under the CMSIS shifted-value convention (what FreeRTOS/Arduino/
 Nordic all write). If a firmware writes *unshifted* priority values,
 ordering still holds but masking granularity shifts — flag it here.
 
+### 11. Nested exception SP used the stale bank, not live r13 — FIXED in
+uno-r4 cores (mirror here if the F4 core shares the code)
+Trigger: Arduino UNO R4 echo firmware (TinyUSB CDC, 1-byte bulk transfers
+at full speed) with AGT0 1ms IRQs nesting inside the USB ISR: after ~31
+transfers the core jumped to 0x1C and faulted (UsageFault on 0xFFFF).
+Expected (silicon): handler mode runs on MSP and r13 is its live SP;
+takes push at live SP, returns pop from live SP. The nested AGT take
+pushes below the USB handler's live SP; the nested return pops it back.
+Observed (core): `take_exception` reloaded r13 from the stale MSP bank
+on entry (stacking the nested frame over the outer frame), and
+`exception_return` unstacked from the stale bank instead of live r13
+(the nested return left the bank at the dead inner frame). The outer
+return then resurrected stale stack words as PC (0x1D -> 0x1C fault).
+Single-level IRQs never noticed (bank == live SP when balanced).
+Pointers: uno-r4 `core/*/src/cpu/mod.rs` `take_exception` (removed
+`r13 = msp` reload) and `exception_return` (unstack base: live r13 for
+F1/E1/F9/ED, PSP bank only for FD/ED thread-PSP returns). Proven by
+`ra4m1_usb_cdc_echo` (100B two-packet round-trip through real CDC bulk
+pipes with AGT running) plus the full suites staying green (149
+snapshot incl. 128 legacy CPU, 21 small-core).
+Status: FIXED in uno-r4 (both cores); F4 core should take the same two
+edits if its take/return still use the bank.
+
 ## CLOSED log
 
 Everything else ever found is closed with a native test — the full

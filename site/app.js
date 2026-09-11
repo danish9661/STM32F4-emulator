@@ -2,12 +2,12 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=14';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=15';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
-import { boardsOf, boardForSelection, BOARDS } from './boards.js?v=1';
-import { FIRMWARES } from './firmware.js?v=11';
+import { boardsOf, boardForSelection, BOARDS } from './boards.js?v=2';
+import { FIRMWARES } from './firmware.js?v=12';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
 
@@ -34,7 +34,7 @@ let dcmiFed = { big2: false, big3: false };
 let image = null;          // { flash, ram, extraMem, entry, symbols, name, uartAddr }
 
 // Firmwares on UART4 (0x40004C00) instead of USART1 (0x40011000).
-const UART4_FIRMWARES = new Set(['echo_test', 'blink_serial']);
+const UART4_FIRMWARES = new Set(['echo_test', 'blink_serial', 'blink_serial_disco_f429zi', 'echo_test_black_f407ve', 'echo_test_black_f407ze', 'echo_test_disco_f407vg', 'echo_test_disco_f429zi', 'timer_test_black_f407ve', 'timer_test_black_f407ze', 'timer_test_disco_f407vg', 'timer_test_disco_f429zi']);
 // Arduino Nucleo/Discovery-F407 builds Serial on USART2 (0x40004400).
 // (Output capture is global — this only selects the RX-inject target for
 // the Send box.)
@@ -52,7 +52,7 @@ const ETH_RX_MAP = {
 // irq_flag and the guest ETH_IRQHandler would double-process DMASR/rx_desc.
 const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehensive_test', 'eth_irq_test', 'edge_test', 'periph_test', 'fpu_irq_test', 'mpu_test', 'exti_test', 'freertos_test',
     'arduino_bp_f401cc', 'arduino_bp_f411ce', 'arduino_nucleo_f401re', 'arduino_nucleo_f411re',
-    'arduino_disco_f407vg', 'arduino_disco_f429zi', 'arduino_black_f407ve', 'arduino_black_f407ze']);
+    'arduino_disco_f407vg', 'arduino_disco_f429zi', 'arduino_black_f407ve', 'arduino_black_f407ze', 'exti_test_f401', 'exti_test_f411', 'exti_test_f429', 'rx_crypto_test_f401', 'rx_crypto_test_f411', 'rx_crypto_test_f429', 'freertos_test_f411', 'freertos_test_f429', 'arduino_test_black_f407ve', 'arduino_test_black_f407ze', 'arduino_test_bp_f401cc', 'arduino_test_bp_f411ce', 'arduino_test_disco_f407vg', 'arduino_test_disco_f429zi', 'arduino_test_nucleo_f401re', 'arduino_test_nucleo_f411re', 'blink_serial_disco_f429zi', 'crypto_test_black_f407ve', 'crypto_test_black_f407ze', 'crypto_test_disco_f407vg', 'crypto_test_disco_f429zi', 'echo_test_black_f407ve', 'echo_test_black_f407ze', 'echo_test_disco_f407vg', 'echo_test_disco_f429zi', 'edge_test_black_f407ve', 'edge_test_black_f407ze', 'edge_test_bp_f401cc', 'edge_test_bp_f411ce', 'edge_test_disco_f407vg', 'edge_test_disco_f429zi', 'edge_test_nucleo_f401re', 'edge_test_nucleo_f411re', 'hal_test_black_f407ve', 'hal_test_black_f407ze', 'hal_test_bp_f401cc', 'hal_test_bp_f411ce', 'hal_test_disco_f407vg', 'hal_test_disco_f429zi', 'hal_test_nucleo_f401re', 'hal_test_nucleo_f411re', 'periph_test_black_f407ve', 'periph_test_black_f407ze', 'periph_test_bp_f401cc', 'periph_test_bp_f411ce', 'periph_test_disco_f407vg', 'periph_test_disco_f429zi', 'periph_test_nucleo_f401re', 'periph_test_nucleo_f411re', 'timer_test_black_f407ve', 'timer_test_black_f407ze', 'timer_test_disco_f407vg', 'timer_test_disco_f429zi', 'mpu_test_f401', 'mpu_test_f411', 'mpu_test_f429', 'fpu_irq_test_f401', 'fpu_irq_test_f411', 'fpu_irq_test_f429']);
 
 // Interrupt-driven ETH firmware: the guest ETH_IRQHandler (run by the pump)
 // reads DMASR and scans rx_desc itself, so the driver must not write the
@@ -60,7 +60,7 @@ const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehen
 const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test', 'eth_dhcp', 'eth_test']);
 
 // FreeRTOS firmware: SVC/PendSV/SysTick delivery (inline in the Rust core).
-const FREERTOS_FIRMWARES = new Set(['freertos_test']);
+const FREERTOS_FIRMWARES = new Set(['freertos_test', 'freertos_test_f411', 'freertos_test_f429']);
 
 // Firmwares that exercise the WFI/STOP low-power path: the emulator halts the
 // core on WFI and advances the virtual RTC until an alarm/interrupt wakes it.
@@ -77,6 +77,15 @@ const RTC_INIT = (() => {
     b[0x11] = 0x1B; b[0x12] = 0x80;
     return b;
 })();
+// FSMC RDDID sink (ILI9341 ID 0x9341), shared by fsmc_test + family builds.
+const fsmcRddidSink = (events, pushData) => {
+    for (let i = 0; i + 1 < events.length; i += 2) {
+        const hdr = events[i] >>> 0;
+        if (hdr & 0x80000000) {
+            if ((events[i + 1] & 0xFF) === 0x04) pushData([0x9341]);
+        }
+    }
+};
 const DEVICE_FIRMWARES = {
     oled_test: { oled: { i2c: 'I2C1', addr: 0x3C } },
     tft_test: { tft: { spi: 'SPI2', cs: 'PB12', dc: 'PB11' } },
@@ -103,19 +112,27 @@ const DEVICE_FIRMWARES = {
     // fsmc_test drives an ILI9341-style display on FSMC BANK1 and reads back
     // RDDID (0x04): answer the ILI9341 ID like site/test_fsmc.mjs does. The
     // BANK4 probe is answered by the model itself (inert-0, no device).
-    fsmc_test: {
-        fsmcDevices: [{
-            bank: 0,
-            handler: (events, pushData) => {
-                for (let i = 0; i + 1 < events.length; i += 2) {
-                    const hdr = events[i] >>> 0;
-                    if (hdr & 0x80000000) {
-                        if ((events[i + 1] & 0xFF) === 0x04) pushData([0x9341]);
-                    }
-                }
-            },
-        }],
-    },
+    fsmc_test: { fsmcDevices: [{ bank: 0, handler: fsmcRddidSink }] },
+    fsmc_test_f429: { fsmcDevices: [{ bank: 0, handler: fsmcRddidSink }] },
+    oled_test_f401: { oled: { i2c: 'I2C1', addr: 0x3C } },
+    oled_test_f411: { oled: { i2c: 'I2C1', addr: 0x3C } },
+    oled_test_f429: { oled: { i2c: 'I2C1', addr: 0x3C } },
+    tft_test_f401: { tft: { spi: 'SPI2', cs: 'PB12', dc: 'PB11' } },
+    tft_test_f411: { tft: { spi: 'SPI2', cs: 'PB12', dc: 'PB11' } },
+    tft_test_f429: { tft: { spi: 'SPI2', cs: 'PB12', dc: 'PB11' } },
+    buzzer_test_f401: { buzzer: { tim: 'TIM2' } },
+    buzzer_test_f411: { buzzer: { tim: 'TIM2' } },
+    buzzer_test_f429: { buzzer: { tim: 'TIM2' } },
+    rtc_test_f401: { rtc: { i2c: 'I2C1', addr: 0x68, init: RTC_INIT } },
+    rtc_test_f411: { rtc: { i2c: 'I2C1', addr: 0x68, init: RTC_INIT } },
+    rtc_test_f429: { rtc: { i2c: 'I2C1', addr: 0x68, init: RTC_INIT } },
+    spi_flash_test_f401: { spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4015, size: 0x200000, cs: 'PB12', data: new Uint8Array(0x200000).fill(0xFF) }] },
+    spi_flash_test_f411: { spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4015, size: 0x200000, cs: 'PB12', data: new Uint8Array(0x200000).fill(0xFF) }] },
+    spi_flash_test_f429: { spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4015, size: 0x200000, cs: 'PB12', data: new Uint8Array(0x200000).fill(0xFF) }] },
+    spi_tft_test_f401: { spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4015, size: 0x200000, cs: 'PB12', data: new Uint8Array(0x200000).fill(0xFF) }] },
+    spi_tft_test_f411: { spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4015, size: 0x200000, cs: 'PB12', data: new Uint8Array(0x200000).fill(0xFF) }] },
+    spi_tft_test_f429: { spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4015, size: 0x200000, cs: 'PB12', data: new Uint8Array(0x200000).fill(0xFF) }] },
+    qspi_test_f429: { qspi: [{ peripheral: 'QUADSPI', size: 256 }] },
 };
 
 // audio_test needs the same 64-sample PCM16 WAV the node harness
@@ -414,15 +431,15 @@ const boot = async () => {
         // ── local mode: WASM runs in the browser (default) ──
         // Board variant per firmware preset (SVD + flash/RAM sizes), honoring
         // the board selector when the preset supports the selected board.
-        // NOTE (VENDOR_V): vendor asset versions (?v=14) must be bumped together
+        // NOTE (VENDOR_V): vendor asset versions (?v=15) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
         const { key: boardKey, board } = boardForSelection(image.name, boardSelectEl ? boardSelectEl.value : 'all');
-        const svdXml = await fetch('vendor/' + board.svd + '?v=14').then((r) => r.text());
+        const svdXml = await fetch('vendor/' + board.svd + '?v=15').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
         // Scripted USB host when the demo preset boots locally.
-        usbhost = (!bridgeUrl && image.name === 'usb_cdc_test') ? createUsbHost(bindings) : null;
+        usbhost = (!bridgeUrl && image.name.startsWith('usb_cdc_test')) ? createUsbHost(bindings) : null;
         gw.tx = 0; gw.rx = 0;
         if (gw.connected) setGwStatus(true, gwLabel());
         emu = await createEmulator({
@@ -431,7 +448,7 @@ const boot = async () => {
             svdXml,
             flash_size: board.flash_size,
             ram_size: board.ram_size,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=14',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=15',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),
@@ -456,14 +473,14 @@ const boot = async () => {
         });
         if (id !== session) { emu.close(); return; }
         // Seed the model's audio source for audio_test (see makeAudioTestWav).
-        if (image.name === 'audio_test' && bindings.audio_load_wav) {
+        if (image.name.startsWith('audio_test') && bindings.audio_load_wav) {
             try { bindings.audio_load_wav(makeAudioTestWav()); } catch (e) {}
         }
         // dcmi_test phase 1 needs its exact 2x2 frame ([11 22 33 44]) to
         // predate CAPTURE — feed it at boot like the audio WAV seed. Phases
         // 2-3 are fed by driveDcmi() in the run loop when their markers print.
         dcmiFed = { big2: false, big3: false };
-        if (image.name === 'dcmi_test' && bindings.dcmi_feed_frame) {
+        if (image.name.startsWith('dcmi_test') && bindings.dcmi_feed_frame) {
             try { bindings.dcmi_feed_frame(2, 2, new Uint8Array([0x11, 0x22, 0x33, 0x44])); } catch (e) {}
         }
         // Pre-feed one camera frame so DCMI capture has sensor data from the
@@ -514,7 +531,7 @@ const loop = async (id) => {
         // firmware retries, so landing anywhere after the marker works) and
         // re-feed it for the phase-3 DMA capture after OVR is confirmed.
         try {
-            if (!bridgeUrl && image && image.name === 'dcmi_test' && bindings.dcmi_feed_frame) driveDcmi();
+            if (!bridgeUrl && image && image.name.startsWith('dcmi_test') && bindings.dcmi_feed_frame) driveDcmi();
         } catch (e) {}
         await refreshStats();
         await renderLtdc();

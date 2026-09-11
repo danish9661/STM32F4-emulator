@@ -3,7 +3,7 @@
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'STM32F4 Emulator',
-  tagline: 'Real Cortex-M4 firmware on an emulated MCU — Unicorn CPU + Rust peripherals, all WebAssembly',
+  tagline: 'Real Cortex-M4 firmware on an emulated MCU — Rust CPU + Rust peripherals, all WebAssembly',
   favicon: 'img/favicon.svg',
 
   url: 'https://danish9661.github.io',

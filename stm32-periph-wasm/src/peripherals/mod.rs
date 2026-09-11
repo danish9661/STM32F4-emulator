@@ -480,6 +480,19 @@ impl Peripherals {
                 peripheral: RefCell::new(p),
             });
         }
+        // FSMC full-range fallback (new_wasm registers it unconditionally;
+        // the SVD loop above only covers maps with an "FSMC" entry — Keil
+        // calls it "FMC" (F429) or omits it (F401/F411), though the F429
+        // silicon has the controller. Without this, BCR1 reads 0).
+        if !peripherals.peripherals.iter().any(|p| p.start == 0x6000_0000) {
+            if let Some(p) = Fsmc::new("FSMC", ext_devices) {
+                peripherals.peripherals.push(PeripheralSlot {
+                    start: 0x6000_0000,
+                    end: 0xA000_1000,
+                    peripheral: RefCell::new(p),
+                });
+            }
+        }
 
         peripherals.wire_spi_flash_cs_callbacks();
         peripherals.finish_registration();

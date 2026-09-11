@@ -1,44 +1,16 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self' ws: wss: https://fonts.googleapis.com; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com;">
-<meta name="google-site-verification" content="15oUGn7tDY5qFKh0oX7q0zWcuUJ_nFIIjjZk6ixculo" />
-<title>STM32F407 Emulator in the Browser — run real Cortex-M4 firmware (and DOOM)</title>
-<!-- Search + social metadata.  The page had none, so search results and
-     shared links showed only the bare title with no summary. -->
-<meta name="description" content="An STM32F407 microcontroller emulator that runs unmodified Cortex-M4 firmware in your browser: Rust CPU core plus a Rust peripheral model (GPIO, USART, DMA, ETH, I2C, SPI, ADC, timers), all compiled to WebAssembly. Boot 67 firmware presets, do real DHCP/TCP/HTTP networking, or play DOOM.">
-<link rel="canonical" href="https://danish9661.github.io/stm32F4-emulator/">
-<link rel="icon" href="favicon.svg" type="image/svg+xml">
-<script type="application/ld+json">
-{
-  "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  "name": "STM32F407 Emulator",
-  "applicationCategory": "DeveloperApplication",
-  "operatingSystem": "Any (runs in a web browser)",
-  "url": "https://danish9661.github.io/stm32F4-emulator/",
-  "codeRepository": "https://github.com/danish9661/stm32F4-emulator",
-  "license": "https://www.gnu.org/licenses/gpl-3.0.html",
-  "description": "An STM32F407 microcontroller emulator that runs unmodified Cortex-M4 firmware in the browser: a Rust CPU core plus a Rust peripheral model (GPIO, USART, DMA, Ethernet, I2C, SPI, ADC, timers) compiled to WebAssembly. Includes DHCP/TCP/HTTP networking demos and a DOOM port.",
-  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
-}
-</script>
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="STM32F407 Emulator">
-<meta property="og:title" content="STM32F407 Emulator in the Browser">
-<meta property="og:description" content="Run real Cortex-M4 firmware in a browser tab — Rust CPU + peripheral model in WebAssembly. Networking demos, 67 firmware presets, and DOOM.">
-<meta property="og:url" content="https://danish9661.github.io/stm32F4-emulator/">
-<meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="STM32F407 Emulator in the Browser">
-<meta name="twitter:description" content="Run real Cortex-M4 firmware in a browser tab — Rust CPU + peripheral model in WebAssembly. Networking demos, 67 firmware presets, and DOOM.">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="STM32F4 emulator landing: launch the live browser console (67 firmware presets, 8 boards) or play DOOM on an emulated STM32F407." />
+<title>STM32F4 Emulator — live console, DOOM, 67 firmware presets</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 :root {
   color-scheme: dark;
   --bg: #080b12;
-  --bg2: #0c1019;
   --panel: rgba(16,21,32,0.85);
   --panel-solid: #101520;
   --border: rgba(56,75,120,0.3);
@@ -46,764 +18,161 @@
   --fg: #e2e8f0;
   --dim: #7b8ba5;
   --green: #34d399;
-  --green-dim: rgba(52,211,153,0.15);
-  --yellow: #fbbf24;
-  --red: #f87171;
-  --cyan: #22d3ee;
   --blue: #60a5fa;
+  --cyan: #22d3ee;
   --purple: #a78bfa;
-  --accent: #60a5fa;
-  --glow-green: 0 0 20px rgba(52,211,153,0.3);
-  --glow-blue: 0 0 20px rgba(96,165,250,0.2);
   --radius: 10px;
   --radius-sm: 6px;
 }
 * { box-sizing: border-box; margin: 0; }
-html, body { height: 100%; }
 ::selection { background: rgba(96,165,250,0.35); color: #fff; }
-/* Dark thin scrollbars everywhere (webkit); firefox uses the thin hints
-   set on the individual scroll containers. */
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(96,120,180,0.25); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(96,120,180,0.45); }
 body {
   background: var(--bg);
   background-image:
     radial-gradient(ellipse 80% 50% at 50% -20%, rgba(59,130,246,0.08), transparent),
     radial-gradient(ellipse 60% 40% at 80% 100%, rgba(52,211,153,0.05), transparent);
   color: var(--fg);
-  font: 13px/1.5 'Inter', system-ui, -apple-system, sans-serif;
-  display: flex; flex-direction: column; overflow: hidden;
+  font: 14px/1.6 'Inter', system-ui, -apple-system, sans-serif;
+  min-height: 100vh; display: flex; flex-direction: column;
 }
-body > * { font-family: inherit; }
-
-/* ── Header ─────────────────────────────────────────────────────────── */
 header {
   display: flex; align-items: center; gap: 16px;
-  padding: 0 20px; height: 52px;
+  padding: 0 20px; height: 52px; flex: none;
   background: linear-gradient(135deg, rgba(16,21,32,0.95), rgba(12,16,25,0.98));
   border-bottom: 1px solid var(--border);
-  backdrop-filter: blur(12px);
-  position: sticky; top: 0; z-index: 50;
 }
-header::before {
-  content: '';
-  position: absolute; inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(59,130,246,0.04), transparent);
-  pointer-events: none;
+header h1 { font-size: 15px; font-weight: 700; letter-spacing: -0.02em; }
+header nav { margin-left: auto; display: flex; gap: 18px; }
+header nav a { color: var(--dim); text-decoration: none; font-size: 13px; font-weight: 500; }
+header nav a:hover { color: var(--fg); }
+main { width: 100%; max-width: 1020px; margin: 0 auto; padding: 64px 20px 40px; flex: 1; }
+.hero { text-align: center; }
+.badge {
+  display: inline-block; padding: 6px 16px; border-radius: 20px;
+  background: rgba(52,211,153,0.08); border: 1px solid rgba(52,211,153,0.2);
+  color: var(--green); font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
+  margin-bottom: 22px;
 }
-header h1 {
-  font-size: 15px; font-weight: 700; margin: 0;
-  white-space: nowrap; flex: none;
-  background: linear-gradient(135deg, #e2e8f0, #94a3b8);
+.hero h2 {
+  font-size: clamp(2.2rem, 5vw, 3.4rem); font-weight: 800; letter-spacing: -0.03em;
+  line-height: 1.1; margin-bottom: 14px;
+  background: linear-gradient(135deg, #ffffff 0%, #34d399 50%, #60a5fa 100%);
   -webkit-background-clip: text; -webkit-text-fill-color: transparent;
   background-clip: text;
-  letter-spacing: -0.02em;
 }
-.tagline {
-  font-size: 12px; color: var(--dim); white-space: nowrap;
-  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-  letter-spacing: -0.01em;
+.hero p.sub { font-size: 1.05rem; color: #94a3b8; max-width: 620px; margin: 0 auto 30px; }
+.cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 44px; }
+.btn {
+  font-size: 14px; font-weight: 600; text-decoration: none;
+  padding: 12px 28px; border-radius: var(--radius-sm);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  display: inline-block;
 }
-.tagline b { color: var(--fg); font-weight: 600; }
-@media (max-width: 980px) { .tagline { display: none; } }
-a.doomLink, a.aboutLink {
-  font-size: 11px; font-weight: 600; color: #fff; text-decoration: none;
-  background: linear-gradient(135deg, #34d399, #059669);
-  padding: 5px 14px; border-radius: 20px;
-  white-space: nowrap; flex: none;
-  transition: all 0.2s ease;
-  box-shadow: 0 2px 8px rgba(52,211,153,0.25);
-  letter-spacing: 0.02em;
+.btn:hover { transform: translateY(-2px); }
+.btn-live {
+  background: linear-gradient(135deg, #34d399, #059669); color: #fff;
+  box-shadow: 0 4px 20px rgba(52,211,153,0.3);
 }
-a.doomLink:hover, a.aboutLink:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(52,211,153,0.35);
-  filter: brightness(1.1);
-}
-a.aboutLink { background: linear-gradient(135deg, #60a5fa, #3b82f6); box-shadow: 0 2px 8px rgba(96,165,250,0.25); }
-a.aboutLink:hover { box-shadow: 0 4px 16px rgba(96,165,250,0.35); }
-#status {
-  font-size: 12px; color: var(--dim); margin-left: auto; white-space: nowrap;
-  display: flex; align-items: center; gap: 8px;
-  font-family: 'JetBrains Mono', monospace;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid var(--border); border-radius: 20px;
-  padding: 5px 14px 5px 10px;
-}
-.dot {
-  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-  background: var(--dim); transition: all 0.3s ease;
-}
-.dot.run {
-  background: var(--green);
-  box-shadow: 0 0 8px var(--green), 0 0 16px rgba(52,211,153,0.2);
-  animation: pulse-green 2s ease-in-out infinite;
-}
-.dot.stop { background: var(--yellow); box-shadow: 0 0 8px rgba(251,191,36,0.4); }
-.dot.err  { background: var(--red); box-shadow: 0 0 8px rgba(248,113,113,0.4); }
-@keyframes pulse-green {
-  0%, 100% { box-shadow: 0 0 8px var(--green), 0 0 16px rgba(52,211,153,0.2); }
-  50% { box-shadow: 0 0 12px var(--green), 0 0 24px rgba(52,211,153,0.3); }
-}
-
-/* ── Main grid ──────────────────────────────────────────────────────── */
-main {
-  display: grid; grid-template-columns: 1fr 380px; gap: 16px;
-  padding: 16px; max-width: 1600px; margin: 0 auto; width: 100%;
-  flex: 1; min-height: 0;
-}
-main > section { display: flex; flex-direction: column; min-height: 0; }
-main > aside { overflow-y: auto; min-height: 0; padding-right: 4px; }
-main > aside::-webkit-scrollbar { width: 6px; }
-main > aside::-webkit-scrollbar-track { background: transparent; }
-main > aside::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-@media (max-width: 960px) {
-  body { overflow: auto; }
-  main { grid-template-columns: 1fr; flex: none; min-height: 0; gap: 12px; }
-  main > aside { overflow-y: visible; }
-}
-
-/* ── Panels ─────────────────────────────────────────────────────────── */
-.panel {
-  background: var(--panel);
+.btn-live:hover { box-shadow: 0 6px 28px rgba(52,211,153,0.45); }
+.btn-doom {
+  background: rgba(255,255,255,0.06); color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  backdrop-filter: blur(8px);
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
-.panel:hover { border-color: var(--border-bright); }
-.panel h2 {
-  margin: 0; padding: 10px 14px;
-  font-size: 10px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.1em; color: var(--dim);
-  border-bottom: 1px solid var(--border);
-  background: rgba(255,255,255,0.02);
-}
-aside .panel h2 {
-  cursor: pointer; user-select: none;
-  display: flex; align-items: center; gap: 8px;
-  transition: color 0.15s ease;
-}
-aside .panel h2::before {
-  content: ""; display: inline-block; width: 0; height: 0;
-  border-left: 4px solid var(--dim); border-top: 3px solid transparent;
-  border-bottom: 3px solid transparent;
-  transition: transform 0.2s ease;
-}
-aside .panel.collapsed h2 { border-bottom: none; background: transparent; }
-aside .panel.collapsed h2::before { transform: rotate(90deg); }
-aside .panel.collapsed > *:not(h2) { display: none !important; }
-aside .panel h2:hover { color: var(--fg); }
-aside .panel h2:hover::before { border-left-color: var(--fg); }
-
-/* ── Terminal ───────────────────────────────────────────────────────── */
-#uart {
-  flex: 1; min-height: 200px;
-  overflow-y: auto; padding: 14px 16px;
-  font: 500 12px/1.6 'JetBrains Mono', 'Fira Code', monospace;
-  white-space: pre-wrap; word-break: break-all;
-  background: #020408;
-  color: #94a3b8;
-  border-top: 1px solid rgba(59,130,246,0.08);
-  caret-color: var(--green);
-  font-variant-numeric: tabular-nums;
-}
-#uart::-webkit-scrollbar { width: 6px; }
-#uart::-webkit-scrollbar-track { background: transparent; }
-#uart::-webkit-scrollbar-thumb { background: rgba(96,165,250,0.2); border-radius: 3px; }
-
-/* ── Controls ───────────────────────────────────────────────────────── */
-.controls {
-  display: flex; gap: 8px; padding: 10px 14px;
-  border-top: 1px solid var(--border);
-  flex-wrap: wrap; align-items: center;
-}
-button {
-  background: rgba(255,255,255,0.06); color: var(--fg);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 6px 14px; font: 500 12px/1 'Inter', sans-serif; cursor: pointer;
-  transition: all 0.15s ease;
-  letter-spacing: 0.01em;
-}
-button:hover {
-  background: rgba(255,255,255,0.1);
-  border-color: var(--border-bright);
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-}
-button:active { transform: translateY(0); }
-button.primary {
-  background: linear-gradient(135deg, #34d399, #059669);
-  border-color: rgba(52,211,153,0.4); color: #fff; font-weight: 600;
-  box-shadow: 0 2px 8px rgba(52,211,153,0.2);
-}
-button.primary:hover {
-  background: linear-gradient(135deg, #3adb9c, #10b981);
-  box-shadow: 0 4px 16px rgba(52,211,153,0.3);
-}
-button.danger {
-  background: linear-gradient(135deg, #f87171, #dc2626);
-  border-color: rgba(248,113,113,0.4); color: #fff;
-}
-button:disabled { opacity: 0.4; cursor: default; transform: none !important; box-shadow: none !important; }
-/* The Run/Stop toggle changes label while running — fixed width keeps the
-   control row from shifting under it. */
-#btnRun { min-width: 78px; text-align: center; }
-
-/* ── Stats grid ─────────────────────────────────────────────────────── */
-.stats {
-  display: grid; grid-template-columns: 1fr 1fr;
-  gap: 1px; background: var(--border);
-  border-radius: var(--radius-sm); overflow: hidden;
-}
-.stat {
-  background: var(--panel-solid); padding: 10px 14px;
-  transition: background 0.2s ease;
-}
-.stat:hover { background: rgba(25,32,48,1); }
+.btn-doom:hover { background: rgba(255,255,255,0.1); border-color: var(--border-bright); }
+.stats { display: flex; justify-content: center; gap: 2.2rem; flex-wrap: wrap; margin-bottom: 56px; }
+.stat { text-align: center; }
 .stat b {
-  display: block; font-size: 16px; font-weight: 700;
-  font-family: 'JetBrains Mono', monospace;
+  display: block; font: 700 1.9rem/1.2 'JetBrains Mono', monospace;
   background: linear-gradient(135deg, #e2e8f0, #94a3b8);
   -webkit-background-clip: text; -webkit-text-fill-color: transparent;
   background-clip: text;
 }
-.stat span {
-  font-size: 9px; color: var(--dim); text-transform: uppercase;
-  letter-spacing: 0.08em; font-weight: 600;
+.stat span { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.1rem; margin-bottom: 44px; }
+@media (max-width: 820px) { .cards { grid-template-columns: 1fr; } }
+.card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 22px;
+  text-decoration: none; color: var(--fg); display: block;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
-
-/* ── Sections / Forms ───────────────────────────────────────────────── */
-.sec { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
-.sec label { font-size: 11px; color: var(--dim); font-weight: 500; }
-.sec input[type=text], .sec select {
-  width: 100%; background: rgba(255,255,255,0.04); color: var(--fg);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 7px 10px; font: 500 12px/1.4 'JetBrains Mono', monospace;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+a.card:hover { transform: translateY(-3px); border-color: var(--border-bright); box-shadow: 0 8px 28px rgba(0,0,0,0.35); }
+.card .k { font-size: 1.5rem; margin-bottom: 10px; }
+.card h3 { font-size: 15px; font-weight: 700; margin-bottom: 6px; }
+.card p { font-size: 12.5px; color: #94a3b8; }
+.card p code, .try code {
+  font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+  background: rgba(255,255,255,0.06); border-radius: 4px; padding: 1px 6px;
 }
-.sec input[type=text]:focus, .sec select:focus {
-  outline: none; border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(96,165,250,0.15);
+.try {
+  text-align: center; color: var(--dim); font-size: 13px;
+  border: 1px dashed var(--border); border-radius: var(--radius);
+  padding: 16px 20px; margin-bottom: 20px;
 }
-.sec select {
-  font: 500 12px/1.4 'Inter', sans-serif;
-  cursor: pointer;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%237b8ba5'%3E%3Cpath d='M6 8L1 3h10z'/%3E%3C/svg%3E");
-  background-repeat: no-repeat; background-position: right 10px center;
-  padding-right: 28px;
-  appearance: none;
-}
-/* Native option popups ignore the box styling and render OS-white by
-   default — force the dark theme onto the list itself. */
-.sec select option {
-  background-color: #141a26;
-  color: var(--fg);
-}
-.sec input[type=file] { width: 100%; font: inherit; font-size: 12px; color: var(--dim); }
-.sec input[type=file]::-webkit-file-upload-button {
-  background: rgba(255,255,255,0.06); color: var(--fg);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 5px 12px; font: 500 12px/1 'Inter', sans-serif; cursor: pointer;
-  transition: all 0.15s ease; margin-right: 8px;
-}
-.sec input[type=file]::-webkit-file-upload-button:hover {
-  background: rgba(255,255,255,0.1); border-color: var(--border-bright);
-}
-input[type=checkbox] {
-  appearance: none; -webkit-appearance: none;
-  width: 16px; height: 16px; border-radius: 4px;
-  background: rgba(255,255,255,0.06); border: 1px solid var(--border);
-  cursor: pointer; position: relative; vertical-align: middle;
-  transition: all 0.15s ease; flex-shrink: 0;
-}
-input[type=checkbox]:checked {
-  background: var(--green); border-color: var(--green);
-}
-input[type=checkbox]:checked::after {
-  content: ''; position: absolute; left: 4px; top: 1px;
-  width: 5px; height: 9px; border: solid #fff; border-width: 0 2px 2px 0;
-  transform: rotate(45deg);
-}
-
-/* ── Custom select dropdown ───────────────────────────────────────── */
-.custom-select {
-  position: relative; width: 100%;
-}
-.custom-select-trigger {
-  width: 100%; background: rgba(255,255,255,0.04); color: var(--fg);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 7px 32px 7px 10px; font: 500 12px/1.4 'Inter', sans-serif;
-  cursor: pointer; display: flex; align-items: center;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-  position: relative; user-select: none;
-}
-.custom-select-trigger::after {
-  content: ''; position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
-  width: 0; height: 0;
-  border-left: 5px solid transparent; border-right: 5px solid transparent;
-  border-top: 5px solid var(--dim);
-}
-.custom-select-trigger:hover, .custom-select.open .custom-select-trigger {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(96,165,250,0.15);
-}
-.custom-select.open .custom-select-trigger::after {
-  transform: translateY(-50%) rotate(180deg);
-}
-.custom-select-dropdown {
-  display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0;
-  background: #141a26; border: 1px solid var(--border); border-radius: var(--radius-sm);
-  box-shadow: 0 8px 32px rgba(0,0,0,0.5); z-index: 1000;
-  max-height: 320px; overflow-y: auto;
-  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
-}
-.custom-select-dropdown::-webkit-scrollbar { width: 6px; }
-.custom-select-dropdown::-webkit-scrollbar-track { background: transparent; }
-.custom-select-dropdown::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-.custom-select.open .custom-select-dropdown { display: block; }
-.custom-select-group-label {
-  font-size: 10px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.08em; color: var(--green); padding: 8px 12px 4px;
-  background: #141a26; border-top: 1px solid var(--border);
-  position: sticky; top: 0; z-index: 1;
-}
-.custom-select-group-label:first-child { border-top: none; }
-.custom-select-option {
-  padding: 7px 12px 7px 28px; font: 500 12px/1.4 'Inter', sans-serif;
-  color: var(--fg); cursor: pointer; transition: background 0.1s ease;
-  display: block; position: relative;
-}
-.custom-select-option:hover { background: rgba(96,165,250,0.1); }
-.custom-select-option.selected { background: rgba(52,211,153,0.12); color: var(--green); }
-.custom-select-option.selected::before {
-  content: '✓'; position: absolute; left: 11px; top: 7px;
-  font-size: 11px; font-weight: 700;
-}
-.sec p { color: var(--dim); font-size: 11px; margin: 0; line-height: 1.5; }
-.sec p b { color: var(--fg); font-weight: 600; }
-.row { display: flex; gap: 8px; }
-.row > * { flex: 1; }
-
-/* ── Frames list ────────────────────────────────────────────────────── */
-#frames { max-height: 160px; overflow-y: auto; }
-.frame {
-  padding: 6px 14px; border-bottom: 1px solid var(--border);
-  font: 500 11px/1.5 'JetBrains Mono', monospace;
-  transition: background 0.15s ease;
-}
-.frame:hover { background: rgba(255,255,255,0.03); }
-.frame .tag { font-weight: 700; }
-.frame.tx .tag { color: var(--yellow); }
-.frame.rx .tag { color: var(--cyan); }
-
-/* ── GPIO ────────────────────────────────────────────────────────────── */
-.gpio { padding: 10px 14px; font-size: 11px; }
-.gpio .bank { margin-bottom: 8px; }
-.gpio .bank .bname {
-  color: var(--dim); width: 28px; display: inline-block;
-  font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 10px;
-}
-.gpio .pins { display: inline-flex; gap: 3px; vertical-align: middle; }
-.pin {
-  width: 10px; height: 10px; border-radius: 2px;
-  background: rgba(255,255,255,0.06); border: 1px solid var(--border);
-  transition: all 0.15s ease;
-}
-.pin.out-on {
-  background: var(--green); border-color: var(--green);
-  box-shadow: 0 0 6px rgba(52,211,153,0.5);
-}
-.pin.out-off { background: rgba(255,255,255,0.08); }
-.pin.in-on { background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 4px rgba(34,211,238,0.4); }
-/* Input-mode pins are host-drivable (click) — see the #gpio handler in
-   app.js. The class is toggled per refresh; outputs never get it. */
-.pin.drivable { cursor: pointer; }
-.pin.drivable:hover { border-color: var(--cyan); box-shadow: 0 0 6px rgba(34,211,238,0.5); }
-.gpio .regs { color: var(--dim); font-size: 10px; margin-top: 3px; font-family: 'JetBrains Mono', monospace; }
-
-/* ── Peripherals ─────────────────────────────────────────────────────── */
-.periph { padding: 10px 14px; font-size: 11px; }
-.periph .line {
-  display: flex; justify-content: space-between; padding: 4px 0;
-  border-bottom: 1px dashed rgba(255,255,255,0.05);
-}
-.periph .line b {
-  color: var(--fg); font-weight: 600;
-  font-family: 'JetBrains Mono', monospace;
-}
-.periph .line span { color: var(--dim); font-family: 'JetBrains Mono', monospace; }
-
-/* ── Memory Watch ───────────────────────────────────────────────────── */
-.watch { padding: 8px 14px; font-size: 11px; }
-.watch .row {
-  display: flex; align-items: center; gap: 6px;
-  padding: 4px 0; border-bottom: 1px dashed rgba(255,255,255,0.05);
-}
-.watch .row .lbl { color: var(--dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.watch .row .lbl b { color: var(--fg); font-weight: 600; }
-.watch .row .val { color: var(--accent); font-variant-numeric: tabular-nums; font-family: 'JetBrains Mono', monospace; }
-.watch .row input { width: 78px; }
-.watch .row .rm { color: var(--dim); cursor: pointer; border: none; background: none; font-size: 13px; padding: 0 2px; transition: color 0.15s; }
-.watch .row .rm:hover { color: var(--red); }
-.watch .empty { color: var(--dim); padding: 4px 0; }
-
-/* ── Symbols ─────────────────────────────────────────────────────────── */
-#symbols { max-height: 180px; overflow-y: auto; padding: 4px 0; }
-.sym {
-  display: flex; justify-content: space-between; padding: 3px 14px;
-  font: 500 11px/1.5 'JetBrains Mono', monospace;
-  transition: background 0.1s ease;
-}
-.sym:hover { background: rgba(255,255,255,0.03); }
-.sym span { color: var(--dim); }
-
-/* ── Gateway status ──────────────────────────────────────────────────── */
-.gwstat { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--dim); }
-.gwstat .dot { margin: 0; }
-
-/* ── Footer ──────────────────────────────────────────────────────────── */
+.try a { color: var(--cyan); text-decoration: none; font-family: 'JetBrains Mono', monospace; font-size: 12.5px; }
+.try a:hover { text-decoration: underline; }
 footer {
-  padding: 9px 20px; color: var(--dim); font-size: 11px;
-  border-top: 1px solid var(--border);
-  background: rgba(16,21,32,0.6);
-  letter-spacing: -0.01em;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding: 14px 20px; color: var(--dim); font-size: 11.5px;
+  border-top: 1px solid var(--border); background: rgba(16,21,32,0.6);
+  text-align: center; flex: none;
 }
-footer a { color: var(--accent); text-decoration: none; transition: color 0.15s; }
-footer a:hover { color: var(--blue); }
-
-/* ── Canvas panels ──────────────────────────────────────────────────── */
-canvas {
-  image-rendering: pixelated;
-  border-bottom: 1px solid var(--border);
-}
+footer a { color: var(--blue); text-decoration: none; }
+footer a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
 <header>
-  <h1>STM32F407 in the Browser</h1>
-  <span class="tagline">Real Cortex-M4 firmware on an emulated MCU — <b>Rust CPU + peripherals</b>, all WebAssembly</span>
-  <a class="doomLink" href="doom.html">▶ Play DOOM</a>
-  <a class="doomLink aboutLink" href="about.html">About</a>
-  <span id="status"><span class="dot" id="dot"></span><span id="statusText">booting…</span></span>
+  <h1>STM32F4 Emulator</h1>
+  <nav>
+    <a href="console.html">Console</a>
+    <a href="doom.html">DOOM</a>
+    <a href="about.html">About</a>
+  </nav>
 </header>
 <main>
-  <section class="panel">
-    <h2>UART terminal (firmware output)</h2>
-    <div id="uart"></div>
-    <div class="controls">
-      <button id="btnRun" class="primary">Run</button>
-      <button id="btnStop">Stop</button>
-      <button id="btnReset">Reset</button>
-      <button id="btnClear">Clear log</button>
-      <button id="btnSaveLog">Save log</button>
-      <label style="color:var(--dim);font-size:12px;margin-left:auto;display:flex;align-items:center;gap:6px;cursor:pointer;">
-        <input type="checkbox" id="chkAuto" checked> autoscroll
-      </label>
+  <div class="hero">
+    <div class="badge">Open Source · Browser + Node · WebAssembly</div>
+    <h2>STM32F4 Emulator</h2>
+    <p class="sub">Real Cortex-M4 firmware on an emulated MCU — Rust CPU + Rust peripherals, all WebAssembly. No install, no plugins: it runs in this tab.</p>
+    <div class="cta">
+      <a class="btn btn-live" href="console.html">Launch Console →</a>
+      <a class="btn btn-doom" href="doom.html">▶ Play DOOM</a>
     </div>
-    <div class="controls" style="border-top:none;padding-top:0;">
-      <input type="text" id="rxInput" placeholder="UART RX — type bytes to send to the firmware (Enter=CR, Shift+Enter=LF)" style="flex:1;background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font:inherit;font-size:12px;">
-      <button id="btnSend">Send</button>
+    <div class="stats">
+      <div class="stat"><b>40</b><span>Peripherals</span></div>
+      <div class="stat"><b>67</b><span>Firmware presets</span></div>
+      <div class="stat"><b>8</b><span>Boards</span></div>
+      <div class="stat"><b>35</b><span>FPS DOOM</span></div>
     </div>
-  </section>
-  <aside>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>Firmware</h2>
-      <div class="sec">
-        <label for="boardSelect" style="font-size:11px;color:var(--dim);display:block;margin-bottom:4px;">Board — filters the preset list to firmware built for it</label>
-        <select id="boardSelect" style="width:100%;margin-bottom:8px;">
-          <option value="all">All boards — show every preset</option>
-        </select>
-        <div class="custom-select" id="fwSelectWrap">
-          <div class="custom-select-trigger" id="fwSelectTrigger">eth_http — web client (DHCP+TCP+HTTP)</div>
-          <div class="custom-select-dropdown" id="fwDropdown">
-            <div class="custom-select-group-label">Network</div>
-            <div class="custom-select-option selected" data-value="eth_http">eth_http — web client (DHCP+TCP+HTTP)</div>
-            <div class="custom-select-option" data-value="eth_dhcp">eth_dhcp — DHCP loop</div>
-            <div class="custom-select-option" data-value="eth_test">eth_test — raw ETH TX test</div>
-            <div class="custom-select-group-label">Bare-metal demo</div>
-            <div class="custom-select-option" data-value="blinky">blinky — LED blinker, no network</div>
-            <div class="custom-select-group-label">Boards</div>
-            <div class="custom-select-option" data-value="blinky_f401">blinky_f401 — BlackPill F401CC (PC13)</div>
-            <div class="custom-select-option" data-value="blinky_f411">blinky_f411 — BlackPill F411CE (PC13)</div>
-            <div class="custom-select-option" data-value="blinky_f407g">blinky_f407g — Discovery F407VG (PD12)</div>
-            <div class="custom-select-option" data-value="blinky_nucleo_f401">blinky_nucleo_f401 — Nucleo-F401RE (PA5)</div>
-            <div class="custom-select-option" data-value="blinky_nucleo_f411">blinky_nucleo_f411 — Nucleo-F411RE (PA5)</div>
-            <div class="custom-select-option" data-value="blinky_f429">blinky_f429 — Discovery F429ZI (PG13)</div>
-            <div class="custom-select-option" data-value="blinky_f407ve">blinky_f407ve — F407VE black board</div>
-            <div class="custom-select-option" data-value="blinky_f407ze">blinky_f407ze — F407ZE black board</div>
-            <div class="custom-select-group-label">Arduino per board</div>
-            <div class="custom-select-option" data-value="arduino_bp_f401cc">arduino_bp_f401cc — Arduino on BlackPill F401CC</div>
-            <div class="custom-select-option" data-value="arduino_bp_f411ce">arduino_bp_f411ce — Arduino on BlackPill F411CE</div>
-            <div class="custom-select-option" data-value="arduino_nucleo_f401re">arduino_nucleo_f401re — Arduino on Nucleo-F401RE</div>
-            <div class="custom-select-option" data-value="arduino_nucleo_f411re">arduino_nucleo_f411re — Arduino on Nucleo-F411RE</div>
-            <div class="custom-select-option" data-value="arduino_disco_f407vg">arduino_disco_f407vg — Arduino on Discovery F407VG</div>
-            <div class="custom-select-option" data-value="arduino_disco_f429zi">arduino_disco_f429zi — Arduino on Discovery F429ZI</div>
-            <div class="custom-select-option" data-value="arduino_black_f407ve">arduino_black_f407ve — Arduino on F407VE black</div>
-            <div class="custom-select-option" data-value="arduino_black_f407ze">arduino_black_f407ze — Arduino on F407ZE black</div>
-            <div class="custom-select-option" data-value="adc_demo">adc_demo — ADC voltmeter on PA0</div>
-            <div class="custom-select-option" data-value="dac_demo">dac_demo — DAC sine wave on PA4</div>
-            <div class="custom-select-option" data-value="pwm_demo">pwm_demo — PWM LED breathing on PA0+PA6</div>
-            <div class="custom-select-option" data-value="blink_serial">blink_serial — UART4 + blink loop</div>
-            <div class="custom-select-option" data-value="timer_test">timer_test — TIM tick 1s prints</div>
-            <div class="custom-select-option" data-value="arduino_test">arduino_test — Arduino core OK + ADC</div>
-            <div class="custom-select-option" data-value="hal_test">hal_test — HAL init + SysTick</div>
-            <div class="custom-select-group-label">Peripheral tests</div>
-            <div class="custom-select-option" data-value="periph_test">periph_test — RCC/GPIO checks</div>
-            <div class="custom-select-option" data-value="new_periph_test">new_periph_test — PWR/FSMC regs</div>
-            <div class="custom-select-option" data-value="deep_periph_test">deep_periph_test — deep reg r/w</div>
-            <div class="custom-select-option" data-value="comprehensive_test">comprehensive_test — EXTI/DMA/USART</div>
-            <div class="custom-select-option" data-value="eth_irq_test">eth_irq_test — interrupt-driven Ethernet</div>
-            <div class="custom-select-option" data-value="edge_test">edge_test — DMA edge cases</div>
-            <div class="custom-select-option" data-value="i2s_sai_test">i2s_sai_test — I2S audio test</div>
-            <div class="custom-select-option" data-value="spi_tft_test">spi_tft_test — SPI TFT LCD test</div>
-            <div class="custom-select-option" data-value="audio_test">audio_test — I2S DMA WAV play + capture</div>
-            <div class="custom-select-option" data-value="ltdc_test">ltdc_test — LTDC scanout gradient</div>
-            <div class="custom-select-option" data-value="oled_test">oled_test — SSD1306 OLED over I2C</div>
-            <div class="custom-select-option" data-value="tft_test">tft_test — ILI9341 TFT over SPI</div>
-            <div class="custom-select-option" data-value="buzzer_test">buzzer_test — TIM2 PWM melody</div>
-            <div class="custom-select-option" data-value="audio_play_test">audio_play_test — I2S sine playback</div>
-            <div class="custom-select-option" data-value="rtc_test">rtc_test — DS3231 RTC time/temp over I2C1</div>
-            <div class="custom-select-option" data-value="can_test">can_test — CAN1/CAN2 bus loopback + arbitration</div>
-            <div class="custom-select-option" data-value="can_demo">can_demo — two-phase CAN showcase</div>
-            <div class="custom-select-option" data-value="can_host_rx">can_host_rx — receives CAN frames you inject</div>
-            <div class="custom-select-option" data-value="watchdog_demo">watchdog_demo — IWDG pet/reset loop</div>
-            <div class="custom-select-option" data-value="wwdg_demo">wwdg_demo — WWDG pet/reset loop</div>
-            <div class="custom-select-option" data-value="wwdg_window_demo">wwdg_window_demo — WWDG with real window</div>
-            <div class="custom-select-option" data-value="tim_capture_demo">tim_capture_demo — TIM3 CH1 input capture</div>
-            <div class="custom-select-option" data-value="qspi_test">qspi_test — QUADSPI read/write round-trip</div>
-            <div class="custom-select-option" data-value="fpu_test">fpu_test — VFPv4-SP hard-float checks</div>
-            <div class="custom-select-option" data-value="fpu_irq_test">fpu_irq_test — FPU state across SysTick IRQs</div>
-            <div class="custom-select-option" data-value="mpu_test">mpu_test — MPU enforcement (MemManage + MMFSR/MMFAR)</div>
-            <div class="custom-select-option" data-value="usb_cdc_test">usb_cdc_test — USB OTG FS CDC-ACM echo</div>
-            <div class="custom-select-option" data-value="deep_sleep_demo">deep_sleep_demo — WFI/STOP + RTC-alarm wakeup</div>
-            <div class="custom-select-option" data-value="test_firmware">test_firmware — TIM2/ADC dump</div>
-            <div class="custom-select-option" data-value="exti_test">exti_test — EXTI0 button (click PA0 in GPIO)</div>
-            <div class="custom-select-option" data-value="flash_test">flash_test — internal flash erase/program</div>
-            <div class="custom-select-option" data-value="spi_flash_test">spi_flash_test — SPI NOR flash on SPI3</div>
-            <div class="custom-select-option" data-value="freertos_test">freertos_test — FreeRTOS tasks + semaphore</div>
-            <div class="custom-select-option" data-value="fsmc_test">fsmc_test — FSMC 8080 display bus + RDDID</div>
-            <div class="custom-select-option" data-value="dcmi_test">dcmi_test — DCMI capture + OVR + DMA</div>
-            <div class="custom-select-group-label">Crypto</div>
-            <div class="custom-select-option" data-value="crypto_test">crypto_test — AES-128 ECB/CBC</div>
-            <div class="custom-select-option" data-value="crypto_deep_test">crypto_deep_test — AES CTR deep</div>
-            <div class="custom-select-option" data-value="rx_crypto_test">rx_crypto_test — RX interrupt + CRC</div>
-            <div class="custom-select-group-label">UART echo (needs input)</div>
-            <div class="custom-select-option" data-value="echo_test">echo_test — UART echo server</div>
-            <div class="custom-select-option" data-value="rx_interrupt_test">rx_interrupt_test — RX interrupt</div>
+  </div>
+  <div class="cards">
+    <a class="card" href="console.html">
+      <div class="k">🖥️</div>
+      <h3>Live Console</h3>
+      <p>67 firmware presets across 5 chips — networking, displays, USB, FreeRTOS, sensors. UART terminal, GPIO grid, packet viewer.</p>
+    </a>
+    <a class="card" href="doom.html">
+      <div class="k">💀</div>
+      <h3>DOOM</h3>
+      <p>Full DOOM 1 shareware at 35 FPS on the emulated F407 — audio, saves, attract mode. WASD + mouse.</p>
+    </a>
+    <div class="card">
+      <div class="k">📦</div>
+      <h3>Bring firmware</h3>
+      <p>Drop your own <code>.bin</code>, <code>.hex</code> or <code>.elf</code> onto the console — symbols, watches and GPIO included.</p>
     </div>
-    <select id="fwSelect" hidden>
-      <option value="eth_http">eth_http</option><option value="eth_dhcp">eth_dhcp</option><option value="eth_test">eth_test</option>
-      <option value="blinky">blinky</option><option value="blinky_f401">blinky_f401</option><option value="blinky_f411">blinky_f411</option><option value="blinky_f407g">blinky_f407g</option><option value="blinky_nucleo_f401">blinky_nucleo_f401</option><option value="blinky_nucleo_f411">blinky_nucleo_f411</option><option value="blinky_f429">blinky_f429</option><option value="blinky_f407ve">blinky_f407ve</option><option value="blinky_f407ze">blinky_f407ze</option><option value="arduino_bp_f401cc">arduino_bp_f401cc</option><option value="arduino_bp_f411ce">arduino_bp_f411ce</option><option value="arduino_nucleo_f401re">arduino_nucleo_f401re</option><option value="arduino_nucleo_f411re">arduino_nucleo_f411re</option><option value="arduino_disco_f407vg">arduino_disco_f407vg</option><option value="arduino_disco_f429zi">arduino_disco_f429zi</option><option value="arduino_black_f407ve">arduino_black_f407ve</option><option value="arduino_black_f407ze">arduino_black_f407ze</option><option value="adc_demo">adc_demo</option><option value="dac_demo">dac_demo</option><option value="pwm_demo">pwm_demo</option><option value="blink_serial">blink_serial</option><option value="timer_test">timer_test</option><option value="arduino_test">arduino_test</option><option value="hal_test">hal_test</option>
-      <option value="periph_test">periph_test</option><option value="new_periph_test">new_periph_test</option><option value="deep_periph_test">deep_periph_test</option><option value="comprehensive_test">comprehensive_test</option><option value="eth_irq_test">eth_irq_test</option><option value="edge_test">edge_test</option><option value="i2s_sai_test">i2s_sai_test</option><option value="spi_tft_test">spi_tft_test</option><option value="audio_test">audio_test</option><option value="ltdc_test">ltdc_test</option><option value="oled_test">oled_test</option><option value="tft_test">tft_test</option><option value="buzzer_test">buzzer_test</option><option value="audio_play_test">audio_play_test</option><option value="rtc_test">rtc_test</option><option value="can_test">can_test</option><option value="can_demo">can_demo</option><option value="can_host_rx">can_host_rx</option><option value="watchdog_demo">watchdog_demo</option><option value="wwdg_demo">wwdg_demo</option><option value="wwdg_window_demo">wwdg_window_demo</option><option value="tim_capture_demo">tim_capture_demo</option><option value="qspi_test">qspi_test</option><option value="fpu_test">fpu_test</option><option value="fpu_irq_test">fpu_irq_test</option><option value="mpu_test">mpu_test</option>      <option value="usb_cdc_test">usb_cdc_test</option><option value="deep_sleep_demo">deep_sleep_demo</option><option value="test_firmware">test_firmware</option><option value="exti_test">exti_test</option><option value="flash_test">flash_test</option><option value="spi_flash_test">spi_flash_test</option><option value="freertos_test">freertos_test</option><option value="fsmc_test">fsmc_test</option><option value="dcmi_test">dcmi_test</option>
-      <option value="crypto_test">crypto_test</option><option value="crypto_deep_test">crypto_deep_test</option><option value="rx_crypto_test">rx_crypto_test</option>
-      <option value="echo_test">echo_test</option><option value="rx_interrupt_test">rx_interrupt_test</option>
-    </select>
-        </div>
-        <button id="btnBoot" class="primary" style="width:100%;">Boot preset</button>
-        <input type="file" id="fwFile" accept=".bin,.hex,.elf,.map">
-        <p id="fwHint">Load a custom firmware: <b>.bin</b> (raw flash), <b>.hex</b> (Intel HEX), <b>.elf</b> (loadable segments + symbols), or a <b>.map</b> file for the symbol table only. Firmware files boot immediately. Nothing runs until you press <b>Boot preset</b> or load a file.</p>
-      </div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>Network gateway</h2>
-      <div class="sec">
-        <input type="text" id="gwUrl" value="ws://127.0.0.1:5099/api/network-gateway" spellcheck="false">
-        <div class="row">
-          <button id="btnGw" class="primary">Connect</button>
-        </div>
-        <div class="gwstat"><span class="dot" id="gwDot"></span><span id="gwStatus">offline — using the scripted network (netsim)</span></div>
-        <p>When connected, all Ethernet frames are sent to a real network stack (openhw-gw + gVisor) instead of netsim. Run <b>openhw-gw</b> locally first. Note: GitHub Pages serves https, which blocks plain ws:// — serve this page over http:// when using a gateway.</p>
-      </div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>Machine state</h2>
-      <div class="stats">
-        <div class="stat"><b id="stInst">0</b><span>instructions</span></div>
-        <div class="stat"><b id="stMips">0.0</b><span>MIPS</span></div>
-        <div class="stat"><b id="stSteps">0</b><span>batches</span></div>
-        <div class="stat"><b id="stRounds">0</b><span>rounds</span></div>
-        <div class="stat"><b id="stPc">—</b><span>PC</span></div>
-        <div class="stat"><b id="stSp">—</b><span>SP</span></div>
-        <div class="stat"><b id="stXpsr">—</b><span>XPSR</span></div>
-        <div class="stat"><b id="stFw">—</b><span>firmware</span></div>
-      </div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>GPIO</h2>
-      <div id="gpio" class="gpio"></div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>LTDC display</h2>
-      <canvas id="ltdcCanvas" width="320" height="160"
-        style="width:100%;box-sizing:border-box;display:block;background:#000;
-               image-rendering:pixelated;border-bottom:1px solid var(--border);"></canvas>
-      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
-        <span id="ltdcInfo">scanout idle</span>
-      </div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>OLED SSD1306 (I2C)</h2>
-      <canvas id="oledCanvas" width="256" height="128"
-        style="width:100%;box-sizing:border-box;display:block;background:#000;
-               image-rendering:pixelated;border-bottom:1px solid var(--border);"></canvas>
-      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
-        <span id="oledInfo">no OLED firmware</span>
-      </div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>TFT ILI9341 (SPI)</h2>
-      <canvas id="tftCanvas" width="240" height="320"
-        style="width:100%;box-sizing:border-box;display:block;background:#000;
-               image-rendering:pixelated;border-bottom:1px solid var(--border);"></canvas>
-      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
-        <span id="tftInfo">no TFT firmware</span>
-      </div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>Buzzer (TIM PWM)</h2>
-      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
-        <span id="buzzerInfo">no buzzer firmware</span>
-      </div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>Speaker (I2S)</h2>
-      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
-        <span id="speakerInfo">no audio firmware</span>
-      </div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>RTC DS3231 (I2C)</h2>
-      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
-        <span id="rtcInfo">no RTC firmware</span>
-      </div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>Peripherals</h2>
-      <div id="periph" class="periph"></div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>Memory Watch</h2>
-      <div class="sec">
-        <label for="watchAddr">Address (hex, e.g. 0x40023830)</label>
-        <input type="text" id="watchAddr" placeholder="0x40023830" spellcheck="false">
-        <label for="watchLabel">Label (optional)</label>
-        <input type="text" id="watchLabel" placeholder="e.g. RCC AHB1ENR" spellcheck="false">
-        <div class="row">
-          <button id="btnWatchAdd" class="primary">Add watch</button>
-          <button id="btnWatchClear">Clear</button>
-        </div>
-        <div id="watchList" class="watch"></div>
-        <p style="color:var(--dim);font-size:11px;margin:6px 0 0;">Live 32-bit reads each frame. Poke a hex value to write it. Reads are 32-bit aligned.</p>
-      </div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>CAN injection</h2>
-      <div class="sec">
-        <label for="canId">CAN ID (hex, 11-bit, e.g. 123)</label>
-        <input type="text" id="canId" value="123" spellcheck="false">
-        <label for="canData">Data (up to 8 hex bytes, space-separated, e.g. 48 45 4C 4C 4F 21 21 21 = "HELLO!!!")</label>
-        <input type="text" id="canData" value="48 45 4C 4C 4F 21 21 21" spellcheck="false">
-        <div class="row">
-          <button id="btnCanInject" class="primary">Inject CAN frame</button>
-          <button id="btnCanDemo">Inject HELLO!!!</button>
-        </div>
-        <p id="canStatus" style="color:var(--dim);">Boot <b>can_host_rx</b> (or <b>can_demo</b>) first, then inject a frame — the firmware receives it on its CAN RX FIFO and prints the ID + data. Standard 11-bit frames only.</p>
-      </div>
-    </div>
-    <div class="panel" style="margin-bottom:12px;">
-      <h2>Symbols</h2>
-      <div id="symbols"></div>
-    </div>
-    <div class="panel">
-      <h2>Network packets</h2>
-      <div id="frames"></div>
-    </div>
-  </aside>
+  </div>
+  <div class="try">
+    Try now — no boot needed:
+    <a href="console.html?fw=blinky">blinky</a> ·
+    <a href="console.html?fw=eth_http">eth_http</a> ·
+    <a href="console.html?fw=can_test">can_test</a> ·
+    <a href="console.html?fw=usb_cdc_test">usb_cdc_test</a> ·
+    <a href="console.html?board=stm32f401">F401 board</a>
+  </div>
 </main>
- <footer>
-    Rust Thumb-2 CPU + peripheral model (WASM) + this page's JS driver. Everything runs locally in your tab — no network calls after the initial asset load (unless you connect a gateway).
-    · <a href="doom.html">Play DOOM</a> (doomgeneric F407 port)
-    · <a href="about.html">About</a>
- </footer>
-
-<script type="module" src="app.js?v=20"></script>
-<script>
-// Custom firmware dropdown (replaces native <select>)
-(() => {
-  const wrap = document.getElementById('fwSelectWrap');
-  const trigger = document.getElementById('fwSelectTrigger');
-  const dropdown = document.getElementById('fwDropdown');
-  const hiddenSelect = document.getElementById('fwSelect');
-  const options = dropdown.querySelectorAll('.custom-select-option');
-
-  function selectOption(opt) {
-    options.forEach(o => o.classList.remove('selected'));
-    opt.classList.add('selected');
-    trigger.textContent = opt.textContent;
-    hiddenSelect.value = opt.dataset.value;
-    wrap.classList.remove('open');
-  }
-
-  trigger.addEventListener('click', (e) => {
-    e.stopPropagation();
-    wrap.classList.toggle('open');
-  });
-
-  options.forEach(opt => {
-    opt.addEventListener('click', (e) => {
-      e.stopPropagation();
-      selectOption(opt);
-    });
-  });
-
-  document.addEventListener('click', () => wrap.classList.remove('open'));
-
-  // Expose setter so app.js can still set firmware programmatically
-  window.__setFwSelect = (val) => {
-    const opt = dropdown.querySelector('[data-value="' + val + '"]');
-    if (opt) selectOption(opt);
-  };
-})();
-</script>
-<script>
-// Collapsible sidebar panels (progressive enhancement — app.js owns the
-// contents, this only toggles a class).  Device panels start collapsed
-// because they are only meaningful for the firmware that drives them;
-// Firmware/Network/Machine state stay open since they are the controls you
-// actually start from.  Choices persist per panel.
-(() => {
-  const COLLAPSED_BY_DEFAULT = new Set([
-    'ltdc display', 'oled ssd1306 (i2c)', 'tft ili9341 (spi)', 'buzzer (tim pwm)',
-    'speaker (i2s)', 'rtc ds3231 (i2c)', 'symbols', 'network packets',
-  ]);
-  for (const panel of document.querySelectorAll('aside .panel')) {
-    const h2 = panel.querySelector('h2');
-    if (!h2) continue;
-    const key = 'panel:' + h2.textContent.trim().toLowerCase();
-    const saved = localStorage.getItem(key);
-    const collapsed = saved === null
-      ? COLLAPSED_BY_DEFAULT.has(h2.textContent.trim().toLowerCase())
-      : saved === '1';
-    panel.classList.toggle('collapsed', collapsed);
-    h2.setAttribute('role', 'button');
-    h2.setAttribute('tabindex', '0');
-    h2.setAttribute('aria-expanded', String(!collapsed));
-    const toggle = () => {
-      const now = panel.classList.toggle('collapsed');
-      h2.setAttribute('aria-expanded', String(!now));
-      localStorage.setItem(key, now ? '1' : '0');
-    };
-    h2.addEventListener('click', toggle);
-    h2.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
-    });
-  }
-})();
-</script>
+<footer>
+  Rust Thumb-2 CPU + peripheral model (WASM) + a small JS driver — everything runs locally in your tab. Docs: <a href="about.html">About</a>.
+</footer>
 </body>
 </html>

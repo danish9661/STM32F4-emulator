@@ -80,7 +80,7 @@ impl Default for Sai {
 
 impl Sai {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
-        if name == "SAI1" { Some(Box::new(Self::default())) } else { None }
+        if name == "SAI1" || name == "SAI" { Some(Box::new(Self::default())) } else { None }
     }
 }
 

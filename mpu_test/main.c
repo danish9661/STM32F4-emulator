@@ -214,8 +214,12 @@ int main(void) {
         "movs r0, #3\n\t"
         "msr control, r0\n\t"
         "isb\n\t" :: "r"(0x200013E0) : "r0");
-    // Unprivileged FLASH RO read passes.
-    if (*(volatile unsigned int *)0x08000000 != 0x20020000) {
+    // Unprivileged FLASH RO read passes. The vector-table SP is the link's
+    // top of RAM (0x20020000 on F407/F411, per-family elsewhere).
+#ifndef EXPECT_SP
+#define EXPECT_SP 0x20020000
+#endif
+    if (*(volatile unsigned int *)0x08000000 != EXPECT_SP) {
         uart_puts("UPRIV-RO FAIL\r\n");
         SCR_FAILS++;
     } else {

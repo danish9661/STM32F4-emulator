@@ -465,21 +465,27 @@ inject, IN take), the netsim pattern applied to control transfers.
 ## Board variants (2026-09-11)
 
 All listed boards are Cortex-M4F — one shared CPU core, per-board SVD +
-flash/RAM sizes + firmware (`site/boards.js`). Coverage diff vs the
-model (SVD names): F401/F411 need zero new models (gaps: `DBG`,
-`OTG_FS_HOST` only); F429 adds `DMA2D` (+`GPIOJ/K`, free via the GPIO
-prefix match). Bring-up per board is a blinky (own link script + real
-LED pin) asserting banner + ODR toggles through that board's SVD map:
+flash/RAM sizes + firmware (`site/boards.js`). Since 2026-09-11 the
+coverage is the full matrix, not just blinky: `site/test_board_matrix.mjs`
+(in `npm test`, 138/138) boots every portable demo build on every
+compatible map and asserts its completion markers, and only passing pairs
+become presets (`BOARDS_OF_FIRMWARE`, ~190 in the bundle). Family builds
+come from `tools/build_family.mjs` (same sources, family link script +
+`-DSTACK_TOP`) plus per-sketch Arduino FQBN rebuilds; `expectFail`
+entries assert honest incompatibilities (absent silicon, 2 known model
+gaps) and alert if they ever pass. Bring-up per board started as a blinky
+(own link script + real LED pin) asserting banner + ODR toggles through
+that board's SVD map:
 
 | Preset | Board | SVD | Sizes | LED |
 |---|---|---|---|---|
 | blinky_f401 | BlackPill F401CC | stm32f401 | 256K/64K | PC13 |
 | blinky_f411 | BlackPill F411CE | stm32f411 | 512K/128K | PC13 |
-| blinky_f407g | Discovery F407VG | stm32f407 | 1M/128K | PD12 |
+| blinky_f407g | Discovery F407VG | stm32f407 | 1M/192K | PD12 |
 | blinky_nucleo_f401 | Nucleo-F401RE | stm32f401 | 256K/64K | PA5 |
 | blinky_nucleo_f411 | Nucleo-F411RE | stm32f411 | 512K/128K | PA5 |
 | blinky_f429 | Discovery F429ZI | stm32f429 | 2M/256K | PG13 |
-| blinky_f407ve/ze | F407VE/ZE black | stm32f407 | 512K/128K | markers only (pinout varies) |
+| blinky_f407ve/ze | F407VE/ZE black | stm32f407 | 512K/192K | markers only (pinout varies) |
 
 ---
 

@@ -113,7 +113,8 @@ scripts/verify_ethernet.sh [max_inst]   # all 3 firmwares + HTTP server, exit 0 
 
 ```bash
 python3 -m http.server 8123 --directory site
-# open http://127.0.0.1:8123
+# landing page; the console lives at /console.html
+# open http://127.0.0.1:8123/console.html
 ```
 
 `file://` will NOT work — the SVD and WASM are fetched at runtime.
@@ -126,8 +127,8 @@ https://danish9661.github.io/stm32F4-emulator/ (GitHub Pages, CI-deployed).
 
 ### What you get
 
-- **Preset dropdown** — 31 bundled firmwares. Auto-boot with
-  `?fw=eth_http`, `?fw=blinky`, `?fw=crypto_test`, … (or `?fw=<name>`
+- **Preset dropdown** — 67 bundled firmwares. Auto-boot with
+  `console.html?fw=eth_http`, `console.html?fw=blinky`, `console.html?fw=crypto_test`, … (or `console.html?fw=<name>`
   for any preset).
 - **UART terminal** — firmware TX scrolls here; the input box sends bytes
   to the emulated USART (RX works — verified end-to-end). HTML spec strips
@@ -233,7 +234,7 @@ node site/ws-bridge.mjs eth_http/eth_http.bin --port 8234
 
 # 2. Open the browser console with the bridge URL param
 npm run serve   # serves site/ on http://127.0.0.1:8123
-# then open: http://127.0.0.1:8123?bridge=ws://127.0.0.1:8234
+# then open: http://127.0.0.1:8123/console.html?bridge=ws://127.0.0.1:8234
 ```
 
 Or use the npm script:

@@ -3201,6 +3201,82 @@ GPIO pins get a `drivable` class (pointer cursor + hover ring, toggled in
 Verified by headless-Chrome screenshots (`.pw-scratch/ui_*.png`, deleted
 after) with the dropdown open and `?fw=blinky` running.
 
+### site/ unification (2026-09-11, UNCOMMITTED — do not commit till asked)
+One command serves everything: `python3 -m http.server 8123 --directory
+site` (aka `npm run serve`). `site/index.html` is now the LANDING page
+(static launcher: Console / DOOM / bring-firmware cards + try-now deep
+links); the live console moved to `site/console.html` (git mv, history
+kept); `site/doom.html` + `about.html` unchanged in place. Deep links are
+`console.html?fw=<preset>` / `console.html?board=<key>` — pre-move history
+throughout this file says `?fw=` at root (and `site/index.html` for the
+console page), read those as `console.html?fw=` / `site/console.html`.
+Code updated: `cdp_smoke.mjs` navigate, `test_bridge_cdp.mjs` URL,
+`about.html` nav + serve line. Docs updated: README `?fw=`/`?bridge=`
+examples, `usage.md` (serve + 67-preset count).
+
+### Landing redirect + boards doc (2026-09-11, UNCOMMITTED)
+Single-landing policy: `website/src/pages/index.js` is now a redirect to
+`/stm32F4-emulator/console/` (meta refresh + JS replace + manual link;
+docs unaffected) — the site/ launcher is the one landing. Deployed,
+`/console/` = copy of `site/` (pages.yml), so root → site landing →
+console/doom. Verified: built + served, redirect fires (lands on 404
+locally ONLY because `console/` is assembled at deploy time), boards page
+200 with correct table/sidebar. New `website/docs/boards.md` (sidebar
+Getting Started): variant table (chip sizes + Arduino LED/Serial, all
+cross-checked vs `test_arduino_boards.mjs`), implemented list, gaps
+(DMA2D F429 / F429 ETH untested / GPIOK undriven / F407-only demos /
+M0+ out of scope), add-a-board recipe. The earlier full landing rebuild
+(index.js content + module.css sections) was reverted as superseded.
+
+### All-boards port, everything except ETH (2026-09-11, UNCOMMITTED)
+~125 new presets (193 firmwares in the bundle): every portable demo on
+every compatible map. Method: `tools/build_family.mjs` (bare-metal: same
+sources, family link script + `-DSTACK_TOP`/`-DEXPECT_SP`) + Arduino FQBN
+matrix (`.pw-scratch/build_arduino_matrix.sh`, 80/88 compile — only
+`rx_interrupt_test` fails everywhere: sketch ISR collides with the core's
+USART1 handler); `site/test_board_matrix.mjs` (in `npm test`, 138/138)
+boots every build and asserts completion markers. Results — not guesses —
+define `BOARDS_OF_FIRMWARE`; F407 builds additionally blanket `ve`
+(bin-size asserted < 512K, spot-booted).
+- `startup.c` carries `STACK_TOP` (default 0x20020000 — rebuilt bins are
+  byte-identical, zero impact); `mpu_test` also takes `EXPECT_SP` (its
+  UPRIV-RO check hardcoded the F407 SP — that "failure" was firmware).
+- `expectFail` entries in the matrix assert honest incompatibilities
+  (no-CRYP/SAI/UART4 silicon, comprehensive's 2 known model gaps) and
+  ALERT (`UNEXPECTEDLY PASSED`) if they ever start passing.
+- Model gaps the matrix exposed, all fixed: Keil `SAI`/`DBG` aliases,
+  FSMC full-range fallback in `from_svd` (Keil calls it FMC/omits it —
+  BCR1 read 0), `test_usb.mjs` bin/svd/size argv.
+- Stepping rules learned: freertos needs ≤100k steps (200k wedges the
+  handshake — the browser default 100k is exactly safe); `expectFail`
+  UART4 hangs are empty-uart + no-fault (not faults).
+- Pre-existing, NOT board issues (fail identically on stock 407, left
+  alone): DCMI empty-capture IRQ + SDIO CMDSENT, new/deep_periph counts,
+  crypto_deep garbage summary counts (per-check lines are the signal),
+  `test_firmware` missing `_start` prototype (GCC14 errors, old toolchain
+  warned).
+- UI wiring is generated (`.pw-scratch/gen_presets.py`, rerunnable):
+  bundle + compat + dropdown + IRQ/UART4/FREERTOS/DEVICE/startsWith gates.
+  Gotchas it hit: hidden-select anchor must be `fwSelect`'s close (the
+  board selector's matched first — 125 options landed in the wrong
+  select, boot broke with `FIRMWARES[fw]` undefined); `failMarkers:['FAIL']`
+  false-positives on zero-count summaries (use `'FAIL '`); mpu/fpu_irq
+  family presets need IRQ delivery like their F407 originals.
+
+### Landing page rebuild (2026-09-11, UNCOMMITTED — do not commit till asked)
+`website/src/pages/index.js` + sections of `index.module.css` + config
+tagline. The old page described the pre-§23 tree (Unicorn CPU card,
+`unicorn_arm.cjs`, MMIO-hook driver, 33 peripherals, 44 demos, npm-install
+fiction — the package was never published). New: Live Demo primary button,
+static UART transcript hero card (real blinky output), stats 40/67/8/35,
+6 feature cards (Rust CPU Core + Multi-Board replace Browser+Node/AI —
+AI/MCP lives in docs now), "One core, five chips" boards band (sizes from
+`boards.js`), rewritten 3-step architecture (honest tags: 1.6 MB wasm,
+730-line driver), QuickStart with verified commands only (`python3
+-m http.server 8123 --directory site`, `node cli.mjs … --inst`, both
+checked). Verified via `docusaurus build` + served screenshot
+(`docusaurus serve`, NOT python http.server — baseUrl 404s otherwise).
+
 ### Flash program/erase driver restored (2026-09-11)
 `flash_test` stalled at BSY in BOTH node and browser (pre-existing — the
 harness was orphaned, never in `npm test`). Root cause: the §23 emulator.js

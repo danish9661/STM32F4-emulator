@@ -38,6 +38,14 @@ const CASES = [
     { label: 'fsmc_test',      fw: 'fsmc_test',      markers: ['=== FSMC Test: done ==='],      failMarkers: ['FAIL'], timeoutMs: 60000 },
     { label: 'dcmi_test',      fw: 'dcmi_test',      markers: ['=== DCMI Test: done ==='],      failMarkers: ['FAIL'], timeoutMs: 120000 },
     { label: 'freertos_test',  fw: 'freertos_test',  markers: ['TIM TEST PASS'],                failMarkers: ['FAIL'], timeoutMs: 120000 },
+    { label: 'oled_f401', fw: 'oled_test_f401', markers: ['OLED draw done'], timeoutMs: 60000 },
+    { label: 'audio_f411', fw: 'audio_test_f411', markers: ['=== Audio Test: done'], timeoutMs: 60000 },
+    { label: 'freertos_f429', fw: 'freertos_test_f429', markers: ['TIM TEST PASS'], timeoutMs: 120000 },
+    { label: 'usb_f429', fw: 'usb_cdc_test_f429', markers: ['USB echo OK', 'USB done'], timeoutMs: 120000 },
+    { label: 'fsmc_f429', fw: 'fsmc_test_f429', markers: ['=== FSMC Test: done ==='], timeoutMs: 60000 },
+    { label: 'dcmi_f429', fw: 'dcmi_test_f429', markers: ['=== DCMI Test: done ==='], timeoutMs: 120000 },
+    { label: 'adc_f429', fw: 'adc_demo_f429', markers: ['=== ADC Demo: done ==='], timeoutMs: 60000 },
+    { label: 'mpu_f401', fw: 'mpu_test_f401', markers: ['MPU all PASS', 'MPU done'], timeoutMs: 60000 },
 ];
 
 let failed = 0;

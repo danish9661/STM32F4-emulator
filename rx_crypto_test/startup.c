@@ -1,6 +1,12 @@
 extern int main(void);
 extern void _start(void);
 
+#ifndef STACK_TOP
+#define STACK_TOP 0x20020000
+#endif
+#define STR_(x) #x
+#define STR(x) STR_(x)
+
 #define USART1_DR  (*(volatile unsigned int *)0x40011004)
 #define USART1_SR  (*(volatile unsigned int *)0x40011000)
 
@@ -26,7 +32,7 @@ void USART1_IRQHandler(void) {
 __attribute__((used, section(".vectors")))
 void (* const vector_table[97 + 16])(void) = {
     // System exceptions (16 entries)
-    (void (*)(void))0x20020000, // [0] SP
+    (void (*)(void))STACK_TOP, // [0] SP
     _start,                     // [1] Reset
     DH, DH, DH, DH, DH,         // [2-6] NMI..UsageFault
     DH, 0, 0, 0, 0,            // [7-11] Reserved, Reserved, Reserved, Reserved, SVC
@@ -42,7 +48,7 @@ void (* const vector_table[97 + 16])(void) = {
 
 __attribute__((naked)) void _start(void) {
     __asm__ volatile (
-        "ldr sp, =0x20020000\n"
+        "ldr sp, =" STR(STACK_TOP) "\n"
         "bl main\n"
         "1: b 1b\n"
     );

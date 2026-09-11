@@ -1,6 +1,12 @@
 extern int main(void);
 extern void _start(void);
 
+#ifndef STACK_TOP
+#define STACK_TOP 0x20020000
+#endif
+#define STR_(x) #x
+#define STR(x) STR_(x)
+
 void SysTick_Handler(void);
 void Default_Handler(void) { while (1); }
 
@@ -9,7 +15,7 @@ void Default_Handler(void) { while (1); }
 // so the handler needs no special prologue.
 __attribute__((used, section(".vectors")))
 void (* const vector_table[16])(void) = {
-    (void (*)(void))0x20020000,
+    (void (*)(void))STACK_TOP,
     _start,
     [2]  = Default_Handler, [3]  = Default_Handler,
     [4]  = Default_Handler, [5]  = Default_Handler,
@@ -22,7 +28,7 @@ void (* const vector_table[16])(void) = {
 
 __attribute__((naked)) void _start(void) {
     __asm__ volatile (
-        "ldr sp, =0x20020000\n"
+        "ldr sp, =" STR(STACK_TOP) "\n"
         "bl main\n"
         "1: b 1b\n"
     );

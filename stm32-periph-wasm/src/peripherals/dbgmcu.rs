@@ -11,7 +11,7 @@ impl Default for Dbgmcu {
 
 impl Dbgmcu {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
-        if name == "DBGMCU" { Some(Box::new(Self::default())) } else { None }
+        if name == "DBGMCU" || name == "DBG" { Some(Box::new(Self::default())) } else { None }
     }
 }
 

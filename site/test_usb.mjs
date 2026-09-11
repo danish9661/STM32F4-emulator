@@ -10,9 +10,13 @@ import { readFileSync } from 'node:fs';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 
-const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
+const svdFile = process.argv[3] || 'stm32f407';
+const svdXml = readFileSync(new URL(`./vendor/${svdFile}.svd`, import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../usb_cdc_test/usb_cdc_test.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL(process.argv[2] || '../usb_cdc_test/usb_cdc_test.bin', import.meta.url)));
+// Optional: flash/ram sizes for non-F407 maps (argv[4]/argv[5], hex ok).
+const flashSize = process.argv[4] ? parseInt(process.argv[4]) : 0x100000;
+const ramSize = process.argv[5] ? parseInt(process.argv[5]) : 0x20000;
 
 function fail(msg) { console.error('USB FAIL: ' + msg); process.exit(1); }
 const eq = (a, b, what) => {
@@ -22,7 +26,8 @@ const eq = (a, b, what) => {
 };
 
 (async () => {
-    const emu = await createEmulator({ firmware, bindings, svdXml, wasmInit: wasmBytes });
+    const emu = await createEmulator({ firmware, bindings, svdXml, wasmInit: wasmBytes,
+        flash_size: flashSize, ram_size: ramSize });
     let uart = '';
     const step = (n = 20000) => { emu.step(n); uart += emu.drainUart().toString(); };
     const waitFor = (marker, budget = 300) => {

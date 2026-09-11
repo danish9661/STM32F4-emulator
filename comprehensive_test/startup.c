@@ -1,6 +1,12 @@
 extern int main(void);
 extern void _start(void);
 
+#ifndef STACK_TOP
+#define STACK_TOP 0x20020000
+#endif
+#define STR_(x) #x
+#define STR(x) STR_(x)
+
 // ISR flags — set by handlers, checked by tests
 volatile int exti0_fired, exti1_fired, exti2_fired;
 volatile int exti9_5_fired, exti15_10_fired;
@@ -38,7 +44,7 @@ void DMA2_Stream0_IRQHandler(void) {
 __attribute__((used, section(".vectors")))
 void (* const vector_table[97 + 16])(void) = {
     // System exceptions (16)
-    (void (*)(void))0x20020000, // SP
+    (void (*)(void))STACK_TOP, // SP
     _start,                     // Reset
     Default_Handler,            // NMI
     Default_Handler,            // HardFault
@@ -153,7 +159,7 @@ void (* const vector_table[97 + 16])(void) = {
 
 __attribute__((naked)) void _start(void) {
     __asm__ volatile (
-        "ldr sp, =0x20020000\n"
+        "ldr sp, =" STR(STACK_TOP) "\n"
         "bl main\n"
         "1: b 1b\n"
     );

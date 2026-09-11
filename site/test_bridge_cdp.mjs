@@ -112,7 +112,7 @@ try {
 
     // Navigate with bridge param — firmware is already loaded by the bridge,
     // so the page connects and starts receiving UART immediately.
-    const url = `http://127.0.0.1:${HTTP_PORT}/?fw=blinky&bridge=ws://127.0.0.1:${BRIDGE_PORT}`;
+    const url = `http://127.0.0.1:${HTTP_PORT}/console.html?fw=blinky&bridge=ws://127.0.0.1:${BRIDGE_PORT}`;
     await send('Page.navigate', { url });
 
     // Wait for boot() to complete (emu is set in bridge mode after LOAD_IMAGE)

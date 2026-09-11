@@ -88,7 +88,7 @@ export async function runCdpSmoke({ fw, markers, failMarkers = [], timeoutMs = 6
 
         await send('Page.enable');
         await send('Runtime.enable');
-        await send('Page.navigate', { url: `http://127.0.0.1:${httpPort}/?fw=${encodeURIComponent(fw)}` });
+        await send('Page.navigate', { url: `http://127.0.0.1:${httpPort}/console.html?fw=${encodeURIComponent(fw)}` });
 
         const t0 = Date.now();
         while (Date.now() - t0 < timeoutMs) {
