@@ -698,6 +698,10 @@ impl WasmCpu {
     pub fn mem_write(&mut self, addr: u32, data: &[u8]) {
         for (i, &b) in data.iter().enumerate() { self.mem.write8(addr.wrapping_add(i as u32), b); }
     }
+    /// Fill a flash range with 0xFF (erase applied by the JS flash driver
+    /// after `flash_take_erase`; clamped to mapped flash, then completed
+    /// with `flash_erase_applied`). Debugger/firmware images use `load_firmware`.
+    pub fn flash_fill_erase(&mut self, start: u32, len: u32) { self.mem.fill_flash_erase(start, len); }
     pub fn reset_cpu(&mut self, sp: u32, pc: u32) { self.cpu.reset(sp, pc); }
     /// Enable/disable inline guest exception delivery (NVIC SysTick, ETH,
     /// USART RX, SVC, PendSV...). Off by default (polling-only: pending

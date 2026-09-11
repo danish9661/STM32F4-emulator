@@ -41,8 +41,10 @@ fn is_periph(addr: u32) -> bool {
 /// `WasmCpu` is created).
 ///
 /// Flash is execute/read-only for the guest: normal `write8` stores to flash
-/// are ignored (real flash needs an erase/program sequence, serviced by the
-/// JS flash driver). `load()` bypasses the protection
+/// are ignored, except while the flash is unlocked with PG set (program
+/// stores apply with NOR 1->0 semantics) — real flash needs an erase/program
+/// sequence, serviced by the JS flash driver (`fill_flash_erase` +
+/// `flash_erase_applied`). `load()` bypasses the protection
 /// and is the only way to get firmware into flash.
 pub struct FlatMemory {
     pub flash: Vec<u8>,
@@ -85,6 +87,21 @@ impl FlatMemory {
     /// every extra_ram region at map time.
     pub fn map_extra(&mut self, base: u32, size: usize) {
         self.extra.push(MemRegion { base, data: vec![0; size] });
+    }
+
+    /// Apply a sector/mass erase fill (all bytes 0xFF), clamped to mapped
+    /// flash. Called by the JS flash driver after `take_flash_erase`, then
+    /// completed with `flash_erase_applied` — the only runtime path that
+    /// sets flash bits besides programming (see `write8`).
+    pub fn fill_flash_erase(&mut self, start: u32, len: u32) {
+        let end = start.saturating_add(len);
+        let mut a = start;
+        while a < end {
+            if self.in_flash(a) {
+                self.flash[(a - self.flash_base) as usize] = 0xFF;
+            }
+            a = a.wrapping_add(1);
+        }
     }
 
     /// Load `data` at `base`, writing through flash protection. Bytes landing
@@ -336,11 +353,19 @@ impl Memory for FlatMemory {
         }
         if self.in_flash(addr) {
             // MPU first (an RX-mapped flash write faults on silicon),
-            // then flash protection: guest stores are ignored (see docs).
+            // then flash protection: an unlocked flash with PG set accepts
+            // program stores with NOR semantics (bits only transition 1->0;
+            // erase restores 0xFF via fill_flash_erase). Anything else is
+            // ignored (see struct docs).
             if self.mpu_deny(addr, 1, true) {
                 return;
             }
-            // flash protection: guest stores are ignored (see struct docs)
+            if crate::system::flash_is_programming() {
+                let i = (addr - self.flash_base) as usize;
+                if let Some(cell) = self.flash.get_mut(i) {
+                    *cell &= v;
+                }
+            }
         } else if self.in_ram(addr) {
             if self.mpu_deny(addr, 1, true) {
                 return;

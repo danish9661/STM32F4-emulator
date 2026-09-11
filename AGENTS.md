@@ -3169,3 +3169,44 @@ binaries in `arduino_board/build-<key>/`), and `site/test_arduino_boards.mjs`
 boot banner + `tick 0 LED=ON` + `tick 2 LED=OFF` + `Arduino done` + ≥2 ODR
 toggles + no fault. 8/8 PASS — full Arduino stack (SystemInit PLL, .data/.bss,
 GPIO, SysTick IRQs, USART TX) on every variant.
+
+### Web UI board selector + preset filter (2026-09-11)
+The console page has a Board dropdown (`#boardSelect`, populated from
+`BOARDS`) above the firmware list. Picking a board filters both the custom
+dropdown and the hidden `<select>` to presets in `BOARDS_OF_FIRMWARE`
+(`boards.js`; default = F407-only, first entry = primary board); empty
+groups hide, an incompatible selection falls back to the first visible
+preset, and `?board=` deep-links (a `?fw=` link auto-selects its primary
+board). Boot uses the selection when compatible (`boardForSelection`).
+67 presets: +8 Arduino per-board builds, +exti/flash/spi-flash/freertos,
+and dropdown entries for the already-bundled fsmc/dcmi. Wiring per preset
+in `app.js`: Arduino set in `IRQ_FIRMWARES` (SysTick `delay()`),
+`UART2_FIRMWARES` (Nucleo/Disc-F407 Serial), `FREERTOS_FIRMWARES`
+(`freertos: true`), `DEVICE_FIRMWARES` SPI-flash for spi_flash_test and an
+RDDID→0x9341 FSMC sink for fsmc_test, boot + `PHASE2`/`ovr OK` scripted
+DCMI feeds for dcmi_test. GPIO pins are clickable inputs (`gpio_set_input`
+via the `#gpio` grid, input-mode pins only — drives exti_test through both
+edges to `EXTI TEST DONE`). `test_browser.mjs` covers arduino_f407vg/
+f401re, flash, spi_flash, fsmc, dcmi, freertos. `?v=` bumps: app.js 20,
+firmware.js 11, boards.js 1 (new query — it was unversioned).
+
+### Flash program/erase driver restored (2026-09-11)
+`flash_test` stalled at BSY in BOTH node and browser (pre-existing — the
+harness was orphaned, never in `npm test`). Root cause: the §23 emulator.js
+rewrite kept the `flash_take_erase`/`flash_erase_applied` imports but dropped
+every call, and guest flash stores are silently ignored by the core, so there
+was no path for either half of the R/W cycle. Restored on both sides:
+- Rust (`cpu/mem.rs`): `write8` to flash applies with NOR 1→0 semantics
+  while `flash_is_programming()` (unlocked + PG set); new
+  `FlatMemory::fill_flash_erase` (0xFF fill, clamped) + `WasmCpu::
+  flash_fill_erase` export (a free export can't reach core memory — it had
+  to be a method).
+- JS (`emulator.js` `wProcessFlash`, per step): take queue → fill → applied.
+- Native: `cpu/tests.rs::flash_test_programs_and_erases` runs the real
+  firmware with the JS role played natively (asserts the sector-5 range).
+- `test_flash.mjs` + `test_spi_flash.mjs` + `test_exti.mjs` wired into
+  `npm test` (all three were orphaned harnesses). `VENDOR_V` 13→14
+  (app.js/doom.js/doom-worker.js together) + `__doomVer`/script-query bumps.
+- Marker convention: spi_flash prints a zero-count `FAIL: 00000000` summary
+  on success (same artifact as comprehensive_test) — its browser case has
+  NO 'FAIL' failMarker; DONE is the signal.

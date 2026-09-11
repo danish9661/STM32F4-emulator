@@ -15,6 +15,12 @@ export class WasmCpu {
      */
     fault_pc(): number;
     /**
+     * Fill a flash range with 0xFF (erase applied by the JS flash driver
+     * after `flash_take_erase`; clamped to mapped flash, then completed
+     * with `flash_erase_applied`). Debugger/firmware images use `load_firmware`.
+     */
+    flash_fill_erase(start: number, len: number): void;
+    /**
      * FPSCR (cumulative flags, RMode, FZ/DN).
      */
     get_fpscr(): number;
@@ -550,6 +556,7 @@ export interface InitOutput {
     readonly wasmcpu_fault_op1: (a: number) => number;
     readonly wasmcpu_fault_op2: (a: number) => number;
     readonly wasmcpu_fault_pc: (a: number) => number;
+    readonly wasmcpu_flash_fill_erase: (a: number, b: number, c: number) => void;
     readonly wasmcpu_get_fpscr: (a: number) => number;
     readonly wasmcpu_get_ipsr: (a: number) => number;
     readonly wasmcpu_get_pc: (a: number) => number;

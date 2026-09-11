@@ -628,6 +628,17 @@ export async function createEmulator(opts) {
                 dma_set_completed(stream, true);
             }
         };
+        // Flash erase completion (restored post-§23: the imports survived the
+        // rewrite but the drain didn't, stalling flash_test at BSY forever).
+        // The model holds BSY until the driver applies the queued fill.
+        const wProcessFlash = () => {
+            try {
+                const q = flash_take_erase();
+                if (!q || q.length < 2) return;
+                try { cpu.flash_fill_erase(q[0] >>> 0, q[1] >>> 0); } catch {}
+                try { flash_erase_applied(); } catch {}
+            } catch {}
+        };
         return {
             uc: wuc,
             read32: wread32, write32: wwrite32,
@@ -658,6 +669,7 @@ export async function createEmulator(opts) {
                 // tick WITHOUT adding here (tick_n(c) would double-count).
                 try { tick_peripherals(); } catch {}
                 wProcessDma();
+                wProcessFlash();
                 wProcessEth();
                 try { processDevices(); } catch {}
                 if (ENV.WASM_DBG && rxQueue.length > 0) console.log(`[wasm-step] pc=0x${(cpu.get_pc() >>> 0).toString(16)} rxpoll=${eth_is_rx_poll() ? 1 : 0} q=${rxQueue.length}`);

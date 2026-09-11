@@ -42,6 +42,16 @@ export class WasmCpu {
         return ret >>> 0;
     }
     /**
+     * Fill a flash range with 0xFF (erase applied by the JS flash driver
+     * after `flash_take_erase`; clamped to mapped flash, then completed
+     * with `flash_erase_applied`). Debugger/firmware images use `load_firmware`.
+     * @param {number} start
+     * @param {number} len
+     */
+    flash_fill_erase(start, len) {
+        wasm.wasmcpu_flash_fill_erase(this.__wbg_ptr, start, len);
+    }
+    /**
      * FPSCR (cumulative flags, RMode, FZ/DN).
      * @returns {number}
      */

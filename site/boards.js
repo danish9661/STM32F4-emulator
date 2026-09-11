@@ -7,13 +7,15 @@
 // that dir on rebuild — restore them alongside the SVD, see AGENTS.md).
 
 export const BOARDS = {
-    // BlackPill F401CC / Nucleo-F401RE (STM32F401CC/Rx: 256K flash, 64K RAM)
+    // STM32F401 family (BlackPill CC / Nucleo RE): superset sizes cover the
+    // biggest die (RE: 512K flash, 96K RAM) — smaller-die firmware (CC blinkies)
+    // runs unchanged, SP comes from its own vector table.
     stm32f401: {
         svd: 'stm32f401.svd',
-        flash_size: 0x40000,
-        ram_size: 0x10000,
+        flash_size: 0x80000,
+        ram_size: 0x18000,
         maxClockMHz: 84,
-        label: 'STM32F401 (256K/64K)',
+        label: 'STM32F401 (512K/96K)',
     },
     // BlackPill F411CE / Nucleo-F411RE (STM32F411CE/Rx: 512K flash, 128K RAM)
     stm32f411: {
@@ -23,21 +25,22 @@ export const BOARDS = {
         maxClockMHz: 100,
         label: 'STM32F411 (512K/128K)',
     },
-    // F407VG/VG (Discovery, 1M flash, 128K RAM + 64K CCM)
+    // F407VG/VG (Discovery, 1M flash, 192K RAM — 128K SRAM + 64K CCM,
+    // mapped flat; Arduino _estack is 0x20030000 and needs the full 192K)
     stm32f407: {
         svd: 'stm32f407.svd',
         flash_size: 0x100000,
-        ram_size: 0x20000,
+        ram_size: 0x30000,
         maxClockMHz: 168,
-        label: 'STM32F407 (1M/128K)',
+        label: 'STM32F407 (1M/192K)',
     },
-    // F407VE/ZE black boards (512K flash, 128K RAM — same die, new package)
+    // F407VE/ZE black boards (512K flash, 192K RAM — same die, new package)
     stm32f407ve: {
         svd: 'stm32f407.svd',
         flash_size: 0x80000,
-        ram_size: 0x20000,
+        ram_size: 0x30000,
         maxClockMHz: 168,
-        label: 'STM32F407VE/ZE (512K/128K)',
+        label: 'STM32F407VE/ZE (512K/192K)',
     },
     // STM32F429ZI (Discovery: 2M flash, 256K RAM + 64K CCM)
     stm32f429: {
@@ -63,4 +66,40 @@ export const BOARD_OF_FIRMWARE = {
 
 export function boardFor(fwName) {
     return BOARDS[BOARD_OF_FIRMWARE[fwName] || 'stm32f407'];
+}
+
+// Firmware preset -> ALL compatible boards (first entry = primary, the board
+// the firmware was built and verified for). Anything absent here runs on
+// stm32f407 only — every pre-boards preset was built for the F407 (ETH, DAC,
+// FSMC, CAN… are F407-only peripherals or F407 link scripts). The web UI
+// board selector filters the preset list by this map.
+export const BOARDS_OF_FIRMWARE = {
+    blinky_f401: ['stm32f401'],
+    blinky_nucleo_f401: ['stm32f401'],
+    blinky_f411: ['stm32f411'],
+    blinky_nucleo_f411: ['stm32f411'],
+    blinky_f429: ['stm32f429'],
+    blinky_f407g: ['stm32f407'],
+    blinky_f407ve: ['stm32f407ve', 'stm32f407'],
+    blinky_f407ze: ['stm32f407ve', 'stm32f407'],
+    arduino_bp_f401cc: ['stm32f401'],
+    arduino_nucleo_f401re: ['stm32f401'],
+    arduino_bp_f411ce: ['stm32f411'],
+    arduino_nucleo_f411re: ['stm32f411'],
+    arduino_disco_f407vg: ['stm32f407'],
+    arduino_black_f407ve: ['stm32f407ve', 'stm32f407'],
+    arduino_black_f407ze: ['stm32f407ve', 'stm32f407'],
+    arduino_disco_f429zi: ['stm32f429'],
+};
+
+export function boardsOf(fwName) {
+    return BOARDS_OF_FIRMWARE[fwName] || [BOARD_OF_FIRMWARE[fwName] || 'stm32f407'];
+}
+
+// Board key actually booted for a preset given the UI's board selection:
+// the selection wins when the preset supports it, else the primary board.
+export function boardForSelection(fwName, sel) {
+    const compat = boardsOf(fwName);
+    const key = (sel && sel !== 'all' && compat.includes(sel)) ? sel : compat[0];
+    return { key, board: BOARDS[key] };
 }

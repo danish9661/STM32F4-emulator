@@ -27,6 +27,17 @@ const CASES = [
     { label: 'blinky_f429',     fw: 'blinky_f429',     markers: ['Blinky F429 done'],             timeoutMs: 60000 },
     { label: 'blinky_nucleo_f401', fw: 'blinky_nucleo_f401', markers: ['Blinky Nucleo-F401 done'], timeoutMs: 60000 },
     { label: 'blinky_nucleo_f411', fw: 'blinky_nucleo_f411', markers: ['Blinky Nucleo-F411 done'], timeoutMs: 60000 },
+    // Board-filter + new-preset coverage: Arduino on real variant maps.
+    { label: 'arduino_f407vg', fw: 'arduino_disco_f407vg', markers: ['Arduino done'], timeoutMs: 120000 },
+    { label: 'arduino_f401re', fw: 'arduino_nucleo_f401re', markers: ['Arduino done'], timeoutMs: 120000 },
+    { label: 'flash_test',     fw: 'flash_test',     markers: ['FLASH TEST DONE'],              timeoutMs: 60000 },
+    // NOTE: no 'FAIL' failMarker here — both firmwares print a zero-count
+    // "FAIL: 00000000" summary line on success (same convention as
+    // comprehensive_test); DONE is the pass signal, hangs time out.
+    { label: 'spi_flash_test', fw: 'spi_flash_test', markers: ['SPI FLASH TEST DONE'],     timeoutMs: 60000 },
+    { label: 'fsmc_test',      fw: 'fsmc_test',      markers: ['=== FSMC Test: done ==='],      failMarkers: ['FAIL'], timeoutMs: 60000 },
+    { label: 'dcmi_test',      fw: 'dcmi_test',      markers: ['=== DCMI Test: done ==='],      failMarkers: ['FAIL'], timeoutMs: 120000 },
+    { label: 'freertos_test',  fw: 'freertos_test',  markers: ['TIM TEST PASS'],                failMarkers: ['FAIL'], timeoutMs: 120000 },
 ];
 
 let failed = 0;

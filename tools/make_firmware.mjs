@@ -20,6 +20,21 @@ const firmwares = [
     ['blinky_f429', 'blinky_f429/blinky_f429.bin', 'blinky_f429.bin'],
     ['blinky_f407ve', 'blinky/blinky.bin', 'blinky.bin'],
     ['blinky_f407ze', 'blinky/blinky.bin', 'blinky.bin'],
+    // Arduino per-board validation (same sketch, 8 targets — Serial prints +
+    // LED blink + SysTick delay; see site/test_arduino_boards.mjs)
+    ['arduino_bp_f401cc', 'arduino_board/build-bp_f401cc/arduino_board.ino.bin', 'arduino_bp_f401cc.bin'],
+    ['arduino_bp_f411ce', 'arduino_board/build-bp_f411ce/arduino_board.ino.bin', 'arduino_bp_f411ce.bin'],
+    ['arduino_nucleo_f401re', 'arduino_board/build-nucleo_f401re/arduino_board.ino.bin', 'arduino_nucleo_f401re.bin'],
+    ['arduino_nucleo_f411re', 'arduino_board/build-nucleo_f411re/arduino_board.ino.bin', 'arduino_nucleo_f411re.bin'],
+    ['arduino_disco_f407vg', 'arduino_board/build-disco_f407vg/arduino_board.ino.bin', 'arduino_disco_f407vg.bin'],
+    ['arduino_disco_f429zi', 'arduino_board/build-disco_f429zi/arduino_board.ino.bin', 'arduino_disco_f429zi.bin'],
+    ['arduino_black_f407ve', 'arduino_board/build-black_f407ve/arduino_board.ino.bin', 'arduino_black_f407ve.bin'],
+    ['arduino_black_f407ze', 'arduino_board/build-black_f407ze/arduino_board.ino.bin', 'arduino_black_f407ze.bin'],
+    // host-driven / OS showcases (need IRQs and/or JS devices; see app.js)
+    ['exti_test', 'exti_test/exti_test.bin', 'exti_test.bin'],
+    ['flash_test', 'flash_test/flash_test.bin', 'flash_test.bin'],
+    ['spi_flash_test', 'spi_flash_test/spi_flash_test.bin', 'spi_flash_test.bin'],
+    ['freertos_test', 'freertos_test/freertos_test.bin', 'freertos_test.bin'],
     // demo firmwares (new peripheral showcases)
     ['adc_demo', 'adc_demo/adc_demo.bin', 'adc_demo.bin'],
     ['dac_demo', 'dac_demo/dac_demo.bin', 'dac_demo.bin'],

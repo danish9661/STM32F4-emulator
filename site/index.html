@@ -8,7 +8,7 @@
 <title>STM32F407 Emulator in the Browser — run real Cortex-M4 firmware (and DOOM)</title>
 <!-- Search + social metadata.  The page had none, so search results and
      shared links showed only the bare title with no summary. -->
-<meta name="description" content="An STM32F407 microcontroller emulator that runs unmodified Cortex-M4 firmware in your browser: Rust CPU core plus a Rust peripheral model (GPIO, USART, DMA, ETH, I2C, SPI, ADC, timers), all compiled to WebAssembly. Boot 31 firmware presets, do real DHCP/TCP/HTTP networking, or play DOOM.">
+<meta name="description" content="An STM32F407 microcontroller emulator that runs unmodified Cortex-M4 firmware in your browser: Rust CPU core plus a Rust peripheral model (GPIO, USART, DMA, ETH, I2C, SPI, ADC, timers), all compiled to WebAssembly. Boot 67 firmware presets, do real DHCP/TCP/HTTP networking, or play DOOM.">
 <link rel="canonical" href="https://danish9661.github.io/stm32F4-emulator/">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <script type="application/ld+json">
@@ -28,11 +28,11 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="STM32F407 Emulator">
 <meta property="og:title" content="STM32F407 Emulator in the Browser">
-<meta property="og:description" content="Run real Cortex-M4 firmware in a browser tab — Rust CPU + peripheral model in WebAssembly. Networking demos, 31 firmware presets, and DOOM.">
+<meta property="og:description" content="Run real Cortex-M4 firmware in a browser tab — Rust CPU + peripheral model in WebAssembly. Networking demos, 67 firmware presets, and DOOM.">
 <meta property="og:url" content="https://danish9661.github.io/stm32F4-emulator/">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="STM32F407 Emulator in the Browser">
-<meta name="twitter:description" content="Run real Cortex-M4 firmware in a browser tab — Rust CPU + peripheral model in WebAssembly. Networking demos, 31 firmware presets, and DOOM.">
+<meta name="twitter:description" content="Run real Cortex-M4 firmware in a browser tab — Rust CPU + peripheral model in WebAssembly. Networking demos, 67 firmware presets, and DOOM.">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 :root {
@@ -482,6 +482,10 @@ canvas {
     <div class="panel" style="margin-bottom:12px;">
       <h2>Firmware</h2>
       <div class="sec">
+        <label for="boardSelect" style="font-size:11px;color:var(--dim);display:block;margin-bottom:4px;">Board — filters the preset list to firmware built for it</label>
+        <select id="boardSelect" style="width:100%;margin-bottom:8px;">
+          <option value="all">All boards — show every preset</option>
+        </select>
         <div class="custom-select" id="fwSelectWrap">
           <div class="custom-select-trigger" id="fwSelectTrigger">eth_http — web client (DHCP+TCP+HTTP)</div>
           <div class="custom-select-dropdown" id="fwDropdown">
@@ -500,6 +504,15 @@ canvas {
             <div class="custom-select-option" data-value="blinky_f429">blinky_f429 — Discovery F429ZI (PG13)</div>
             <div class="custom-select-option" data-value="blinky_f407ve">blinky_f407ve — F407VE black board</div>
             <div class="custom-select-option" data-value="blinky_f407ze">blinky_f407ze — F407ZE black board</div>
+            <div class="custom-select-group-label">Arduino per board</div>
+            <div class="custom-select-option" data-value="arduino_bp_f401cc">arduino_bp_f401cc — Arduino on BlackPill F401CC</div>
+            <div class="custom-select-option" data-value="arduino_bp_f411ce">arduino_bp_f411ce — Arduino on BlackPill F411CE</div>
+            <div class="custom-select-option" data-value="arduino_nucleo_f401re">arduino_nucleo_f401re — Arduino on Nucleo-F401RE</div>
+            <div class="custom-select-option" data-value="arduino_nucleo_f411re">arduino_nucleo_f411re — Arduino on Nucleo-F411RE</div>
+            <div class="custom-select-option" data-value="arduino_disco_f407vg">arduino_disco_f407vg — Arduino on Discovery F407VG</div>
+            <div class="custom-select-option" data-value="arduino_disco_f429zi">arduino_disco_f429zi — Arduino on Discovery F429ZI</div>
+            <div class="custom-select-option" data-value="arduino_black_f407ve">arduino_black_f407ve — Arduino on F407VE black</div>
+            <div class="custom-select-option" data-value="arduino_black_f407ze">arduino_black_f407ze — Arduino on F407ZE black</div>
             <div class="custom-select-option" data-value="adc_demo">adc_demo — ADC voltmeter on PA0</div>
             <div class="custom-select-option" data-value="dac_demo">dac_demo — DAC sine wave on PA4</div>
             <div class="custom-select-option" data-value="pwm_demo">pwm_demo — PWM LED breathing on PA0+PA6</div>
@@ -537,6 +550,12 @@ canvas {
             <div class="custom-select-option" data-value="usb_cdc_test">usb_cdc_test — USB OTG FS CDC-ACM echo</div>
             <div class="custom-select-option" data-value="deep_sleep_demo">deep_sleep_demo — WFI/STOP + RTC-alarm wakeup</div>
             <div class="custom-select-option" data-value="test_firmware">test_firmware — TIM2/ADC dump</div>
+            <div class="custom-select-option" data-value="exti_test">exti_test — EXTI0 button (click PA0 in GPIO)</div>
+            <div class="custom-select-option" data-value="flash_test">flash_test — internal flash erase/program</div>
+            <div class="custom-select-option" data-value="spi_flash_test">spi_flash_test — SPI NOR flash on SPI3</div>
+            <div class="custom-select-option" data-value="freertos_test">freertos_test — FreeRTOS tasks + semaphore</div>
+            <div class="custom-select-option" data-value="fsmc_test">fsmc_test — FSMC 8080 display bus + RDDID</div>
+            <div class="custom-select-option" data-value="dcmi_test">dcmi_test — DCMI capture + OVR + DMA</div>
             <div class="custom-select-group-label">Crypto</div>
             <div class="custom-select-option" data-value="crypto_test">crypto_test — AES-128 ECB/CBC</div>
             <div class="custom-select-option" data-value="crypto_deep_test">crypto_deep_test — AES CTR deep</div>
@@ -547,8 +566,8 @@ canvas {
     </div>
     <select id="fwSelect" hidden>
       <option value="eth_http">eth_http</option><option value="eth_dhcp">eth_dhcp</option><option value="eth_test">eth_test</option>
-      <option value="blinky">blinky</option><option value="blinky_f401">blinky_f401</option><option value="blinky_f411">blinky_f411</option><option value="blinky_f407g">blinky_f407g</option><option value="blinky_nucleo_f401">blinky_nucleo_f401</option><option value="blinky_nucleo_f411">blinky_nucleo_f411</option><option value="blinky_f429">blinky_f429</option><option value="blinky_f407ve">blinky_f407ve</option><option value="blinky_f407ze">blinky_f407ze</option><option value="adc_demo">adc_demo</option><option value="dac_demo">dac_demo</option><option value="pwm_demo">pwm_demo</option><option value="blink_serial">blink_serial</option><option value="timer_test">timer_test</option><option value="arduino_test">arduino_test</option><option value="hal_test">hal_test</option>
-      <option value="periph_test">periph_test</option><option value="new_periph_test">new_periph_test</option><option value="deep_periph_test">deep_periph_test</option><option value="comprehensive_test">comprehensive_test</option><option value="eth_irq_test">eth_irq_test</option><option value="edge_test">edge_test</option><option value="i2s_sai_test">i2s_sai_test</option><option value="spi_tft_test">spi_tft_test</option><option value="audio_test">audio_test</option><option value="ltdc_test">ltdc_test</option><option value="oled_test">oled_test</option><option value="tft_test">tft_test</option><option value="buzzer_test">buzzer_test</option><option value="audio_play_test">audio_play_test</option><option value="rtc_test">rtc_test</option><option value="can_test">can_test</option><option value="can_demo">can_demo</option><option value="can_host_rx">can_host_rx</option><option value="watchdog_demo">watchdog_demo</option><option value="wwdg_demo">wwdg_demo</option><option value="wwdg_window_demo">wwdg_window_demo</option><option value="tim_capture_demo">tim_capture_demo</option><option value="qspi_test">qspi_test</option><option value="fpu_test">fpu_test</option><option value="fpu_irq_test">fpu_irq_test</option><option value="mpu_test">mpu_test</option><option value="usb_cdc_test">usb_cdc_test</option><option value="deep_sleep_demo">deep_sleep_demo</option><option value="test_firmware">test_firmware</option>
+      <option value="blinky">blinky</option><option value="blinky_f401">blinky_f401</option><option value="blinky_f411">blinky_f411</option><option value="blinky_f407g">blinky_f407g</option><option value="blinky_nucleo_f401">blinky_nucleo_f401</option><option value="blinky_nucleo_f411">blinky_nucleo_f411</option><option value="blinky_f429">blinky_f429</option><option value="blinky_f407ve">blinky_f407ve</option><option value="blinky_f407ze">blinky_f407ze</option><option value="arduino_bp_f401cc">arduino_bp_f401cc</option><option value="arduino_bp_f411ce">arduino_bp_f411ce</option><option value="arduino_nucleo_f401re">arduino_nucleo_f401re</option><option value="arduino_nucleo_f411re">arduino_nucleo_f411re</option><option value="arduino_disco_f407vg">arduino_disco_f407vg</option><option value="arduino_disco_f429zi">arduino_disco_f429zi</option><option value="arduino_black_f407ve">arduino_black_f407ve</option><option value="arduino_black_f407ze">arduino_black_f407ze</option><option value="adc_demo">adc_demo</option><option value="dac_demo">dac_demo</option><option value="pwm_demo">pwm_demo</option><option value="blink_serial">blink_serial</option><option value="timer_test">timer_test</option><option value="arduino_test">arduino_test</option><option value="hal_test">hal_test</option>
+      <option value="periph_test">periph_test</option><option value="new_periph_test">new_periph_test</option><option value="deep_periph_test">deep_periph_test</option><option value="comprehensive_test">comprehensive_test</option><option value="eth_irq_test">eth_irq_test</option><option value="edge_test">edge_test</option><option value="i2s_sai_test">i2s_sai_test</option><option value="spi_tft_test">spi_tft_test</option><option value="audio_test">audio_test</option><option value="ltdc_test">ltdc_test</option><option value="oled_test">oled_test</option><option value="tft_test">tft_test</option><option value="buzzer_test">buzzer_test</option><option value="audio_play_test">audio_play_test</option><option value="rtc_test">rtc_test</option><option value="can_test">can_test</option><option value="can_demo">can_demo</option><option value="can_host_rx">can_host_rx</option><option value="watchdog_demo">watchdog_demo</option><option value="wwdg_demo">wwdg_demo</option><option value="wwdg_window_demo">wwdg_window_demo</option><option value="tim_capture_demo">tim_capture_demo</option><option value="qspi_test">qspi_test</option><option value="fpu_test">fpu_test</option><option value="fpu_irq_test">fpu_irq_test</option><option value="mpu_test">mpu_test</option>      <option value="usb_cdc_test">usb_cdc_test</option><option value="deep_sleep_demo">deep_sleep_demo</option><option value="test_firmware">test_firmware</option><option value="exti_test">exti_test</option><option value="flash_test">flash_test</option><option value="spi_flash_test">spi_flash_test</option><option value="freertos_test">freertos_test</option><option value="fsmc_test">fsmc_test</option><option value="dcmi_test">dcmi_test</option>
       <option value="crypto_test">crypto_test</option><option value="crypto_deep_test">crypto_deep_test</option><option value="rx_crypto_test">rx_crypto_test</option>
       <option value="echo_test">echo_test</option><option value="rx_interrupt_test">rx_interrupt_test</option>
     </select>
@@ -680,7 +699,7 @@ canvas {
     · <a href="about.html">About</a>
  </footer>
 
-<script type="module" src="app.js?v=19"></script>
+<script type="module" src="app.js?v=20"></script>
 <script>
 // Custom firmware dropdown (replaces native <select>)
 (() => {

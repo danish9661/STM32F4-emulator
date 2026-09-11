@@ -79,6 +79,7 @@ export const wasmcpu_fault_len: (a: number) => number;
 export const wasmcpu_fault_op1: (a: number) => number;
 export const wasmcpu_fault_op2: (a: number) => number;
 export const wasmcpu_fault_pc: (a: number) => number;
+export const wasmcpu_flash_fill_erase: (a: number, b: number, c: number) => void;
 export const wasmcpu_get_fpscr: (a: number) => number;
 export const wasmcpu_get_ipsr: (a: number) => number;
 export const wasmcpu_get_pc: (a: number) => number;

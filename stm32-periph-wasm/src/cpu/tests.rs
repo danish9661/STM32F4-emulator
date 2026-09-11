@@ -2817,3 +2817,32 @@ fn dwt_foldcnt_counts_skipped_slots() {
     assert_eq!(cpu.regs.r[0], 1, "taken slot executed");
     assert_eq!(mem.read32(0xE0001018), 1, "one folded slot counted");
 }
+
+#[test]
+fn flash_test_programs_and_erases() {
+    // Real flash_test.bin through program + sector-erase + re-erase. Program
+    // stores land with NOR 1->0 semantics while PG is set (mem.rs gate);
+    // the erase fill + BSY/EOP completion is the JS flash driver's role,
+    // played natively here (take_flash_erase -> fill_flash_erase ->
+    // flash_erase_applied), mirroring emulator.js wProcessFlash.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../flash_test/flash_test.bin"));
+    let sys = crate::sys();
+    let mut uart = String::new();
+    for _ in 0..4000 {
+        cpu.run(sys, &mut mem, 50_000);
+        no_fault(&cpu, &mem);
+        uart.push_str(&crate::system::get_uart_output().lock().unwrap().clone());
+        crate::system::get_uart_output().lock().unwrap().clear();
+        if let Some((start, len)) = crate::system::take_flash_erase() {
+            assert_eq!((start, len), (0x08020000, 0x20000), "sector 5 range");
+            mem.fill_flash_erase(start, len);
+            sys.flash_erase_applied();
+        }
+        if uart.contains("FLASH TEST DONE") {
+            break;
+        }
+    }
+    assert!(uart.contains("FLASH TEST DONE"), "no done marker: {uart:?}");
+    assert!(!uart.contains("FAIL "), "failures: {uart:?}");
+}

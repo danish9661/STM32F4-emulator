@@ -2,12 +2,12 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=13';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=14';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
-import { boardFor } from './boards.js';
-import { FIRMWARES } from './firmware.js?v=10';
+import { boardsOf, boardForSelection, BOARDS } from './boards.js?v=1';
+import { FIRMWARES } from './firmware.js?v=11';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
 
@@ -30,11 +30,16 @@ let session = 0;
 let emu = null, netsim = null, usbhost = null, running = false;
 let uartBuf = '', totalInst = 0, t0 = performance.now(), lastInst = 0, lastT = t0;
 let stepsDone = 0;
+let dcmiFed = { big2: false, big3: false };
 let image = null;          // { flash, ram, extraMem, entry, symbols, name, uartAddr }
 
 // Firmwares on UART4 (0x40004C00) instead of USART1 (0x40011000).
 const UART4_FIRMWARES = new Set(['echo_test', 'blink_serial']);
-const uartAddrFor = (name) => UART4_FIRMWARES.has(name) ? 0x40004C00 : 0x40011000;
+// Arduino Nucleo/Discovery-F407 builds Serial on USART2 (0x40004400).
+// (Output capture is global — this only selects the RX-inject target for
+// the Send box.)
+const UART2_FIRMWARES = new Set(['arduino_nucleo_f401re', 'arduino_nucleo_f411re', 'arduino_disco_f407vg']);
+const uartAddrFor = (name) => UART4_FIRMWARES.has(name) ? 0x40004C00 : UART2_FIRMWARES.has(name) ? 0x40004400 : 0x40011000;
 
 // Per-firmware ETH RX descriptor/buffer SRAM addresses (driver injects frames
 // directly into guest memory). Defaults match eth_http (emulator.js E).
@@ -45,12 +50,17 @@ const ETH_RX_MAP = {
 // Interrupt-driven firmware: the emulator pumps guest IRQ handlers (USART RXNE
 // etc.). OFF for ETH firmware — the driver signals completion via SRAM
 // irq_flag and the guest ETH_IRQHandler would double-process DMASR/rx_desc.
-const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehensive_test', 'eth_irq_test', 'edge_test', 'periph_test', 'fpu_irq_test', 'mpu_test']);
+const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehensive_test', 'eth_irq_test', 'edge_test', 'periph_test', 'fpu_irq_test', 'mpu_test', 'exti_test', 'freertos_test',
+    'arduino_bp_f401cc', 'arduino_bp_f411ce', 'arduino_nucleo_f401re', 'arduino_nucleo_f411re',
+    'arduino_disco_f407vg', 'arduino_disco_f429zi', 'arduino_black_f407ve', 'arduino_black_f407ze']);
 
 // Interrupt-driven ETH firmware: the guest ETH_IRQHandler (run by the pump)
 // reads DMASR and scans rx_desc itself, so the driver must not write the
 // SRAM irq_flag/rx_frame_idx globals (irq_eth mode in emulator.js).
 const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test', 'eth_dhcp', 'eth_test']);
+
+// FreeRTOS firmware: SVC/PendSV/SysTick delivery (inline in the Rust core).
+const FREERTOS_FIRMWARES = new Set(['freertos_test']);
 
 // Firmwares that exercise the WFI/STOP low-power path: the emulator halts the
 // core on WFI and advances the virtual RTC until an alarm/interrupt wakes it.
@@ -87,6 +97,25 @@ const DEVICE_FIRMWARES = {
     // Without it JEDEC/status reads return 0xFF and the checks FAIL.
     // Blank 2 MB image, same shape as site/test_spi_flash.mjs.
     spi_tft_test: { spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4015, size: 0x200000, cs: 'PB12', data: new Uint8Array(0x200000).fill(0xFF) }] },
+    // spi_flash_test is the standalone version of the same check (own JEDEC
+    // id 0xEF4015, same wiring). Blank 2 MB image.
+    spi_flash_test: { spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4015, size: 0x200000, cs: 'PB12', data: new Uint8Array(0x200000).fill(0xFF) }] },
+    // fsmc_test drives an ILI9341-style display on FSMC BANK1 and reads back
+    // RDDID (0x04): answer the ILI9341 ID like site/test_fsmc.mjs does. The
+    // BANK4 probe is answered by the model itself (inert-0, no device).
+    fsmc_test: {
+        fsmcDevices: [{
+            bank: 0,
+            handler: (events, pushData) => {
+                for (let i = 0; i + 1 < events.length; i += 2) {
+                    const hdr = events[i] >>> 0;
+                    if (hdr & 0x80000000) {
+                        if ((events[i + 1] & 0xFF) === 0x04) pushData([0x9341]);
+                    }
+                }
+            },
+        }],
+    },
 };
 
 // audio_test needs the same 64-sample PCM16 WAV the node harness
@@ -108,6 +137,19 @@ function makeAudioTestWav() {
 }
 
 // ── status + UART ──────────────────────────────────────────────────────────
+
+// ── scripted DCMI feeds (dcmi_test, local mode) ────────────────────────────
+const DCMI_BIG = Uint8Array.from({ length: 32 }, (_, i) => i + 1);
+function driveDcmi() {
+    if (uartBuf.includes('PHASE2') && !dcmiFed.big2) {
+        dcmiFed.big2 = true;
+        bindings.dcmi_feed_frame(8, 4, DCMI_BIG);
+    }
+    if (uartBuf.includes('DCMI ovr OK') && !dcmiFed.big3) {
+        dcmiFed.big3 = true;
+        bindings.dcmi_feed_frame(8, 4, DCMI_BIG);
+    }
+}
 const setStatus = (text, cls) => {
     statusEl.textContent = text;
     dotEl.className = 'dot ' + cls;
@@ -316,6 +358,7 @@ const boot = async () => {
     if (emu) { try { emu.close(); } catch (e) {} emu = null; }
     oledCacheKey = ''; tftCacheKey = ''; buzzerCacheKey = ''; rtcCacheKey = '';
     if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; audioQueued = 0; }
+    gpioDrivenHigh.clear();
 
     const fw = image.flash;
     uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0;
@@ -369,11 +412,12 @@ const boot = async () => {
         }
     } else {
         // ── local mode: WASM runs in the browser (default) ──
-        // Board variant per firmware preset (SVD + flash/RAM sizes).
-        // NOTE (VENDOR_V): vendor asset versions (?v=13) must be bumped together
+        // Board variant per firmware preset (SVD + flash/RAM sizes), honoring
+        // the board selector when the preset supports the selected board.
+        // NOTE (VENDOR_V): vendor asset versions (?v=14) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
-        const board = boardFor(image.name);
-        const svdXml = await fetch('vendor/' + board.svd + '?v=13').then((r) => r.text());
+        const { key: boardKey, board } = boardForSelection(image.name, boardSelectEl ? boardSelectEl.value : 'all');
+        const svdXml = await fetch('vendor/' + board.svd + '?v=14').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
@@ -387,11 +431,12 @@ const boot = async () => {
             svdXml,
             flash_size: board.flash_size,
             ram_size: board.ram_size,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=13',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=14',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),
             irq_eth: IRQ_ETH_FIRMWARES.has(image.name),
+            freertos: FREERTOS_FIRMWARES.has(image.name),
             lowpower: LOWPOWER_FIRMWARES.has(image.name),
             eth: ETH_RX_MAP[image.name],
             ext_devices: DEVICE_FIRMWARES[image.name],
@@ -413,6 +458,13 @@ const boot = async () => {
         // Seed the model's audio source for audio_test (see makeAudioTestWav).
         if (image.name === 'audio_test' && bindings.audio_load_wav) {
             try { bindings.audio_load_wav(makeAudioTestWav()); } catch (e) {}
+        }
+        // dcmi_test phase 1 needs its exact 2x2 frame ([11 22 33 44]) to
+        // predate CAPTURE — feed it at boot like the audio WAV seed. Phases
+        // 2-3 are fed by driveDcmi() in the run loop when their markers print.
+        dcmiFed = { big2: false, big3: false };
+        if (image.name === 'dcmi_test' && bindings.dcmi_feed_frame) {
+            try { bindings.dcmi_feed_frame(2, 2, new Uint8Array([0x11, 0x22, 0x33, 0x44])); } catch (e) {}
         }
         // Pre-feed one camera frame so DCMI capture has sensor data from the
         // very first step (the firmware reads DR immediately after setting
@@ -456,6 +508,13 @@ const loop = async (id) => {
         // USB has no gateway backend; this is the netsim equivalent).
         try {
             if (usbhost && !usbhost.done) usbhost.frame(uartBuf);
+        } catch (e) {}
+        // Scripted DCMI camera for dcmi_test (local mode only): phase 1 was
+        // fed at boot; feed the oversized frame when PHASE2 prints (the
+        // firmware retries, so landing anywhere after the marker works) and
+        // re-feed it for the phase-3 DMA capture after OVR is confirmed.
+        try {
+            if (!bridgeUrl && image && image.name === 'dcmi_test' && bindings.dcmi_feed_frame) driveDcmi();
         } catch (e) {}
         await refreshStats();
         await renderLtdc();
@@ -830,6 +889,11 @@ const renderDevices = () => { renderOled(); renderTft(); renderBuzzer(); renderS
 const GPIO_BASE = 0x40020000, GPIO_STRIDE = 0x400;
 const BANKS = ['A', 'B', 'C', 'D', 'E'];
 let gpioBuilt = false;
+// Last-seen MODER mode per pin (0 = input) + host-driven input levels, so a
+// click on an input pin drives it (EXTI buttons, etc.). Output pins ignore
+// clicks — they are firmware-driven.
+const gpioModes = {};
+const gpioDrivenHigh = new Set();
 
 const buildGpio = () => {
     if (gpioBuilt) return;
@@ -845,6 +909,20 @@ const buildGpio = () => {
         div.appendChild(regs);
         el.appendChild(div);
     }
+    // Click an input pin to drive it high/low (host stimulus for EXTI and
+    // other input-driven firmware). Delegated: pins are re-created per boot.
+    el.addEventListener('click', (e) => {
+        const t = e.target.closest ? e.target.closest('.pin') : null;
+        if (!t || !t.id || !t.id.startsWith('pin') || !emu || !bindings.gpio_set_input) return;
+        const bank = t.id.charAt(3), pin = parseInt(t.id.slice(4), 10);
+        const bankIdx = BANKS.indexOf(bank);
+        if (bankIdx < 0 || !(pin >= 0 && pin < 16)) return;
+        if ((gpioModes[bank + pin] || 0) !== 0) return; // outputs are firmware-driven
+        const key = bank + pin;
+        const high = !gpioDrivenHigh.has(key);
+        if (high) gpioDrivenHigh.add(key); else gpioDrivenHigh.delete(key);
+        try { bindings.gpio_set_input(bankIdx, pin, high); } catch (err) {}
+    });
 };
 
 const refreshGpio = async () => {
@@ -862,6 +940,8 @@ const refreshGpio = async () => {
             const on = out ? ((odr >> p) & 1) !== 0 : ((idr >> p) & 1) !== 0;
             const pin = $('pin' + b + p);
             pin.className = 'pin ' + (out ? (on ? 'out-on' : 'out-off') : on ? 'in-on' : '');
+            gpioModes[b + p] = mode;
+            pin.title = out ? `P${b}${p} output` : `P${b}${p} input — click to drive ${on ? 'low' : 'high'}`;
         }
         $('regs' + b).textContent = `MODER=${hex32(moder)} ODR=${hex32(odr)} IDR=${hex32(idr)}`;
     }
@@ -924,8 +1004,82 @@ appendUart('STM32F407 console ready. Nothing is running yet.\r\n'
     + 'Pick a firmware under FIRMWARE (right) and press "Boot preset",\r\n'
     + 'or upload your own .bin/.hex/.elf/.map. Firmware output appears here.\r\n');
 
+// ── board selector + per-board preset filtering ────────────────────────────
+// The board selector filters the firmware dropdown to presets built for that
+// board (boards.js BOARDS_OF_FIRMWARE); 'all' shows everything. The boot uses
+// the selected board whenever the preset supports it (boardForSelection).
+const boardSelectEl = $('boardSelect');
+const applyBoardFilter = () => {
+    if (!boardSelectEl) return 'all';
+    const sel = boardSelectEl.value || 'all';
+    const dropdown = $('fwDropdown');
+    const opts = dropdown ? dropdown.querySelectorAll('.custom-select-option') : [];
+    const hidden = $('fwSelect');
+    let firstVisible = null;
+    opts.forEach((opt) => {
+        const compat = boardsOf(opt.dataset.value);
+        const show = sel === 'all' || compat.includes(sel);
+        opt.style.display = show ? '' : 'none';
+        if (show && !firstVisible) firstVisible = opt;
+    });
+    if (hidden) {
+        for (const o of hidden.options) {
+            const compat = boardsOf(o.value);
+            o.disabled = !(sel === 'all' || compat.includes(sel));
+        }
+    }
+    // Hide group labels with no visible preset underneath.
+    if (dropdown) {
+        const kids = Array.from(dropdown.children);
+        for (let i = 0; i < kids.length; i++) {
+            if (!kids[i].classList.contains('custom-select-group-label')) continue;
+            let any = false;
+            for (let j = i + 1; j < kids.length && !kids[j].classList.contains('custom-select-group-label'); j++) {
+                if (kids[j].style.display !== 'none') { any = true; break; }
+            }
+            kids[i].style.display = any ? '' : 'none';
+        }
+    }
+    // A filtered-out selection falls back to the first visible preset.
+    if (hidden && hidden.selectedOptions.length && hidden.selectedOptions[0].disabled && firstVisible) {
+        if (window.__setFwSelect) window.__setFwSelect(firstVisible.dataset.value);
+        else hidden.value = firstVisible.dataset.value;
+    }
+    return sel;
+};
+if (boardSelectEl) {
+    for (const [key, b] of Object.entries(BOARDS)) {
+        const o = document.createElement('option');
+        o.value = key;
+        o.textContent = b.label;
+        boardSelectEl.appendChild(o);
+    }
+    const urlBoard = params.get('board');
+    boardSelectEl.value = (urlBoard && (urlBoard === 'all' || BOARDS[urlBoard])) ? urlBoard : 'all';
+    applyBoardFilter();
+    boardSelectEl.addEventListener('change', () => {
+        const sel = applyBoardFilter();
+        const u = new URL(location.href);
+        if (sel === 'all') u.searchParams.delete('board');
+        else u.searchParams.set('board', sel);
+        history.replaceState(null, '', u);
+    });
+}
+
 const preset = params.get('fw');
 if (preset && FIRMWARES[preset]) {
+    // Deep link onto the preset's primary board so the filtered view matches
+    // what is about to boot (unless ?board= already picked a compatible one).
+    if (boardSelectEl) {
+        const compat = boardsOf(preset);
+        if (boardSelectEl.value === 'all' || !compat.includes(boardSelectEl.value)) {
+            boardSelectEl.value = compat[0];
+            const u = new URL(location.href);
+            u.searchParams.set('board', compat[0]);
+            history.replaceState(null, '', u);
+        }
+        applyBoardFilter();
+    }
     if (window.__setFwSelect) window.__setFwSelect(preset);
     else $('fwSelect').value = preset;
     $('btnBoot').click();
