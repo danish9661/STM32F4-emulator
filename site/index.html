@@ -36,6 +36,7 @@
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 :root {
+  color-scheme: dark;
   --bg: #080b12;
   --bg2: #0c1019;
   --panel: rgba(16,21,32,0.85);
@@ -59,6 +60,13 @@
 }
 * { box-sizing: border-box; margin: 0; }
 html, body { height: 100%; }
+::selection { background: rgba(96,165,250,0.35); color: #fff; }
+/* Dark thin scrollbars everywhere (webkit); firefox uses the thin hints
+   set on the individual scroll containers. */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(96,120,180,0.25); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(96,120,180,0.45); }
 body {
   background: var(--bg);
   background-image:
@@ -120,6 +128,9 @@ a.aboutLink:hover { box-shadow: 0 4px 16px rgba(96,165,250,0.35); }
   font-size: 12px; color: var(--dim); margin-left: auto; white-space: nowrap;
   display: flex; align-items: center; gap: 8px;
   font-family: 'JetBrains Mono', monospace;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border); border-radius: 20px;
+  padding: 5px 14px 5px 10px;
 }
 .dot {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
@@ -197,6 +208,8 @@ aside .panel h2:hover::before { border-left-color: var(--fg); }
   background: #020408;
   color: #94a3b8;
   border-top: 1px solid rgba(59,130,246,0.08);
+  caret-color: var(--green);
+  font-variant-numeric: tabular-nums;
 }
 #uart::-webkit-scrollbar { width: 6px; }
 #uart::-webkit-scrollbar-track { background: transparent; }
@@ -236,6 +249,9 @@ button.danger {
   border-color: rgba(248,113,113,0.4); color: #fff;
 }
 button:disabled { opacity: 0.4; cursor: default; transform: none !important; box-shadow: none !important; }
+/* The Run/Stop toggle changes label while running — fixed width keeps the
+   control row from shifting under it. */
+#btnRun { min-width: 78px; text-align: center; }
 
 /* ── Stats grid ─────────────────────────────────────────────────────── */
 .stats {
@@ -280,6 +296,12 @@ button:disabled { opacity: 0.4; cursor: default; transform: none !important; box
   background-repeat: no-repeat; background-position: right 10px center;
   padding-right: 28px;
   appearance: none;
+}
+/* Native option popups ignore the box styling and render OS-white by
+   default — force the dark theme onto the list itself. */
+.sec select option {
+  background-color: #141a26;
+  color: var(--fg);
 }
 .sec input[type=file] { width: 100%; font: inherit; font-size: 12px; color: var(--dim); }
 .sec input[type=file]::-webkit-file-upload-button {
@@ -346,16 +368,21 @@ input[type=checkbox]:checked::after {
 .custom-select-group-label {
   font-size: 10px; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.08em; color: var(--green); padding: 8px 12px 4px;
-  background: rgba(52,211,153,0.05); border-top: 1px solid var(--border);
+  background: #141a26; border-top: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 1;
 }
 .custom-select-group-label:first-child { border-top: none; }
 .custom-select-option {
-  padding: 7px 12px; font: 500 12px/1.4 'Inter', sans-serif;
+  padding: 7px 12px 7px 28px; font: 500 12px/1.4 'Inter', sans-serif;
   color: var(--fg); cursor: pointer; transition: background 0.1s ease;
-  display: block;
+  display: block; position: relative;
 }
 .custom-select-option:hover { background: rgba(96,165,250,0.1); }
 .custom-select-option.selected { background: rgba(52,211,153,0.12); color: var(--green); }
+.custom-select-option.selected::before {
+  content: '✓'; position: absolute; left: 11px; top: 7px;
+  font-size: 11px; font-weight: 700;
+}
 .sec p { color: var(--dim); font-size: 11px; margin: 0; line-height: 1.5; }
 .sec p b { color: var(--fg); font-weight: 600; }
 .row { display: flex; gap: 8px; }
@@ -392,6 +419,10 @@ input[type=checkbox]:checked::after {
 }
 .pin.out-off { background: rgba(255,255,255,0.08); }
 .pin.in-on { background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 4px rgba(34,211,238,0.4); }
+/* Input-mode pins are host-drivable (click) — see the #gpio handler in
+   app.js. The class is toggled per refresh; outputs never get it. */
+.pin.drivable { cursor: pointer; }
+.pin.drivable:hover { border-color: var(--cyan); box-shadow: 0 0 6px rgba(34,211,238,0.5); }
 .gpio .regs { color: var(--dim); font-size: 10px; margin-top: 3px; font-family: 'JetBrains Mono', monospace; }
 
 /* ── Peripherals ─────────────────────────────────────────────────────── */
@@ -436,10 +467,11 @@ input[type=checkbox]:checked::after {
 
 /* ── Footer ──────────────────────────────────────────────────────────── */
 footer {
-  padding: 12px 20px; color: var(--dim); font-size: 11px;
+  padding: 9px 20px; color: var(--dim); font-size: 11px;
   border-top: 1px solid var(--border);
   background: rgba(16,21,32,0.6);
   letter-spacing: -0.01em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 footer a { color: var(--accent); text-decoration: none; transition: color 0.15s; }
 footer a:hover { color: var(--blue); }

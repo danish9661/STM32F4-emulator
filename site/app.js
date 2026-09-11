@@ -939,7 +939,7 @@ const refreshGpio = async () => {
             const out = mode === 1;
             const on = out ? ((odr >> p) & 1) !== 0 : ((idr >> p) & 1) !== 0;
             const pin = $('pin' + b + p);
-            pin.className = 'pin ' + (out ? (on ? 'out-on' : 'out-off') : on ? 'in-on' : '');
+            pin.className = 'pin ' + (out ? (on ? 'out-on' : 'out-off') : on ? 'in-on' : '') + (out ? '' : ' drivable');
             gpioModes[b + p] = mode;
             pin.title = out ? `P${b}${p} output` : `P${b}${p} input — click to drive ${on ? 'low' : 'high'}`;
         }

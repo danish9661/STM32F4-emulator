@@ -3190,6 +3190,17 @@ edges to `EXTI TEST DONE`). `test_browser.mjs` covers arduino_f407vg/
 f401re, flash, spi_flash, fsmc, dcmi, freertos. `?v=` bumps: app.js 20,
 firmware.js 11, boards.js 1 (new query — it was unversioned).
 
+### Console redesign (2026-09-11)
+`site/index.html` `<style>` only (zero JS-behavior change, except one
+class): `color-scheme: dark` + explicit `option` rule fix the white native
+popup (the board `<select>` opened OS-white); `#status` is now a pill;
+`#btnRun` fixed width (Run/Stop toggle no longer shifts the row); custom
+dropdown has sticky group labels + ✓ on the selected preset; input-mode
+GPIO pins get a `drivable` class (pointer cursor + hover ring, toggled in
+`refreshGpio`); global dark scrollbars, `::selection`, slimmer footer.
+Verified by headless-Chrome screenshots (`.pw-scratch/ui_*.png`, deleted
+after) with the dropdown open and `?fw=blinky` running.
+
 ### Flash program/erase driver restored (2026-09-11)
 `flash_test` stalled at BSY in BOTH node and browser (pre-existing — the
 harness was orphaned, never in `npm test`). Root cause: the §23 emulator.js
