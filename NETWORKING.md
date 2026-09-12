@@ -47,7 +47,8 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 | Half-duplex collisions | shared wire + peer | 🔶 | `eth_feat_test` "COLLIDE OK" (EC + CC=15 in half-duplex) + "COLLIDE DROP OK" (armed collision ignored full-duplex) | real contention/backoff timing | Single node, so this models the MAC's error-reporting path (armed via `eth_arm_collision`, one-shot), not backoff contention. |
 | Media select (SYSCFG PMC MII/RMII) | pin mux | ✅ | `eth_feat_test` "PHY media RMII/MII OK" (select sticks, traffic flows) | — | Element exists in silicon as a mux bit; data path is mode-agnostic (no pins to mux). |
 | ARP (both directions), IPv4, ICMP echo, UDP/DHCP/DNS/echo, TCP (SYN/data/FIN), HTTP, custom ethertype PING/PONG | software (LwIP on silicon) | ✅ | `eth_http`/`eth_dhcp`/`eth_test`/`eth_irq_test` + `_f429`, netsim + real gateway | ICMP/DNS/other-UDP beyond the demo services | gVisor would carry them; no demo firmware speaks them. |
-| Socket-style API | software (LwIP on silicon) | ✅ (clean-room subset) | `lwip_demo` (+`_f429`): DNS → TCP echo :7 → UDP echo | full LwIP stack | No LwIP sources vendored; API clone over the raw driver, same call shapes. |
+| Socket-style API | software (LwIP on silicon) | ✅ (clean-room subset) | `lwip_demo` (+`_f429`): DNS → TCP echo :7 → TCP **server** :7 (`bind`/`listen`/`accept`, netsim plays client) → UDP echo | full LwIP stack | No LwIP sources vendored; API clone over the raw driver, same call shapes. |
+| STOP + WOL wake | power + MAC | ✅ | `eth_feat_test` "WOKE BY WOL" (magic reply queued, STOP via WFI, sleep drain injects, IRQ62 wakes; CYCCNT>50k proves real sleep) | — | WKUP ISR must not ack status on entry (destroys the evidence); thread mode acks after observing. |
 | Half-duplex collisions/backoff, MII/RMII pin modes, ETH+STOP wake integration | yes (PHY/wire/power) | ➖ | — | not modeled | Needs a pin layer (MII/RMII, CRS/COL) and a power-state peer; no firmware exercises them. Out of scope by design. |
 
 ## 3. Per-board verdict
@@ -63,9 +64,8 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 1. **PPS pin** — no pin layer; `eth_pps_count()` + `eth_pps_level()` are the sinks. Closes if a demo ever needs PPS-driven behavior.
 2. **MII/RMII wire signaling, half-duplex contention timing** — register-level MDIO + PMC select only. Needs a signal-level peer nobody can observe from firmware. The error-reporting half (EC/CC) is modeled.
 3. **Exact RWUFFR packing** — simplified mask/offset-CRC layout, documented; silicon-exact packing on request (no RM0090 available in this env to verify against — a guessed "exact" layout would be worse).
-4. **Full LwIP** — clean-room socket subset only; a real port is a firmware project, not emulator work.
-5. **ETH wake-from-STOP integration** — WOL pends IRQ62 correctly and the sleep drain injects queued RX while asleep; combined STOP+magic-packet-wake flow untested.
-6. **M0+ chips are out of scope** — different core (closed per maintainer decision; see `cpu_bug.md`).
+4. **Full LwIP** — clean-room socket subset (client + server + UDP + DNS) only; a real port is a firmware project, not emulator work.
+5. **M0+ chips are out of scope** — different core (closed per maintainer decision; see `cpu_bug.md`).
 
 ## 5. Verify it
 

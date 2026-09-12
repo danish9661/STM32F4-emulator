@@ -104,6 +104,9 @@ export function createNetSim({ log = () => {} } = {}) {
     let tcpSrcPort = 0; // client ephemeral port, learned from SYN
     let echoSport = 0;  // TCP-echo (port 7) client port, learned from SYN
     let echoSeq = 0x20000000; // TCP-echo server ISN
+    // TCP-server-test client role (lwip_demo listens on 7): fixed sport,
+    // connects when the firmware sends a UDP trigger to port 5004.
+    let cliSport = 5005, cliSeq = 0x30000000, cliSrvIss = 0, cliFwIp = null;
     const DNS_IP = [93, 184, 216, 34]; // canned A answer (example.com real IP)
 
     // TCP segment builder with explicit ports (echo path; HTTP uses tcpFrame).
@@ -315,6 +318,11 @@ export function createNetSim({ log = () => {} } = {}) {
                 for (let r = 0; r < 16; r++) mp.set(clientMac, 20 + r * 6);
                 replies.push(mp);
                 log('magic packet');
+            } else if (dport === 5004) { // lwip_demo: TCP client connects to :7
+                // Firmware listens on port 7; open from sport 5005.
+                cliFwIp = [frame[ipStart - 8], frame[ipStart - 7], frame[ipStart - 6], frame[ipStart - 5]];
+                log('TCP client SYN -> :7');
+                replies.push(tcpSeg(cliSport, 7, 0x02, cliSeq, 0, null, cliFwIp));
             }
             return replies;
         }
@@ -354,7 +362,33 @@ export function createNetSim({ log = () => {} } = {}) {
             const sport = (frame[ipStart] << 8) | frame[ipStart + 1];
             const dport = (frame[ipStart + 2] << 8) | frame[ipStart + 3];
             const srcIp = [frame[ipStart - 8], frame[ipStart - 7], frame[ipStart - 6], frame[ipStart - 5]];
-            if (dport === 7 || sport === echoSport && echoSport !== 0) {
+            if (sport === 7 && cliFwIp !== null) {
+                // Server-side frames (firmware listens on 7): drive the
+                // client role — SYN-ACK -> ACK + data, echo-ACK ignored,
+                // FIN -> FIN-ACK. sport 7 never belongs to echo clients.
+                const seq = (frame[ipStart + 4] << 24) | (frame[ipStart + 5] << 16) | (frame[ipStart + 6] << 8) | frame[ipStart + 7];
+                const fl = frame[ipStart + 13];
+                const th = ((frame[ipStart + 12] >> 4) & 0x0f) * 4;
+                const ipTot = (frame[16] << 8) | frame[17];
+                const dlen = Math.max(0, Math.min(frame.length - ipStart - th, ipTot - (ipStart - 14) - th));
+                if ((fl & 0x12) === 0x12) { // SYN-ACK: ACK it, then send data
+                    cliSrvIss = seq;
+                    const ack = seq + 1;
+                    const payload = new TextEncoder().encode('SRV');
+                    log('TCP client: SYN-ACK -> ACK + data');
+                    replies.push(tcpSeg(cliSport, 7, 0x10, cliSeq + 1, ack, null, srcIp));
+                    replies.push(tcpSeg(cliSport, 7, 0x18, cliSeq + 1, ack, payload, srcIp));
+                } else if (fl & 0x01) { // FIN: FIN-ACK
+                    const ack = seq + dlen + 1;
+                    log('TCP client: FIN -> FIN-ACK');
+                    replies.push(tcpSeg(cliSport, 7, 0x11, cliSeq + 1 + 3, ack, null, srcIp));
+                } else if (dlen > 0 && (fl & 0x10)) { // echo data: ACK it
+                    log('TCP client: echo data ACK');
+                    replies.push(tcpSeg(cliSport, 7, 0x10, cliSeq + 1 + 3, seq + dlen, null, srcIp));
+                }
+                return replies;
+            }
+            if (dport === 7 || (sport === echoSport && echoSport !== 0)) {
                 // TCP echo service (port 7): SYN -> SYN-ACK, data -> echo.
                 const seq = (frame[ipStart + 4] << 24) | (frame[ipStart + 5] << 16) | (frame[ipStart + 6] << 8) | frame[ipStart + 7];
                 const fl = frame[ipStart + 13];

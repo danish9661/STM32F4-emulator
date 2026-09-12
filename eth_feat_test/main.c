@@ -32,10 +32,9 @@ void ETH_IRQHandler(void) {
 
 void ETH_WKUP_IRQHandler(void) {
     wkp_flag = 1;
-    // Ack MPR only (W1C bit 5); writing 0 to RWKPR's bit preserves it.
-    // A blanket (ctl | 0x20) would ack-and-clear a just-latched RWKPR
-    // before the main loop observes it (real status-ack race).
-    MACPMTCTL = (MACPMTCTL & ~0x40u) | 0x20;
+    // Ack NOTHING here: MPR/RWKPR are W1C, and acking on entry destroys
+    // the evidence before thread mode can assert it (the handler always
+    // wins that race). Thread mode acks explicitly after observing.
 }
 
 static unsigned char tx_frame[1536];
@@ -537,6 +536,42 @@ int main(void) {
         dwt_zero(); while (dwt_rd() < 200000);
         PTPPPSCR = 0; // back to 1 Hz: ~0 edges over the rest of the run
         uart_puts("PPS window done\r\n");
+    }
+
+    // ---- 10. STOP + WOL wake ----
+    // Arm magic-packet wake, trigger netsim (its reply queues
+    // synchronously), then enter STOP. The sleep drain delivers the queued
+    // frame while asleep; IRQ62 wakes us. CYCCNT across WFI discriminates
+    // real sleep (>50k, one sleep-step is 120k) from a nop fall-through.
+    {
+        wkp_flag = 0;
+        MACPMTCTL = 0x20 | 0x2; // W1C stale MPR away, arm MPE (PMTIM set)
+        unsigned int off = ip_header(gw_mac, gw_ip, 17, 8 + 4);
+        tx_frame[off] = 5003 >> 8; tx_frame[off + 1] = 5003 & 0xFF;
+        tx_frame[off + 2] = 5003 >> 8; tx_frame[off + 3] = 5003 & 0xFF;
+        tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
+        tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
+        if (eth_send_frame(14 + 20 + 12, 0)) {
+            rx_desc[0] = 0x80000000 | 1536;
+            DMARPDR = 1;
+            uart_puts("GOING TO STOP\r\n");
+            dwt_zero();
+            *(volatile unsigned int *)0xE000ED10 |= (1 << 2); // SCR SLEEPDEEP
+            __asm__ volatile ("wfi");
+            *(volatile unsigned int *)0xE000ED10 &= ~(1 << 2);
+            unsigned int slept = dwt_rd();
+            uart_puts("BACK FROM STOP\r\n");
+            int hit = wkp_flag;
+            for (int i = 0; i < 60 && !hit; i++) {
+                (void)eth_recv_frame(20000);
+                if (wkp_flag) hit = 1;
+            }
+            if (hit && (MACPMTCTL & 0x20) && slept > 50000)
+                uart_puts("WOKE BY WOL\r\n");
+            else { uart_puts("WOL WAKE FAIL "); uart_hex32(slept); uart_puts("\r\n"); }
+            MACPMTCTL = MACPMTCTL | 0x20; // W1C: clear MPR now observed
+        } else uart_puts("WOL WAKE TX TIMEOUT\r\n");
+        MACPMTCTL = 0;
     }
 
     uart_puts("FEAT ALL PASS\r\n");

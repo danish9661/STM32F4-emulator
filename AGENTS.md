@@ -3504,3 +3504,33 @@ above frames is firmware. What the model + drivers + firmware now cover:
   leaving n=0 — found because the level test programs everything via
   MMIO and asserted toggling (the count test set the field directly
   and could not see it).
+
+### Round 3 (2026-09-12): server role, STOP/WOL wake, USB matrix, GPIOK, dma2d
+- **Socket server role** (`lwip_bind/listen/accept` + netsim TCP client):
+  firmware trigger (UDP :5004) makes netsim SYN :7; accept fills
+  rip/rport and reuses send/recv/close. Netsim needed a data-ACK branch
+  (firmware `send` waits for it) and IP-length `dlen` (padding is not
+  payload — same fix as the echo path). Marker "LWIP TCP server OK".
+- **STOP + WOL wake** (`eth_feat_test` "WOKE BY WOL"): magic reply queues
+  synchronously at trigger TX; STOP via WFI (SLEEPDEEP); the sleep drain
+  (`wDeliverRx(true)` — extracted from the RX branch so the sleeping
+  step can call it; the wire delivers though the guest can't re-arm)
+  injects it; IRQ62 wakes; CYCCNT>50k across WFI proves real sleep vs a
+  nop fall-through. Gotcha (second W1C-ack race in one week): the WKUP
+  ISR must not ack MPR/RWKPR on entry — acking destroys the evidence
+  before thread mode asserts it. ISR only sets the flag now; thread
+  mode acks after observing (and the STOP arming W1Cs stale MPR away).
+  Needs `lowpower: true` in the matrix opts (new IRQETHLP).
+- **USB in the matrix** (`usb` script hook in runOne, `bare usb_cdc`
+  f401+f429): replicates test_usb.mjs (reset/enum/setup chain/line
+  coding/2x echo) with byte-exact checks; mismatches append
+  `USBHOST FAIL` (anti-marker — runOne can only fail via markers).
+  Two hook bugs found by the f429 run: (1) op 0 must wait for the
+  firmware's ENUMDNE print (firing SETUP early desyncs EP0);
+  (2) the op-initiation branch must be `phase === 0` — `< 90` caught
+  take-wait phases too and re-injected SETUP forever.
+- **GPIOK** (`gpio_k_test/`, f429-only silicon): PK3 toggle + ODR
+  readback prints ("PK3=ON odr=1", "GPIOK OK"); family build (byte-
+  identical to stock), bundle + dropdown + boards entries.
+- **dma2d_test formal f429 build** (was stock-bin-on-f429-map by luck):
+  family build is byte-identical; matrix now uses the `_f429` path.

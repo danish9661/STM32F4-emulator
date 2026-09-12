@@ -26,6 +26,8 @@ const DEMOS = {
     test_firmware: {}, i2s_sai_test: { flags: 'O0' }, spi_tft_test: { flags: 'O0' },
     can_demo: { fams: ['f429'] }, can_test: { fams: ['f429'] }, can_host_rx: { fams: ['f429'] },
     dac_demo: { fams: ['f429'] }, usb_cdc_test: { fams: ['f401', 'f429'] },
+    dma2d_test: { fams: ['f429'] },
+    gpio_k_test: { fams: ['f429'] },
     fsmc_test: { fams: ['f429'] }, dcmi_test: { fams: ['f429'] },
     qspi_test: { fams: ['f429'] }, deep_sleep_demo: {}, ltdc_test: { fams: ['f429'] },
     eth_http: { fams: ['f429'], srcs: ['startup.c', 'eth_http.ino'] },

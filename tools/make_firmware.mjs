@@ -224,6 +224,10 @@ const firmwares = [
     ['blink_serial_disco_f429zi', 'blink_serial/build-disco_f429zi/blink_serial.ino.bin', 'blink_serial_disco_f429zi.bin'],
     ['comprehensive_test_f429', 'comprehensive_test/comprehensive_test_f429.bin', 'comprehensive_test_f429.bin'],
     ['dma2d_test', 'dma2d_test/dma2d_test.bin', 'dma2d_test.bin'],
+    ['dma2d_test_f429', 'dma2d_test/dma2d_test_f429.bin', 'dma2d_test_f429.bin'],
+    ['gpio_k_test', 'gpio_k_test/gpio_k_test.bin', 'gpio_k_test.bin'],
+    ['gpio_k_test_f429', 'gpio_k_test/gpio_k_test_f429.bin', 'gpio_k_test_f429.bin'],
+    ['dma2d_test_f429', 'dma2d_test/dma2d_test_f429.bin', 'dma2d_test_f429.bin'],
     // doom (doomgeneric F407 port; needs doom1.wad served alongside)
     ['doom', 'doom/doom.bin', 'doom.bin'],
 ];

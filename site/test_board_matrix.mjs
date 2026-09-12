@@ -130,17 +130,20 @@ bare('fsmc_test', ['f429'], ['=== FSMC Test: done ==='], ['FAIL'], { ext_devices
 bare('dcmi_test', ['f429'], ['=== DCMI Test: done ==='], ['FAIL'], {}, 'dcmi');
 bare('qspi_test', ['f429'], ['QSPI Test done'], ['QSPI FAIL'], { ext_devices: DEV.qspi });
 bare('ltdc_test', ['f429'], ['LTDC pixels OK']);
-E.push(['dma2d_test', 'f429', 'dma2d_test/dma2d_test.bin', ['=== DMA2D Test: done ==='], ['TIMEOUT', 'FAIL '], IRQ, null, 600, 100000]);
+E.push(['dma2d_test', 'f429', 'dma2d_test/dma2d_test_f429.bin', ['=== DMA2D Test: done ==='], ['TIMEOUT', 'FAIL '], IRQ, null, 600, 100000]);
+E.push(['gpio_k_test', 'f429', 'gpio_k_test/gpio_k_test_f429.bin', ['PK3=ON odr=1', 'PK3=OFF odr=0', 'GPIOK OK'], ['FAIL'], {}, null, 600, 100000]);
+bare('usb_cdc_test', ['f401', 'f429'], ['USB enum done', 'USB echo OK', 'USB done'], ['USB FAIL', 'USBHOST FAIL'], {}, 'usb', 1500, 50000);
 // F429 Ethernet (netsim backend; same ARP/DHCP/TCP/HTTP coverage as the
 // gateway runs). eth_http runs polling (no IRQs); the rest use irq_eth.
 E.push(['eth_http_f429', 'f429', 'eth_http/eth_http_f429.bin', ['TCP connected'], ['TCP fail'], {}, 'netsim', 600, 100000]);
 const IRQETH = { enable_irqs: true, irq_eth: true };
+const IRQETHLP = { enable_irqs: true, irq_eth: true, lowpower: true };
 E.push(['eth_dhcp_f429', 'f429', 'eth_dhcp/eth_dhcp_f429.bin', ['=== DHCP SUCCESS ==='], null, IRQETH, 'netsim', 600, 100000]);
 E.push(['eth_test_f429', 'f429', 'eth_test/eth_test_f429.bin', ['ETH Test: done', 'ICMP reply OK', 'ICMP RX reply sent', 'DNS IP=093.184.216.034', 'UDP echo OK'], ['TIMEOUT!'], IRQETH, 'netsim', 900, 200000]);
-E.push(['eth_feat_test_f429', 'f429', 'eth_feat_test/eth_feat_test_f429.bin', ['PHY link OK', 'PHY AN restart OK', 'PHY force OK', 'PHY media RMII OK', 'PHY media MII OK', 'CSUM TX insert OK', 'CSUM RX IPHCE OK', 'CSUM RX PCE OK', 'MCAST OK', 'VLAN OK', 'PTP target OK', 'PTP drift OK', 'PTP TX snap OK', 'PTP RX snap OK', 'WOL OK', 'WOL filter OK', 'WIRE RATE OK', 'COLLIDE OK', 'COLLIDE DROP OK', 'RX RATE OK', 'PPS window done', 'FEAT Test: done'], ['FAIL', 'TIMEOUT'], IRQETH, 'netsim', 8000, 5000,
+E.push(['eth_feat_test_f429', 'f429', 'eth_feat_test/eth_feat_test_f429.bin', ['PHY link OK', 'PHY AN restart OK', 'PHY force OK', 'PHY media RMII OK', 'PHY media MII OK', 'CSUM TX insert OK', 'CSUM RX IPHCE OK', 'CSUM RX PCE OK', 'MCAST OK', 'VLAN OK', 'PTP target OK', 'PTP drift OK', 'PTP TX snap OK', 'PTP RX snap OK', 'WOL OK', 'WOL filter OK', 'WIRE RATE OK', 'COLLIDE OK', 'COLLIDE DROP OK', 'RX RATE OK', 'PPS window done', 'WOKE BY WOL', 'FEAT Test: done'], ['FAIL', 'TIMEOUT'], IRQETHLP, 'netsim', 8000, 5000,
     // PPS scope probe: 200k inst at 32768 Hz (edge per ~5041 inst) ~= 39.
     (b) => { const n = b.eth_pps_count(); return (n >= 20 && n <= 60) ? null : ('pps_count=' + n); }]);
-E.push(['lwip_demo_f429', 'f429', 'lwip_demo/lwip_demo_f429.bin', ['LWIP init OK', 'LWIP DNS 093.184.216.034', 'LWIP TCP echo OK', 'LWIP UDP echo OK', 'LWIP DEMO DONE'], ['FAIL'], IRQETH, 'netsim', 1200, 200000]);
+E.push(['lwip_demo_f429', 'f429', 'lwip_demo/lwip_demo_f429.bin', ['LWIP init OK', 'LWIP DNS 093.184.216.034', 'LWIP TCP echo OK', 'LWIP TCP server OK', 'LWIP UDP echo OK', 'LWIP DEMO DONE'], ['FAIL'], IRQETH, 'netsim', 1200, 200000]);
 const IRQETH_LAYOUT = { rxDesc: 0x20000050, rxBuf: 0x2000005c, rxStride: 1536, rxDescs: 1 };
 E.push(['eth_irq_test_f429', 'f429', 'eth_irq_test/eth_irq_test_f429.bin', ['ETH IRQ Test: done'], ['TIMEOUT'], { ...IRQETH, eth: IRQETH_LAYOUT }, 'netsim', 600, 100000]);
 ino('blink_serial', ['disco_f429zi'], ['Hello from UART4!']);
@@ -172,7 +175,7 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
     });
     if (script === 'wav') bindings.audio_load_wav(makeWav());
     if (script === 'dcmi') bindings.dcmi_feed_frame(2, 2, DCMI_SMALL);
-    let uart = '', fed2 = false, fed3 = false, raised = 0, raising = false, echoed = false, collideDone = 0;
+    let uart = '', fed2 = false, fed3 = false, raised = 0, raising = false, echoed = false, collideDone = 0, usb = null;
     let ok = false;
     for (let i = 0; i < iters; i++) {
         emu.step(step);
@@ -195,6 +198,83 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
         } else if (script === 'dcmi') {
             if (uart.includes('PHASE2') && !fed2) { fed2 = true; bindings.dcmi_feed_frame(8, 4, DCMI_BIG); }
             if (uart.includes('DCMI ovr OK') && !fed3) { fed3 = true; bindings.dcmi_feed_frame(8, 4, DCMI_BIG); }
+        } else if (script === 'usb') {
+            // USB host play (mirrors site/test_usb.mjs): reset -> enum ->
+            // setup exchanges -> line coding -> 2x bulk echo. Mismatches
+            // append USBHOST FAIL (an anti-marker), since runOne can only
+            // fail entries via markers.
+            if (!usb) {
+                usb = { phase: -2, op: 0, wait: 0,
+                    ops: [
+                        { t: 'setup', d: [0x80,0x06,0x00,0x01,0x00,0x00,0x40,0x00], c: 'dev' },
+                        { t: 'status' },
+                        { t: 'setup', d: [0x80,0x06,0x00,0x02,0x00,0x00,0xFF,0x00], c: 'cfg' },
+                        { t: 'status' },
+                        { t: 'setup', d: [0x80,0x06,0x00,0x03,0x00,0x00,0xFF,0x00], c: 'lang' },
+                        { t: 'status' },
+                        { t: 'setup', d: [0x00,0x05,0x05,0x00,0x00,0x00,0x00,0x00], c: 'zlp' },
+                        { t: 'setup', d: [0x00,0x09,0x01,0x00,0x00,0x00,0x00,0x00], c: 'zlp' },
+                        { t: 'setup', d: [0x21,0x22,0x03,0x00,0x00,0x00,0x00,0x00], c: 'zlp' },
+                        { t: 'setup', d: [0x21,0x20,0,0,7,0,0,0] },
+                        { t: 'out', ep: 0, d: [0x00,0xC2,0x01,0x00,0x00,0x00,0x08] },
+                        { t: 'take', ep: 0, c: 'zlp' },
+                        { t: 'out', ep: 1, d: [72,101,108,108,111,85,83,66] },
+                        { t: 'take', ep: 1, c: 'echo1' },
+                        { t: 'out', ep: 1, d: [87,111,114,108,100,33,33,33] },
+                        { t: 'take', ep: 1, c: 'echo2' },
+                    ] };
+            }
+            const ufail = (m) => { uart += '\n[USBHOST FAIL ' + m + ']'; usb.phase = 99; };
+            const ueq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+            if (usb.phase === -2) {
+                if (uart.includes('USB init done')) { bindings.usb_reset(); usb.phase = -1; }
+            } else if (usb.phase === -1) {
+                if (uart.includes('USBRST')) { bindings.usb_enumerated(); usb.phase = 0; }
+            } else if (usb.phase === 0 && usb.op < usb.ops.length) {
+                // The first SETUP must wait until the firmware has
+                // processed enum-done (test_usb.mjs waitFor('ENUMDNE'));
+                // firing early desyncs its EP0 state machine.
+                if (usb.op === 0 && !uart.includes('ENUMDNE')) {
+                    /* wait */
+                } else {
+                const op = usb.ops[usb.op];
+                if (op.t === 'setup') {
+                    bindings.usb_inject_setup(Uint8Array.from(op.d));
+                    // The line-coding setup has no IN stage (OUT follows).
+                    if (op.c) { usb.phase = 1; usb.wait = 0; }
+                    else { usb.op++; usb.phase = 0; }
+                } else if (op.t === 'out') {
+                    bindings.usb_inject_out(op.ep, Uint8Array.from(op.d));
+                    usb.op++;
+                } else if (op.t === 'status') {
+                    bindings.usb_inject_out(0, new Uint8Array(0));
+                    usb.phase = 2; usb.wait = 0;
+                } else if (op.t === 'take') {
+                    usb.phase = 1; usb.wait = 0;
+                }
+                }
+            } else if (usb.phase === 1 || usb.phase === 2) {
+                // Take-wait (1, after setup) or status drain (2, N steps).
+                const op = usb.ops[usb.op];
+                if (usb.phase === 2) {
+                    if (++usb.wait > 200) { usb.op++; usb.phase = 0; }
+                } else {
+                    const ep = op.t === 'take' ? op.ep : 0;
+                    const st = bindings.usb_in_status(ep);
+                    if (st === 2) ufail('STALL ep' + ep);
+                    else if (st === 1) {
+                        const blob = Array.from(bindings.usb_take_in(ep));
+                        const c = op.c;
+                        if (c === 'dev' && !ueq(blob.slice(0, 18), [18,1,0,2,2,0,0,64,0x83,4,0x40,0x57,0,2,1,2,3,1])) ufail('device desc');
+                        else if (c === 'cfg' && !(blob[1] === 2 && (blob[2] | (blob[3] << 8)) === 67 && blob.length === 67 && blob[4] === 2)) ufail('config desc');
+                        else if (c === 'lang' && !ueq(blob.slice(0, 4), [4,3,9,4])) ufail('lang');
+                        else if (c === 'zlp' && blob.length !== 0) ufail('expected ZLP got ' + blob.length);
+                        else if (c === 'echo1' && !ueq(blob, [72,101,108,108,111,85,83,66])) ufail('echo1');
+                        else if (c === 'echo2' && !ueq(blob, [87,111,114,108,100,33,33,33])) ufail('echo2');
+                        usb.op++; usb.phase = 0;
+                    } else if (++usb.wait > 400) ufail('take timeout ep' + ep);
+                }
+            }
         }
         // Collision arming (any firmware): arm once per COLLIDE ARM print.
         // The guest spins before sending so the arm lands first (the

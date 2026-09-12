@@ -15,11 +15,11 @@ typedef struct { unsigned int addr; } ip_addr_t;
 
 typedef struct {
     int used, type;
-    unsigned int sport;      // local ephemeral port
+    unsigned int sport;      // local port (ephemeral, or bound)
     unsigned int rip;        // remote IP (v4, host order bytes packed)
     unsigned int rport;
     unsigned int iss, snd_nxt, rcv_nxt; // TCP state
-    int connected;
+    int connected, listening;
 } lwip_sock_t;
 
 static lwip_sock_t socks[LWIP_MAX_SOCK];
@@ -236,8 +236,61 @@ static int lwip_recv(int fd, unsigned char *buf, unsigned int maxlen) {
     return -1;
 }
 
-static int lwip_close(int fd) {
+static int lwip_bind(int fd, unsigned int port) {
     if (fd < 0 || fd >= LWIP_MAX_SOCK || !socks[fd].used) return -1;
+    socks[fd].sport = port;
+    return 0;
+}
+
+static int lwip_listen(int fd) {
+    if (fd < 0 || fd >= LWIP_MAX_SOCK || !socks[fd].used) return -1;
+    if (socks[fd].type != SOCK_STREAM) return -1;
+    socks[fd].listening = 1;
+    return 0;
+}
+
+// Accept one connection: wait for SYN to the bound port, SYN-ACK it,
+// wait for the ACK. Fills rip/rport; reuses send/recv/close after.
+static int lwip_accept(int fd) {
+    if (fd < 0 || fd >= LWIP_MAX_SOCK || !socks[fd].used) return -1;
+    lwip_sock_t *s = &socks[fd];
+    if (!s->listening) return -1;
+    for (int r = 0; r < 300 && !s->connected; r++) {
+        unsigned int len = eth_recv_frame(20000);
+        if (!len) continue;
+        if (rx_buf[12] != 0x08 || rx_buf[13] != 0x00 || rx_buf[23] != 6) continue;
+        unsigned int to = 14 + ((rx_buf[14] & 0xF) * 4);
+        unsigned int sport = (rx_buf[to] << 8) | rx_buf[to + 1];
+        unsigned int dport = (rx_buf[to + 2] << 8) | rx_buf[to + 3];
+        unsigned int fl = rx_buf[to + 13];
+        if (dport != s->sport || (fl & 0x02) == 0) continue; // not our SYN
+        unsigned int cli = (rx_buf[to + 4] << 24) | (rx_buf[to + 5] << 16) |
+                           (rx_buf[to + 6] << 8) | rx_buf[to + 7];
+        s->rport = sport;
+        s->rip = ((unsigned int)rx_buf[26] << 24) | ((unsigned int)rx_buf[27] << 16) |
+                 ((unsigned int)rx_buf[28] << 8) | rx_buf[29];
+        s->iss = 0x0B000001u + (unsigned int)fd;
+        s->snd_nxt = s->iss;
+        s->rcv_nxt = cli + 1;
+        tcp_tx(s, 0x12, 0, 0); // SYN-ACK
+        for (int r2 = 0; r2 < 200 && !s->connected; r2++) {
+            unsigned int l2 = eth_recv_frame(20000);
+            if (!l2) continue;
+            int pl = tcp_match(s, l2);
+            if (pl < 0) continue;
+            unsigned int t2 = 14 + ((rx_buf[14] & 0xF) * 4);
+            unsigned int ack = (rx_buf[t2 + 8] << 24) | (rx_buf[t2 + 9] << 16) |
+                               (rx_buf[t2 + 10] << 8) | rx_buf[t2 + 11];
+            if (ack == s->iss + 1) {
+                s->snd_nxt = s->iss + 1;
+                s->connected = 1;
+            }
+        }
+    }
+    return s->connected ? 0 : -1;
+}
+
+static int lwip_close(int fd) {    if (fd < 0 || fd >= LWIP_MAX_SOCK || !socks[fd].used) return -1;
     lwip_sock_t *s = &socks[fd];
     if (s->type == SOCK_STREAM && s->connected) {
         tcp_tx(s, 0x11, 0, 0); // FIN|ACK
@@ -355,6 +408,25 @@ int main(void) {
         uart_puts("LWIP TCP echo OK\r\n");
     else { uart_puts("LWIP TCP ECHO FAIL\r\n"); while (1); }
     lwip_close(s);
+
+    // Server role: listen on 7, accept the netsim client, echo "SRV".
+    {
+        int t = lwip_socket(AF_INET, SOCK_STREAM);
+        int u0 = lwip_socket(AF_INET, SOCK_DGRAM);
+        ip_addr_t gw = { 0xC0A80401 };
+        unsigned char go[2] = { 'G', 'O' };
+        lwip_sendto(u0, go, 2, gw, 5004); // trigger: netsim SYNs us
+        lwip_close(u0);
+        if (lwip_bind(t, 7) != 0 || lwip_listen(t) != 0) { uart_puts("LWIP SRV SETUP FAIL\r\n"); while (1); }
+        if (lwip_accept(t) != 0) { uart_puts("LWIP ACCEPT FAIL\r\n"); while (1); }
+        unsigned char sbuf[16];
+        int k = lwip_recv(t, sbuf, sizeof(sbuf));
+        if (k == 3 && sbuf[0] == 'S' && sbuf[1] == 'R' && sbuf[2] == 'V') {
+            if (lwip_send(t, sbuf, 3) != 3) { uart_puts("LWIP SRV SEND FAIL\r\n"); while (1); }
+            uart_puts("LWIP TCP server OK\r\n");
+        } else { uart_puts("LWIP SRV ECHO FAIL\r\n"); while (1); }
+        lwip_close(t);
+    }
 
     int u = lwip_socket(AF_INET, SOCK_DGRAM);
     unsigned char umsg[8] = { 'U', 'D', 'P', ' ', 'E', 'C', 'H', 'O' };
