@@ -46,6 +46,8 @@ const CASES = [
     { label: 'dcmi_f429', fw: 'dcmi_test_f429', markers: ['=== DCMI Test: done ==='], timeoutMs: 120000 },
     { label: 'adc_f429', fw: 'adc_demo_f429', markers: ['=== ADC Demo: done ==='], timeoutMs: 60000 },
     { label: 'mpu_f401', fw: 'mpu_test_f401', markers: ['MPU all PASS', 'MPU done'], timeoutMs: 60000 },
+    { label: 'dma2d', fw: 'dma2d_test', markers: ['=== DMA2D Test: done ==='], timeoutMs: 60000 },
+    { label: 'comprehensive_f429', fw: 'comprehensive_test_f429', markers: ['=== DONE ===', 'FAIL: 00000000'], timeoutMs: 120000 },
 ];
 
 let failed = 0;

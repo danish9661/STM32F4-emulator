@@ -3228,8 +3228,7 @@ cross-checked vs `test_arduino_boards.mjs`), implemented list, gaps
 M0+ out of scope), add-a-board recipe. The earlier full landing rebuild
 (index.js content + module.css sections) was reverted as superseded.
 
-### All-boards port, everything except ETH (2026-09-11, UNCOMMITTED)
-~125 new presets (193 firmwares in the bundle): every portable demo on
+### All-boards port, everything except ETH (2026-09-11, UNCOMMITTED)~125 new presets (193 firmwares in the bundle): every portable demo on
 every compatible map. Method: `tools/build_family.mjs` (bare-metal: same
 sources, family link script + `-DSTACK_TOP`/`-DEXPECT_SP`) + Arduino FQBN
 matrix (`.pw-scratch/build_arduino_matrix.sh`, 80/88 compile — only
@@ -3250,11 +3249,24 @@ define `BOARDS_OF_FIRMWARE`; F407 builds additionally blanket `ve`
 - Stepping rules learned: freertos needs ≤100k steps (200k wedges the
   handshake — the browser default 100k is exactly safe); `expectFail`
   UART4 hangs are empty-uart + no-fault (not faults).
-- Pre-existing, NOT board issues (fail identically on stock 407, left
-  alone): DCMI empty-capture IRQ + SDIO CMDSENT, new/deep_periph counts,
-  crypto_deep garbage summary counts (per-check lines are the signal),
-  `test_firmware` missing `_start` prototype (GCC14 errors, old toolchain
-  warned).
+- Pre-existing, NOT board issues (fail identically on stock 407 — then
+  FIXED, see below): DCMI empty-capture IRQ + SDIO CMDSENT. Root causes:
+  (1) the SDIO ISR clears STA via ICR before the firmware's poll sees it
+  (inline delivery wins the race the test created) — fixed by polling
+  CMDREND before enabling IRQ49; (2) the DCMI check locked an old-model
+  quirk (phantom RIS on bare DR read) — replaced with silicon-true
+  checks (quiet + DR-zero + CR readback), which exposed a REAL mask bug
+  (0x7FFF_3FFF dropped ENABLE bit 14; now 0x57F7 per RM0090).
+  comprehensive_test 43/43 on 407 + 429; f429 preset added.
+- new/deep_periph: model-regression probes, never green anywhere —
+  deliberately: the model loads the fed frame once (CR-rising/tick when
+  None) and never refreshes a consumed copy, while ticks drain
+  PIXELS_PER_TICK per tick into the 4-deep FIFO — so a one-shot
+  capture-then-read probe sees feed timing, not silicon behavior, and
+  matrix1's passes were stale-feed pollution from earlier dcmi_test
+  entries in the same process. Fixing the lifecycle risks dcmi_test
+  (green, browser-covered, relies on consume-once + CAPTURE-rearm), so
+  new/deep stay boot-only F407 presets. dcmi_test remains the DCMI proof.
 - UI wiring is generated (`.pw-scratch/gen_presets.py`, rerunnable):
   bundle + compat + dropdown + IRQ/UART4/FREERTOS/DEVICE/startsWith gates.
   Gotchas it hit: hidden-select anchor must be `fwSelect`'s close (the
@@ -3262,6 +3274,43 @@ define `BOARDS_OF_FIRMWARE`; F407 builds additionally blanket `ve`
   select, boot broke with `FIRMWARES[fw]` undefined); `failMarkers:['FAIL']`
   false-positives on zero-count summaries (use `'FAIL '`); mpu/fpu_irq
   family presets need IRQ delivery like their F407 originals.
+
+### cpu_bug #11 + leftovers + DMA2D (2026-09-11, UNCOMMITTED)
+- **#11 nested-SP (verified shared, fixed)**: F4 entry already stacked
+  at live r13, but return unstacked from the MSP bank, which goes stale
+  whenever a handler moves SP (handler-mode bank sync skipped by design).
+  Fix: unstack base is live r13 for F1/E1/F9/ED, PSP bank only for FD/ED;
+  dead `r13 = msp` reload removed. Test
+  `nested_push_outer_returns_clean` (pushing outer + preempting inner)
+  fails pre-fix (bad access via stale unstack), passes post-fix. Existing
+  nesting tests used spinning (stackless) handlers — the hole. Details +
+  report in `cpu_bug.md` #11.
+- **comprehensive 43/43 both maps**: SDIO CMDSENT was an ISR race the
+  test created (ISR clears STA via ICR before the poll; inline delivery
+  wins) — fixed by polling CMDREND before enabling IRQ49. DCMI check
+  locked an old-model phantom-RIS quirk — replaced with silicon-true
+  checks (quiet + DR-zero + CR readback), exposing a REAL mask bug
+  (`0x7FFF_3FFF` dropped ENABLE bit 14; now `0x57F7` per RM0090). F429
+  preset added; f401/f411 stay expect-fail (absent silicon).
+- **rx_interrupt bare-metal**: the sketch's USART1_IRQHandler collides
+  with core 2.12 SrcWrapper on every FQBN (the committed .bin predates
+  the core) — converted to bare-metal (main/startup/link/Makefile,
+  same logic), all 4 maps pass with identical CRC. Stale .ino/build
+  removed; preset path now `rx_interrupt_test/rx_interrupt_test*.bin`.
+- **DMA2D (F429, closes the peripheral gap)**: `dma2d.rs` (regs + job
+  staging + TCIF/IRQ56/CEIF) with pure `convert_px`/`blend_px` (ARGB8888/
+  RGB888/RGB565, over-operator, 6 unit tests); JS `wProcessDma2d` gathers
+  lines, converts, scatters with OR offsets; `dma2d_test/` firmware
+  (R2M/M2M/PFC/blend/stride through the IRQ path, 5 phases).   Gotchas:
+  `Dma::new` prefix-matched "DMA2D" and panicked (now exact DMA1/DMA2);
+  startup `.data` isn't copied (const-ify init tables — black PFC
+  output). VENDOR_V 16, app 22, boards 3, firmware 13,
+  doom 61/worker 34.
+- new/deep verdict stays: model-regression probes, boot-only F407 (feed-
+  lifecycle documented above); their DCMI sections see feed timing.
+- Silicon-absent list is FINAL (CAN/DAC/CRYP/SAI/UART4/USB-411): no
+  firmware can complete them — matrix expect-fails + no presets encode
+  it. SAI-on-F401 re-verified absent (no silicon, not just SVD).
 
 ### Landing page rebuild (2026-09-11, UNCOMMITTED — do not commit till asked)
 `website/src/pages/index.js` + sections of `index.module.css` + config

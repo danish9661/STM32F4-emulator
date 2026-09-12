@@ -189,8 +189,8 @@ void setup() {
 
     // DCMI
     CHECK(DCMI_SR == 0, "DCMI SR default 0");
-    DCMI_CR = 0x7FFF3FFF;
-    CHECK(DCMI_CR == 0x7FFF3FFF, "DCMI CR write");
+    DCMI_CR = 0xFFFFFFFF;
+    CHECK(DCMI_CR == 0x4FFF, "DCMI CR write");  // documented bits only (12,13,15+ reserved read 0)
     DCMI_CR = 1;
     burn(500);
     uint32_t dr1 = DCMI_DR;

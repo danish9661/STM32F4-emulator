@@ -470,6 +470,92 @@ export function dcmi_feed_frame(w, h, pixels) {
 }
 
 /**
+ * Blend FG over BG ("over" operator) into the output mode. `fg_alpha`
+ * supplies the alpha for formats without one (FGPFCCR.ALPHA).
+ * @param {number} fg_cm
+ * @param {number} bg_cm
+ * @param {number} out_cm
+ * @param {number} _w
+ * @param {number} _h
+ * @param {number} fg_alpha
+ * @param {Uint8Array} fg
+ * @param {Uint8Array} bg
+ * @returns {Uint8Array}
+ */
+export function dma2d_blend(fg_cm, bg_cm, out_cm, _w, _h, fg_alpha, fg, bg) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(fg, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(bg, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.dma2d_blend(retptr, fg_cm, bg_cm, out_cm, _w, _h, fg_alpha, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v3 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Convert a line-packed pixel buffer between color modes
+ * (0 ARGB8888, 1 RGB888, 2 RGB565). Pure function of its inputs.
+ * @param {number} fg_cm
+ * @param {number} out_cm
+ * @param {number} _w
+ * @param {number} _h
+ * @param {Uint8Array} px
+ * @returns {Uint8Array}
+ */
+export function dma2d_convert(fg_cm, out_cm, _w, _h, px) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(px, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.dma2d_convert(retptr, fg_cm, out_cm, _w, _h, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Complete the staged DMA2D transfer (TCIF + IRQ56 when TCIE is set).
+ */
+export function dma2d_job_done() {
+    wasm.dma2d_job_done();
+}
+
+/**
+ * Take the staged DMA2D transfer for the JS driver: 16 words
+ * [mode, w, h, fg_addr, fg_cm, fg_off, bg_addr, bg_cm, bg_off,
+ *  out_addr, out_cm, out_off, ocolr, 0, 0, 0], or empty when idle.
+ * The driver gathers source lines, converts/blends them, scatters the
+ * output lines (honoring the OR line offsets), then calls dma2d_job_done.
+ * @returns {Uint32Array}
+ */
+export function dma2d_take_job() {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.dma2d_take_job(retptr);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU32FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 4, 4);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * @param {number} index
  * @returns {Uint32Array}
  */

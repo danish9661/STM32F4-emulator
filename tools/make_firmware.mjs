@@ -51,7 +51,10 @@ const firmwares = [
     ['eth_irq_test', 'eth_irq_test/eth_irq_test.bin', 'eth_irq_test.bin'],
     ['edge_test', 'edge_test/edge_test.ino.bin', 'edge_test.ino.bin'],
     ['echo_test', 'echo_test/build/echo_test.ino.bin', 'echo_test.ino.bin'],
-    ['rx_interrupt_test', 'rx_interrupt_test/build/rx_interrupt_test.ino.bin', 'rx_interrupt_test.ino.bin'],
+    ['rx_interrupt_test', 'rx_interrupt_test/rx_interrupt_test.bin', 'rx_interrupt_test.bin'],
+    ['rx_interrupt_test_f401', 'rx_interrupt_test/rx_interrupt_test_f401.bin', 'rx_interrupt_test_f401.bin'],
+    ['rx_interrupt_test_f411', 'rx_interrupt_test/rx_interrupt_test_f411.bin', 'rx_interrupt_test_f411.bin'],
+    ['rx_interrupt_test_f429', 'rx_interrupt_test/rx_interrupt_test_f429.bin', 'rx_interrupt_test_f429.bin'],
     ['blink_serial', 'blink_serial/build/blink_serial.ino.bin', 'blink_serial.ino.bin'],
     ['timer_test', 'timer_test/build/timer_test.ino.bin', 'timer_test.ino.bin'],
     ['test_firmware', 'test_firmware/test_firmware.bin', 'test_firmware.bin'],
@@ -211,6 +214,8 @@ const firmwares = [
     ['crypto_test_black_f407ve', 'crypto_test/build-black_f407ve/crypto_test.ino.bin', 'crypto_test_black_f407ve.bin'],
     ['crypto_test_black_f407ze', 'crypto_test/build-black_f407ze/crypto_test.ino.bin', 'crypto_test_black_f407ze.bin'],
     ['blink_serial_disco_f429zi', 'blink_serial/build-disco_f429zi/blink_serial.ino.bin', 'blink_serial_disco_f429zi.bin'],
+    ['comprehensive_test_f429', 'comprehensive_test/comprehensive_test_f429.bin', 'comprehensive_test_f429.bin'],
+    ['dma2d_test', 'dma2d_test/dma2d_test.bin', 'dma2d_test.bin'],
     // doom (doomgeneric F407 port; needs doom1.wad served alongside)
     ['doom', 'doom/doom.bin', 'doom.bin'],
 ];

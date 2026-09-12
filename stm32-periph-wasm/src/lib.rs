@@ -125,6 +125,40 @@ pub fn pwr_wakeup() {
     sys().p.pwr_wakeup();
 }
 
+/// Take the staged DMA2D transfer for the JS driver: 16 words
+/// [mode, w, h, fg_addr, fg_cm, fg_off, bg_addr, bg_cm, bg_off,
+///  out_addr, out_cm, out_off, ocolr, 0, 0, 0], or empty when idle.
+/// The driver gathers source lines, converts/blends them, scatters the
+/// output lines (honoring the OR line offsets), then calls dma2d_job_done.
+#[wasm_bindgen]
+pub fn dma2d_take_job() -> Vec<u32> {
+    match crate::peripherals::dma2d::take_job() {
+        Some(j) => j.to_vec(),
+        None => Vec::new(),
+    }
+}
+
+/// Complete the staged DMA2D transfer (TCIF + IRQ56 when TCIE is set).
+#[wasm_bindgen]
+pub fn dma2d_job_done() {
+    let s = sys();
+    s.p.dma2d_job_done(s);
+}
+
+/// Convert a line-packed pixel buffer between color modes
+/// (0 ARGB8888, 1 RGB888, 2 RGB565). Pure function of its inputs.
+#[wasm_bindgen]
+pub fn dma2d_convert(fg_cm: u32, out_cm: u32, _w: u32, _h: u32, px: &[u8]) -> Vec<u8> {
+    crate::peripherals::dma2d::convert_px(fg_cm, out_cm, px)
+}
+
+/// Blend FG over BG ("over" operator) into the output mode. `fg_alpha`
+/// supplies the alpha for formats without one (FGPFCCR.ALPHA).
+#[wasm_bindgen]
+pub fn dma2d_blend(fg_cm: u32, bg_cm: u32, out_cm: u32, _w: u32, _h: u32, fg_alpha: u8, fg: &[u8], bg: &[u8]) -> Vec<u8> {
+    crate::peripherals::dma2d::blend_px(fg_cm, bg_cm, out_cm, fg_alpha, fg, bg)
+}
+
 /// Inject a CAN frame from an external transmitter onto the shared bus. The
 /// frame is delivered to every CAN node (CAN1/CAN2) whose accept filters pass
 /// it, so the guest sees it exactly as if another node sent it. `data` is up

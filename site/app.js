@@ -2,12 +2,12 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=15';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=17';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
-import { boardsOf, boardForSelection, BOARDS } from './boards.js?v=2';
-import { FIRMWARES } from './firmware.js?v=12';
+import { boardsOf, boardForSelection, BOARDS } from './boards.js?v=4';
+import { FIRMWARES } from './firmware.js?v=15';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
 
@@ -50,7 +50,7 @@ const ETH_RX_MAP = {
 // Interrupt-driven firmware: the emulator pumps guest IRQ handlers (USART RXNE
 // etc.). OFF for ETH firmware — the driver signals completion via SRAM
 // irq_flag and the guest ETH_IRQHandler would double-process DMASR/rx_desc.
-const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_crypto_test', 'comprehensive_test', 'eth_irq_test', 'edge_test', 'periph_test', 'fpu_irq_test', 'mpu_test', 'exti_test', 'freertos_test',
+const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_interrupt_test_f401', 'rx_interrupt_test_f411', 'rx_interrupt_test_f429', 'rx_crypto_test', 'comprehensive_test', 'comprehensive_test_f429', 'dma2d_test', 'eth_irq_test', 'edge_test', 'periph_test', 'fpu_irq_test', 'mpu_test', 'exti_test', 'freertos_test',
     'arduino_bp_f401cc', 'arduino_bp_f411ce', 'arduino_nucleo_f401re', 'arduino_nucleo_f411re',
     'arduino_disco_f407vg', 'arduino_disco_f429zi', 'arduino_black_f407ve', 'arduino_black_f407ze', 'exti_test_f401', 'exti_test_f411', 'exti_test_f429', 'rx_crypto_test_f401', 'rx_crypto_test_f411', 'rx_crypto_test_f429', 'freertos_test_f411', 'freertos_test_f429', 'arduino_test_black_f407ve', 'arduino_test_black_f407ze', 'arduino_test_bp_f401cc', 'arduino_test_bp_f411ce', 'arduino_test_disco_f407vg', 'arduino_test_disco_f429zi', 'arduino_test_nucleo_f401re', 'arduino_test_nucleo_f411re', 'blink_serial_disco_f429zi', 'crypto_test_black_f407ve', 'crypto_test_black_f407ze', 'crypto_test_disco_f407vg', 'crypto_test_disco_f429zi', 'echo_test_black_f407ve', 'echo_test_black_f407ze', 'echo_test_disco_f407vg', 'echo_test_disco_f429zi', 'edge_test_black_f407ve', 'edge_test_black_f407ze', 'edge_test_bp_f401cc', 'edge_test_bp_f411ce', 'edge_test_disco_f407vg', 'edge_test_disco_f429zi', 'edge_test_nucleo_f401re', 'edge_test_nucleo_f411re', 'hal_test_black_f407ve', 'hal_test_black_f407ze', 'hal_test_bp_f401cc', 'hal_test_bp_f411ce', 'hal_test_disco_f407vg', 'hal_test_disco_f429zi', 'hal_test_nucleo_f401re', 'hal_test_nucleo_f411re', 'periph_test_black_f407ve', 'periph_test_black_f407ze', 'periph_test_bp_f401cc', 'periph_test_bp_f411ce', 'periph_test_disco_f407vg', 'periph_test_disco_f429zi', 'periph_test_nucleo_f401re', 'periph_test_nucleo_f411re', 'timer_test_black_f407ve', 'timer_test_black_f407ze', 'timer_test_disco_f407vg', 'timer_test_disco_f429zi', 'mpu_test_f401', 'mpu_test_f411', 'mpu_test_f429', 'fpu_irq_test_f401', 'fpu_irq_test_f411', 'fpu_irq_test_f429']);
 
@@ -431,10 +431,10 @@ const boot = async () => {
         // ── local mode: WASM runs in the browser (default) ──
         // Board variant per firmware preset (SVD + flash/RAM sizes), honoring
         // the board selector when the preset supports the selected board.
-        // NOTE (VENDOR_V): vendor asset versions (?v=15) must be bumped together
+        // NOTE (VENDOR_V): vendor asset versions (?v=17) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
         const { key: boardKey, board } = boardForSelection(image.name, boardSelectEl ? boardSelectEl.value : 'all');
-        const svdXml = await fetch('vendor/' + board.svd + '?v=15').then((r) => r.text());
+        const svdXml = await fetch('vendor/' + board.svd + '?v=17').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
@@ -448,7 +448,7 @@ const boot = async () => {
             svdXml,
             flash_size: board.flash_size,
             ram_size: board.ram_size,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=15',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=17',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),

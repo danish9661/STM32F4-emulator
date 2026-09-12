@@ -2846,3 +2846,65 @@ fn flash_test_programs_and_erases() {
     assert!(uart.contains("FLASH TEST DONE"), "no done marker: {uart:?}");
     assert!(!uart.contains("FAIL "), "failures: {uart:?}");
 }
+
+/// Synthetic nested-preemption image for the stale-bank check (cpu_bug #11):
+/// outer handler A (IRQ0, low prio) pushes regs then pends B; inner handler
+/// B (IRQ1, high prio) returns immediately. A writes a marker after B
+/// returns, then pops-pc home. If the outer return unstacks from the stale
+/// MSP bank instead of live r13, it pops garbage (fault / wrong resume).
+/// Vector table + main spin + A @0x110 + pools + B @0x140.
+fn nested_push_image() -> Vec<u8> {
+    let mut img = vec![0u8; 0x200];
+    fn w32(img: &mut Vec<u8>, off: usize, v: u32) {
+        img[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    fn w16(img: &mut Vec<u8>, off: usize, v: u16) {
+        img[off..off + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    w32(&mut img, 0x00, 0x20002000); // SP
+    w32(&mut img, 0x04, 0x08000101); // reset -> main
+    for v in 2..16u32 {
+        w32(&mut img, (v * 4) as usize, 0x08000101);
+    }
+    w32(&mut img, 0x40, 0x08000111); // IRQ0 -> A
+    w32(&mut img, 0x44, 0x08000141); // IRQ1 -> B
+    w16(&mut img, 0x100, 0xE7FE); // main: b .
+    // A: push {r4,lr}; pend B via ISPR0; marker; pop {r4,pc} (EXC_RETURN home)
+    for (o, v) in [
+        (0x110, 0xB510u16), // push {r4, lr}
+        (0x112, 0x4803),    // ldr r0, [pc, #12] -> 0x120 (pool; #8 would hit code)
+        (0x114, 0x2102),    // movs r1, #2
+        (0x116, 0x6001),    // str r1, [r0] (ISPR0: pend B)
+        (0x118, 0x4802),    // ldr r0, [pc, #8] -> 0x124
+        (0x11A, 0x21A5),    // movs r1, #0xA5
+        (0x11C, 0x6001),    // str r1, [r0] (marker, proves post-nest resume)
+        (0x11E, 0xBD10),    // pop {r4, pc}
+    ] {
+        w16(&mut img, o, v);
+    }
+    w32(&mut img, 0x120, 0xE000E200); // ISPR0
+    w32(&mut img, 0x124, 0x20001000); // marker slot
+    // B: bx lr (balanced, immediate F1 return)
+    w16(&mut img, 0x140, 0x4770);
+    w16(&mut img, 0x142, 0xBF00);
+    img
+}
+
+#[test]
+fn nested_push_outer_returns_clean() {
+    // Outer A pushes {r4,lr} (r13 moves, MSP bank goes stale by design —
+    // handler-mode bank sync is skipped), B preempts and returns, A pops
+    // and returns home. Post-fix: marker written, thread resumed, no fault.
+    // Pre-fix: the outer return unstacks from stale MSP and faults.
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&nested_push_image());
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    mem.write32(0xE000E100, 0x3); // ISER0: IRQ0+IRQ1
+    mem.write32(0xE000E400, 0x000000C0); // A=0xC0 (low), B=0x00 (high)
+    sys.p.nvic.borrow_mut().set_intr_pending(0);
+    cpu.run(sys, &mut mem, 400);
+    no_fault(&cpu, &mem);
+    assert_eq!(mem.read32(0x20001000), 0xA5, "outer handler must resume after nesting");
+    assert_eq!(cpu.ipsr, 0, "back in thread mode");
+}

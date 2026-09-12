@@ -59,8 +59,9 @@ prints + LED blink + SysTick `delay()`) is built for all eight targets
 
 ## What is left
 
-- **DMA2D (F429)** — the one known peripheral gap: the F429's Chrom-ART
-  2D accelerator is unmodeled (LTDC scanout itself works).
+- **DMA2D (F429)** — modeled (`dma2d.rs`: R2M/M2M/PFC/blend, TCIF/IRQ56)
+  with a 5-phase IRQ-driven firmware proof (`dma2d_test`, in `npm test`
+  and the browser). No gap remains.
 - **F429 Ethernet** — present on silicon but untested; all ETH presets
   stay F407-only and the driver's descriptor layout assumes the F407 map.
 - **F429 GPIOK** — on silicon, covered by the generic GPIO bank, but no

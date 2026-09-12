@@ -263,6 +263,11 @@ export const BOARDS_OF_FIRMWARE = {
     watchdog_demo: ['stm32f407', 'stm32f407ve'],
     wwdg_demo: ['stm32f407', 'stm32f407ve'],
     wwdg_window_demo: ['stm32f407', 'stm32f407ve'],
+    rx_interrupt_test_f401: ['stm32f401'],
+    rx_interrupt_test_f411: ['stm32f411'],
+    rx_interrupt_test_f429: ['stm32f429'],
+    comprehensive_test_f429: ['stm32f429'],
+    dma2d_test: ['stm32f429'],
 };
 
 export function boardsOf(fwName) {

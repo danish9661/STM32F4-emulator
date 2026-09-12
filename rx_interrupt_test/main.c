@@ -1,3 +1,7 @@
+// USART1 RXNE interrupt test (bare-metal; converted from the Arduino sketch
+// in 2026-09: the sketch's own USART1_IRQHandler collides with the Arduino
+// core 2.12 SrcWrapper handler on every FQBN, so it no longer links as .ino.
+// Logic unchanged: RXNE ISR collects a line, main CRCs it and prints CRC=).
 #define RCC_AHB1ENR (*(volatile unsigned int *)0x40023830)
 #define RCC_AHB2ENR (*(volatile unsigned int *)0x40023834)
 #define RCC_APB1ENR (*(volatile unsigned int *)0x40023840)
@@ -16,22 +20,11 @@
 #define CRC_DR  (*(volatile unsigned int *)0x40023000)
 #define CRC_CR  (*(volatile unsigned int *)0x40023008)
 
-#define HASH_CR  (*(volatile unsigned int *)0x50060400)
-#define HASH_DIN (*(volatile unsigned int *)0x50060408)
-#define HASH_STR (*(volatile unsigned int *)0x50060410)
-#define HASH_HR0 (*(volatile unsigned int *)0x50060418)
-#define HASH_HR1 (*(volatile unsigned int *)0x5006041C)
-#define HASH_HR2 (*(volatile unsigned int *)0x50060420)
-#define HASH_HR3 (*(volatile unsigned int *)0x50060424)
-#define HASH_HR4 (*(volatile unsigned int *)0x50060428)
-
 static volatile unsigned int rx_count = 0;
 static volatile unsigned int rx_buf[64];
 static volatile unsigned int rx_done = 0;
 
-// USART1 IRQ 37 handler - vector table entry at 0x080000D4 (0x100 + 37*4)
-extern "C" void USART1_IRQHandler(void) __attribute__((interrupt));
-extern "C" void USART1_IRQHandler(void) {
+void USART1_IRQHandler(void) {
     unsigned int sr = USART1_SR;
     if (sr & (1 << 5)) {
         unsigned char c = USART1_DR;
@@ -59,7 +52,7 @@ static void uart_puthex(unsigned int v) {
     }
 }
 
-void setup() {
+int main(void) {
     RCC_AHB1ENR |= (1 << 0);
     RCC_APB2ENR |= (1 << 4);
 
@@ -80,35 +73,31 @@ void setup() {
     RCC_AHB1ENR |= (1 << 12);
     CRC_CR |= 1;
 
-    RCC_AHB2ENR |= (1 << 4);
-
     uart_puts("RX-INT-TEST\n");
-}
 
-void loop() {
-    if (!rx_done) {
-        unsigned int *sr = (unsigned int *)0x40011000;
-        unsigned int *dr = (unsigned int *)0x40011004;
-        return;
+    while (1) {
+        if (!rx_done) {
+            continue;
+        }
+
+        rx_done = 0;
+
+        CRC_CR |= 1;
+        while (CRC_CR & 1);
+
+        // Feed received bytes to CRC
+        for (unsigned int i = 0; i < rx_count; i++) {
+            unsigned int v = rx_buf[i] & 0xFF;
+            CRC_DR = v;
+        }
+
+        unsigned int crc_result = CRC_DR;
+
+        uart_puts("CRC=");
+        uart_puthex(crc_result);
+        uart_puts("\n");
+
+        rx_count = 0;
     }
-
-    rx_done = 0;
-
-    CRC_CR |= 1;
-    while (CRC_CR & 1);
-
-    // Feed received bytes to CRC
-    for (unsigned int i = 0; i < rx_count; i++) {
-        unsigned int v = rx_buf[i] & 0xFF;
-        CRC_DR = v;
-    }
-
-    unsigned int crc_result = CRC_DR;
-
-    uart_puts("CRC=");
-    uart_puthex(crc_result);
-    uart_puts("\n");
-
-    unsigned int saved_rx_count = rx_count;
-    rx_count = 0;
+    return 0;
 }

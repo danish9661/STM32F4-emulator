@@ -150,6 +150,32 @@ export function dcmi_clear(): void;
  */
 export function dcmi_feed_frame(w: number, h: number, pixels: Uint8Array): void;
 
+/**
+ * Blend FG over BG ("over" operator) into the output mode. `fg_alpha`
+ * supplies the alpha for formats without one (FGPFCCR.ALPHA).
+ */
+export function dma2d_blend(fg_cm: number, bg_cm: number, out_cm: number, _w: number, _h: number, fg_alpha: number, fg: Uint8Array, bg: Uint8Array): Uint8Array;
+
+/**
+ * Convert a line-packed pixel buffer between color modes
+ * (0 ARGB8888, 1 RGB888, 2 RGB565). Pure function of its inputs.
+ */
+export function dma2d_convert(fg_cm: number, out_cm: number, _w: number, _h: number, px: Uint8Array): Uint8Array;
+
+/**
+ * Complete the staged DMA2D transfer (TCIF + IRQ56 when TCIE is set).
+ */
+export function dma2d_job_done(): void;
+
+/**
+ * Take the staged DMA2D transfer for the JS driver: 16 words
+ * [mode, w, h, fg_addr, fg_cm, fg_off, bg_addr, bg_cm, bg_off,
+ *  out_addr, out_cm, out_off, ocolr, 0, 0, 0], or empty when idle.
+ * The driver gathers source lines, converts/blends them, scatters the
+ * output lines (honoring the OR line offsets), then calls dma2d_job_done.
+ */
+export function dma2d_take_job(): Uint32Array;
+
 export function dma_get_pending(index: number): Uint32Array;
 
 export function dma_get_pending_count(): number;
@@ -492,6 +518,10 @@ export interface InitOutput {
     readonly clear_watchdog_reset_flags: () => void;
     readonly dcmi_clear: () => void;
     readonly dcmi_feed_frame: (a: number, b: number, c: number, d: number) => void;
+    readonly dma2d_blend: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => void;
+    readonly dma2d_convert: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly dma2d_job_done: () => void;
+    readonly dma2d_take_job: (a: number) => void;
     readonly dma_get_pending: (a: number, b: number) => void;
     readonly dma_get_pending_count: () => number;
     readonly dma_periph_read: (a: number, b: number, c: number, d: number, e: number) => void;

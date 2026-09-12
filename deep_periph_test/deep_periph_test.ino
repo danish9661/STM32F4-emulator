@@ -181,8 +181,8 @@ void setup() {
 
     // DCMI: full capture sequence
     CHECK(DCMI_SR == 0, "DCMI SR default 0");
-    DCMI_CR = 0x7FFF3FFF;
-    CHECK(DCMI_CR == 0x7FFF3FFF, "DCMI CR write max");
+    DCMI_CR = 0xFFFFFFFF;
+    CHECK(DCMI_CR == 0x4FFF, "DCMI CR write max");  // documented bits only
 
     DCMI_CR = 0x1F;
     CHECK(DCMI_CR == 0x1F, "DCMI CR write 0x1F");

@@ -8,7 +8,7 @@ const svdXml = readFileSync(new URL('../site/vendor/stm32f407.svd', import.meta.
 const wasmBytes = new Uint8Array(readFileSync(new URL('../site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 
 const cases = [
-    ['rx_interrupt_test', '../rx_interrupt_test/build/rx_interrupt_test.ino.bin', 'CRC='],
+    ['rx_interrupt_test', '../rx_interrupt_test/rx_interrupt_test.bin', 'CRC='],
     ['rx_crypto_test', '../rx_crypto_test/rx_crypto_test.bin', 'DONE'],
 ];
 

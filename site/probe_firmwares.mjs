@@ -18,7 +18,7 @@ const candidates = [
     ['comprehensive_test', '../comprehensive_test/comprehensive_test.bin'],
     ['edge_test', '../edge_test/edge_test.ino.bin'],
     ['echo_test', '../echo_test/build/echo_test.ino.bin'],
-    ['rx_interrupt_test', '../rx_interrupt_test/build/rx_interrupt_test.ino.bin'],
+    ['rx_interrupt_test', '../rx_interrupt_test/rx_interrupt_test.bin'],
     ['blink_serial', '../blink_serial/build/blink_serial.ino.bin'],
     ['timer_test', '../timer_test/build/timer_test.ino.bin'],
     ['test_firmware', '../test_firmware/test_firmware.bin'],

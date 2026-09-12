@@ -20,7 +20,7 @@ const DEMOS = {
     adc_demo: {}, pwm_demo: {}, oled_test: {}, tft_test: {}, buzzer_test: {},
     rtc_test: {}, audio_test: {}, audio_play_test: {}, watchdog_demo: {},
     wwdg_demo: {}, wwdg_window_demo: {}, tim_capture_demo: {},
-    spi_flash_test: {}, flash_test: {}, exti_test: {}, freertos_test: { flags: 'freertos', fams: ['f411', 'f429'] }, // .testvars pinned at 0x2001E000 needs 128K+ RAM — no F401
+    spi_flash_test: {}, flash_test: {}, exti_test: {}, rx_interrupt_test: {}, freertos_test: { flags: 'freertos', fams: ['f411', 'f429'] }, // .testvars pinned at 0x2001E000 needs 128K+ RAM — no F401
     comprehensive_test: {}, crypto_deep_test: {}, rx_crypto_test: {},
     fpu_test: { flags: 'hard' }, fpu_irq_test: { flags: 'hard' }, mpu_test: {},
     test_firmware: {}, i2s_sai_test: { flags: 'O0' }, spi_tft_test: { flags: 'O0' },

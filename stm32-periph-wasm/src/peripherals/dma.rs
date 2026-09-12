@@ -9,7 +9,10 @@ pub struct Dma {
 
 impl Dma {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
-        if name.starts_with("DMA") {
+        // NOTE: prefix match would also swallow "DMA2D" (the Chrom-ART
+        // engine, a separate model) and panic below in stream_irq — match
+        // the two real controllers exactly.
+        if name == "DMA1" || name == "DMA2" {
             Some(Box::new(Self { name: name.to_string(), ..Self::default() }))
         } else {
             None

@@ -476,8 +476,9 @@ impl Cpu {
         // the ALIGN pad flag (bit 9) when STKALIGN padded above.
         let xpsr = self.regs.xpsr | 0x01000000 | if pad != 0 { 0x200 } else { 0 };
         mem.write32(sp.wrapping_add(28), xpsr);
-        // Handler mode always runs on MSP.
-        self.regs.r[13] = self.regs.msp;
+        // Handler mode always runs on MSP (r13 already is the live MSP;
+        // no bank reload here — reloading from the MSP bank would clobber a
+        // live outer-handler SP on a nested take, cpu_bug #11).
         // LR = EXC_RETURN for where this handler returns to: a nested take
         // (preemption) returns via F1 to the outer handler; a thread take
         // selects the thread stack it came from. FType bit follows the
@@ -496,13 +497,13 @@ impl Cpu {
         if irq != -14 {
             self.regs.faultmask = false;
         }
-        // ^ BUG: r13 must be the POST-PUSH sp, not stale msp! Fix below.
+        // r13/msp both advance past the pushed frame (post-push SP). The
+        // THREAD bank advances too when coming from thread+PSP, so a later
+        // `mrs psp` (PendSV save) points BELOW the entry frame.
         self.regs.r[13] = sp;
         self.regs.msp = sp;
-        // Hardware also advances the THREAD bank past the pushed frame, so a
-        // later `mrs psp` (PendSV save) points BELOW the entry frame and the
-        // stmdb doesn't overwrite it. Without this the entry frame is
-        // clobbered and the switch-back unstacks garbage (FreeRTOS slide).
+        // (Without the PSP advance the entry frame is clobbered and the
+        // switch-back unstacks garbage — the FreeRTOS slide.)
         if was_psp {
             self.regs.psp = sp;
         }
@@ -591,12 +592,20 @@ impl Cpu {
             self.raise_sync(sys, mem, Self::usage_target(sys));
             return self.fault.is_none();
         }
-        // Unstack from the bank selected by EXC_RETURN (using CURRENT bank
-        // values — a PendSV task switch updates PSP mid-handler). The FP
-        // variants (ED/E9) select the same bank as their FType=1 twins;
-        // F1/E1 always unstack from MSP (handler mode runs on MSP).
+        // Unstack base: thread-PSP returns (FD/ED) use the PSP bank (in
+        // handler mode r13 is MSP, never PSP). Every other return — F9/E9
+        // to thread-MSP and F1/E1 nested — unstacks from LIVE r13, which in
+        // handler mode always is the current MSP (write_msp keeps them
+        // coherent). Trusting the MSP bank here instead goes stale the
+        // moment a handler moves SP (push/pop without a balancing bank
+        // sync — handler-mode sync is skipped by design), so a nested
+        // preemption followed by an outer return would pop garbage
+        // (cpu_bug #11). A PendSV task switch updates PSP mid-handler,
+        // which is why the comment above calls out CURRENT values.
+        // The FP variants (ED/E9) select the same bank as their FType=1
+        // twins; F1/E1 always unstack from MSP (handler mode runs on MSP).
         let to_psp = exc == EXC_RETURN_PSP || exc == EXC_RETURN_PSP_FP;
-        let mut sp = if to_psp { self.regs.psp } else { self.regs.msp };
+        let mut sp = if to_psp { self.regs.psp } else { self.regs.r[13] };
         // Pop the returning entry's saved state first (its IT/FP context is
         // done; the outer frame owns the model FP state again). The FP pop
         // is unconditional: every take pushes exactly one save, so every
@@ -662,8 +671,10 @@ impl Cpu {
             self.fault = Some(CpuFault { pc, op1: 0xDEAD, op2: 0, len: 2 });
             return false;
         }
-        // In handler mode r13 == MSP; if returning to MSP it must match.
-        // (If a buggy handler moved MSP, trust the bank per ARM.)
+        // In handler mode r13 is the live MSP; a return to MSP unstacks
+        // from it (never from a possibly-stale bank copy, cpu_bug #11).
+        // (If a buggy handler moved MSP via `msr msp`, write_msp moved r13
+        // along with it, so this still trusts exactly what ARM would use.)
         let r0 = mem.read32(sp);
         let r1 = mem.read32(sp.wrapping_add(4));
         let r2 = mem.read32(sp.wrapping_add(8));

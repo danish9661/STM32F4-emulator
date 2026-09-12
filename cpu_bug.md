@@ -110,6 +110,33 @@ snapshot incl. 128 legacy CPU, 21 small-core).
 Status: FIXED in uno-r4 (both cores); F4 core should take the same two
 edits if its take/return still use the bank.
 
+### 12. Predicated T1 ADD/SUB-immediate clobbered flags for the next IT slot — FIXED in uno-r4
+Trigger: Arduino `Serial.print(int)` (printNumber's `ite le; addle r3,#48;
+addgt r3,#55`): every digit printed +0x37 ('4' -> 'k').
+Expected (silicon + GCC + Unicorn): predicated T1 ALU preserves APSR, so
+the else-branch sees the pre-block flags (the codebase already did this
+for MOVS/ADD-reg/SUB-reg: D_PageTicker, S_Start).
+Observed (core): the ADD/SUB-imm3/imm8 arms (0x1C00/0x1E00/0x3000/0x3800)
+lacked the `it_pred` guard, so `addle` cleared N and the skipped `addgt`
+ran too (r3 = 4+48+55 = 107). Native repro: hand-assembled
+udiv+mls+cmp+ite+adds gives r3=103, fixed to 48.
+Pointers: uno-r4 `core/*/src/cpu/thumb.rs` ADD/SUB-imm arms now mirror the
+ADD-reg arm (`if !cpu.it_pred` around `add_flags`/`sub_flags`); proof is
+`ra4m1_ite_add_imm_preserves_flags` in both cores' ra4m1.rs.
+Status: FIXED in uno-r4 (both cores); F4 core should extend its own
+it_pred guards the same way if its imm arms lack them.
+Status (F4, 2026-09-11, UNCOMMITTED): VERIFIED shared (return-side half)
++ FIXED. F4 entry already stacked at live r13 (no stale reload); the
+return unstacked from the MSP bank, which goes stale whenever a handler
+moves SP (handler-mode bank sync is skipped by design), so an outer
+return after a nested preemption popped garbage. Fix (`cpu/mod.rs`):
+unstack base is live r13 for F1/E1/F9/ED, PSP bank only for FD/ED;
+removed the dead `r13 = msp` reload in take. Native test
+`nested_push_outer_returns_clean` (pushing outer + preempting inner,
+marker + thread-resume asserted) FAILS pre-fix (bad access via stale
+unstack) and passes post-fix; cargo 139/139. Existing nesting tests
+used spinning (stackless) handlers — that was the coverage hole.
+
 ## CLOSED log
 
 Everything else ever found is closed with a native test — the full

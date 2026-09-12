@@ -102,13 +102,15 @@ bare('tim_capture_demo', ALL3, ['cap=', 'done'], null, {}, 'timcap');
 bare('spi_flash_test', ALL3, ['SPI FLASH TEST DONE'], ['FAIL '], { ext_devices: DEV.spiflash });
 bare('flash_test', ALL3, ['FLASH TEST DONE']);
 bare('exti_test', ALL3, ['EXTI TEST DONE'], null, IRQ, 'exti');
-bare('comprehensive_test', ALL3, ['=== DONE ==='], ['FAILED', 'FAIL '], { ...IRQ, expectFail: 'silicon+model' });
+bare('comprehensive_test', ['f429'], ['=== DONE ===', 'FAIL: 00000000'], ['FAILED', 'FAIL '], IRQ);
+bare('comprehensive_test', ['f401', 'f411'], ['=== DONE ==='], ['FAILED', 'FAIL '], { ...IRQ, expectFail: 'absent-CRYP/HASH/CAN/DAC/SAI' });
 bare('crypto_deep_test', ['f401', 'f411'], ['=== DONE ==='], ['FAIL '], { expectFail: 'no-CRYP-silicon' });
 bare('i2s_sai_test', ['f401', 'f411'], ['DONE', 'FAIL: 00000000'], null, { expectFail: 'no-SAI-silicon' });
 ino('timer_test', ['bp_f401cc', 'bp_f411ce', 'nucleo_f401re', 'nucleo_f411re'], ['Timer start'], null, { expectFail: 'no-UART4-silicon' });
 ino('echo_test', ['bp_f401cc', 'bp_f411ce', 'nucleo_f401re', 'nucleo_f411re'], ['Echo ready'], null, { expectFail: 'no-UART4-silicon' });
 bare('crypto_deep_test', ['f429'], ['=== DONE ===', 'PASS DT8 w3'], ['FAIL ']);
 bare('rx_crypto_test', ALL3, ['PASS: INT CRC matches polling'], ['FAIL: CRC mismatch'], IRQ, 'rxhost');
+bare('rx_interrupt_test', ALL3, ['CRC=EFE8B569'], null, IRQ, 'rxhost');
 bare('test_firmware', ALL3, ['DONE'], ['FAIL']);
 bare('i2s_sai_test', ['f429'], ['DONE', 'FAIL: 00000000'], ['FAIL ']);
 bare('spi_tft_test', ALL3, ['DONE', 'FAIL: 00000000'], ['FAIL '], { ext_devices: DEV.spiflash });
@@ -127,6 +129,7 @@ bare('fsmc_test', ['f429'], ['=== FSMC Test: done ==='], ['FAIL'], { ext_devices
 bare('dcmi_test', ['f429'], ['=== DCMI Test: done ==='], ['FAIL'], {}, 'dcmi');
 bare('qspi_test', ['f429'], ['QSPI Test done'], ['QSPI FAIL'], { ext_devices: DEV.qspi });
 bare('ltdc_test', ['f429'], ['LTDC pixels OK']);
+E.push(['dma2d_test', 'f429', 'dma2d_test/dma2d_test.bin', ['=== DMA2D Test: done ==='], ['TIMEOUT', 'FAIL '], IRQ, null, 600, 100000]);
 ino('blink_serial', ['disco_f429zi'], ['Hello from UART4!']);
 const UART4KEYS = ['disco_f407vg', 'disco_f429zi', 'black_f407ve', 'black_f407ze'];
 const HASHKEYS = ['disco_f407vg', 'disco_f429zi', 'black_f407ve', 'black_f407ze'];
@@ -173,7 +176,7 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
         } else if (script === 'echo') {
             if (!echoed && uart.includes('Echo ready')) { echoed = true; emu.sendUart('hello'); }
         } else if (script === 'rxhost') {
-            if (!echoed && uart.includes('Sending')) { echoed = true; emu.sendUart('Hello\n'); }
+            if (!echoed && (uart.includes('Sending') || uart.includes('RX-INT-TEST'))) { echoed = true; emu.sendUart('Hello\n'); }
         } else if (script === 'dcmi') {
             if (uart.includes('PHASE2') && !fed2) { fed2 = true; bindings.dcmi_feed_frame(8, 4, DCMI_BIG); }
             if (uart.includes('DCMI ovr OK') && !fed3) { fed3 = true; bindings.dcmi_feed_frame(8, 4, DCMI_BIG); }

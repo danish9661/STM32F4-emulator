@@ -70,6 +70,7 @@ export async function createEmulator(opts) {
         eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
         get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
+        dma2d_take_job, dma2d_job_done, dma2d_convert, dma2d_blend,
         spi_tap, spi_take_events, spi_push_miso,
         fsmc_tap, fsmc_take_events, fsmc_push_data,
         dcmi_feed_frame, dcmi_clear,
@@ -639,6 +640,59 @@ export async function createEmulator(opts) {
                 try { flash_erase_applied(); } catch {}
             } catch {}
         };
+        // DMA2D Chrom-ART job: gather source lines from guest RAM, convert/
+        // blend them through the model helpers, scatter output lines honoring
+        // the OR line offsets, then complete (TCIF + IRQ56 when TCIE is set).
+        const dma2dBpp = (cm) => cm === 0 ? 4 : cm === 1 ? 3 : 2;
+        const wProcessDma2d = () => {
+            let job;
+            try { job = dma2d_take_job(); } catch { return; }
+            if (!job || job.length < 16) return;
+            const j = Array.from(job, (v) => v >>> 0);
+            const [mode, w, h, fgA, fgCM, fgOff, bgA, bgCM, bgOff, outA, outCM, outOff, ocolr, fgAlpha] = j;
+            try {
+                const ob = dma2dBpp(outCM);
+                if (mode === 0) {
+                    // M2M: raw 32-bit word copy with line offsets.
+                    for (let y = 0; y < h; y++) {
+                        const src = wuc.mem_read(BigInt(((fgA + y * (w + fgOff) * 4) >>> 0)), w * 4);
+                        wuc.mem_write(BigInt(((outA + y * (w + outOff) * 4) >>> 0)),
+                            new Uint8Array(src.buffer, src.byteOffset, w * 4));
+                    }
+                } else if (mode === 3) {
+                    // R2M: OCOLR is an ARGB8888 constant; convert it once to
+                    // the output format, then fill every line.
+                    const src = new Uint8Array([(ocolr & 255), ((ocolr >> 8) & 255), ((ocolr >> 16) & 255), ((ocolr >>> 24) & 255)]);
+                    const px = dma2d_convert(0, outCM, 1, 1, src);
+                    const line = new Uint8Array(w * ob);
+                    for (let x = 0; x < w; x++) line.set(px, x * ob);
+                    for (let y = 0; y < h; y++) {
+                        wuc.mem_write(BigInt(((outA + y * (w + outOff) * ob) >>> 0)), line);
+                    }
+                } else if (mode === 1) {
+                    // M2M+PFC: convert FG lines.
+                    const fb = dma2dBpp(fgCM);
+                    for (let y = 0; y < h; y++) {
+                        const src = wuc.mem_read(BigInt(((fgA + y * (w + fgOff) * fb) >>> 0)), w * fb);
+                        const out = dma2d_convert(fgCM, outCM, w, 1,
+                            new Uint8Array(src.buffer, src.byteOffset, w * fb));
+                        wuc.mem_write(BigInt(((outA + y * (w + outOff) * ob) >>> 0)), out);
+                    }
+                } else {
+                    // M2M+blend: FG over BG, one line per convert call.
+                    const fb = dma2dBpp(fgCM), bb = dma2dBpp(bgCM);
+                    for (let y = 0; y < h; y++) {
+                        const fgs = wuc.mem_read(BigInt(((fgA + y * (w + fgOff) * fb) >>> 0)), w * fb);
+                        const bgs = wuc.mem_read(BigInt(((bgA + y * (w + bgOff) * bb) >>> 0)), w * bb);
+                        const out = dma2d_blend(fgCM, bgCM, outCM, w, 1, fgAlpha,
+                            new Uint8Array(fgs.buffer, fgs.byteOffset, w * fb),
+                            new Uint8Array(bgs.buffer, bgs.byteOffset, w * bb));
+                        wuc.mem_write(BigInt(((outA + y * (w + outOff) * ob) >>> 0)), out);
+                    }
+                }
+            } catch {}
+            try { dma2d_job_done(); } catch {}
+        };
         return {
             uc: wuc,
             read32: wread32, write32: wwrite32,
@@ -670,6 +724,7 @@ export async function createEmulator(opts) {
                 try { tick_peripherals(); } catch {}
                 wProcessDma();
                 wProcessFlash();
+                wProcessDma2d();
                 wProcessEth();
                 try { processDevices(); } catch {}
                 if (ENV.WASM_DBG && rxQueue.length > 0) console.log(`[wasm-step] pc=0x${(cpu.get_pc() >>> 0).toString(16)} rxpoll=${eth_is_rx_poll() ? 1 : 0} q=${rxQueue.length}`);

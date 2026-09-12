@@ -306,13 +306,20 @@ int main(void) {
     NVIC_ICER2 = (1 << 23);
 
     // ========== 9. DCMI ==========
+    // No sensor is attached in this test, so no frame ever arrives: a
+    // correctly modeled DCMI stays silent here (an old model raised RIS on
+    // a bare DR read and this check used to lock that quirk). Lock the
+    // correct behavior instead: ENABLE+CAPTURE with FRAME_IE must NOT fire
+    // IRQ78 without data, DR reads 0 (no phantom pixels), CR reads back.
     uart_puts("--- DCMI ---\n");
     dcmi_fired = 0;
     NVIC_ICER2 = (1 << 14); NVIC_ISER2 |= (1 << 14);
-    DCMI_IER = 4; DCMI_CR = 1;
+    DCMI_IER = 1; DCMI_CR = (1 << 14) | 1;
     volatile unsigned int d = DCMI_DR;
     irq_wait(&dcmi_fired);
-    CHECK(dcmi_fired != 0, "DCMI IRQ78 ISR executed");
+    CHECK(dcmi_fired == 0, "DCMI IRQ78 quiet with no frame");
+    CHECK(d == 0, "DCMI DR reads 0 with no frame");
+    CHECK(DCMI_CR == ((1 << 14) | 1), "DCMI CR readable");
     DCMI_CR = 0; DCMI_ICR = 0x1F; NVIC_ICER2 = (1 << 14);
 
     // ========== 10. LTDC ==========
@@ -328,10 +335,15 @@ int main(void) {
     // ========== 11. SDIO ==========
     uart_puts("--- SDIO ---\n");
     sdio_fired = 0;
-    SDIO_POWER = 1; SDIO_MASK = (1 << 6);
-    NVIC_ICER1 = (1 << 17); NVIC_ISER1 |= (1 << 17);
+    SDIO_POWER = 1;
     SDIO_CMD = 0x40;
+    // Poll CMDREND with the IRQ still masked: once IRQ49 is enabled the
+    // ISR clears STA via ICR before this poll could see it (inline
+    // delivery wins the race), so the poll must come first.
     CHECK(SDIO_STA & (1 << 6), "SDIO CMDSENT");
+    SDIO_MASK = (1 << 6);
+    NVIC_ICER1 = (1 << 17); NVIC_ISER1 |= (1 << 17);
+    SDIO_CMD = 0x40; // re-trigger: this one completes through the ISR path
     irq_wait(&sdio_fired);
     CHECK(sdio_fired != 0, "SDIO IRQ49 ISR executed");
     NVIC_ICER1 = (1 << 17);

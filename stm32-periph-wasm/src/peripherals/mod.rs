@@ -38,6 +38,7 @@ pub mod dwt;
 pub mod itm;
 pub mod stir;
 pub mod usb;
+pub mod dma2d;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -61,6 +62,7 @@ use dwt::{Dwt, Demcr};
 use itm::Itm;
 use stir::Stir;
 use usb::UsbFs;
+use dma2d::Dma2d;
 use gpio::GpioPorts;
 use svd_parser::svd::{MaybeArray, PeripheralInfo};
 
@@ -186,6 +188,20 @@ impl Peripherals {
                 use crate::peripherals::pwr::Pwr;
                 if let Some(pwr) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Pwr>() {
                     pwr.wakeup();
+                }
+                break;
+            }
+        }
+    }
+
+    /// Complete the staged DMA2D transfer (called by the JS driver after it
+    /// moved the pixels): TCIF + IRQ56 when TCIE is set.
+    pub fn dma2d_job_done(&self, sys: &System) {
+        for slot in &self.peripherals {
+            if slot.start == 0x4002_B000 {
+                use crate::peripherals::dma2d::Dma2d;
+                if let Some(d) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Dma2d>() {
+                    d.job_done(sys);
                 }
                 break;
             }
@@ -389,6 +405,7 @@ impl Peripherals {
                 .or_else(|| Dac::new(name))
                 .or_else(|| I2c::new(name, ext_devices))
                 .or_else(|| Dma::new(name))
+                .or_else(|| Dma2d::new(name))
                 .or_else(|| Spi::new(name, ext_devices))
                 .or_else(|| Timer::new(name))
                 .or_else(|| Adc::new(name))

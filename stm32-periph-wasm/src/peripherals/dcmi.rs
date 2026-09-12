@@ -161,7 +161,12 @@ impl Peripheral for Dcmi {
         match offset {
             0x00 => {
                 let was_capture = self.cr & 1 != 0;
-                self.cr = value & 0x7FFF_3FFF;
+                // Real CR bits (both SVDs agree): 0 CAPTURE, 1 CM, 2 CROP,
+                // 3 JPEG, 4 ESS, 5 PCKPOL, 6 HSPOL, 7 VSPOL, 9:8 FCRC,
+                // 11:10 EDM, 14 ENABLE (12, 13, 15+ reserved). The old
+                // 0x7FFF_3FFF mask wrongly dropped ENABLE, so it could
+                // never be set.
+                self.cr = value & 0x4FFF;
                 let now_capture = self.cr & 1 != 0;
                 if now_capture && !was_capture {
                     // CAPTURE rising: start consuming the JS-fed frame.
