@@ -3259,14 +3259,14 @@ define `BOARDS_OF_FIRMWARE`; F407 builds additionally blanket `ve`
   (0x7FFF_3FFF dropped ENABLE bit 14; now 0x57F7 per RM0090).
   comprehensive_test 43/43 on 407 + 429; f429 preset added.
 - new/deep_periph: model-regression probes, never green anywhere —
-  deliberately: the model loads the fed frame once (CR-rising/tick when
-  None) and never refreshes a consumed copy, while ticks drain
-  PIXELS_PER_TICK per tick into the 4-deep FIFO — so a one-shot
-  capture-then-read probe sees feed timing, not silicon behavior, and
-  matrix1's passes were stale-feed pollution from earlier dcmi_test
-  entries in the same process. Fixing the lifecycle risks dcmi_test
-  (green, browser-covered, relies on consume-once + CAPTURE-rearm), so
-  new/deep stay boot-only F407 presets. dcmi_test remains the DCMI proof.
+  deliberately: PROVEN step-cadence sensitive (same bin+model+feeds:
+  100k-inst steps red, 5k-inst steps green, browser green) — coarse
+  steps starve the one-shot capture (tick drain outruns feed refresh
+  between the CR write and the DR reads), fine steps keep the stream
+  alive. Same class as the freertos ≤100k rule. So they stay out of the
+  node matrix (which steps 100k) and boot-only F407; the browser
+  (continuous run + camera) passes them deterministically (sweep green
+  twice). dcmi_test remains the DCMI proof.
 - UI wiring is generated (`.pw-scratch/gen_presets.py`, rerunnable):
   bundle + compat + dropdown + IRQ/UART4/FREERTOS/DEVICE/startsWith gates.
   Gotchas it hit: hidden-select anchor must be `fwSelect`'s close (the
