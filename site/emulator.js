@@ -69,6 +69,7 @@ export async function createEmulator(opts) {
         eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll,
         eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
         eth_mac_accept, eth_rx_csum_status, eth_check_wol, eth_tx_wire_busy,
+        eth_rx_wire_busy, eth_arm_collision, eth_take_collision,
         eth_get_maccr, eth_loopback_tx, eth_ptp_tse, eth_ptp_sec, eth_ptp_sub,
         get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
@@ -621,6 +622,60 @@ export async function createEmulator(opts) {
         let instCount = 0;
         let lastTxLen = 0; // bytes of the last TX frame (wire pacing)
         // Compact mirrors of processEth/processDma for the wasm memory.
+        // Shared RX delivery: WOL inspect, accept gate, checksum
+        // status, snapshot, descriptor write. `force` bypasses the
+        // RX-poll requirement (sleep drain: the wire delivers even
+        // when the guest can't re-arm). Returns true when a frame
+        // was consumed from the queue.
+        const wDeliverRx = (force) => {
+            if (rxQueue.length === 0) return false;
+            if (!force && !eth_is_rx_poll()) return false;
+            if (ENV.WASM_DBG) console.log(`[wasm-rx] inject idx=${E.rxInjectIdx} q=${rxQueue.length} poll=${eth_is_rx_poll() ? 1 : 0}${force ? ' FORCE' : ''}`);
+            const frame = rxQueue.shift();
+            const len = Math.min(frame.length, E.rxStride);
+            // Wake-on-LAN inspection runs before filtering (it works
+            // in powerdown too); then the MAC accept filter drops
+            // rejected frames with no RS/flag (like silicon).
+            try { eth_check_wol(frame); } catch {}
+            let accepted = true;
+            try { accepted = eth_mac_accept(frame); } catch {}
+            // RX checksum status -> RDES0 IPHCE(7)/PCE(0).
+            let rdesExtra = 0;
+            try {
+                const st = eth_rx_csum_status(frame) >>> 0;
+                if ((st & 1) && !(st & 2)) rdesExtra |= 0x80;
+                if ((st & 4) && !(st & 8)) rdesExtra |= 0x01;
+            } catch {}
+            eth_clear_rx_poll();
+            if (!accepted) {
+                if (ENV.WASM_DBG) console.log('[wasm-rx] dropped by accept filter');
+            } else if (!irq_eth) {
+                const idx = E.rxInjectIdx;
+                E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
+                const descAddr = E.rxDesc + idx * 8;
+                const bufAddr = E.rxBuf + idx * E.rxStride;
+                wuc.mem_write(BigInt(bufAddr), frame.subarray(0, len));
+                const wb = new Uint8Array(4);
+                new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
+                wuc.mem_write(BigInt(descAddr), wb);
+                wwrite32(E.rxFrameIdx, idx);
+                wwrite32(E.rxFrameLen, len);
+                wwrite32(E.irqFlag, wread32(E.irqFlag) | 2);
+            } else {
+                // IRQ-driven firmware owns its descriptor layout: walk the
+                // guest RX list from the model's poll address for the first
+                // DMA-owned descriptor and deliver there (its ISR scans).
+                injectRxIrq((a, d) => wuc.mem_write(a, d), wread32, frame, len, rdesExtra);
+            }
+            // Dropped frames raise no RS (the DMA never saw them).
+            // Delivered frames pace RS by their wire time.
+            if (accepted) {
+                try { eth_rx_wire_busy(len); } catch {}
+                eth_rx_done();
+            }
+            return true;
+        };
+
         const wProcessEth = () => {
             if (eth_is_tx_poll()) {
                 const descAddr = eth_get_tx_desc_addr();
@@ -661,7 +716,14 @@ export async function createEmulator(opts) {
                             }
                         }
                         const wb = new Uint8Array(4);
-                        new DataView(wb.buffer).setUint32(0, (tdes0 & ~0x80000000) | 0x20000000 | ttss, true);
+                        // Single-node collision report: an armed collision
+                        // ORs EC + CC=15 into the writeback, but only in
+                        // half-duplex (silicon never collides full-duplex).
+                        let ec = 0;
+                        try {
+                            if (eth_take_collision() && (eth_get_maccr() & 0x800) === 0) ec = 0x100 | (0xF << 3);
+                        } catch {}
+                        new DataView(wb.buffer).setUint32(0, (tdes0 & ~0x80000000) | 0x20000000 | ttss | ec, true);
                         wuc.mem_write(BigInt(descAddr), wb);
                     }
                 }
@@ -672,47 +734,7 @@ export async function createEmulator(opts) {
                 eth_tx_done();
                 if (!irq_eth) wwrite32(E.irqFlag, wread32(E.irqFlag) | 1);
             }
-            if (eth_is_rx_poll() && rxQueue.length > 0) {
-                if (ENV.WASM_DBG) console.log(`[wasm-rx] inject idx=${E.rxInjectIdx} q=${rxQueue.length} poll=1`);
-                const frame = rxQueue.shift();
-                const len = Math.min(frame.length, E.rxStride);
-                // Wake-on-LAN inspection runs before filtering (it works
-                // in powerdown too); then the MAC accept filter drops
-                // rejected frames with no RS/flag (like silicon).
-                try { eth_check_wol(frame); } catch {}
-                let accepted = true;
-                try { accepted = eth_mac_accept(frame); } catch {}
-                // RX checksum status -> RDES0 IPHCE(7)/PCE(0).
-                let rdesExtra = 0;
-                try {
-                    const st = eth_rx_csum_status(frame) >>> 0;
-                    if ((st & 1) && !(st & 2)) rdesExtra |= 0x80;
-                    if ((st & 4) && !(st & 8)) rdesExtra |= 0x01;
-                } catch {}
-                eth_clear_rx_poll();
-                if (!accepted) {
-                    if (ENV.WASM_DBG) console.log('[wasm-rx] dropped by accept filter');
-                } else if (!irq_eth) {
-                    const idx = E.rxInjectIdx;
-                    E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
-                    const descAddr = E.rxDesc + idx * 8;
-                    const bufAddr = E.rxBuf + idx * E.rxStride;
-                    wuc.mem_write(BigInt(bufAddr), frame.subarray(0, len));
-                    const wb = new Uint8Array(4);
-                    new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
-                    wuc.mem_write(BigInt(descAddr), wb);
-                    wwrite32(E.rxFrameIdx, idx);
-                    wwrite32(E.rxFrameLen, len);
-                    wwrite32(E.irqFlag, wread32(E.irqFlag) | 2);
-                } else {
-                    // IRQ-driven firmware owns its descriptor layout: walk the
-                    // guest RX list from the model's poll address for the first
-                    // DMA-owned descriptor and deliver there (its ISR scans).
-                    injectRxIrq((a, d) => wuc.mem_write(a, d), wread32, frame, len, rdesExtra);
-                }
-                // Dropped frames raise no RS (the DMA never saw them).
-                if (accepted) eth_rx_done();
-            }
+            if (eth_is_rx_poll() && rxQueue.length > 0) wDeliverRx(false);
         };
         const wIsPeriph = (a) => (a >= 0x40000000 && a < 0xB0000000) || (a >= 0xE0000000 && a < 0xE1000000);
         const wProcessDma = () => {
@@ -810,10 +832,14 @@ export async function createEmulator(opts) {
             setFpscr: (v) => { cpu.set_fpscr(v >>> 0); },
             step: (n = 100000) => {
                 // WFI/WFE sleep: advance virtual time (which fires the RTC
-                // alarm etc.), then wake when an interrupt is pending.
+                // alarm etc.), drain any queued RX frames (the wire
+                // delivers even though the guest can't re-arm — this is
+                // what lets a WOL magic packet wake STOP), then wake
+                // when an interrupt is pending.
                 if (typeof cpu.sleeping === 'function' && cpu.sleeping()) {
                     try { tick_n(120000); } catch {}
                     try { periph_read(0x40002800, 4); } catch {}
+                    try { wDeliverRx(true); } catch {}
                     if (has_pending_interrupt()) {
                         try {
                             if (((wread32(0xE000ED10) >>> 0) >> 2) & 1) pwr_wakeup();

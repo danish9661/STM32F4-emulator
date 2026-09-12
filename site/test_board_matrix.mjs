@@ -137,7 +137,7 @@ E.push(['eth_http_f429', 'f429', 'eth_http/eth_http_f429.bin', ['TCP connected']
 const IRQETH = { enable_irqs: true, irq_eth: true };
 E.push(['eth_dhcp_f429', 'f429', 'eth_dhcp/eth_dhcp_f429.bin', ['=== DHCP SUCCESS ==='], null, IRQETH, 'netsim', 600, 100000]);
 E.push(['eth_test_f429', 'f429', 'eth_test/eth_test_f429.bin', ['ETH Test: done', 'ICMP reply OK', 'ICMP RX reply sent', 'DNS IP=093.184.216.034', 'UDP echo OK'], ['TIMEOUT!'], IRQETH, 'netsim', 900, 200000]);
-E.push(['eth_feat_test_f429', 'f429', 'eth_feat_test/eth_feat_test_f429.bin', ['PHY link OK', 'PHY AN restart OK', 'PHY force OK', 'CSUM TX insert OK', 'CSUM RX IPHCE OK', 'CSUM RX PCE OK', 'MCAST OK', 'VLAN OK', 'PTP target OK', 'PTP drift OK', 'PTP TX snap OK', 'PTP RX snap OK', 'WOL OK', 'WOL filter OK', 'WIRE RATE OK', 'PPS window done', 'FEAT Test: done'], ['FAIL', 'TIMEOUT'], IRQETH, 'netsim', 8000, 5000,
+E.push(['eth_feat_test_f429', 'f429', 'eth_feat_test/eth_feat_test_f429.bin', ['PHY link OK', 'PHY AN restart OK', 'PHY force OK', 'PHY media RMII OK', 'PHY media MII OK', 'CSUM TX insert OK', 'CSUM RX IPHCE OK', 'CSUM RX PCE OK', 'MCAST OK', 'VLAN OK', 'PTP target OK', 'PTP drift OK', 'PTP TX snap OK', 'PTP RX snap OK', 'WOL OK', 'WOL filter OK', 'WIRE RATE OK', 'COLLIDE OK', 'COLLIDE DROP OK', 'RX RATE OK', 'PPS window done', 'FEAT Test: done'], ['FAIL', 'TIMEOUT'], IRQETH, 'netsim', 8000, 5000,
     // PPS scope probe: 200k inst at 32768 Hz (edge per ~5041 inst) ~= 39.
     (b) => { const n = b.eth_pps_count(); return (n >= 20 && n <= 60) ? null : ('pps_count=' + n); }]);
 E.push(['lwip_demo_f429', 'f429', 'lwip_demo/lwip_demo_f429.bin', ['LWIP init OK', 'LWIP DNS 093.184.216.034', 'LWIP TCP echo OK', 'LWIP UDP echo OK', 'LWIP DEMO DONE'], ['FAIL'], IRQETH, 'netsim', 1200, 200000]);
@@ -172,7 +172,7 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
     });
     if (script === 'wav') bindings.audio_load_wav(makeWav());
     if (script === 'dcmi') bindings.dcmi_feed_frame(2, 2, DCMI_SMALL);
-    let uart = '', fed2 = false, fed3 = false, raised = 0, raising = false, echoed = false;
+    let uart = '', fed2 = false, fed3 = false, raised = 0, raising = false, echoed = false, collideDone = 0;
     let ok = false;
     for (let i = 0; i < iters; i++) {
         emu.step(step);
@@ -195,6 +195,14 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
         } else if (script === 'dcmi') {
             if (uart.includes('PHASE2') && !fed2) { fed2 = true; bindings.dcmi_feed_frame(8, 4, DCMI_BIG); }
             if (uart.includes('DCMI ovr OK') && !fed3) { fed3 = true; bindings.dcmi_feed_frame(8, 4, DCMI_BIG); }
+        }
+        // Collision arming (any firmware): arm once per COLLIDE ARM print.
+        // The guest spins before sending so the arm lands first (the
+        // driver decides EC at poll-processing time, not at TS).
+        const arms = uart.split('COLLIDE ARM').length - 1;
+        while (collideDone < arms) {
+            collideDone++;
+            try { bindings.eth_arm_collision(); } catch {}
         }
         const fault = emu.faultInfo();
         if (fault) { uart += `\n[FAULT ${JSON.stringify(fault)}]`; break; }

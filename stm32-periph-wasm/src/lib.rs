@@ -470,6 +470,30 @@ pub fn eth_ptp_sub() -> u32 { crate::peripherals::eth::eth_ptp_sub(sys()) }
 #[wasm_bindgen]
 pub fn eth_pps_count() -> u32 { crate::peripherals::eth::eth_pps_count(sys()) }
 
+/// PPS pin level (square wave at the PTPPPSCR rate, 50% duty). The
+/// readable model of the PPS output — sample it like a logic analyzer.
+#[wasm_bindgen]
+pub fn eth_pps_level() -> bool { crate::peripherals::eth::eth_pps_level(sys()) }
+
+/// Arm RX wire pacing for a delivered frame (RS waits the wire time).
+#[wasm_bindgen]
+pub fn eth_rx_wire_busy(len: u32) {
+    crate::peripherals::eth::eth_rx_wire_busy(sys(), len)
+}
+
+/// Arm a single-node collision for the next TX completion (consumed once;
+/// the driver reports EC + CC=15 when the MAC is half-duplex).
+#[wasm_bindgen]
+pub fn eth_arm_collision() {
+    crate::peripherals::eth::eth_arm_collision(sys())
+}
+
+/// Take a pending armed collision (one-shot, false when none armed).
+#[wasm_bindgen]
+pub fn eth_take_collision() -> bool {
+    crate::peripherals::eth::eth_take_collision(sys())
+}
+
 /// USB OTG FS host-side test API (the harness plays USB host; see
 /// peripherals/usb.rs). Drive reset -> enum-done -> SETUP/OUT inject,
 /// and drain device-to-host IN blobs with usb_take_in.

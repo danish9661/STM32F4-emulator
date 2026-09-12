@@ -63,17 +63,19 @@ prints + LED blink + SysTick `delay()`) is built for all eight targets
   with a 5-phase IRQ-driven firmware proof (`dma2d_test`, in `npm test`
   and the browser). No gap remains.
 - **F429 Ethernet** — fully working: same-sources builds
-  (`eth_http/dhcp/test/irq_test_f429`, SRAM layouts nm-identical to
-  F407), gateway runs (DHCP→TCP→HTTP, DHCP loop, TX test) and netsim
-  flows on the Keil map; polling + IRQ paths, ARP/DHCP/TCP/HTTP all
-  covered. No firmware speaks ICMP/DNS — nothing to verify there.
+  (`eth_http/dhcp/test/irq_test/feat/lwip_f429`, SRAM layouts nm-identical
+  to F407), gateway runs (DHCP→TCP→HTTP, DHCP loop, TX test) and netsim
+  flows on the Keil map; polling + IRQ paths, ARP/IPv4/ICMP/UDP/DHCP/DNS/
+  TCP/HTTP/custom-PING all covered, plus PHY/MDIO, checksum offload, MAC
+  filtering, VLAN, PTP, WOL, wire pacing (`eth_feat_test`) and a
+  socket-style demo (`lwip_demo`). See `NETWORKING.md`.
 - **F429 GPIOK** — on silicon, covered by the generic GPIO bank, but no
   firmware drives a K pin yet.
-- **Known model gaps (fail identically on stock F407, not board issues)** —
-  DCMI empty-capture IRQ + SDIO CMDSENT flag (comprehensive_test's two
-  red checks), `new/deep_periph_test` (never green anywhere; kept as
-  boot-only F407 presets), `rx_interrupt_test` Arduino builds (sketch ISR
-  collides with the core's USART1 handler on every FQBN).
+- **Former model gaps, now closed** — DCMI empty-capture IRQ + SDIO
+  CMDSENT (comprehensive_test is 43/43 on 407 + 429) and the
+  `rx_interrupt_test` Arduino builds (converted to bare-metal; all 4 maps
+  pass). `new/deep_periph_test` stay boot-only F407 presets (step-cadence
+  sensitive by design; the browser passes them deterministically).
 - **M0+ chips are out of scope** — different core; see `cpu_bug.md`.
 
 ## Adding a board

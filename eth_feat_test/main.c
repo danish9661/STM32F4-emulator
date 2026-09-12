@@ -176,6 +176,15 @@ int main(void) {
         }
         MACCR |= (1 << 14) | (1 << 11); // FES + DM per negotiation
         uart_puts("PHY MAC programmed\r\n");
+        // Media interface select (SYSCFG PMC RMII/MII): the data path is
+        // mode-agnostic (no pins to mux), but the select element must
+        // stick and traffic must flow in both modes.
+        SYSCFG_PMC = (1 << 23); // RMII
+        if ((SYSCFG_PMC & (1 << 23)) != 0) uart_puts("PHY media RMII OK\r\n");
+        else uart_puts("PHY MEDIA FAIL\r\n");
+        SYSCFG_PMC = 0; // MII
+        if ((SYSCFG_PMC & (1 << 23)) == 0) uart_puts("PHY media MII OK\r\n");
+        else uart_puts("PHY MEDIA FAIL\r\n");
     }
 
     // ---- 2/3. Checksum offload via loopback ----
@@ -456,10 +465,74 @@ int main(void) {
         } else uart_puts("WIRE TX TIMEOUT\r\n");
     }
 
+    // ---- 8b. Collision report (half-duplex error path) ----
+    // The matrix hook arms one collision when it sees COLLIDE ARM; the
+    // send must follow after a spin so the arm lands first (the driver
+    // decides EC at poll-processing time, not at TS).
+    {
+        MACCR &= ~(1 << 11); // DM=0 half-duplex
+        MACCR |= (1 << 12); // LM loopback (self-contained)
+        uart_puts("COLLIDE ARM\r\n");
+        for (volatile int i = 0; i < 20000; i++);
+        {
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
+            tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
+            if (eth_send_frame(14 + 20 + 12, 0)) {
+                (void)eth_recv_frame(20000);
+                unsigned int t0 = tx_desc[0];
+                if ((t0 & 0x100) && ((t0 >> 3) & 0xF) == 0xF)
+                    uart_puts("COLLIDE OK\r\n");
+                else { uart_puts("COLLIDE FAIL "); uart_hex32(t0); uart_puts("\r\n"); }
+            } else uart_puts("COLLIDE TX TIMEOUT\r\n");
+        }
+        // Full-duplex negative: an armed collision must be dropped.
+        MACCR &= ~(1 << 12);
+        MACCR |= (1 << 11); // DM=1 full
+        uart_puts("COLLIDE ARM\r\n");
+        for (volatile int i = 0; i < 20000; i++);
+        {
+            unsigned int off = ip_header((unsigned char *)gw_mac, gw_ip, 17, 8 + 4);
+            tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
+            tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
+            if (eth_send_frame(14 + 20 + 12, 0)) {
+                (void)eth_recv_frame(20000);
+                if (!(tx_desc[0] & 0x100)) uart_puts("COLLIDE DROP OK\r\n");
+                else uart_puts("COLLIDE DROP FAIL\r\n");
+            }
+        }
+    }
+
+    // ---- 8c. RX wire pacing: loopback 1200B, DWT from send to recv ----
+    // Covers TX pacing (~17k) + RX pacing (~17k) + step overshoot.
+    {
+        MACCR |= (1 << 12); // LM loopback
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 1200);
+        tx_frame[off] = 0; tx_frame[off + 1] = 8;
+        tx_frame[off + 2] = 0; tx_frame[off + 3] = 9;
+        tx_frame[off + 4] = (1200 + 8) >> 8; tx_frame[off + 5] = (1200 + 8) & 0xFF;
+        tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
+        for (int i = 0; i < 1200; i++) tx_frame[off + 8 + i] = i & 0xFF;
+        dwt_zero();
+        if (eth_send_frame(14 + 20 + 8 + 1200, 0)) {
+            unsigned int len = eth_recv_frame(200000);
+            unsigned int d = dwt_rd();
+            uart_puts("RX cycles=");
+            uart_hex32(d);
+            uart_puts("\r\n");
+            if (len && d > 20000 && d < 80000) uart_puts("RX RATE OK\r\n");
+            else uart_puts("RX RATE OFF\r\n");
+        } else uart_puts("RX RATE TX TIMEOUT\r\n");
+        MACCR &= ~(1 << 12);
+    }
+
     // ---- 9. PPS: 32768 Hz for a CYCCNT-measured 200k-inst window ----
     // (~39 edges). The count is model-side (the pin's observable sink);
     // the harness asserts the band (see the matrix post hook).
     {
+        uart_puts("PPS ppscr before=");
+        uart_hex32(PTPPPSCR);
+        uart_puts("\r\n");
         PTPPPSCR = 15;
         dwt_zero(); while (dwt_rd() < 200000);
         PTPPPSCR = 0; // back to 1 Hz: ~0 edges over the rest of the run

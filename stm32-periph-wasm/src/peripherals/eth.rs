@@ -84,6 +84,14 @@ pub struct EthernetMac {
     // TX wire pacing: virtual-instruction count until the wire is free.
     // Set by eth_tx_wire_busy(len); TS completion waits for it.
     tx_busy_until: u64,
+    // RX wire pacing (same clock): set by eth_rx_wire_busy(len) at frame
+    // delivery; RS completion waits for it.
+    rx_busy_until: u64,
+    // Single-node collision injection (half-duplex error-reporting path):
+    // armed by eth_arm_collision, consumed once by eth_take_collision.
+    // There is no contending peer, so this models the MAC's error
+    // response (EC + CC status), not backoff timing.
+    tx_collide_armed: bool,
     // PTP timebase (binary 2^31 rollover): current time, update shadow,
     // target + armed flag, and the last tick the clock was advanced on.
     ptp_sec: u32, ptp_sub: u32,
@@ -136,6 +144,8 @@ impl EthernetMac {
             phy_bcr: 0x3100, phy_anar: 0x01E1, phy_anlpar: 0x45E1,
             phy_speed100: true, phy_full: true, phy_an_done: true, phy_done_at: 0,
             tx_busy_until: 0,
+            rx_busy_until: 0,
+            tx_collide_armed: false,
             ptp_sec: 0, ptp_sub: 0,
             ptp_tsec: 0, ptp_tsub: 0, ptp_target_armed: false, ptp_last: 0,
             ptp_acc: 0, ptp_addend: 0, ptp_ssinc: 0,
@@ -284,7 +294,7 @@ impl EthernetMac {
             self.dmasr |= DMA_TS;
             self.pending_tx_done = false;
         }
-        if self.pending_rx_done && (self.dmasr & DMA_RS) == 0 {
+        if self.pending_rx_done && (self.dmasr & DMA_RS) == 0 && now >= self.rx_busy_until {
             self.dmasr |= DMA_RS;
             self.pending_rx_done = false;
         }
@@ -520,6 +530,24 @@ impl Peripheral for EthernetMac {
                     self.ptpttlr = value;
                     self.ptp_tsub = value;
                     self.ptp_target_armed = true;
+                }
+                0x2C => {
+                    // Frequency change preserves divider phase (rescales
+                    // the residue) instead of replaying stale backlog as
+                    // a burst of phantom edges — the residue belongs to
+                    // the old period.
+                    let old_n = (self.ptpppscr & 0xF) as u32;
+                    let new_n = (value & 0xF) as u32;
+                    if old_n != new_n {
+                        let old_p = if old_n < 31 { 1u64 << (31 - old_n) } else { 0 };
+                        let new_p = if new_n < 31 { 1u64 << (31 - new_n) } else { 0 };
+                        self.pps_acc = if old_p > 0 && new_p > 0 {
+                            self.pps_acc * new_p / old_p
+                        } else {
+                            0
+                        };
+                    }
+                    self.ptpppscr = value & 0x0F;
                 }
                 _ => {}
             },
@@ -962,6 +990,33 @@ pub fn eth_tx_wire_busy(sys: &System, len: u32) {
     with_dma_mut(sys, |d| d.tx_busy_until = until);
 }
 
+/// Driver entry: arm RX wire pacing for a delivered `len`-byte frame.
+/// RS completion waits for it (mirrors the TX path).
+pub fn eth_rx_wire_busy(sys: &System, len: u32) {
+    let mhz: u64 = if with_mac(sys, |m| (m.maccr >> 14) & 1) != 0 { 100 } else { 10 };
+    let inst = (len as u64 + 20) * 8 * 168 / mhz;
+    let until = system::instruction_count() + inst;
+    with_dma_mut(sys, |d| d.rx_busy_until = until);
+}
+
+/// Arm a single-node collision for the next TX completion (half-duplex
+/// error-reporting path). Consumed once by eth_take_collision.
+pub fn eth_arm_collision(sys: &System) {
+    with_dma_mut(sys, |d| d.tx_collide_armed = true);
+}
+
+/// Take a pending armed collision (one-shot). The driver ORs EC + CC=15
+/// into the TX writeback when the MAC is in half-duplex (DM==0); in
+/// full-duplex the arm is silently dropped (silicon never collides).
+pub fn eth_take_collision(sys: &System) -> bool {
+    let mut out = false;
+    with_dma_mut(sys, |d| {
+        out = d.tx_collide_armed;
+        d.tx_collide_armed = false;
+    });
+    out
+}
+
 /// Driver entry: current MACCR (FES/DM/LM/ROD checks).
 pub fn eth_get_maccr(sys: &System) -> u32 {
     with_mac(sys, |m| m.maccr)
@@ -989,6 +1044,22 @@ pub fn eth_ptp_sub(sys: &System) -> u32 {
 /// Driver entry: PPS edge count (the observable sink for the PPS pin).
 pub fn eth_pps_count(sys: &System) -> u32 {
     with_ptp(sys, |p| p.pps_count as u64) as u32
+}
+
+/// Driver entry: PPS pin level (square wave at the PTPPPSCR rate, 50%
+/// duty from the edge residue). The readable model of the PPS output —
+/// a harness samples this like a logic analyzer on the pin.
+pub fn eth_pps_level(sys: &System) -> bool {
+    with_ptp(sys, |p| {
+        if p.ptptscr & 1 == 0 {
+            return 0;
+        }
+        let n = (p.ptpppscr & 0xF) as u32;
+        if n >= 31 {
+            return 0;
+        }
+        ((p.pps_acc >= (1u64 << (30 - n))) as u64)
+    }) != 0
 }
 
 #[cfg(test)]
@@ -1292,5 +1363,104 @@ mod gap2_tests {
         let r2 = eth_check_wol(&sys, &f);
         assert_eq!(r2 & 2, 0, "mismatch matched");
         assert_eq!(sys.p.read(&sys, 0x4002_802C, 4) & 0x40, 0);
+    }
+}
+
+#[cfg(test)]
+mod gap3_tests {
+    use super::*;
+    use crate::system::test_dummy_system;
+
+    static G3_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn collision_arm_take_once() {
+        let _g = G3_LOCK.lock().unwrap();
+        let sys = test_dummy_system();
+        assert!(!eth_take_collision(&sys));
+        eth_arm_collision(&sys);
+        assert!(eth_take_collision(&sys));
+        assert!(!eth_take_collision(&sys)); // one-shot
+    }
+
+    #[test]
+    fn rx_pacing_gates_rs() {
+        let _g = G3_LOCK.lock().unwrap();
+        let sys = test_dummy_system();
+        // FES on (100M): 1200B -> ~16.7k inst of wire time.
+        sys.p.write(&sys, 0x4002_8000, 4, (1 << 14) | (1 << 2) | (1 << 3));
+        let t0 = system::instruction_count();
+        eth_rx_wire_busy(&sys, 1200);
+        system::eth_set_done(2);
+        // Immediate tick: RS must NOT be set yet.
+        sys.p.peripherals.iter().for_each(|s| s.peripheral.borrow_mut().tick(&sys));
+        let sr = sys.p.read(&sys, 0x4002_9014, 4);
+        assert_eq!(sr & (1 << 6), 0, "RS set before wire time");
+        // Past the wire time: RS lands.
+        system::INSTRUCTION_COUNT.fetch_add(100_000, std::sync::atomic::Ordering::Relaxed);
+        system::eth_set_done(2);
+        sys.p.peripherals.iter().for_each(|s| s.peripheral.borrow_mut().tick(&sys));
+        let sr2 = sys.p.read(&sys, 0x4002_9014, 4);
+        assert_ne!(sr2 & (1 << 6), 0, "RS missing after wire time");
+        let _ = t0;
+    }
+
+    #[test]
+    fn pps_level_toggles() {
+        let _g = G3_LOCK.lock().unwrap();
+        let sys = test_dummy_system();
+        // TSE + addend/SSINC + TSFCU + 32768 Hz, all via MMIO.
+        sys.p.write(&sys, 0x4002_8700, 4, 1);
+        sys.p.write(&sys, 0x4002_8718, 4, 0x8000_0000); // SAR
+        sys.p.write(&sys, 0x4002_8704, 4, 26); // SSIR
+        sys.p.write(&sys, 0x4002_8700, 4, 1 | (1 << 1)); // TSE + TSFCU
+        sys.p.write(&sys, 0x4002_872C, 4, 15); // PPSFREQ
+        system::INSTRUCTION_COUNT.fetch_add(1000, std::sync::atomic::Ordering::Relaxed);
+        sys.p.peripherals.iter().for_each(|sl| sl.peripheral.borrow_mut().tick(&sys));
+        let mut seen = [eth_pps_level(&sys), false];
+        for _ in 0..40 {
+            system::INSTRUCTION_COUNT.fetch_add(1000, std::sync::atomic::Ordering::Relaxed);
+            sys.p.peripherals.iter().for_each(|sl| sl.peripheral.borrow_mut().tick(&sys));
+            let l = eth_pps_level(&sys);
+            if l != seen[0] {
+                seen[1] = true;
+                break;
+            }
+        }
+        assert!(seen[1], "PPS level never toggled through the export");
+    }
+}
+
+#[cfg(test)]
+mod gap4_tests {
+    use super::*;
+    use crate::system::{test_dummy_system, test_system_with};
+    use crate::ext_devices::ExtDevices;
+
+    fn count_ptp(sys: &std::rc::Rc<crate::system::System>) -> usize {
+        sys.p.peripherals.iter().filter(|s| {
+            s.peripheral.borrow_mut().as_any_mut().downcast_mut::<EthernetMac>().map(|m| m.block_id()) == Some(2)
+        }).count()
+    }
+
+    #[test]
+    fn single_ptp_new_wasm() {
+        assert_eq!(count_ptp(&test_dummy_system()), 1);
+    }
+
+    #[test]
+    fn single_ptp_keil_f429() {
+        let svd = include_str!("../../../site/vendor/stm32f429.svd");
+        let sys = test_system_with(&ExtDevices::default());
+        let _ = svd;
+        // from_svd path needs full init; emulate via Peripherals::from_svd directly
+        let p = crate::peripherals::Peripherals::from_svd(
+            include_str!("../../../site/vendor/stm32f429.svd"),
+            crate::system::dummy_gpio(), &ExtDevices::default());
+        let n = p.peripherals.iter().filter(|s| {
+            s.peripheral.borrow_mut().as_any_mut().downcast_mut::<EthernetMac>().map(|m| m.block_id()) == Some(2)
+        }).count();
+        assert_eq!(n, 1, "keil map has {} PTP instances", n);
+        let _ = sys;
     }
 }

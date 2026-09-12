@@ -39,6 +39,9 @@
 #define RCC_BASE    0x40023800
 #define RCC_AHB1ENR (*(volatile unsigned int *)(RCC_BASE + 0x30))
 
+#define SYSCFG_BASE 0x40013800
+#define SYSCFG_PMC  (*(volatile unsigned int *)(SYSCFG_BASE + 0x04))
+
 #define NVIC_ISER1  (*(volatile unsigned int *)0xE000E104)
 
 #define USART1_BASE 0x40011000

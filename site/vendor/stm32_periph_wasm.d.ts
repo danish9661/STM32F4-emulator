@@ -197,6 +197,12 @@ export function dma_periph_write(addr: number, bytes: Uint8Array): void;
 export function dma_set_completed(stream_idx: number, success: boolean): void;
 
 /**
+ * Arm a single-node collision for the next TX completion (consumed once;
+ * the driver reports EC + CC=15 when the MAC is half-duplex).
+ */
+export function eth_arm_collision(): void;
+
+/**
  * Wake-on-LAN inspection of a received frame. Returns bit 0 on a magic
  * packet (latches MPR when MPE is set, pends IRQ 62 when PMTIM is set).
  * Wakeup-frame CRC matching is not modeled (RWKPR never sets).
@@ -258,6 +264,12 @@ export function eth_mac_accept(frame: Uint8Array): boolean;
 export function eth_pps_count(): number;
 
 /**
+ * PPS pin level (square wave at the PTPPPSCR rate, 50% duty). The
+ * readable model of the PPS output — sample it like a logic analyzer.
+ */
+export function eth_pps_level(): boolean;
+
+/**
  * PTP current seconds / subseconds for TDES6/7 + RDES6/7 snapshots.
  */
 export function eth_ptp_sec(): number;
@@ -283,6 +295,11 @@ export function eth_rx_csum_status(frame: Uint8Array): number;
 export function eth_rx_done(): void;
 
 /**
+ * Arm RX wire pacing for a delivered frame (RS waits the wire time).
+ */
+export function eth_rx_wire_busy(len: number): void;
+
+/**
  * Re-arm the RX poll flag from JS (used when more packets are pending in gwRxQueue).
  */
 export function eth_signal_rx_poll(desc_addr: number): void;
@@ -291,6 +308,11 @@ export function eth_signal_rx_poll(desc_addr: number): void;
  * Re-arm the TX poll flag from JS (used when more TX descriptors are pending).
  */
 export function eth_signal_tx_poll(desc_addr: number): void;
+
+/**
+ * Take a pending armed collision (one-shot, false when none armed).
+ */
+export function eth_take_collision(): boolean;
 
 /**
  * Signal to the peripheral that TX descriptor processing is complete.
@@ -583,6 +605,7 @@ export interface InitOutput {
     readonly dma_periph_read: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly dma_periph_write: (a: number, b: number, c: number) => void;
     readonly dma_set_completed: (a: number, b: number) => void;
+    readonly eth_arm_collision: () => void;
     readonly eth_check_wol: (a: number, b: number) => number;
     readonly eth_clear_rx_poll: () => void;
     readonly eth_clear_tx_poll: () => void;
@@ -594,13 +617,16 @@ export interface InitOutput {
     readonly eth_loopback_tx: () => number;
     readonly eth_mac_accept: (a: number, b: number) => number;
     readonly eth_pps_count: () => number;
+    readonly eth_pps_level: () => number;
     readonly eth_ptp_sec: () => number;
     readonly eth_ptp_sub: () => number;
     readonly eth_ptp_tse: () => number;
     readonly eth_rx_csum_status: (a: number, b: number) => number;
     readonly eth_rx_done: () => void;
+    readonly eth_rx_wire_busy: (a: number) => void;
     readonly eth_signal_rx_poll: (a: number) => void;
     readonly eth_signal_tx_poll: (a: number) => void;
+    readonly eth_take_collision: () => number;
     readonly eth_tx_done: () => void;
     readonly eth_tx_wire_busy: (a: number) => void;
     readonly flash_erase_applied: () => void;

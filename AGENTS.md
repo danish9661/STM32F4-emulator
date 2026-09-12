@@ -3480,3 +3480,27 @@ above frames is firmware. What the model + drivers + firmware now cover:
   counter IS the sink), addend values as anything but rate control.
 - Versions: VENDOR_V 19→20 (app 26→27/doom 64→65/worker 37→38/
   __doomVer 65, firmware 17→18).
+
+### Round 2 (2026-09-12): RX pacing, collisions, PMC, PPS level + phase fix
+- **RX wire pacing** mirrors TX (`eth_rx_wire_busy`, RS gated on
+  `rx_busy_until`); driver arms it at delivery on both paths.
+  `eth_feat_test` "RX RATE OK" (loopback 1200 B send→recv 20k<d<80k).
+- **Collision reporting** (`eth_arm_collision` one-shot +
+  `eth_take_collision`): driver ORs EC + CC=15 into the TX writeback
+  only when DM==0 (dropped full-duplex). Matrix `collideDone` hook arms
+  once per `COLLIDE ARM` print; the guest spins first so the arm lands
+  before poll processing (EC is decided at writeback, not at TS).
+  Markers "COLLIDE OK" + "COLLIDE DROP OK".
+- **SYSCFG PMC** (MII_RMII_SEL) was already modeled — feat asserts
+  RMII/MII select + traffic ("PHY media … OK").
+- **PPS level** (`eth_pps_level`, 50% duty from the edge residue) is the
+  readable pin model; native toggle test programs everything via MMIO.
+- **PPS residue-burst fix**: the edge residue accumulated unbounded
+  while the frequency was 1 Hz, then released ~2300 phantom edges the
+  moment the window set 32768 Hz (count read 2347 vs ~39 expected —
+  caught by the matrix band assert, not by review). Frequency changes
+  now preserve divider phase (rescale residue by new/old period).
+- **Missing PTPPPSCR write arm**: `PTPPPSCR = 15` vanished (`_ => {}`),
+  leaving n=0 — found because the level test programs everything via
+  MMIO and asserted toggling (the count test set the field directly
+  and could not see it).

@@ -627,6 +627,14 @@ export function dma_set_completed(stream_idx, success) {
 }
 
 /**
+ * Arm a single-node collision for the next TX completion (consumed once;
+ * the driver reports EC + CC=15 when the MAC is half-duplex).
+ */
+export function eth_arm_collision() {
+    wasm.eth_arm_collision();
+}
+
+/**
  * Wake-on-LAN inspection of a received frame. Returns bit 0 on a magic
  * packet (latches MPR when MPE is set, pends IRQ 62 when PMTIM is set).
  * Wakeup-frame CRC matching is not modeled (RWKPR never sets).
@@ -734,6 +742,16 @@ export function eth_pps_count() {
 }
 
 /**
+ * PPS pin level (square wave at the PTPPPSCR rate, 50% duty). The
+ * readable model of the PPS output — sample it like a logic analyzer.
+ * @returns {boolean}
+ */
+export function eth_pps_level() {
+    const ret = wasm.eth_pps_level();
+    return ret !== 0;
+}
+
+/**
  * PTP current seconds / subseconds for TDES6/7 + RDES6/7 snapshots.
  * @returns {number}
  */
@@ -782,6 +800,14 @@ export function eth_rx_done() {
 }
 
 /**
+ * Arm RX wire pacing for a delivered frame (RS waits the wire time).
+ * @param {number} len
+ */
+export function eth_rx_wire_busy(len) {
+    wasm.eth_rx_wire_busy(len);
+}
+
+/**
  * Re-arm the RX poll flag from JS (used when more packets are pending in gwRxQueue).
  * @param {number} desc_addr
  */
@@ -795,6 +821,15 @@ export function eth_signal_rx_poll(desc_addr) {
  */
 export function eth_signal_tx_poll(desc_addr) {
     wasm.eth_signal_tx_poll(desc_addr);
+}
+
+/**
+ * Take a pending armed collision (one-shot, false when none armed).
+ * @returns {boolean}
+ */
+export function eth_take_collision() {
+    const ret = wasm.eth_take_collision();
+    return ret !== 0;
 }
 
 /**

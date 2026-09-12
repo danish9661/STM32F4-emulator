@@ -34,13 +34,9 @@ are blocked, file the item here and continue elsewhere.
 
 ## OPEN / POLICY items
 
-### 1. M0+ strict mode — OPEN (the one known CPU task)
-Tracking M0+ firmware (micro:bit v1, interface MCUs) needs a `v6m_strict`
-gate: fault on UDIV/SDIV, 32-bit Thumb-2, IT blocks, unaligned accesses,
-VTOR use, BASEPRI/FAULTMASK, and M4-style MPU — instead of executing
-them. The M4 core *runs* M0+ code today (superset) but is not faithful.
-Owner: whoever starts the M0+ track. Method: same as every other fix —
-GAS probes (`docs/encodings/`) + native tests.
+### 1. M0+ strict mode — DROPPED (not needed, 2026-09-12)
+Closed without implementation by maintainer decision; do not reopen or
+mention in future work lists.
 
 ### 2. Peripheral-space holes read-as-0 — POLICY
 Unlisted SVD devices return 0 / swallow writes (many are documented-
