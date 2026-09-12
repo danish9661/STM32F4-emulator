@@ -627,6 +627,20 @@ export function dma_set_completed(stream_idx, success) {
 }
 
 /**
+ * Wake-on-LAN inspection of a received frame. Returns bit 0 on a magic
+ * packet (latches MPR when MPE is set, pends IRQ 62 when PMTIM is set).
+ * Wakeup-frame CRC matching is not modeled (RWKPR never sets).
+ * @param {Uint8Array} frame
+ * @returns {number}
+ */
+export function eth_check_wol(frame) {
+    const ptr0 = passArray8ToWasm0(frame, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.eth_check_wol(ptr0, len0);
+    return ret >>> 0;
+}
+
+/**
  * Clear the RX poll flag (call after processing descriptors).
  */
 export function eth_clear_rx_poll() {
@@ -638,6 +652,15 @@ export function eth_clear_rx_poll() {
  */
 export function eth_clear_tx_poll() {
     wasm.eth_clear_tx_poll();
+}
+
+/**
+ * Current MACCR (FES/DM/LM/ROD checks for pacing + loopback).
+ * @returns {number}
+ */
+export function eth_get_maccr() {
+    const ret = wasm.eth_get_maccr();
+    return ret >>> 0;
 }
 
 /**
@@ -677,6 +700,69 @@ export function eth_is_tx_poll() {
 }
 
 /**
+ * Loopback active (MACCR LM). The driver re-injects TX into RX.
+ * @returns {boolean}
+ */
+export function eth_loopback_tx() {
+    const ret = wasm.eth_loopback_tx();
+    return ret !== 0;
+}
+
+/**
+ * MAC accept filtering for a received frame (perfect slots + hash table +
+ * broadcast/multicast/promiscuous + VLAN tag). The driver drops rejected
+ * frames before writing any descriptor.
+ * @param {Uint8Array} frame
+ * @returns {boolean}
+ */
+export function eth_mac_accept(frame) {
+    const ptr0 = passArray8ToWasm0(frame, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.eth_mac_accept(ptr0, len0);
+    return ret !== 0;
+}
+
+/**
+ * PTP current seconds / subseconds for TDES6/7 + RDES6/7 snapshots.
+ * @returns {number}
+ */
+export function eth_ptp_sec() {
+    const ret = wasm.eth_ptp_sec();
+    return ret >>> 0;
+}
+
+/**
+ * @returns {number}
+ */
+export function eth_ptp_sub() {
+    const ret = wasm.eth_ptp_sub();
+    return ret >>> 0;
+}
+
+/**
+ * PTP timestamping enabled (PTPTSCR TSE). Gates RX/TX snapshots.
+ * @returns {boolean}
+ */
+export function eth_ptp_tse() {
+    const ret = wasm.eth_ptp_tse();
+    return ret !== 0;
+}
+
+/**
+ * RX checksum status for descriptor bits: bit 0 = has IPv4, bit 1 = IP
+ * header OK, bit 2 = has TCP/UDP/ICMP, bit 3 = L4 OK. Maps to RDES0
+ * IPHCE (bit 7) / PCE (bit 0).
+ * @param {Uint8Array} frame
+ * @returns {number}
+ */
+export function eth_rx_csum_status(frame) {
+    const ptr0 = passArray8ToWasm0(frame, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.eth_rx_csum_status(ptr0, len0);
+    return ret >>> 0;
+}
+
+/**
  * Signal to the peripheral that RX descriptor processing is complete.
  * Call this after writing received data into RX buffers.
  */
@@ -706,6 +792,15 @@ export function eth_signal_tx_poll(desc_addr) {
  */
 export function eth_tx_done() {
     wasm.eth_tx_done();
+}
+
+/**
+ * Arm TX wire pacing for a `len`-byte frame: TS completion waits until the
+ * frame has left the wire at the MACCR FES speed (168 MHz virtual clock).
+ * @param {number} len
+ */
+export function eth_tx_wire_busy(len) {
+    wasm.eth_tx_wire_busy(len);
 }
 
 /**

@@ -12,6 +12,8 @@
 #define MACMIIDR (*(volatile unsigned int *)(ETH_MAC_BASE + 0x14))
 #define MACA0HR (*(volatile unsigned int *)(ETH_MAC_BASE + 0x40))
 #define MACA0LR (*(volatile unsigned int *)(ETH_MAC_BASE + 0x44))
+#define MACA1HR (*(volatile unsigned int *)(ETH_MAC_BASE + 0x48))
+#define MACA1LR (*(volatile unsigned int *)(ETH_MAC_BASE + 0x4C))
 
 #define DMABMR  (*(volatile unsigned int *)(ETH_DMA_BASE + 0x00))
 #define DMATPDR (*(volatile unsigned int *)(ETH_DMA_BASE + 0x04))
@@ -122,8 +124,12 @@ int main(void) {
     uart_puts("DMA reset\r\n");
 
     MACCR = (1 << 2) | (1 << 3) | (1 << 11); // RE + TE + DM
-    MACA0HR = 0x0000FFFF | (1 << 31); // AE
-    MACA0LR = 0x02000001; // 02:00:00:00:00:01
+    MACA0HR = 0x00000200 | (1 << 31); // AE; MAC 02:00:00:00:00:01 MSB-first
+    MACA0LR = 0x00000001;
+    // Second unicast identity (perfect-filter slot 1): the PING goes out
+    // with src ...:02, so its PONG comes back to ...:02.
+    MACA1HR = (1 << 31) | 0x00000200; // AE; MAC 02:00:00:00:00:02
+    MACA1LR = 0x00000002;
     uart_puts("MAC addr set\r\n");
 
     DMAOMR = (1 << 13) | (1 << 1); // ST + SR

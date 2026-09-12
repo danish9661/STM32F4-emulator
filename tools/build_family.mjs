@@ -31,6 +31,8 @@ const DEMOS = {
     eth_http: { fams: ['f429'], srcs: ['startup.c', 'eth_http.ino'] },
     eth_dhcp: { fams: ['f429'], srcs: ['startup.c', 'eth_dhcp.ino'] },
     eth_test: { fams: ['f429'] },
+    eth_feat_test: { fams: ['f429'] },
+    lwip_demo: { fams: ['f429'] },
     eth_irq_test: { fams: ['f429'] },
 };
 const FREERTOS_SRCS = ['startup.c', 'main.c', 'string.c', 'FreeRTOS/tasks.c', 'FreeRTOS/list.c',

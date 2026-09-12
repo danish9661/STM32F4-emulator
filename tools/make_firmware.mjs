@@ -12,6 +12,10 @@ const firmwares = [
     ['eth_http_f429', 'eth_http/eth_http_f429.bin', 'eth_http_f429.bin'],
     ['eth_dhcp_f429', 'eth_dhcp/eth_dhcp_f429.bin', 'eth_dhcp_f429.bin'],
     ['eth_test_f429', 'eth_test/eth_test_f429.bin', 'eth_test_f429.bin'],
+    ['eth_feat_test', 'eth_feat_test/eth_feat_test.bin', 'eth_feat_test.bin'],
+    ['eth_feat_test_f429', 'eth_feat_test/eth_feat_test_f429.bin', 'eth_feat_test_f429.bin'],
+    ['lwip_demo', 'lwip_demo/lwip_demo.bin', 'lwip_demo.bin'],
+    ['lwip_demo_f429', 'lwip_demo/lwip_demo_f429.bin', 'lwip_demo_f429.bin'],
     ['eth_irq_test_f429', 'eth_irq_test/eth_irq_test_f429.bin', 'eth_irq_test_f429.bin'],
     // bare-metal demos
     ['blinky', 'blinky/blinky.bin', 'blinky.bin'],

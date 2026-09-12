@@ -415,6 +415,55 @@ pub fn eth_signal_rx_poll(desc_addr: u32) { system::eth_signal_rx_poll(desc_addr
 #[wasm_bindgen]
 pub fn eth_signal_tx_poll(desc_addr: u32) { system::eth_signal_tx_poll(desc_addr); }
 
+/// MAC accept filtering for a received frame (perfect slots + hash table +
+/// broadcast/multicast/promiscuous + VLAN tag). The driver drops rejected
+/// frames before writing any descriptor.
+#[wasm_bindgen]
+pub fn eth_mac_accept(frame: &[u8]) -> bool {
+    crate::peripherals::eth::eth_mac_accept(sys(), frame)
+}
+
+/// RX checksum status for descriptor bits: bit 0 = has IPv4, bit 1 = IP
+/// header OK, bit 2 = has TCP/UDP/ICMP, bit 3 = L4 OK. Maps to RDES0
+/// IPHCE (bit 7) / PCE (bit 0).
+#[wasm_bindgen]
+pub fn eth_rx_csum_status(frame: &[u8]) -> u32 {
+    crate::peripherals::eth::eth_rx_csum_status(frame)
+}
+
+/// Wake-on-LAN inspection of a received frame. Returns bit 0 on a magic
+/// packet (latches MPR when MPE is set, pends IRQ 62 when PMTIM is set).
+/// Wakeup-frame CRC matching is not modeled (RWKPR never sets).
+#[wasm_bindgen]
+pub fn eth_check_wol(frame: &[u8]) -> u32 {
+    crate::peripherals::eth::eth_check_wol(sys(), frame)
+}
+
+/// Arm TX wire pacing for a `len`-byte frame: TS completion waits until the
+/// frame has left the wire at the MACCR FES speed (168 MHz virtual clock).
+#[wasm_bindgen]
+pub fn eth_tx_wire_busy(len: u32) {
+    crate::peripherals::eth::eth_tx_wire_busy(sys(), len)
+}
+
+/// Current MACCR (FES/DM/LM/ROD checks for pacing + loopback).
+#[wasm_bindgen]
+pub fn eth_get_maccr() -> u32 { crate::peripherals::eth::eth_get_maccr(sys()) }
+
+/// Loopback active (MACCR LM). The driver re-injects TX into RX.
+#[wasm_bindgen]
+pub fn eth_loopback_tx() -> bool { crate::peripherals::eth::eth_loopback_tx(sys()) }
+
+/// PTP timestamping enabled (PTPTSCR TSE). Gates RX/TX snapshots.
+#[wasm_bindgen]
+pub fn eth_ptp_tse() -> bool { crate::peripherals::eth::eth_ptp_tse(sys()) }
+
+/// PTP current seconds / subseconds for TDES6/7 + RDES6/7 snapshots.
+#[wasm_bindgen]
+pub fn eth_ptp_sec() -> u32 { crate::peripherals::eth::eth_ptp_sec(sys()) }
+#[wasm_bindgen]
+pub fn eth_ptp_sub() -> u32 { crate::peripherals::eth::eth_ptp_sub(sys()) }
+
 /// USB OTG FS host-side test API (the harness plays USB host; see
 /// peripherals/usb.rs). Drive reset -> enum-done -> SETUP/OUT inject,
 /// and drain device-to-host IN blobs with usb_take_in.

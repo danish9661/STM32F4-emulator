@@ -3370,3 +3370,73 @@ was no path for either half of the R/W cycle. Restored on both sides:
 - Marker convention: spi_flash prints a zero-count `FAIL: 00000000` summary
   on success (same artifact as comprehensive_test) — its browser case has
   NO 'FAIL' failMarker; DONE is the signal.
+
+## 29. Ethernet completeness: PHY / offload / filters / VLAN / PTP / WOL / pacing / sockets (2026-09-12)
+
+The §28 "silicon-absent / deliberate-gap" list for Ethernet is now closed.
+Real F407/F429 silicon has MAC-only Ethernet (external PHY); everything
+above frames is firmware. What the model + drivers + firmware now cover:
+
+- **PHY/MDIO peer** (`eth.rs` PHY block, DP83848-style reg set @ addr 0):
+  BCR (reset self-clears + re-runs AN, AN restart schedules completion
+  ~20000 virt inst out, forced speed/duplex immediate with `done_at=MAX`
+  so the tick completion can't instantly re-resolve AN over it), BMSR
+  live (link always up — the peer is the cable), ANAR writable, ANLPAR
+  canned partner, PHYSTS (0x10) + reg 0x1F speed/duplex/link mirrors.
+  MB stays set until the next tick completes the op (firmware polls MB);
+  the outcome is REPORTED only — like silicon, the driver programs
+  MACCR FES/DM itself. PHY ID1/ID2 read LAN8720A 0x0007/0xC0F1 (the old
+  canned 0x0001/0x0000 are gone; nothing read them).
+- **TX checksum offload** (TDES0 CIC[23:22]): `txInsertCsum` (emulator.js)
+  inserts IP header + TCP/UDP/ICMP checksums into guest buffer + capture
+  before onTx. Untagged L3 is at offset 14 (an `off=12` cut wrote checksums
+  into TTL/proto — caught by CSUM tests, don't regress it).
+- **RX checksum status**: `eth_rx_csum_status` → RDES0 IPHCE(7)/PCE(0),
+  written by the driver on both polling + irq paths.
+- **Accept filtering** (`eth_mac_accept`, driver drops with no RS):
+  perfect slots 0-3 (slot 0 always on; 1-3 honor AE + MBC byte masks +
+  SA/DA select), CRC32 hash (HU/HM, upper 6 bits), broadcast (DBF),
+  multicast (PM), promiscuous (PR), DAIF inversion, ROD drop-own
+  (loopback path). **MAC register byte order is MSB-first (IEEE)**:
+  wire 02:00:...:01 = HR 0x0200 / LR 0x00000001 — eth_test/eth_irq_test
+  wrote HR 0xFFFF/LR 0x02000001 (latent wrong, invisible until filtering);
+  fixed to match eth_http/eth_dhcp. Any new firmware must program the
+  regs to its wire MAC or all RX is dropped.
+- **VLAN**: MACVLANTR mask widened to 0x3FFFF (was 0x300FF, ate VID bits
+  8-15); gate requires matching tagged VID (12/16-bit per VLANTC, bit 17
+  inverts), applies even in promiscuous mode.
+- **PTP**: binary-2^31 timebase on the virtual clock (SSINC override),
+  TSSTI/TSSTU init/update (self-clearing edge bits), target + TSITE →
+  IRQ61, live SHR/SLR reads, TX snapshot to TDES6/7 (TTSE) + RX snapshot
+  to RDES6/7 (TSE, needs 32-byte descriptors — the polling E-layout has
+  8-byte descs, so RX snapshots are irq-path only). TSFCU/TTSARU drift
+  correction stored, no drift model. PPS pin not modeled (no pin layer).
+- **WOL**: magic-packet detect (6xFF + 16x MACA0 scan) latches MPR when
+  MPE + pends IRQ62 when PMTIM; MPR/RWKPR are W1C (the old PMT arm
+  preserved MPR on write — fixed, mask 0x687). Wakeup-frame CRC matching
+  NOT modeled (RWKPR never sets); filter regs stored.
+- **Wire pacing**: `eth_tx_wire_busy(len)` arms `tx_busy_until` from
+  (len+20B) at MACCR FES speed on the 168 MHz virtual clock; TS waits.
+  Delay lands on step boundaries (driver runs between steps), so rate
+  tests must use small steps (feat matrix entry: 8000x5000) and wide
+  bands (1200B frame asserts 10k<d<40k cycles; instant would be <=5k).
+- **LwIP-style sockets** (`lwip_demo/`, clean-room API clone, no LwIP
+  sources): `lwip_socket/connect/send/recv/close` (TCP) +
+  `sendto/recvfrom` (UDP) + `gethostbyname` over the raw driver; demo =
+  DNS → TCP echo port 7 → UDP echo. Needs netsim TCP-echo (port 7:
+  SYN→SYN-ACK, data→ACK+echo, FIN→FIN-ACK) + UDP echo + canned DNS.
+- **Loopback (MACCR LM)**: driver re-injects TX into rxQueue (never to
+  the wire); the accept filter APPLIES, so loopback self-tests must
+  address frames to themselves (dst=my_mac), like silicon.
+- **netsim TCP `dlen` comes from the IP total length**, not the frame
+  length (60B padding is not payload — the lwip echo caught this).
+- **netsim srcIp rule**: IP source is at `ipStart-8` (start of the IP
+  header); `ipStart+12` is inside the L4 payload (DNS-bytes-as-IP bug
+  caught 2026-09-12; UDP-echo had the same bug, fixed together).
+- Firmwares: `eth_feat_test/` (9 phases, all markers in matrix entry,
+  irq_eth + netsim) + `lwip_demo/` (matrix entry); both built for
+  f407 (stock) + f429 (`build_family` fams). `verify_ethernet.sh`
+  `run_check` takes an optional per-check budget (eth_test entries need
+  200M — tolerated timeouts on the real gateway).
+- Versions: VENDOR_V 18→19 (app.js/doom.js/doom-worker.js + entry
+  queries app 25→26/doom 63→64/worker 36→37/__doomVer 64, firmware 16→17).

@@ -136,7 +136,9 @@ E.push(['dma2d_test', 'f429', 'dma2d_test/dma2d_test.bin', ['=== DMA2D Test: don
 E.push(['eth_http_f429', 'f429', 'eth_http/eth_http_f429.bin', ['TCP connected'], ['TCP fail'], {}, 'netsim', 600, 100000]);
 const IRQETH = { enable_irqs: true, irq_eth: true };
 E.push(['eth_dhcp_f429', 'f429', 'eth_dhcp/eth_dhcp_f429.bin', ['=== DHCP SUCCESS ==='], null, IRQETH, 'netsim', 600, 100000]);
-E.push(['eth_test_f429', 'f429', 'eth_test/eth_test_f429.bin', ['ETH Test: done'], null, IRQETH, 'netsim', 600, 100000]);
+E.push(['eth_test_f429', 'f429', 'eth_test/eth_test_f429.bin', ['ETH Test: done', 'ICMP reply OK', 'ICMP RX reply sent', 'DNS IP=093.184.216.034', 'UDP echo OK'], ['TIMEOUT!'], IRQETH, 'netsim', 900, 200000]);
+E.push(['eth_feat_test_f429', 'f429', 'eth_feat_test/eth_feat_test_f429.bin', ['PHY link OK', 'PHY AN restart OK', 'PHY force OK', 'CSUM TX insert OK', 'CSUM RX IPHCE OK', 'CSUM RX PCE OK', 'MCAST OK', 'VLAN OK', 'PTP target OK', 'PTP TX snap OK', 'PTP RX snap OK', 'WOL OK', 'WIRE RATE OK', 'FEAT Test: done'], ['FAIL', 'TIMEOUT'], IRQETH, 'netsim', 8000, 5000]);
+E.push(['lwip_demo_f429', 'f429', 'lwip_demo/lwip_demo_f429.bin', ['LWIP init OK', 'LWIP DNS 093.184.216.034', 'LWIP TCP echo OK', 'LWIP UDP echo OK', 'LWIP DEMO DONE'], ['FAIL'], IRQETH, 'netsim', 1200, 200000]);
 const IRQETH_LAYOUT = { rxDesc: 0x20000050, rxBuf: 0x2000005c, rxStride: 1536, rxDescs: 1 };
 E.push(['eth_irq_test_f429', 'f429', 'eth_irq_test/eth_irq_test_f429.bin', ['ETH IRQ Test: done'], ['TIMEOUT'], { ...IRQETH, eth: IRQETH_LAYOUT }, 'netsim', 600, 100000]);
 ino('blink_serial', ['disco_f429zi'], ['Hello from UART4!']);

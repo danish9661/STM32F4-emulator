@@ -68,6 +68,8 @@ export async function createEmulator(opts) {
         is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, qspi_register_flash, init_svd,
         eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll,
         eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
+        eth_mac_accept, eth_rx_csum_status, eth_check_wol, eth_tx_wire_busy,
+        eth_get_maccr, eth_loopback_tx, eth_ptp_tse, eth_ptp_sec, eth_ptp_sub,
         get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
         dma2d_take_job, dma2d_job_done, dma2d_convert, dma2d_blend,
@@ -92,10 +94,12 @@ export async function createEmulator(opts) {
 
     // IRQ-mode RX delivery: the guest owns its descriptor layout, so walk its
     // RX list from the model's poll address (DMARDLAR base) for the first
-    // DMA-owned descriptor and deliver the frame there. Falls back to the
-    // static E layout when no owned descriptor is found. The guest ISR scans
-    // the list itself, so no idx/flag bookkeeping is needed.
-    const injectRxIrq = (memWrite, memRead32, frame, len) => {
+    // DMA-owned descriptor and deliver there. Falls back to the static E
+    // layout when no owned descriptor is found. The guest ISR scans the
+    // list itself, so no idx/flag bookkeeping is needed. rdesExtra carries
+    // RDES0 status bits (IPHCE/PCE from the checksum engine); when PTP TSE
+    // is on, RDES6/7 get the snapshot (guest must use 32-byte descriptors).
+    const injectRxIrq = (memWrite, memRead32, frame, len, rdesExtra) => {
         let listBase = 0;
         try { listBase = eth_get_rx_desc_addr() >>> 0; } catch {}
         if (listBase !== 0) {
@@ -109,8 +113,15 @@ export async function createEmulator(opts) {
                     try {
                         memWrite(BigInt(rdes1), frame.subarray(0, len));
                         const wb = new Uint8Array(4);
-                        new DataView(wb.buffer).setUint32(0, len << 16, true);
+                        new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
                         memWrite(BigInt(listBase + i * 8), wb);
+                        if (eth_ptp_tse()) {
+                            const sb = new Uint8Array(8);
+                            const sdv = new DataView(sb.buffer);
+                            sdv.setUint32(0, eth_ptp_sec(), true);
+                            sdv.setUint32(4, eth_ptp_sub(), true);
+                            memWrite(BigInt(listBase + i * 8 + 24), sb);
+                        }
                         return;
                     } catch { return; }
                 }
@@ -120,8 +131,62 @@ export async function createEmulator(opts) {
         E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
         memWrite(BigInt(E.rxBuf + idx * E.rxStride), frame.subarray(0, len));
         const wb = new Uint8Array(4);
-        new DataView(wb.buffer).setUint32(0, len << 16, true);
+        new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
         memWrite(BigInt(E.rxDesc + idx * 8), wb);
+    };
+
+    // Internet checksum over pkt[off..off+len].
+    const ethCksum = (pkt, off, len) => {
+        let s = 0;
+        for (let i = 0; i + 1 < len; i += 2) s += (pkt[off + i] << 8) | pkt[off + i + 1];
+        if (len & 1) s += pkt[off + len - 1] << 8;
+        while (s >>> 16) s = (s & 0xFFFF) + (s >>> 16);
+        return (~s) & 0xFFFF;
+    };
+
+    // TX checksum offload (TDES0 CIC): insert IP header + TCP/UDP/ICMP
+    // checksums into the captured copy AND guest buffer (via wr16, like
+    // silicon). Defined here (wuc is in TDZ above); called from wProcessEth.
+    const txInsertCsum = (pkt, wr16, cic) => {
+        if (pkt.length < 14 || cic === 0) return;
+        // Untagged frames: ethertype at 12, L3 at 14 (NOT 12 — that
+        // misaligns IHL/proto and writes checksums into TTL/proto).
+        let off = 14, et = (pkt[12] << 8) | pkt[13];
+        if (et === 0x8100) {
+            if (pkt.length < 18) return;
+            off = 18; et = (pkt[16] << 8) | pkt[17];
+        }
+        if (et !== 0x0800 || pkt.length < off + 20) return;
+        const ihl = (pkt[off] & 0xF) * 4;
+        if (ihl < 20 || pkt.length < off + ihl) return;
+        const set16 = (at, v) => {
+            pkt[at] = (v >> 8) & 0xFF; pkt[at + 1] = v & 0xFF;
+            wr16(at, v);
+        };
+        pkt[off + 10] = 0; pkt[off + 11] = 0;
+        set16(off + 10, ethCksum(pkt, off, ihl));
+        if (cic < 2) return; // IP header only
+        const proto = pkt[off + 9], l4 = off + ihl;
+        const pseudo = (pl, p) => {
+            let s = 0;
+            for (let i = 0; i < 4; i += 2) s += (pkt[off + 12 + i] << 8) | pkt[off + 13 + i];
+            for (let i = 0; i < 4; i += 2) s += (pkt[off + 16 + i] << 8) | pkt[off + 17 + i];
+            s += p + pl;
+            for (let i = 0; i + 1 < pl; i += 2) s += (pkt[l4 + i] << 8) | pkt[l4 + i + 1];
+            if (pl & 1) s += pkt[l4 + pl - 1] << 8;
+            while (s >>> 16) s = (s & 0xFFFF) + (s >>> 16);
+            return (~s) & 0xFFFF;
+        };
+        if (proto === 6 && pkt.length >= l4 + 20) {
+            pkt[l4 + 16] = 0; pkt[l4 + 17] = 0;
+            set16(l4 + 16, pseudo(pkt.length - l4, 6));
+        } else if (proto === 17 && pkt.length >= l4 + 8) {
+            pkt[l4 + 6] = 0; pkt[l4 + 7] = 0;
+            set16(l4 + 6, pseudo(Math.max(8, Math.min(pkt.length - l4, ((pkt[l4 + 4] << 8) | pkt[l4 + 5]) || 8)), 17));
+        } else if (proto === 1 && pkt.length >= l4 + 4) {
+            pkt[l4 + 2] = 0; pkt[l4 + 3] = 0;
+            set16(l4 + 2, ethCksum(pkt, l4, pkt.length - l4));
+        }
     };
 
     if (typeof bindings.default === 'function') {
@@ -554,6 +619,7 @@ export async function createEmulator(opts) {
         };
         const rxQueue = [];
         let instCount = 0;
+        let lastTxLen = 0; // bytes of the last TX frame (wire pacing)
         // Compact mirrors of processEth/processDma for the wasm memory.
         const wProcessEth = () => {
             if (eth_is_tx_poll()) {
@@ -568,16 +634,41 @@ export async function createEmulator(opts) {
                         const bufAddr = tdes1 & 0xFFFFFFFC;
                         const bufSize = tdes0 & 0x3FFF;
                         if (ENV.WASM_DBG) console.log(`[wasm-tx] tdes0=0x${tdes0.toString(16)} buf=0x${bufAddr.toString(16)} len=${bufSize}`);
+                        let ttss = 0;
                         if (bufAddr !== 0 && bufSize > 0 && bufSize <= 2000) {
+                            lastTxLen = bufSize;
                             const pkt = new Uint8Array(wuc.mem_read(BigInt(bufAddr), bufSize));
-                            if (onTx) onTx(pkt, { bufAddr, len: bufSize });
+                            // Checksum offload: TDES0 CIC[23:22] inserts IP
+                            // (+TCP/UDP/ICMP) checksums before capture.
+                            txInsertCsum(pkt, (at, v) => {
+                                wuc.mem_write(BigInt(bufAddr + at), new Uint8Array([(v >> 8) & 0xFF, v & 0xFF]));
+                            }, (tdes0 >>> 22) & 3);
+                            // TX timestamp snapshot (TTSE + PTP TSE).
+                            if ((tdes0 & 0x02000000) && eth_ptp_tse()) {
+                                const sb = new Uint8Array(8);
+                                const sdv = new DataView(sb.buffer);
+                                sdv.setUint32(0, eth_ptp_sec(), true);
+                                sdv.setUint32(4, eth_ptp_sub(), true);
+                                wuc.mem_write(BigInt(descAddr + 24), sb);
+                                ttss = 0x20000; // TTSS status
+                            }
+                            // MAC loopback (LM): internal only, never on
+                            // the wire; ROD filtering happens at accept().
+                            if (eth_loopback_tx()) {
+                                rxQueue.push(pkt.slice());
+                            } else if (onTx) {
+                                onTx(pkt, { bufAddr, len: bufSize });
+                            }
                         }
                         const wb = new Uint8Array(4);
-                        new DataView(wb.buffer).setUint32(0, (tdes0 & ~0x80000000) | 0x20000000, true);
+                        new DataView(wb.buffer).setUint32(0, (tdes0 & ~0x80000000) | 0x20000000 | ttss, true);
                         wuc.mem_write(BigInt(descAddr), wb);
                     }
                 }
                 eth_clear_tx_poll();
+                // Wire pacing: TS completion waits for the frame's wire
+                // time at the FES speed (168 MHz virtual clock).
+                try { eth_tx_wire_busy(lastTxLen); } catch {}
                 eth_tx_done();
                 if (!irq_eth) wwrite32(E.irqFlag, wread32(E.irqFlag) | 1);
             }
@@ -585,14 +676,30 @@ export async function createEmulator(opts) {
                 if (ENV.WASM_DBG) console.log(`[wasm-rx] inject idx=${E.rxInjectIdx} q=${rxQueue.length} poll=1`);
                 const frame = rxQueue.shift();
                 const len = Math.min(frame.length, E.rxStride);
-                if (!irq_eth) {
+                // Wake-on-LAN inspection runs before filtering (it works
+                // in powerdown too); then the MAC accept filter drops
+                // rejected frames with no RS/flag (like silicon).
+                try { eth_check_wol(frame); } catch {}
+                let accepted = true;
+                try { accepted = eth_mac_accept(frame); } catch {}
+                // RX checksum status -> RDES0 IPHCE(7)/PCE(0).
+                let rdesExtra = 0;
+                try {
+                    const st = eth_rx_csum_status(frame) >>> 0;
+                    if ((st & 1) && !(st & 2)) rdesExtra |= 0x80;
+                    if ((st & 4) && !(st & 8)) rdesExtra |= 0x01;
+                } catch {}
+                eth_clear_rx_poll();
+                if (!accepted) {
+                    if (ENV.WASM_DBG) console.log('[wasm-rx] dropped by accept filter');
+                } else if (!irq_eth) {
                     const idx = E.rxInjectIdx;
                     E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
                     const descAddr = E.rxDesc + idx * 8;
                     const bufAddr = E.rxBuf + idx * E.rxStride;
                     wuc.mem_write(BigInt(bufAddr), frame.subarray(0, len));
                     const wb = new Uint8Array(4);
-                    new DataView(wb.buffer).setUint32(0, len << 16, true);
+                    new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
                     wuc.mem_write(BigInt(descAddr), wb);
                     wwrite32(E.rxFrameIdx, idx);
                     wwrite32(E.rxFrameLen, len);
@@ -601,10 +708,10 @@ export async function createEmulator(opts) {
                     // IRQ-driven firmware owns its descriptor layout: walk the
                     // guest RX list from the model's poll address for the first
                     // DMA-owned descriptor and deliver there (its ISR scans).
-                    injectRxIrq((a, d) => wuc.mem_write(a, d), wread32, frame, len);
+                    injectRxIrq((a, d) => wuc.mem_write(a, d), wread32, frame, len, rdesExtra);
                 }
-                eth_clear_rx_poll();
-                eth_rx_done();
+                // Dropped frames raise no RS (the DMA never saw them).
+                if (accepted) eth_rx_done();
             }
         };
         const wIsPeriph = (a) => (a >= 0x40000000 && a < 0xB0000000) || (a >= 0xE0000000 && a < 0xE1000000);

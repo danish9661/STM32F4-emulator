@@ -197,6 +197,13 @@ export function dma_periph_write(addr: number, bytes: Uint8Array): void;
 export function dma_set_completed(stream_idx: number, success: boolean): void;
 
 /**
+ * Wake-on-LAN inspection of a received frame. Returns bit 0 on a magic
+ * packet (latches MPR when MPE is set, pends IRQ 62 when PMTIM is set).
+ * Wakeup-frame CRC matching is not modeled (RWKPR never sets).
+ */
+export function eth_check_wol(frame: Uint8Array): number;
+
+/**
  * Clear the RX poll flag (call after processing descriptors).
  */
 export function eth_clear_rx_poll(): void;
@@ -205,6 +212,11 @@ export function eth_clear_rx_poll(): void;
  * Clear the TX poll flag (call after processing descriptors).
  */
 export function eth_clear_tx_poll(): void;
+
+/**
+ * Current MACCR (FES/DM/LM/ROD checks for pacing + loopback).
+ */
+export function eth_get_maccr(): number;
 
 /**
  * Get the RX descriptor list address for the current poll.
@@ -227,6 +239,37 @@ export function eth_is_rx_poll(): boolean;
 export function eth_is_tx_poll(): boolean;
 
 /**
+ * Loopback active (MACCR LM). The driver re-injects TX into RX.
+ */
+export function eth_loopback_tx(): boolean;
+
+/**
+ * MAC accept filtering for a received frame (perfect slots + hash table +
+ * broadcast/multicast/promiscuous + VLAN tag). The driver drops rejected
+ * frames before writing any descriptor.
+ */
+export function eth_mac_accept(frame: Uint8Array): boolean;
+
+/**
+ * PTP current seconds / subseconds for TDES6/7 + RDES6/7 snapshots.
+ */
+export function eth_ptp_sec(): number;
+
+export function eth_ptp_sub(): number;
+
+/**
+ * PTP timestamping enabled (PTPTSCR TSE). Gates RX/TX snapshots.
+ */
+export function eth_ptp_tse(): boolean;
+
+/**
+ * RX checksum status for descriptor bits: bit 0 = has IPv4, bit 1 = IP
+ * header OK, bit 2 = has TCP/UDP/ICMP, bit 3 = L4 OK. Maps to RDES0
+ * IPHCE (bit 7) / PCE (bit 0).
+ */
+export function eth_rx_csum_status(frame: Uint8Array): number;
+
+/**
  * Signal to the peripheral that RX descriptor processing is complete.
  * Call this after writing received data into RX buffers.
  */
@@ -247,6 +290,12 @@ export function eth_signal_tx_poll(desc_addr: number): void;
  * Call this after walking TX descriptors and sending the packet.
  */
 export function eth_tx_done(): void;
+
+/**
+ * Arm TX wire pacing for a `len`-byte frame: TS completion waits until the
+ * frame has left the wire at the MACCR FES speed (168 MHz virtual clock).
+ */
+export function eth_tx_wire_busy(len: number): void;
 
 /**
  * Called by the JS driver after it applied the queued erase to guest memory;
@@ -527,16 +576,25 @@ export interface InitOutput {
     readonly dma_periph_read: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly dma_periph_write: (a: number, b: number, c: number) => void;
     readonly dma_set_completed: (a: number, b: number) => void;
+    readonly eth_check_wol: (a: number, b: number) => number;
     readonly eth_clear_rx_poll: () => void;
     readonly eth_clear_tx_poll: () => void;
+    readonly eth_get_maccr: () => number;
     readonly eth_get_rx_desc_addr: () => number;
     readonly eth_get_tx_desc_addr: () => number;
     readonly eth_is_rx_poll: () => number;
     readonly eth_is_tx_poll: () => number;
+    readonly eth_loopback_tx: () => number;
+    readonly eth_mac_accept: (a: number, b: number) => number;
+    readonly eth_ptp_sec: () => number;
+    readonly eth_ptp_sub: () => number;
+    readonly eth_ptp_tse: () => number;
+    readonly eth_rx_csum_status: (a: number, b: number) => number;
     readonly eth_rx_done: () => void;
     readonly eth_signal_rx_poll: (a: number) => void;
     readonly eth_signal_tx_poll: (a: number) => void;
     readonly eth_tx_done: () => void;
+    readonly eth_tx_wire_busy: (a: number) => void;
     readonly flash_erase_applied: () => void;
     readonly flash_is_programming: () => number;
     readonly flash_take_erase: (a: number) => void;

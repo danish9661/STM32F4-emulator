@@ -272,6 +272,10 @@ export const BOARDS_OF_FIRMWARE = {
     eth_dhcp_f429: ['stm32f429'],
     eth_test_f429: ['stm32f429'],
     eth_irq_test_f429: ['stm32f429'],
+    eth_feat_test: ['stm32f407'],
+    eth_feat_test_f429: ['stm32f429'],
+    lwip_demo: ['stm32f407'],
+    lwip_demo_f429: ['stm32f429'],
 };
 
 export function boardsOf(fwName) {

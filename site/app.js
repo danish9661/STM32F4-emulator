@@ -2,12 +2,12 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=18';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=19';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
-import { boardsOf, boardForSelection, BOARDS } from './boards.js?v=5';
-import { FIRMWARES } from './firmware.js?v=16';
+import { boardsOf, boardForSelection, BOARDS } from './boards.js?v=6';
+import { FIRMWARES } from './firmware.js?v=17';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
 
@@ -58,7 +58,7 @@ const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_interrupt_test_f401', 'r
 // Interrupt-driven ETH firmware: the guest ETH_IRQHandler (run by the pump)
 // reads DMASR and scans rx_desc itself, so the driver must not write the
 // SRAM irq_flag/rx_frame_idx globals (irq_eth mode in emulator.js).
-const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test', 'eth_dhcp', 'eth_test', 'eth_irq_test_f429', 'eth_dhcp_f429', 'eth_test_f429']);
+const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test', 'eth_dhcp', 'eth_test', 'eth_irq_test_f429', 'eth_dhcp_f429', 'eth_test_f429', 'eth_feat_test', 'eth_feat_test_f429', 'lwip_demo', 'lwip_demo_f429']);
 
 // FreeRTOS firmware: SVC/PendSV/SysTick delivery (inline in the Rust core).
 const FREERTOS_FIRMWARES = new Set(['freertos_test', 'freertos_test_f411', 'freertos_test_f429']);
@@ -432,10 +432,10 @@ const boot = async () => {
         // ── local mode: WASM runs in the browser (default) ──
         // Board variant per firmware preset (SVD + flash/RAM sizes), honoring
         // the board selector when the preset supports the selected board.
-        // NOTE (VENDOR_V): vendor asset versions (?v=18) must be bumped together
+        // NOTE (VENDOR_V): vendor asset versions (?v=19) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
         const { key: boardKey, board } = boardForSelection(image.name, boardSelectEl ? boardSelectEl.value : 'all');
-        const svdXml = await fetch('vendor/' + board.svd + '?v=18').then((r) => r.text());
+        const svdXml = await fetch('vendor/' + board.svd + '?v=19').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
@@ -449,7 +449,7 @@ const boot = async () => {
             svdXml,
             flash_size: board.flash_size,
             ram_size: board.ram_size,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=18',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=19',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),
