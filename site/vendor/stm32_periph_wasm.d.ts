@@ -251,6 +251,13 @@ export function eth_loopback_tx(): boolean;
 export function eth_mac_accept(frame: Uint8Array): boolean;
 
 /**
+ * PPS edge count: the observable sink for the PPS output pin (frequency
+ * 2^n Hz from PTPPPSCR, gated by TSE). Test harnesses read this like a
+ * scope probe; the guest itself cannot see it, like silicon.
+ */
+export function eth_pps_count(): number;
+
+/**
  * PTP current seconds / subseconds for TDES6/7 + RDES6/7 snapshots.
  */
 export function eth_ptp_sec(): number;
@@ -586,6 +593,7 @@ export interface InitOutput {
     readonly eth_is_tx_poll: () => number;
     readonly eth_loopback_tx: () => number;
     readonly eth_mac_accept: (a: number, b: number) => number;
+    readonly eth_pps_count: () => number;
     readonly eth_ptp_sec: () => number;
     readonly eth_ptp_sub: () => number;
     readonly eth_ptp_tse: () => number;

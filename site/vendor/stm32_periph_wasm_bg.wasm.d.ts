@@ -34,6 +34,7 @@ export const eth_is_rx_poll: () => number;
 export const eth_is_tx_poll: () => number;
 export const eth_loopback_tx: () => number;
 export const eth_mac_accept: (a: number, b: number) => number;
+export const eth_pps_count: () => number;
 export const eth_ptp_sec: () => number;
 export const eth_ptp_sub: () => number;
 export const eth_ptp_tse: () => number;

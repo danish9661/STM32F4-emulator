@@ -32,7 +32,10 @@ void ETH_IRQHandler(void) {
 
 void ETH_WKUP_IRQHandler(void) {
     wkp_flag = 1;
-    MACPMTCTL = MACPMTCTL | 0x20; // W1C: clear MPR, keep control bits
+    // Ack MPR only (W1C bit 5); writing 0 to RWKPR's bit preserves it.
+    // A blanket (ctl | 0x20) would ack-and-clear a just-latched RWKPR
+    // before the main loop observes it (real status-ack race).
+    MACPMTCTL = (MACPMTCTL & ~0x40u) | 0x20;
 }
 
 static unsigned char tx_frame[1536];
@@ -118,6 +121,17 @@ static void dwt_on(void) {
 }
 static void dwt_zero(void) { *(volatile unsigned int *)0xE0001004 = 0; }
 static unsigned int dwt_rd(void) { return *(volatile unsigned int *)0xE0001004; }
+
+// CRC-16 (poly 0x1021, init 0xFFFF): matches the wakeup-filter engine.
+static unsigned int crc16(unsigned char *p, unsigned int n) {
+    unsigned int crc = 0xFFFF;
+    for (unsigned int i = 0; i < n; i++) {
+        crc ^= (unsigned int)p[i] << 8;
+        for (int b = 0; b < 8; b++)
+            crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xFFFF : (crc << 1) & 0xFFFF;
+    }
+    return crc & 0xFFFF;
+}
 
 int main(void) {
     uart_init();
@@ -289,6 +303,11 @@ int main(void) {
     // ---- 6. PTP ----
     {
         PTPTSCR |= 1; // TSE
+        // Real driver init: program addend + SSINC, apply with TSFCU.
+        // 0x80000000 wraps every 2 ticks; SSINC 26 => 13 sub-units/tick.
+        PTPTSAR = 0x80000000;
+        PTPSSIR = 26;
+        PTPTSCR |= (1 << 1); // TSFCU: latch rate
         PTPTSHUR = 0; PTPTSLUR = 0;
         PTPTSCR |= (1 << 2); // TSSTI init
         unsigned int s0 = PTPTSHR, u0 = PTPTSLR;
@@ -310,6 +329,26 @@ int main(void) {
             }
             if (hit) uart_puts("PTP target OK\r\n");
             else uart_puts("PTP TARGET TIMEOUT\r\n");
+        }
+        // Drift correction: halve the addend, re-latch, and compare the
+        // subsecond advance over identical CYCCNT windows (expect ~1:2).
+        dwt_on();
+        {
+            unsigned int s0 = PTPTSLR;
+            dwt_zero(); while (dwt_rd() < 200000);
+            unsigned int s1 = PTPTSLR;
+            unsigned int full = s1 - s0;
+            PTPTSAR = 0x40000000;
+            PTPTSCR |= (1 << 1); // TSFCU
+            unsigned int s2 = PTPTSLR;
+            dwt_zero(); while (dwt_rd() < 200000);
+            unsigned int s3 = PTPTSLR;
+            unsigned int half = s3 - s2;
+            PTPTSAR = 0x80000000;
+            PTPTSCR |= (1 << 1); // restore full rate
+            unsigned int pct = full ? (half * 100) / full : 0;
+            if (pct >= 40 && pct <= 60) uart_puts("PTP drift OK\r\n");
+            else { uart_puts("PTP DRIFT FAIL "); uart_hex32(pct); uart_puts("\r\n"); }
         }
         // TX snapshot via loopback RX too (driver writes both).
         MACCR |= (1 << 12);
@@ -349,6 +388,47 @@ int main(void) {
             if (hit) uart_puts("WOL OK\r\n");
             else uart_puts("WOL TIMEOUT\r\n");
         } else uart_puts("WOL TX TIMEOUT\r\n");
+        // Wakeup-frame filter: program filter 0 (payload bytes [42..46]
+        // == "WAKE", CRC-16) via 8 sequential RWUFFR writes, then match +
+        // mismatch through loopback (accept-filtered to ourselves).
+        {
+            unsigned char pat[4] = { 'W', 'A', 'K', 'E' };
+            unsigned int crc = crc16(pat, 4);
+            MACPMTCTL = (1 << 31) | 0x6; // WFFRPR + MPE + WFE
+            MACRWUFFR = 0x0F; // filter 0 byte mask: bytes [off+0..3]
+            MACRWUFFR = (42 << 16) | crc; // filter 0 offset + CRC
+            for (int i = 0; i < 6; i++) MACRWUFFR = 0; // filters 1..3 unused
+            MACCR |= (1 << 12); // LM loopback
+            wkp_flag = 0;
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            tx_frame[off] = 0; tx_frame[off + 1] = 8;
+            tx_frame[off + 2] = 0; tx_frame[off + 3] = 9;
+            tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
+            tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
+            tx_frame[off + 8] = 'W'; tx_frame[off + 9] = 'A';
+            tx_frame[off + 10] = 'K'; tx_frame[off + 11] = 'E';
+            int fok = 0;
+            if (eth_send_frame(14 + 20 + 12, 0)) {
+                for (int i = 0; i < 200 && !fok; i++) {
+                    (void)eth_recv_frame(20000);
+                    if ((MACPMTCTL & 0x40) && wkp_flag) fok = 1;
+                }
+            }
+            MACPMTCTL = MACPMTCTL | 0x40; // W1C: clear RWKPR
+            // Mismatch must NOT set RWKPR.
+            int bad = 0;
+            tx_frame[off + 9] = 'X';
+            wkp_flag = 0;
+            if (eth_send_frame(14 + 20 + 12, 0)) {
+                for (int i = 0; i < 60 && !bad; i++) {
+                    (void)eth_recv_frame(20000);
+                    if (MACPMTCTL & 0x40) bad = 1;
+                }
+            }
+            MACCR &= ~(1 << 12);
+            if (fok && !bad) uart_puts("WOL filter OK\r\n");
+            else { uart_puts("WOL FILTER FAIL "); uart_hex32(fok * 2 + bad); uart_puts("\r\n"); }
+        }
         MACPMTCTL = 0;
     }
 
@@ -374,6 +454,16 @@ int main(void) {
             if (d > 10000 && d < 40000) uart_puts("WIRE RATE OK\r\n");
             else uart_puts("WIRE RATE OFF\r\n");
         } else uart_puts("WIRE TX TIMEOUT\r\n");
+    }
+
+    // ---- 9. PPS: 32768 Hz for a CYCCNT-measured 200k-inst window ----
+    // (~39 edges). The count is model-side (the pin's observable sink);
+    // the harness asserts the band (see the matrix post hook).
+    {
+        PTPPPSCR = 15;
+        dwt_zero(); while (dwt_rd() < 200000);
+        PTPPPSCR = 0; // back to 1 Hz: ~0 edges over the rest of the run
+        uart_puts("PPS window done\r\n");
     }
 
     uart_puts("FEAT ALL PASS\r\n");

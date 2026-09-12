@@ -137,7 +137,9 @@ E.push(['eth_http_f429', 'f429', 'eth_http/eth_http_f429.bin', ['TCP connected']
 const IRQETH = { enable_irqs: true, irq_eth: true };
 E.push(['eth_dhcp_f429', 'f429', 'eth_dhcp/eth_dhcp_f429.bin', ['=== DHCP SUCCESS ==='], null, IRQETH, 'netsim', 600, 100000]);
 E.push(['eth_test_f429', 'f429', 'eth_test/eth_test_f429.bin', ['ETH Test: done', 'ICMP reply OK', 'ICMP RX reply sent', 'DNS IP=093.184.216.034', 'UDP echo OK'], ['TIMEOUT!'], IRQETH, 'netsim', 900, 200000]);
-E.push(['eth_feat_test_f429', 'f429', 'eth_feat_test/eth_feat_test_f429.bin', ['PHY link OK', 'PHY AN restart OK', 'PHY force OK', 'CSUM TX insert OK', 'CSUM RX IPHCE OK', 'CSUM RX PCE OK', 'MCAST OK', 'VLAN OK', 'PTP target OK', 'PTP TX snap OK', 'PTP RX snap OK', 'WOL OK', 'WIRE RATE OK', 'FEAT Test: done'], ['FAIL', 'TIMEOUT'], IRQETH, 'netsim', 8000, 5000]);
+E.push(['eth_feat_test_f429', 'f429', 'eth_feat_test/eth_feat_test_f429.bin', ['PHY link OK', 'PHY AN restart OK', 'PHY force OK', 'CSUM TX insert OK', 'CSUM RX IPHCE OK', 'CSUM RX PCE OK', 'MCAST OK', 'VLAN OK', 'PTP target OK', 'PTP drift OK', 'PTP TX snap OK', 'PTP RX snap OK', 'WOL OK', 'WOL filter OK', 'WIRE RATE OK', 'PPS window done', 'FEAT Test: done'], ['FAIL', 'TIMEOUT'], IRQETH, 'netsim', 8000, 5000,
+    // PPS scope probe: 200k inst at 32768 Hz (edge per ~5041 inst) ~= 39.
+    (b) => { const n = b.eth_pps_count(); return (n >= 20 && n <= 60) ? null : ('pps_count=' + n); }]);
 E.push(['lwip_demo_f429', 'f429', 'lwip_demo/lwip_demo_f429.bin', ['LWIP init OK', 'LWIP DNS 093.184.216.034', 'LWIP TCP echo OK', 'LWIP UDP echo OK', 'LWIP DEMO DONE'], ['FAIL'], IRQETH, 'netsim', 1200, 200000]);
 const IRQETH_LAYOUT = { rxDesc: 0x20000050, rxBuf: 0x2000005c, rxStride: 1536, rxDescs: 1 };
 E.push(['eth_irq_test_f429', 'f429', 'eth_irq_test/eth_irq_test_f429.bin', ['ETH IRQ Test: done'], ['TIMEOUT'], { ...IRQETH, eth: IRQETH_LAYOUT }, 'netsim', 600, 100000]);
@@ -155,7 +157,7 @@ ino('arduino_test', AKEYS, ['ARDUINO OK']);
 const filters = process.argv.slice(2);
 let pass = 0, fail = 0;
 const failed = [];
-const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, step) => {
+const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, step, post) => {
     const label = `${demo}/${boardKey}`;
     if (filters.length && !filters.some((f) => label.includes(f))) return 'skip';
     let fw;
@@ -200,6 +202,13 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
     }
     if (ok && anti && anti.some((a) => uart.includes(a))) ok = false;
     if (ok && script === 'exti' && raised !== 2) ok = false;
+    // Optional post hook: observe model-side state the guest cannot see
+    // (e.g. a pin counter), like a scope probe. Runs before close().
+    // Returns an error string, or null when satisfied.
+    if (ok && typeof post === 'function') {
+        const err = post(bindings, uart);
+        if (err) { ok = false; uart += '\n[POST] ' + err; }
+    }
     if (opts.expectFail) {
         if (!ok) { pass++; return 'pass'; }
         fail++; failed.push(label + ' UNEXPECTEDLY-PASSED');
@@ -217,7 +226,7 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
     return ok ? 'pass' : 'fail';
 };
 
-for (const [demo, boardKey, bin, markers, anti, opts, script, iters, step] of E) {
+for (const [demo, boardKey, bin, markers, anti, opts, script, iters, step, post] of E) {
     await runOne(demo, boardKey, bin, markers, anti, opts, script, iters, step);
 }
 console.log(`\nMATRIX pass=${pass} fail=${fail}`);

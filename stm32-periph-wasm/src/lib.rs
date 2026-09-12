@@ -464,6 +464,12 @@ pub fn eth_ptp_sec() -> u32 { crate::peripherals::eth::eth_ptp_sec(sys()) }
 #[wasm_bindgen]
 pub fn eth_ptp_sub() -> u32 { crate::peripherals::eth::eth_ptp_sub(sys()) }
 
+/// PPS edge count: the observable sink for the PPS output pin (frequency
+/// 2^n Hz from PTPPPSCR, gated by TSE). Test harnesses read this like a
+/// scope probe; the guest itself cannot see it, like silicon.
+#[wasm_bindgen]
+pub fn eth_pps_count() -> u32 { crate::peripherals::eth::eth_pps_count(sys()) }
+
 /// USB OTG FS host-side test API (the harness plays USB host; see
 /// peripherals/usb.rs). Drive reset -> enum-done -> SETUP/OUT inject,
 /// and drain device-to-host IN blobs with usb_take_in.

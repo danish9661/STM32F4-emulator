@@ -3440,3 +3440,43 @@ above frames is firmware. What the model + drivers + firmware now cover:
   200M — tolerated timeouts on the real gateway).
 - Versions: VENDOR_V 18→19 (app.js/doom.js/doom-worker.js + entry
   queries app 25→26/doom 63→64/worker 36→37/__doomVer 64, firmware 16→17).
+
+### Gap closure (2026-09-12): wakeup-filter CRC, addend drift, PPS counter
+- **Wakeup-frame CRC matching is modeled** (the "RWKPR never sets" gap is
+  closed): 4 filters, documented-simplified layout with silicon-like
+  sequential access — word[2i] = byte mask (bit j covers frame byte
+  [offset+j], j=0..31), word[2i+1] = (offset<<16)|crc16 (poly 0x1021,
+  init 0xFFFF). Writes to MACRWUFFR (0x28) fill words sequentially;
+  PMTCTL WFFRPR resets the pointer (reads return the last word). Any
+  match sets RWKPR (when WFE) + IRQ62 (when PMTIM); `eth_check_wol`
+  returns bit 1 for it. NOTE: neither SVD lists MACRWUFFR, but the slot
+  range covers 0x28 on both maps (verified live on the Keil F429 map) —
+  no fallback needed. `eth_feat_test` programs filter 0 ("WAKE" @42) and
+  asserts match (RWKPR + IRQ62) + mismatch silence.
+- **Driver-pattern gotcha (real silicon race, caught by the test):** the
+  WKUP ISR must ack ONLY the bit it services —
+  `MACPMTCTL = (MACPMTCTL & ~0x40u) | 0x20` — because the status bits are
+  W1C. A blanket `(ctl | 0x20)` acks-and-clears a just-latched RWKPR
+  before the main loop observes it (handler always wins the race: the
+  IRQ pends in the same model call that latches the bit). The magic path
+  never noticed (it checks only the flag, not MPR).
+- **PTP drift correction is real** (silicon fine-correction algorithm):
+  TSFCU latches SAR/SSINC into working copies; every core tick adds the
+  latched addend to a 64-bit accumulator and each 2^32 wrap adds latched
+  SSINC subsecond units. Addend 0 (reset) = clock stopped — drivers must
+  program it (feat firmware: 0x80000000 + SSINC 26 + TSFCU, same 13
+  sub-units/tick as the old fixed step). TSSTI also clears the
+  accumulator. `eth_feat_test` asserts a 1:2 rate ratio over identical
+  CYCCNT windows after halving the addend ("PTP drift OK", band 40-60%).
+- **PPS has an observable sink**: edges accumulate at 2^n Hz from
+  PTPPPSCR (0000 = 1 Hz .. 1111 = 32768 Hz), gated by TSE alongside the
+  clock (including in live reads). `eth_pps_count()` export is the scope
+  probe — the guest can't see it, like silicon. `eth_feat_test` runs a
+  CYCCNT-measured 200k-inst window at 32768 Hz ("PPS window done",
+  last phase so post-window 1 Hz accumulation is ~0); the matrix has a
+  generic `post(bindings, uart)` hook (10th E.push element, runs before
+  close) asserting the count in [20, 60] (~39 expected).
+- Remaining deliberate non-models: PPS pin itself (no pin layer — the
+  counter IS the sink), addend values as anything but rate control.
+- Versions: VENDOR_V 19→20 (app 26→27/doom 64→65/worker 37→38/
+  __doomVer 65, firmware 17→18).

@@ -88,6 +88,23 @@ pub struct EthernetMac {
     // target + armed flag, and the last tick the clock was advanced on.
     ptp_sec: u32, ptp_sub: u32,
     ptp_tsec: u32, ptp_tsub: u32, ptp_target_armed: bool, ptp_last: u64,
+    // Fine-correction accumulator (silicon algorithm): pacc grows by the
+    // LATCHED addend every core tick and each 2^32 wrap adds latched SSINC
+    // to the subseconds. SAR/SSINC writes take effect only on TSFCU
+    // (like silicon); addend 0 (reset) = clock stopped.
+    ptp_acc: u64, ptp_addend: u32, ptp_ssinc: u32,
+    // PPS output: edge counter + subsecond residue. Frequency from
+    // PTPPPSCR[3:0] as 2^n Hz (0000 = 1 Hz .. 1111 = 32768 Hz), gated by
+    // TSE. The counter is the observable sink (read via eth_pps_count,
+    // e.g. by a test harness like a scope probe on the pin).
+    pps_count: u32, pps_acc: u64,
+    // Wakeup frame filter (4 filters; simplified documented layout, but
+    // silicon-like sequential access): word[2i] = byte mask (bit j covers
+    // frame byte [offset+j], j = 0..31), word[2i+1] = (offset<<16)|crc16
+    // (CRC-16 poly 0x1021, init 0xFFFF over the selected bytes). Writes to
+    // MACRWUFFR (0x28) fill words sequentially; PMTCTL WFFRPR resets the
+    // pointer. Any filter match sets RWKPR (when WFE) like a magic packet.
+    wff: [u32; 8], wff_ptr: usize,
 }
 
 impl EthernetMac {
@@ -121,6 +138,9 @@ impl EthernetMac {
             tx_busy_until: 0,
             ptp_sec: 0, ptp_sub: 0,
             ptp_tsec: 0, ptp_tsub: 0, ptp_target_armed: false, ptp_last: 0,
+            ptp_acc: 0, ptp_addend: 0, ptp_ssinc: 0,
+            pps_count: 0, pps_acc: 0,
+            wff: [0; 8], wff_ptr: 0,
         }
     }
 
@@ -272,6 +292,11 @@ impl EthernetMac {
     }
 
     /// Time math only (no target check): shared by tick and live reads.
+    /// Silicon fine-correction algorithm: the TSFCU-latched addend
+    /// accumulates every core tick and each 2^32 wrap adds latched SSINC
+    /// subsecond units (binary 2^31 rollover into seconds). Addend 0
+    /// (reset) = clock stopped. PPS edges accumulate alongside at
+    /// 2^n Hz from PTPPPSCR (gated by TSE like the clock).
     fn ptp_now_advance(&mut self, now: u64) {
         if self.ptptscr & 1 == 0 {
             self.ptp_last = now;
@@ -280,14 +305,24 @@ impl EthernetMac {
         let el = now.saturating_sub(self.ptp_last);
         self.ptp_last = now;
         if el > 0 {
-            let step = match self.ptpssir & 0xFF {
-                0 => 13,
-                s => s as u64,
-            };
-            let (sub, carry) = self.ptp_sub.overflowing_add((el * step) as u32);
-            self.ptp_sub = sub;
-            if carry {
-                self.ptp_sec = self.ptp_sec.wrapping_add(1);
+            self.ptp_acc += self.ptp_addend as u64 * el;
+            let wraps = (self.ptp_acc >> 32) as u32;
+            self.ptp_acc &= 0xFFFF_FFFF;
+            if wraps > 0 && self.ptp_ssinc != 0 {
+                let (sub, carry) = self.ptp_sub.overflowing_add(wraps.wrapping_mul(self.ptp_ssinc));
+                self.ptp_sub = sub;
+                if carry {
+                    self.ptp_sec = self.ptp_sec.wrapping_add(1);
+                }
+                let n = (self.ptpppscr & 0xF) as u32;
+                if n < 31 {
+                    let period = 1u64 << (31 - n);
+                    self.pps_acc += wraps as u64 * self.ptp_ssinc as u64;
+                    while self.pps_acc >= period {
+                        self.pps_acc -= period;
+                        self.pps_count = self.pps_count.wrapping_add(1);
+                    }
+                }
             }
         }
     }
@@ -334,6 +369,9 @@ impl Peripheral for EthernetMac {
                 0x08 => self.machthr, 0x0C => self.machtlr,
                 0x10 => self.macmiiar, 0x14 => self.macmiidr,
                 0x18 => self.macfcr, 0x1C => self.macvlantr,
+                // RWUFFR reads return the most recently written word
+                // (writes are sequential, silicon-style).
+                0x28 => self.wff[(self.wff_ptr + 7) % 8],
                 0x2C => self.macpmtcsr, 0x34 => 0,
                 0x38 => self.macsr, 0x3C => self.macimr,
                 0x40 => self.maca0hr | (1 << 31), 0x44 => self.maca0lr,
@@ -403,9 +441,16 @@ impl Peripheral for EthernetMac {
                 // only the low 8 VID bits.
                 0x1C => self.macvlantr = value & 0x3FFFF,
                 // PMT: control bits stored; MPR/RWKPR (6:5) are
-                // write-1-to-clear status. WFFRPR(31) has no filter
-                // pointer state here and reads back 0.
+                // write-1-to-clear status; WFFRPR (31) resets the
+                // wakeup-filter write pointer and reads back 0.
+                0x28 => {
+                    self.wff[self.wff_ptr] = value;
+                    self.wff_ptr = (self.wff_ptr + 1) % 8;
+                }
                 0x2C => {
+                    if value & (1 << 31) != 0 {
+                        self.wff_ptr = 0;
+                    }
                     let status = self.macpmtcsr & 0x60;
                     self.macpmtcsr = (value & 0x687) | (status & !(value & 0x60));
                 }
@@ -433,12 +478,13 @@ impl Peripheral for EthernetMac {
                     // Command bits act on write and self-clear (edge
                     // semantics): TSSTI inits time from SHUR/SLUR, TSSTU
                     // adds SHUR/SLUR, TTSARU arms the target from
-                    // PTPTTHR/PTPTTLR. TSFCU/TTSARU fine-correction is
-                    // stored but has no drift model behind it.
+                    // PTPTTHR/PTPTTLR, TSFCU latches SAR/SSIR into the
+                    // working addend (rate changes only apply here).
                     let now = system::instruction_count();
                     if value & (1 << 2) != 0 {
                         self.ptp_sec = self.ptptshur;
                         self.ptp_sub = self.ptptslur;
+                        self.ptp_acc = 0;
                         self.ptp_last = now;
                     }
                     if value & (1 << 3) != 0 {
@@ -452,7 +498,12 @@ impl Peripheral for EthernetMac {
                         self.ptp_tsub = self.ptpttlr;
                         self.ptp_target_armed = true;
                     }
-                    self.ptptscr = value & 0x7FDFF & !(0x2C);
+                    if value & (1 << 1) != 0 {
+                        // TSFCU: latch the programmed addend/SSINC.
+                        self.ptp_addend = self.ptptsar;
+                        self.ptp_ssinc = self.ptpssir & 0xFF;
+                    }
+                    self.ptptscr = value & 0x7FDFF & !(0x2E);
                 }
                 0x04 => self.ptpssir = value & 0xFF,
                 // PTPTSHR/SLR are read-only current time on silicon;
@@ -558,6 +609,18 @@ fn eth_crc32(data: &[u8]) -> u32 {
         }
     }
     !crc
+}
+
+/// CRC-16 (poly 0x1021, init 0xFFFF) for the wakeup frame filter.
+fn eth_crc16(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF;
+    for &b in data {
+        crc ^= (b as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
+        }
+    }
+    crc
 }
 
 /// Internet checksum (one's complement) over `data`.
@@ -733,6 +796,34 @@ impl EthernetMac {
         // DAIF inverts unicast destination filtering.
         if ff & (1 << 3) != 0 { !hit } else { hit }
     }
+
+    /// Wakeup frame filter match: any of the 4 programmed filters whose
+    /// CRC-16 over the mask-selected bytes equals the stored CRC.
+    /// Layout (documented simplification, silicon-like sequential access):
+    /// word[2i] = byte mask (bit j covers frame byte [offset+j]),
+    /// word[2i+1] = (offset<<16)|crc16.
+    fn wol_filter_match(&self, frame: &[u8]) -> bool {
+        for i in 0..4 {
+            let mask = self.wff[2 * i];
+            if mask == 0 {
+                continue; // filter unused
+            }
+            let off = (self.wff[2 * i + 1] >> 16) as usize;
+            let want = (self.wff[2 * i + 1] & 0xFFFF) as u16;
+            let mut sel = [0u8; 32];
+            let mut n = 0;
+            for j in 0..32 {
+                if mask >> j & 1 != 0 && off + j < frame.len() {
+                    sel[n] = frame[off + j];
+                    n += 1;
+                }
+            }
+            if n > 0 && eth_crc16(&sel[..n]) == want {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// Driver entry: does the MAC accept this received frame?
@@ -810,10 +901,10 @@ pub fn eth_rx_csum_status(frame: &[u8]) -> u32 {
     st
 }
 
-/// Driver entry: Wake-on-LAN inspection. Returns bit 0 if a magic packet
-/// (6xFF + 16x our MAC) is seen; latches MPR when MPE is set and pends
-/// the PMT interrupt (IRQ 62) when PMTIM is unmasked. Wakeup-frame CRC
-/// matching is not modeled: RWKPR never sets (documented gap).
+/// Driver entry: Wake-on-LAN inspection. Returns bit 0 on a magic packet
+/// (latches MPR when MPE is set) and bit 1 on a wakeup-filter match
+/// (latches RWKPR when WFE is set); either pends the PMT interrupt
+/// (IRQ 62) when PMTIM is unmasked.
 pub fn eth_check_wol(sys: &System, frame: &[u8]) -> u32 {
     let mut magic = false;
     with_mac(sys, |m| {
@@ -834,6 +925,8 @@ pub fn eth_check_wol(sys: &System, frame: &[u8]) -> u32 {
         }
         0
     });
+    let filtered = with_mac(sys, |m| m.wol_filter_match(frame) as u32) != 0;
+    let mut out = 0;
     if magic {
         with_mac_mut(sys, |m| {
             if m.macpmtcsr & 0x2 != 0 {
@@ -843,10 +936,20 @@ pub fn eth_check_wol(sys: &System, frame: &[u8]) -> u32 {
                 }
             }
         });
-        1
-    } else {
-        0
+        out |= 1;
     }
+    if filtered {
+        with_mac_mut(sys, |m| {
+            if m.macpmtcsr & 0x4 != 0 {
+                m.macpmtcsr |= 0x40; // RWKPR
+                if m.macimr & 0x8 != 0 {
+                    sys.p.nvic.borrow_mut().set_intr_pending(62);
+                }
+            }
+        });
+        out |= 2;
+    }
+    out
 }
 
 /// Driver entry: arm TX wire pacing for a frame of `len` bytes.
@@ -881,6 +984,11 @@ pub fn eth_ptp_sec(sys: &System) -> u32 {
 }
 pub fn eth_ptp_sub(sys: &System) -> u32 {
     with_ptp(sys, |p| p.ptp_sub as u64) as u32
+}
+
+/// Driver entry: PPS edge count (the observable sink for the PPS pin).
+pub fn eth_pps_count(sys: &System) -> u32 {
+    with_ptp(sys, |p| p.pps_count as u64) as u32
 }
 
 #[cfg(test)]
@@ -1075,5 +1183,114 @@ mod tests {
         sys.p.write(&sys, 0x4002_8000, 4, 1 << 14);
         assert_eq!(eth_get_maccr(&sys) & (1 << 14), 1 << 14);
         assert!(!eth_loopback_tx(&sys));
+    }
+}
+
+#[cfg(test)]
+mod gap_tests {
+    use super::*;
+
+    #[test]
+    fn wol_filter_crc_match_and_mismatch() {
+        let mut m = EthernetMac::new_default(BlockType::Mac);
+        // Filter 0: bytes [42..46] ("WAKE"), CRC over them.
+        let payload = b"WAKE";
+        let crc = eth_crc16(payload);
+        m.wff[0] = 0x0F;
+        m.wff[1] = (42 << 16) | crc as u32;
+        let mut frame = vec![0u8; 60];
+        frame[42..46].copy_from_slice(payload);
+        assert!(m.wol_filter_match(&frame));
+        frame[43] ^= 0xFF;
+        assert!(!m.wol_filter_match(&frame));
+        // Unused filters (mask 0) never match, even on empty frames.
+        let m2 = EthernetMac::new_default(BlockType::Mac);
+        assert!(!m2.wol_filter_match(&frame));
+        assert!(!m2.wol_filter_match(&[]));
+    }
+
+    #[test]
+    fn ptp_addend_ratio_and_tsfcu_latch() {
+        let mut p = EthernetMac::new_default(BlockType::Ptp);
+        p.ptptscr |= 1; // TSE
+        // Program addend + SSINC but do NOT apply: rate stays stopped.
+        p.ptptsar = 0x8000_0000;
+        p.ptpssir = 26;
+        p.ptp_now_advance(100000);
+        assert_eq!(p.ptp_sub, 0);
+        // TSFCU latches: 0x80000000 wraps every 2 ticks, +26 each.
+        p.ptp_addend = p.ptptsar;
+        p.ptp_ssinc = p.ptpssir & 0xFF;
+        p.ptp_now_advance(100000 + 1_000_000);
+        let full = p.ptp_sub;
+        assert_eq!(full, 500_000 * 26);
+        // Halve the addend + re-latch: half rate over the same span.
+        p.ptptsar = 0x4000_0000;
+        p.ptp_addend = p.ptptsar;
+        let s0 = p.ptp_sub;
+        p.ptp_now_advance(100000 + 2_000_000);
+        assert_eq!(p.ptp_sub - s0, full / 2);
+    }
+
+    #[test]
+    fn pps_edges_follow_freq() {
+        let mut p = EthernetMac::new_default(BlockType::Ptp);
+        p.ptptscr |= 1;
+        p.ptp_addend = 0x8000_0000; // wrap every 2 ticks
+        p.ptp_ssinc = 26; // 13 sub-units per tick
+        p.ptpppscr = 15; // 32768 Hz -> period 65536 sub-units
+        p.ptp_now_advance(2_000_000);
+        // 2M ticks * 13 = 26M sub-units / 65536 ~= 396 edges.
+        assert!(p.pps_count >= 390 && p.pps_count <= 402, "pps={}", p.pps_count);
+        // TSE off: frozen, no edges.
+        let c = p.pps_count;
+        p.ptptscr &= !1;
+        p.ptp_now_advance(4_000_000);
+        assert_eq!(p.pps_count, c);
+    }
+}
+
+#[cfg(test)]
+mod gap2_tests {
+    use super::*;
+    use crate::system::test_dummy_system;
+
+    static G2_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+
+    #[test]
+    fn wol_filter_mmio_to_irq() {
+        let _g = G2_LOCK.lock().unwrap();
+        let sys = test_dummy_system();
+        sys.p.write(&sys, 0x4002_8044, 4, 0x00000001);
+        sys.p.write(&sys, 0x4002_8040, 4, 0x0200);
+        // Program filter 0 via sequential RWUFFR writes (WFFRPR first).
+        sys.p.write(&sys, 0x4002_802C, 4, (1 << 31) | 0x6); // WFFRPR+MPE+WFE
+        let crc = eth_crc16(b"WAKE");
+        sys.p.write(&sys, 0x4002_8028, 4, 0x0F);
+        sys.p.write(&sys, 0x4002_8028, 4, (42 << 16) | crc as u32);
+        for _ in 0..6 {
+            sys.p.write(&sys, 0x4002_8028, 4, 0);
+        }
+        // Matching frame: dst=us, "WAKE" at [42..46].
+        let mut f = vec![0u8; 60];
+        f[0..6].copy_from_slice(&MAC);
+        f[6..12].copy_from_slice(&MAC);
+        f[12] = 0x08;
+        f[42..46].copy_from_slice(b"WAKE");
+        sys.p.write(&sys, 0x4002_803C, 4, 0x8); // MACIMR PMTIM
+        let r = eth_check_wol(&sys, &f);
+        assert_eq!(r & 2, 2, "filter bit not set");
+        assert_eq!(sys.p.read(&sys, 0x4002_802C, 4) & 0x40, 0x40); // RWKPR
+        assert!(sys.p.nvic.borrow().irq_pending(62), "IRQ62 not pending");
+        // W1C clears RWKPR; mismatch sets nothing.
+        sys.p.write(&sys, 0x4002_802C, 4, 0x40 | 0x6);
+        assert_eq!(sys.p.read(&sys, 0x4002_802C, 4) & 0x40, 0);
+        f[43] = b'X';
+        // (drain the pending IRQ first so the mismatch assert is clean)
+        sys.p.nvic.borrow_mut().get_and_clear_next_intr_pending();
+        let r2 = eth_check_wol(&sys, &f);
+        assert_eq!(r2 & 2, 0, "mismatch matched");
+        assert_eq!(sys.p.read(&sys, 0x4002_802C, 4) & 0x40, 0);
     }
 }

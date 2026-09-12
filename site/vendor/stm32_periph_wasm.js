@@ -723,6 +723,17 @@ export function eth_mac_accept(frame) {
 }
 
 /**
+ * PPS edge count: the observable sink for the PPS output pin (frequency
+ * 2^n Hz from PTPPPSCR, gated by TSE). Test harnesses read this like a
+ * scope probe; the guest itself cannot see it, like silicon.
+ * @returns {number}
+ */
+export function eth_pps_count() {
+    const ret = wasm.eth_pps_count();
+    return ret >>> 0;
+}
+
+/**
  * PTP current seconds / subseconds for TDES6/7 + RDES6/7 snapshots.
  * @returns {number}
  */
