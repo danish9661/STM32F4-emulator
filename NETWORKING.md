@@ -27,7 +27,7 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 | TX/RX DMA, descriptor rings, OWN/FS/LS, poll demand, ST/SR | yes | ✅ | `eth_http`/`eth_test` netsim + gateway trio, `verify_ethernet.sh` | — | — |
 | TX/RX completion IRQ 61 (TS/RS/NIS/AIS, W1C) | yes | ✅ | `eth_irq_test` (+`_f429`), `eth_dhcp`, `eth_test` | — | — |
 | MDIO read/write (MIIAR/MIIDR, MB poll) | yes | ✅ | `eth_feat_test` "PHY …" (`mii_read`/`mii_write`) | wire-level MII timing | Register-level only; firmware only ever sees registers. |
-| PHY BCR/BMSR/ANAR/ANLPAR/PHYSTS, AN restart + resolution, forced speed/duplex | external PHY (LAN8720/DP83848-style) | ✅ | `eth_feat_test` PHY phase; 1 native test | link is always up (the peer is the cable) | Outcome is reported, never forced into MACCR — like silicon, the driver programs FES/DM itself. |
+| PHY BCR/BMSR/ANAR/ANLPAR/PHYSTS, AN restart + resolution, forced speed/duplex | external PHY (LAN8720/DP83848-style) | ✅ | `eth_feat_test` PHY phase; 2 native tests | — | Outcome is reported, never forced into MACCR — like silicon, the driver programs FES/DM itself. Harness drives link (`eth_set_link`); BMSR/PHYSTS follow. |
 | TX checksum offload (CIC: IP / +TCP-UDP-ICMP) | yes | ✅ | `eth_feat_test` "CSUM TX insert OK" (loopback) | — | Inserted by the driver into guest buffer + capture before onTx. |
 | RX checksum status (IPHCE/PCE in RDES0) | yes | ✅ | `eth_feat_test` IPHCE/PCE phases; 1 native test | extended-status RDES4 (needs enhanced descriptors) | Normal-descriptor bits cover what our firmware reads. |
 | Perfect filter slots 0–3 (AE, MBC masks, SA/DA) | yes | ✅ | `eth_irq_test` uses slot 1 (`:02` identity); 1 native test | — | Slot 0 always on. **Byte order is MSB-first (IEEE)**: wire `02:00:…:01` = HR `0x0200` / LR `0x00000001`. |
@@ -40,16 +40,17 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 | PTP target + interrupt (TSITE → IRQ61) | yes | ✅ | `eth_feat_test` "PTP target OK" | — | — |
 | PTP TX/RX snapshots (TDES6/7, RDES6/7) | yes (enhanced descs) | ✅ | `eth_feat_test` both snap phases | RX snapshot needs 32-byte descs (polling E-layout has 8) | Driver-side write; irq path only. |
 | PPS output pin | yes (pin) | 🔶 | `eth_pps_count()` scope-probe export + matrix `post` band assert (~39 edges) | the pin itself | No pin layer exists; the counter IS the sink. Guest can't see it, like silicon. |
-| Wake-on-LAN magic packet (MPR + IRQ62) | yes | ✅ | `eth_feat_test` "WOL OK"; 1 native test | — | — |
-| Wakeup-frame filter CRC match (RWKPR + IRQ62) | yes | ✅ | `eth_feat_test` "WOL filter OK" (+ mismatch silence); 2 native tests | exact silicon reg packing | Simplified layout (mask + offset\|CRC pairs) with silicon-like sequential access + WFFRPR; documented in §29. |
-| TX wire pacing (line-rate TS delay at FES speed) | physical wire | ✅ | `eth_feat_test` "WIRE RATE OK" (1200 B, 10k<d<40k cycles) | RX-side pacing | Delay lands on step boundaries; rate tests use small steps (matrix entry 8000×5000). |
-| RX wire pacing (RS waits the wire time) | physical wire | ✅ | `eth_feat_test` "RX RATE OK" (loopback 1200 B send→recv, 20k<d<80k) | — | Mirrors the TX path; armed at delivery on both polling and irq paths. |
+| Wake-on-LAN magic packet (MPR + IRQ62) | yes | ✅ | `eth_feat_test` "WOL OK"; 1 native test | — | PMT status is read-to-clear (DWC_gmac, not W1C); PWRDWN drops all RX but WOL still sees; GLOBU gates unicast filter eligibility. |
+| Wakeup-frame filter CRC match (RWKPR + IRQ62) | yes | ✅ | `eth_feat_test` "WOL filter OK" (+ mismatch, multicast-only, GLOBU, powerdown-drop + magic-during-PD sub-cases); 4 native tests | — | Sourced layout (Synopsys DWC_gmac via the ESP32 EMAC header): masks ptr 0–3 (bits 30:0), commands ptr 4 (bit 3/11/19/27 = multicast-only), offsets ptr 5, CRCs ptr 6–7. |
+| TX wire pacing (line-rate TS delay at FES speed) | physical wire | ✅ | `eth_feat_test` "WIRE RATE OK" (1200 B, 10k<d<40k cycles) | — | Delay lands on step boundaries; rate tests use small steps. RX completions are NOT paced (RS fires at delivery — pacing it hides the wire from deferral); the RX busy window feeds deferral only ("RX RATE OK" measures the round trip). |
+| Link/carrier (dead wire → NC, TS error completion) | wire + peer | ✅ | `eth_feat_test` "LINK DOWN OK" (BMSR + NC) / "LINK UP OK" | — | Harness is the peer; dead-wire TX still raises TS (error completion, like silicon). |
+| Half-duplex deferral (DB while RX occupies the wire) | shared wire | ✅ | `eth_feat_test` "DEFER OK" (pipelined at 10M) + "DEFER DROP OK" (full-duplex negative) | real contention timing | Must pipeline (waiting TX#1's TS consumes the window); runs at 10M for margin, rate proven by WIRE/RX bands. |
 | Half-duplex collisions | shared wire + peer | 🔶 | `eth_feat_test` "COLLIDE OK" (EC + CC=15 in half-duplex) + "COLLIDE DROP OK" (armed collision ignored full-duplex) | real contention/backoff timing | Single node, so this models the MAC's error-reporting path (armed via `eth_arm_collision`, one-shot), not backoff contention. |
 | Media select (SYSCFG PMC MII/RMII) | pin mux | ✅ | `eth_feat_test` "PHY media RMII/MII OK" (select sticks, traffic flows) | — | Element exists in silicon as a mux bit; data path is mode-agnostic (no pins to mux). |
 | ARP (both directions), IPv4, ICMP echo, UDP/DHCP/DNS/echo, TCP (SYN/data/FIN), HTTP, custom ethertype PING/PONG | software (LwIP on silicon) | ✅ | `eth_http`/`eth_dhcp`/`eth_test`/`eth_irq_test` + `_f429`, netsim + real gateway | ICMP/DNS/other-UDP beyond the demo services | gVisor would carry them; no demo firmware speaks them. |
-| Socket-style API | software (LwIP on silicon) | ✅ (clean-room subset) | `lwip_demo` (+`_f429`): DNS → TCP echo :7 → TCP **server** :7 (`bind`/`listen`/`accept`, netsim plays client) → UDP echo | full LwIP stack | No LwIP sources vendored; API clone over the raw driver, same call shapes. |
+| Socket-style API | software (LwIP on silicon) | ✅ (real LwIP 2.2.1, NO_SYS=1 raw API, vendored in `lwip_demo/lwip/`) | `lwip_demo` (+`_f429`): DHCP (real client) → DNS (real resolver) → TCP echo client :7 → TCP echo server :7 → UDP echo | full socket API (needs an OS: mboxes/select) | NO_SYS has no threads, so raw callbacks + a pump loop; needs the peer (netsim/gateway) for DHCP-server/DNS/echo. |
 | STOP + WOL wake | power + MAC | ✅ | `eth_feat_test` "WOKE BY WOL" (magic reply queued, STOP via WFI, sleep drain injects, IRQ62 wakes; CYCCNT>50k proves real sleep) | — | WKUP ISR must not ack status on entry (destroys the evidence); thread mode acks after observing. |
-| Half-duplex collisions/backoff, MII/RMII pin modes, ETH+STOP wake integration | yes (PHY/wire/power) | ➖ | — | not modeled | Needs a pin layer (MII/RMII, CRS/COL) and a power-state peer; no firmware exercises them. Out of scope by design. |
+| Half-duplex collisions/backoff, MII/RMII pin modes | yes (PHY/wire) | ➖ | — | not modeled | Needs a pin layer (MII/RMII, CRS/COL); no firmware exercises them. Error reporting (EC/CC) and deferral (DB) above are modeled. |
 
 ## 3. Per-board verdict
 
@@ -61,11 +62,10 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 
 ## 4. What "left" means (deliberate non-models)
 
-1. **PPS pin** — no pin layer; `eth_pps_count()` + `eth_pps_level()` are the sinks. Closes if a demo ever needs PPS-driven behavior.
-2. **MII/RMII wire signaling, half-duplex contention timing** — register-level MDIO + PMC select only. Needs a signal-level peer nobody can observe from firmware. The error-reporting half (EC/CC) is modeled.
-3. **Exact RWUFFR packing** — simplified mask/offset-CRC layout, documented; silicon-exact packing on request (no RM0090 available in this env to verify against — a guessed "exact" layout would be worse).
-4. **Full LwIP** — clean-room socket subset (client + server + UDP + DNS) only; a real port is a firmware project, not emulator work.
-5. **M0+ chips are out of scope** — different core (closed per maintainer decision; see `cpu_bug.md`).
+1. **PPS pin metal** — no pin layer; `eth_pps_count()` + `eth_pps_level()` + a browser panel dot are the sinks. Closes if a demo ever needs PPS-driven behavior.
+2. **MII/RMII wire signaling, half-duplex contention timing** — register-level MDIO + PMC select + carrier/deferral reporting only. Needs a signal-level peer nobody can observe from firmware.
+3. **Full socket API (threads/select/mboxes)** — needs an OS layer; NO_SYS raw callbacks cover everything the demos need.
+4. **M0+ chips are out of scope** — different core (closed per maintainer decision; see `cpu_bug.md`).
 
 ## 5. Verify it
 

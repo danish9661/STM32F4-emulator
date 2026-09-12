@@ -70,6 +70,7 @@ export async function createEmulator(opts) {
         eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
         eth_mac_accept, eth_rx_csum_status, eth_check_wol, eth_tx_wire_busy,
         eth_rx_wire_busy, eth_arm_collision, eth_take_collision,
+        eth_set_link, eth_link_up, eth_tx_deferred,
         eth_get_maccr, eth_loopback_tx, eth_ptp_tse, eth_ptp_sec, eth_ptp_sub,
         get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
@@ -93,40 +94,40 @@ export async function createEmulator(opts) {
         ...eth,
     };
 
-    // IRQ-mode RX delivery: the guest owns its descriptor layout, so walk its
-    // RX list from the model's poll address (DMARDLAR base) for the first
-    // DMA-owned descriptor and deliver there. Falls back to the static E
-    // layout when no owned descriptor is found. The guest ISR scans the
-    // list itself, so no idx/flag bookkeeping is needed. rdesExtra carries
-    // RDES0 status bits (IPHCE/PCE from the checksum engine); when PTP TSE
-    // is on, RDES6/7 get the snapshot (guest must use 32-byte descriptors).
+    // IRQ-mode RX delivery: the guest owns its descriptor layout. The DMA
+    // takes the frame ONLY if the polled head descriptor (DMARDLAR base)
+    // is DMA-owned; otherwise (RBUS, like silicon) the frame stays queued
+    // for the next poll. NEVER scan forward: past a single-entry ring
+    // lies ordinary guest RAM, and an OWN-looking garbage word would
+    // divert the frame into the wild (observed: DHCP Offer-shaped bytes
+    // misdelivered, ping lost). Falls back to the static E layout when
+    // no poll address was ever armed. Returns true on delivery.
+    // rdesExtra carries RDES0 status bits (IPHCE/PCE); with PTP TSE the
+    // snapshot goes to RDES6/7 (guest needs 32-byte descriptors).
     const injectRxIrq = (memWrite, memRead32, frame, len, rdesExtra) => {
         let listBase = 0;
         try { listBase = eth_get_rx_desc_addr() >>> 0; } catch {}
         if (listBase !== 0) {
-            for (let i = 0; i < 8; i++) {
-                let rdes0 = 0, rdes1 = 0;
-                try {
-                    rdes0 = memRead32(listBase + i * 8) >>> 0;
-                    rdes1 = memRead32(listBase + i * 8 + 4) >>> 0;
-                } catch { break; }
-                if ((rdes0 & 0x80000000) && rdes1 !== 0) {
-                    try {
-                        memWrite(BigInt(rdes1), frame.subarray(0, len));
-                        const wb = new Uint8Array(4);
-                        new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
-                        memWrite(BigInt(listBase + i * 8), wb);
-                        if (eth_ptp_tse()) {
-                            const sb = new Uint8Array(8);
-                            const sdv = new DataView(sb.buffer);
-                            sdv.setUint32(0, eth_ptp_sec(), true);
-                            sdv.setUint32(4, eth_ptp_sub(), true);
-                            memWrite(BigInt(listBase + i * 8 + 24), sb);
-                        }
-                        return;
-                    } catch { return; }
+            let rdes0 = 0, rdes1 = 0;
+            try {
+                rdes0 = memRead32(listBase) >>> 0;
+                rdes1 = memRead32(listBase + 4) >>> 0;
+            } catch { return false; }
+            if (!((rdes0 & 0x80000000) && rdes1 !== 0)) return false;
+            try {
+                memWrite(BigInt(rdes1), frame.subarray(0, len));
+                const wb = new Uint8Array(4);
+                new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
+                memWrite(BigInt(listBase), wb);
+                if (eth_ptp_tse()) {
+                    const sb = new Uint8Array(8);
+                    const sdv = new DataView(sb.buffer);
+                    sdv.setUint32(0, eth_ptp_sec(), true);
+                    sdv.setUint32(4, eth_ptp_sub(), true);
+                    memWrite(BigInt(listBase + 24), sb);
                 }
-            }
+                return true;
+            } catch { return false; }
         }
         const idx = E.rxInjectIdx;
         E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
@@ -134,6 +135,7 @@ export async function createEmulator(opts) {
         const wb = new Uint8Array(4);
         new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
         memWrite(BigInt(E.rxDesc + idx * 8), wb);
+        return true;
     };
 
     // Internet checksum over pkt[off..off+len].
@@ -627,11 +629,11 @@ export async function createEmulator(opts) {
         // RX-poll requirement (sleep drain: the wire delivers even
         // when the guest can't re-arm). Returns true when a frame
         // was consumed from the queue.
-        const wDeliverRx = (force) => {
+            const wDeliverRx = (force) => {
             if (rxQueue.length === 0) return false;
             if (!force && !eth_is_rx_poll()) return false;
-            if (ENV.WASM_DBG) console.log(`[wasm-rx] inject idx=${E.rxInjectIdx} q=${rxQueue.length} poll=${eth_is_rx_poll() ? 1 : 0}${force ? ' FORCE' : ''}`);
-            const frame = rxQueue.shift();
+            // Peek first: a busy head (or filter drop) must not consume.
+            const frame = rxQueue[0];
             const len = Math.min(frame.length, E.rxStride);
             // Wake-on-LAN inspection runs before filtering (it works
             // in powerdown too); then the MAC accept filter drops
@@ -639,6 +641,12 @@ export async function createEmulator(opts) {
             try { eth_check_wol(frame); } catch {}
             let accepted = true;
             try { accepted = eth_mac_accept(frame); } catch {}
+            if (!accepted) {
+                rxQueue.shift();
+                eth_clear_rx_poll();
+                if (ENV.WASM_DBG) console.log('[wasm-rx] dropped by accept filter');
+                return true;
+            }
             // RX checksum status -> RDES0 IPHCE(7)/PCE(0).
             let rdesExtra = 0;
             try {
@@ -646,33 +654,37 @@ export async function createEmulator(opts) {
                 if ((st & 1) && !(st & 2)) rdesExtra |= 0x80;
                 if ((st & 4) && !(st & 8)) rdesExtra |= 0x01;
             } catch {}
-            eth_clear_rx_poll();
-            if (!accepted) {
-                if (ENV.WASM_DBG) console.log('[wasm-rx] dropped by accept filter');
-            } else if (!irq_eth) {
+            let delivered = false;
+            if (!irq_eth) {
                 const idx = E.rxInjectIdx;
                 E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
                 const descAddr = E.rxDesc + idx * 8;
                 const bufAddr = E.rxBuf + idx * E.rxStride;
-                wuc.mem_write(BigInt(bufAddr), frame.subarray(0, len));
-                const wb = new Uint8Array(4);
-                new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
-                wuc.mem_write(BigInt(descAddr), wb);
-                wwrite32(E.rxFrameIdx, idx);
-                wwrite32(E.rxFrameLen, len);
-                wwrite32(E.irqFlag, wread32(E.irqFlag) | 2);
+                try {
+                    wuc.mem_write(BigInt(bufAddr), frame.subarray(0, len));
+                    const wb = new Uint8Array(4);
+                    new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
+                    wuc.mem_write(BigInt(descAddr), wb);
+                    wwrite32(E.rxFrameIdx, idx);
+                    wwrite32(E.rxFrameLen, len);
+                    wwrite32(E.irqFlag, wread32(E.irqFlag) | 2);
+                    delivered = true;
+                } catch {}
             } else {
-                // IRQ-driven firmware owns its descriptor layout: walk the
-                // guest RX list from the model's poll address for the first
-                // DMA-owned descriptor and deliver there (its ISR scans).
-                injectRxIrq((a, d) => wuc.mem_write(a, d), wread32, frame, len, rdesExtra);
+                // IRQ-driven firmware owns its descriptor layout: deliver
+                // at the polled head or hold for the next poll (RBUS).
+                try {
+                    delivered = injectRxIrq((a, d) => wuc.mem_write(a, d), wread32, frame, len, rdesExtra);
+                } catch { delivered = false; }
             }
-            // Dropped frames raise no RS (the DMA never saw them).
+            if (!delivered) return false; // hold frame AND poll for retry
+            rxQueue.shift();
+            // Bound the queue against a hung guest (real NICs drop too).
+            while (rxQueue.length > 32) rxQueue.shift();
+            eth_clear_rx_poll();
             // Delivered frames pace RS by their wire time.
-            if (accepted) {
-                try { eth_rx_wire_busy(len); } catch {}
-                eth_rx_done();
-            }
+            try { eth_rx_wire_busy(len); } catch {}
+            eth_rx_done();
             return true;
         };
 
@@ -689,6 +701,16 @@ export async function createEmulator(opts) {
                         const bufAddr = tdes1 & 0xFFFFFFFC;
                         const bufSize = tdes0 & 0x3FFF;
                         if (ENV.WASM_DBG) console.log(`[wasm-tx] tdes0=0x${tdes0.toString(16)} buf=0x${bufAddr.toString(16)} len=${bufSize}`);
+                        let linkUp = true;
+                        try { linkUp = eth_link_up(); } catch {}
+                        if (!linkUp) {
+                            // Dead wire: NC status, nothing on the wire.
+                            // Completion still raises TS (error completion,
+                            // like silicon) — the driver learns it from NC.
+                            const wb = new Uint8Array(4);
+                            new DataView(wb.buffer).setUint32(0, (tdes0 & ~0x80000000) | 0x400, true);
+                            wuc.mem_write(BigInt(descAddr), wb);
+                        } else {
                         let ttss = 0;
                         if (bufAddr !== 0 && bufSize > 0 && bufSize <= 2000) {
                             lastTxLen = bufSize;
@@ -721,10 +743,22 @@ export async function createEmulator(opts) {
                         // half-duplex (silicon never collides full-duplex).
                         let ec = 0;
                         try {
-                            if (eth_take_collision() && (eth_get_maccr() & 0x800) === 0) ec = 0x100 | (0xF << 3);
+                            // NOTE: (x & MASK) === 0 needs the inner parens —
+                            // & binds looser than === in JS.
+                            // Single take() call: it is one-shot, and even
+                            // logging it would consume the arm.
+                            const tk = eth_take_collision();
+                            if (tk && ((eth_get_maccr() & 0x800) === 0)) ec = 0x100 | (0xF << 3);
+                        } catch {}
+                        // CSMA/CD deferral: half-duplex TX while a receive
+                        // still occupies the wire reports DB (TS normal).
+                        try {
+                            const df = eth_tx_deferred();
+                            if (df) ec |= 0x1;
                         } catch {}
                         new DataView(wb.buffer).setUint32(0, (tdes0 & ~0x80000000) | 0x20000000 | ttss | ec, true);
                         wuc.mem_write(BigInt(descAddr), wb);
+                        }
                     }
                 }
                 eth_clear_tx_poll();
@@ -735,6 +769,12 @@ export async function createEmulator(opts) {
                 if (!irq_eth) wwrite32(E.irqFlag, wread32(E.irqFlag) | 1);
             }
             if (eth_is_rx_poll() && rxQueue.length > 0) wDeliverRx(false);
+            // Stale polls (armed, queue empty) are dropped: delivery then
+            // requires a poll armed after the frame queued. All firmware
+            // re-arms periodically while waiting, so nothing is lost — and
+            // a synchronously-queued reply (e.g. a WOL trigger's magic)
+            // can no longer be delivered before the guest sleeps on it.
+            else if (eth_is_rx_poll()) { try { eth_clear_rx_poll(); } catch {} }
         };
         const wIsPeriph = (a) => (a >= 0x40000000 && a < 0xB0000000) || (a >= 0xE0000000 && a < 0xE1000000);
         const wProcessDma = () => {

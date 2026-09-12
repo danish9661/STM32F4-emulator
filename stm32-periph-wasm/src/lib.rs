@@ -494,6 +494,23 @@ pub fn eth_take_collision() -> bool {
     crate::peripherals::eth::eth_take_collision(sys())
 }
 
+/// Set the wire link state (test-harness peer control).
+#[wasm_bindgen]
+pub fn eth_set_link(up: bool) {
+    crate::peripherals::eth::eth_set_link(sys(), up)
+}
+
+/// Wire link currently up.
+#[wasm_bindgen]
+pub fn eth_link_up() -> bool { crate::peripherals::eth::eth_link_up(sys()) }
+
+/// True when a TX completing now must report deferral (half-duplex while
+/// a receive still occupies the wire).
+#[wasm_bindgen]
+pub fn eth_tx_deferred() -> bool {
+    crate::peripherals::eth::eth_tx_deferred(sys())
+}
+
 /// USB OTG FS host-side test API (the harness plays USB host; see
 /// peripherals/usb.rs). Drive reset -> enum-done -> SETUP/OUT inject,
 /// and drain device-to-host IN blobs with usb_take_in.

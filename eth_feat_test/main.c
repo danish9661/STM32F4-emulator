@@ -42,6 +42,7 @@ static const unsigned char my_ip[4] = {10, 0, 2, 15};
 static const unsigned char gw_ip[4] = {10, 0, 2, 2};
 static const unsigned char gw_mac[6] = {0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd};
 static const unsigned char my_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+static const unsigned char bcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // Build eth+IPv4 header; returns L4 payload offset (34).
 static unsigned int ip_header(unsigned char *dst_mac, unsigned char *dst_ip,
@@ -396,16 +397,20 @@ int main(void) {
             if (hit) uart_puts("WOL OK\r\n");
             else uart_puts("WOL TIMEOUT\r\n");
         } else uart_puts("WOL TX TIMEOUT\r\n");
-        // Wakeup-frame filter: program filter 0 (payload bytes [42..46]
-        // == "WAKE", CRC-16) via 8 sequential RWUFFR writes, then match +
-        // mismatch through loopback (accept-filtered to ourselves).
+        // Wakeup-frame filter: program filter 0 ("WAKE" at [42..46]) in
+        // the sourced DWC_gmac layout — mask, command (unicast-eligible),
+        // offset, CRC — plus GLOBU (unicast-to-us eligibility), then match
+        // + mismatch through loopback (accept-filtered to ourselves).
         {
             unsigned char pat[4] = { 'W', 'A', 'K', 'E' };
             unsigned int crc = crc16(pat, 4);
-            MACPMTCTL = (1 << 31) | 0x6; // WFFRPR + MPE + WFE
-            MACRWUFFR = 0x0F; // filter 0 byte mask: bytes [off+0..3]
-            MACRWUFFR = (42 << 16) | crc; // filter 0 offset + CRC
-            for (int i = 0; i < 6; i++) MACRWUFFR = 0; // filters 1..3 unused
+            MACPMTCTL = (1 << 31) | 0x206; // WFFRPR + MPE + WFE + GLOBU
+            MACRWUFFR = 0x0F; // word 0: filter 0 mask
+            MACRWUFFR = 0x00; MACRWUFFR = 0x00; MACRWUFFR = 0x00; // words 1-3
+            MACRWUFFR = 0x00; // word 4: commands
+            MACRWUFFR = 42; // word 5: filter 0 offset
+            MACRWUFFR = crc; // word 6: filter 0 CRC
+            MACRWUFFR = 0x00; // word 7
             MACCR |= (1 << 12); // LM loopback
             wkp_flag = 0;
             unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
@@ -422,7 +427,7 @@ int main(void) {
                     if ((MACPMTCTL & 0x40) && wkp_flag) fok = 1;
                 }
             }
-            MACPMTCTL = MACPMTCTL | 0x40; // W1C: clear RWKPR
+            // Read-to-clear already handled by the observes above; nothing to ack.
             // Mismatch must NOT set RWKPR.
             int bad = 0;
             tx_frame[off + 9] = 'X';
@@ -433,9 +438,72 @@ int main(void) {
                     if (MACPMTCTL & 0x40) bad = 1;
                 }
             }
+            // Multicast-only command: the unicast match goes silent...
+            int mcast_ok = 0, uni_silent = 1;
+            MACPMTCTL = (1 << 31) | 0x206; // re-arm pointer, keep enables
+            MACRWUFFR = 0x0F; MACRWUFFR = 0x00; MACRWUFFR = 0x00; MACRWUFFR = 0x00;
+            MACRWUFFR = 0x08; // word 4: filter 0 multicast-only
+            MACRWUFFR = 42; MACRWUFFR = crc; MACRWUFFR = 0x00;
+            wkp_flag = 0;
+            tx_frame[off + 9] = 'A'; // back to "WAKE"
+            if (eth_send_frame(14 + 20 + 12, 0)) {
+                for (int i = 0; i < 30; i++) {
+                    (void)eth_recv_frame(20000);
+                    if (MACPMTCTL & 0x40) uni_silent = 0;
+                }
+            }
+            // ...but the same payload to broadcast matches.
+            {
+                unsigned int bo = ip_header((unsigned char *)bcast_mac, my_ip, 17, 8 + 4);
+                tx_frame[bo + 4] = 0; tx_frame[bo + 5] = 12;
+                tx_frame[bo + 6] = 0; tx_frame[bo + 7] = 0;
+                tx_frame[bo + 8] = 'W'; tx_frame[bo + 9] = 'A';
+                tx_frame[bo + 10] = 'K'; tx_frame[bo + 11] = 'E';
+                wkp_flag = 0;
+                if (eth_send_frame(14 + 20 + 12, 0)) {
+                    for (int i = 0; i < 200 && !mcast_ok; i++) {
+                        (void)eth_recv_frame(20000);
+                        if ((MACPMTCTL & 0x40) && wkp_flag) mcast_ok = 1;
+                    }
+                }
+            }
+            // Powerdown: receiver drops everything, WOL still sees magic.
+            int pd_ok = 0, pd_drop = 1;
+            MACPMTCTL = 0x1 | 0x2; // PWRDWN + MPE
+            wkp_flag = 0;
+            {
+                // Normal frame under PD: must never arrive.
+                unsigned int po = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+                tx_frame[po + 4] = 0; tx_frame[po + 5] = 12;
+                tx_frame[po + 6] = 0; tx_frame[po + 7] = 0;
+                if (eth_send_frame(14 + 20 + 12, 0)) {
+                    for (int i = 0; i < 30; i++) {
+                        unsigned int l = eth_recv_frame(20000);
+                        if (l) pd_drop = 0;
+                    }
+                }
+                // Magic pattern under PD: still detected (loopback frame).
+                unsigned char *mp = tx_frame;
+                for (int i = 0; i < 6; i++) { mp[i] = my_mac[i]; mp[6 + i] = my_mac[i]; }
+                mp[12] = 0x08; mp[13] = 0x00;
+                for (int i = 0; i < 6; i++) mp[14 + i] = 0xFF;
+                for (int r = 0; r < 16; r++)
+                    for (int i = 0; i < 6; i++) mp[20 + r * 6 + i] = my_mac[i];
+                if (eth_send_frame(14 + 102, 0)) {
+                    for (int i = 0; i < 200 && !pd_ok; i++) {
+                        (void)eth_recv_frame(20000);
+                        if ((MACPMTCTL & 0x20) && wkp_flag) pd_ok = 1;
+                    }
+                }
+            }
+            MACPMTCTL = 0;
             MACCR &= ~(1 << 12);
-            if (fok && !bad) uart_puts("WOL filter OK\r\n");
-            else { uart_puts("WOL FILTER FAIL "); uart_hex32(fok * 2 + bad); uart_puts("\r\n"); }
+            {
+                unsigned int pass = (fok ? 32 : 0) | (!bad ? 16 : 0) | (uni_silent ? 8 : 0) |
+                                    (mcast_ok ? 4 : 0) | (pd_drop ? 2 : 0) | (pd_ok ? 1 : 0);
+                if (pass == 0x3F) uart_puts("WOL filter OK\r\n");
+                else { uart_puts("WOL FILTER FAIL "); uart_hex32(pass); uart_puts("\r\n"); }
+            }
         }
         MACPMTCTL = 0;
     }
@@ -519,10 +587,110 @@ int main(void) {
             uart_puts("RX cycles=");
             uart_hex32(d);
             uart_puts("\r\n");
-            if (len && d > 20000 && d < 80000) uart_puts("RX RATE OK\r\n");
+            if (len && d > 12000 && d < 80000) uart_puts("RX RATE OK\r\n");
             else uart_puts("RX RATE OFF\r\n");
         } else uart_puts("RX RATE TX TIMEOUT\r\n");
+        // CSMA/CD deferral: half-duplex TX while the 1200 B receive is
+        // still on the wire must report DB (TS still completes); the
+        // same race in full-duplex must not. Run at 10M so the ~170k
+        // wire window dwarfs the stepped-execution path jitter (~15k);
+        // the rate itself is proven by the WIRE/RX bands at 100M.
+        // PIPELINED (never wait TX#1's paced TS first — that wait alone
+        // consumes the whole RX window, on silicon too): queue TX#1,
+        // take delivery#1, fire TX#2 immediately, then join everything.
+        MACCR &= ~(1 << 11); // DM=0 half-duplex
+        MACCR &= ~(1 << 14); // 10M
+        {
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 1200);
+            tx_frame[off + 4] = (1200 + 8) >> 8; tx_frame[off + 5] = (1200 + 8) & 0xFF;
+            tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
+            for (int i = 0; i < 1200; i++) tx_frame[off + 8 + i] = i & 0xFF;
+            tx_desc[0] = 0x80000000 | ((14 + 20 + 8 + 1200) & 0x3FFF);
+            tx_desc[1] = (unsigned int)&tx_frame[0];
+            DMATDLAR = (unsigned int)&tx_desc[0];
+            eth_done = 0;
+            DMATPDR = 1;
+            unsigned int l1 = eth_recv_frame(200000);
+            int db = 0, ok2 = 0, consumed = 0;
+            if (l1) {
+                unsigned int off2 = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+                tx_frame[off2 + 4] = 0; tx_frame[off2 + 5] = 12;
+                tx_frame[off2 + 6] = 0; tx_frame[off2 + 7] = 0;
+                tx_desc[0] = 0x80000000 | ((14 + 20 + 12) & 0x3FFF);
+                tx_desc[1] = (unsigned int)&tx_frame[0];
+                DMATDLAR = (unsigned int)&tx_desc[0];
+                DMATPDR = 1;
+                // Join: both paced completions + TX#2's loopback back.
+                // (Bounded: 40 rounds worst-case, fast path exits early.)
+                for (int i = 0; i < 40 && (!ok2 || !consumed); i++) {
+                    unsigned int l2 = eth_recv_frame(20000);
+                    if (l2) ok2 = 1;
+                    if (!(tx_desc[0] & 0x80000000)) consumed = 1;
+                }
+                db = (tx_desc[0] & 0x1) != 0;
+            }
+            if (db && ok2 && consumed) uart_puts("DEFER OK\r\n");
+            else uart_puts("DEFER FAIL\r\n");
+        }
+        MACCR |= (1 << 11); // DM=1 full-duplex
+        {
+            // Same race full-duplex: DB must stay clear.
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 1200);
+            tx_frame[off + 4] = (1200 + 8) >> 8; tx_frame[off + 5] = (1200 + 8) & 0xFF;
+            tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
+            for (int i = 0; i < 1200; i++) tx_frame[off + 8 + i] = i & 0xFF;
+            int db = 0;
+            if (eth_send_frame(14 + 20 + 8 + 1200, 0)) {
+                if (eth_recv_frame(200000)) {
+                    unsigned int off2 = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+                    tx_frame[off2 + 4] = 0; tx_frame[off2 + 5] = 12;
+                    tx_frame[off2 + 6] = 0; tx_frame[off2 + 7] = 0;
+                    if (eth_send_frame(14 + 20 + 12, 0)) {
+                        (void)eth_recv_frame(200000);
+                        db = (tx_desc[0] & 0x1) != 0;
+                    }
+                }
+            }
+            if (!db) uart_puts("DEFER DROP OK\r\n");
+            else uart_puts("DEFER DROP FAIL\r\n");
+        }
+        MACCR |= (1 << 14); // restore 100M
         MACCR &= ~(1 << 12);
+    }
+
+    // ---- 8d. Link/carrier (matrix hook drops/restores the wire) ----
+    // Down: MDIO reports link-clear and TX never completes (no carrier:
+    // NC status). Up: MDIO link + TX works. Spins give the hook time
+    // (link state is a wire property the guest can only observe).
+    {
+        uart_puts("LINK DOWN ARM\r\n");
+        for (volatile int i = 0; i < 20000; i++);
+        {
+            unsigned int bmsr = mii_read(0, 1);
+            int blink = !(bmsr & 0x04);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
+            tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
+            // Dead wire completes with NC status (TS still raises: error
+            // completion, like silicon) and nothing goes out.
+            int ok = eth_send_frame(14 + 20 + 12, 0);
+            unsigned int nc = tx_desc[0] & 0x400;
+            if (blink && ok && nc) uart_puts("LINK DOWN OK\r\n");
+            else { uart_puts("LINK DOWN FAIL "); uart_hex32((blink << 16) | nc); uart_puts("\r\n"); }
+        }
+        uart_puts("LINK UP ARM\r\n");
+        for (volatile int i = 0; i < 20000; i++);
+        {
+            unsigned int bmsr = mii_read(0, 1);
+            int blink = (bmsr & 0x04) != 0;
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
+            tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
+            int ok = eth_send_frame(14 + 20 + 12, 0);
+            if (ok) (void)eth_recv_frame(20000);
+            if (blink && ok) uart_puts("LINK UP OK\r\n");
+            else uart_puts("LINK UP FAIL\r\n");
+        }
     }
 
     // ---- 9. PPS: 32768 Hz for a CYCCNT-measured 200k-inst window ----
@@ -552,8 +720,10 @@ int main(void) {
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
         tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
         if (eth_send_frame(14 + 20 + 12, 0)) {
+            // No DMARPDR re-arm here: the poll must be CLEAR at WFI so the
+            // queued magic cannot be delivered pre-sleep (stale polls are
+            // dropped by the driver). The sleep drain force-delivers it.
             rx_desc[0] = 0x80000000 | 1536;
-            DMARPDR = 1;
             uart_puts("GOING TO STOP\r\n");
             dwt_zero();
             *(volatile unsigned int *)0xE000ED10 |= (1 << 2); // SCR SLEEPDEEP

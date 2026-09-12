@@ -50,6 +50,9 @@ const CASES = [
     { label: 'comprehensive_f429', fw: 'comprehensive_test_f429', markers: ['=== DONE ===', 'FAIL: 00000000'], timeoutMs: 120000 },
     { label: 'eth_http_f429', fw: 'eth_http_f429', markers: ['TCP connected'], timeoutMs: 120000 },
     { label: 'eth_irq_f429', fw: 'eth_irq_test_f429', markers: ['ETH IRQ Test: done'], failMarkers: ['TIMEOUT'], timeoutMs: 120000 },
+    // Full feature run incl. STOP/WOL wake; the PPS panel (scope view of
+    // the PPS pin) must show accumulated edges by the end.
+    { label: 'eth_feat_pps', fw: 'eth_feat_test', markers: ['WOKE BY WOL', 'FEAT Test: done'], failMarkers: ['FAIL', 'TIMEOUT'], domChecks: [{ sel: 'ppsInfo', contains: 'edges' }], timeoutMs: 180000 },
 ];
 
 let failed = 0;

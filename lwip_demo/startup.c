@@ -32,7 +32,23 @@ void (* const vector_table[97 + 16])(void) = {
 
 __attribute__((naked)) void _start(void) {
     __asm__ volatile (
-        "ldr sp, =" STR(STACK_TOP) "\n"
+        // Copy .data (flash -> RAM) and zero .bss (real LwIP needs it).
+        "ldr r0, =_sdata\n"
+        "ldr r1, =_edata\n"
+        "ldr r2, =_sidata\n"
+        "1: cmp r0, r1\n"
+        "bcs 2f\n"
+        "ldr r3, [r2], #4\n"
+        "str r3, [r0], #4\n"
+        "b 1b\n"
+        "2: ldr r0, =_sbss\n"
+        "ldr r1, =_ebss\n"
+        "movs r2, #0\n"
+        "3: cmp r0, r1\n"
+        "bcs 4f\n"
+        "str r2, [r0], #4\n"
+        "b 3b\n"
+        "4: ldr sp, =" STR(STACK_TOP) "\n"
         "bl main\n"
         "1: b 1b\n"
     );

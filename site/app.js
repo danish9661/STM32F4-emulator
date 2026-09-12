@@ -7,7 +7,7 @@ import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
 import { boardsOf, boardForSelection, BOARDS } from './boards.js?v=6';
-import { FIRMWARES } from './firmware.js?v=18';
+import { FIRMWARES } from './firmware.js?v=19';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
 
@@ -27,7 +27,7 @@ const hex = (arr, n = 32) => {
 const hex32 = (v) => '0x' + (v >>> 0).toString(16).padStart(8, '0');
 
 let session = 0;
-let emu = null, netsim = null, usbhost = null, running = false;
+let emu = null, netsim = null, usbhost = null, running = false, featHooks = null;
 let uartBuf = '', totalInst = 0, t0 = performance.now(), lastInst = 0, lastT = t0;
 let stepsDone = 0;
 let dcmiFed = { big2: false, big3: false };
@@ -374,7 +374,7 @@ const boot = async () => {
     $('btnRun').textContent = 'Run';
     setStatus('booting…', 'stop');
     if (emu) { try { emu.close(); } catch (e) {} emu = null; }
-    oledCacheKey = ''; tftCacheKey = ''; buzzerCacheKey = ''; rtcCacheKey = '';
+    oledCacheKey = ''; tftCacheKey = ''; buzzerCacheKey = ''; rtcCacheKey = ''; ppsCacheKey = '';
     if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; audioQueued = 0; }
     gpioDrivenHigh.clear();
 
@@ -441,6 +441,11 @@ const boot = async () => {
         netsim = gw.connected ? null : createNetSim();
         // Scripted USB host when the demo preset boots locally.
         usbhost = (!bridgeUrl && image.name.startsWith('usb_cdc_test')) ? createUsbHost(bindings) : null;
+        // Harness arms for eth_feat_test (local mode only): the guest
+        // prints markers and spins, the page arms collisions + link (same
+        // mechanism as the node matrix hooks).
+        featHooks = (!bridgeUrl && image.name.startsWith('eth_feat_test') && bindings && typeof bindings.eth_arm_collision === 'function')
+            ? { collideDone: 0, linkDown: false, linkUp: false } : null;
         gw.tx = 0; gw.rx = 0;
         if (gw.connected) setGwStatus(true, gwLabel());
         emu = await createEmulator({
@@ -512,7 +517,10 @@ const loop = async (id) => {
     while (session === id) {
         if (!running) { await raf(); continue; }
         try {
-            const res = await emu.step();
+            // eth_feat_test runs at 20k-inst steps: its wire-rate bands
+            // and race windows are calibrated for fine steps (the node
+            // matrix uses 5k); 100k steps would overshoot every band.
+            const res = await emu.step(image && image.name.startsWith('eth_feat_test') ? 20000 : undefined);
             totalInst = res.instCount;
             stepsDone++;
         } catch (e) {
@@ -533,6 +541,24 @@ const loop = async (id) => {
         // re-feed it for the phase-3 DMA capture after OVR is confirmed.
         try {
             if (!bridgeUrl && image && image.name.startsWith('dcmi_test') && bindings.dcmi_feed_frame) driveDcmi();
+        } catch (e) {}
+        // Harness arms for eth_feat_test (local mode only).
+        try {
+            if (featHooks) {
+                const arms = uartBuf.split('COLLIDE ARM').length - 1;
+                while (featHooks.collideDone < arms) {
+                    featHooks.collideDone++;
+                    bindings.eth_arm_collision();
+                }
+                if (!featHooks.linkDown && uartBuf.includes('LINK DOWN ARM')) {
+                    featHooks.linkDown = true;
+                    bindings.eth_set_link(false);
+                }
+                if (!featHooks.linkUp && uartBuf.includes('LINK UP ARM')) {
+                    featHooks.linkUp = true;
+                    bindings.eth_set_link(true);
+                }
+            }
         } catch (e) {}
         await refreshStats();
         await renderLtdc();
@@ -901,7 +927,28 @@ const renderRtc = () => {
         `${pad(t.day)}/${pad(t.mon)}/${pad(t.year)} temp=${temp.toFixed(2)} C`;
 };
 
-const renderDevices = () => { renderOled(); renderTft(); renderBuzzer(); renderSpeaker(); renderRtc(); };
+const renderDevices = () => { renderOled(); renderTft(); renderBuzzer(); renderSpeaker(); renderRtc(); renderPps(); };
+
+// ETH PPS pin model: level dot + edge count (scope view of the pin).
+let ppsCacheKey = '';
+const renderPps = () => {
+    let level = null, count = null;
+    try {
+        if (typeof bindings !== 'undefined' && bindings && typeof bindings.eth_pps_count === 'function') {
+            count = bindings.eth_pps_count() >>> 0;
+            level = !!bindings.eth_pps_level();
+        }
+    } catch {}
+    if (level === null) {
+        if (ppsCacheKey !== 'none') { ppsCacheKey = 'none'; $('ppsInfo').textContent = 'no PTP firmware'; $('ppsDot').textContent = '○'; }
+        return;
+    }
+    const key = `${level ? 1 : 0}:${count}`;
+    if (key === ppsCacheKey) return;
+    ppsCacheKey = key;
+    $('ppsDot').textContent = level ? '●' : '○';
+    $('ppsInfo').textContent = `${count} edges`;
+};
 
 // ── GPIO banks A–E ─────────────────────────────────────────────────────────
 const GPIO_BASE = 0x40020000, GPIO_STRIDE = 0x400;

@@ -41,7 +41,7 @@ function findPython() {
     return null;
 }
 
-export async function runCdpSmoke({ fw, markers, failMarkers = [], timeoutMs = 60000, httpPort = 8137, cdpPort = 9337 }) {
+export async function runCdpSmoke({ fw, markers, failMarkers = [], domChecks = [], timeoutMs = 60000, httpPort = 8137, cdpPort = 9337 }) {
     const python = findPython();
     if (!python) return { ok: false, reason: 'python not found (skipped)', pageErrors: [] };
     // Quick check that Chrome is actually reachable before starting the test
@@ -100,7 +100,21 @@ export async function runCdpSmoke({ fw, markers, failMarkers = [], timeoutMs = 6
             const fail = failMarkers.find((f) => txt.includes(f));
             if (fail) { ok = false; reason = 'fail marker: ' + fail; break; }
             const hit = markers.find((m) => txt.includes(m));
-            if (hit) { ok = true; reason = 'marker: ' + hit; break; }
+            if (hit) {
+                // Optional DOM assertions (e.g. device panels) once the
+                // UART marker proves the firmware got there.
+                let domOk = true;
+                for (const c of domChecks) {
+                    const d = await send('Runtime.evaluate', {
+                        expression: `document.getElementById('${c.sel}') ? document.getElementById('${c.sel}').textContent : ''`,
+                        returnByValue: true,
+                    });
+                    const dtxt = (d && d.result && d.result.value) || '';
+                    if (!dtxt.includes(c.contains)) { domOk = false; reason = `dom #${c.sel} missing ${JSON.stringify(c.contains)} (got ${JSON.stringify(dtxt.slice(0, 60))})`; break; }
+                }
+                if (domOk) { ok = true; reason = 'marker: ' + hit; break; }
+                else if (Date.now() - t0 > timeoutMs) { ok = false; break; }
+            }
             await new Promise((res) => setTimeout(res, 500));
         }
         if (!ok && !reason) reason = 'timeout waiting for marker';

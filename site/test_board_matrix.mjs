@@ -140,7 +140,7 @@ const IRQETH = { enable_irqs: true, irq_eth: true };
 const IRQETHLP = { enable_irqs: true, irq_eth: true, lowpower: true };
 E.push(['eth_dhcp_f429', 'f429', 'eth_dhcp/eth_dhcp_f429.bin', ['=== DHCP SUCCESS ==='], null, IRQETH, 'netsim', 600, 100000]);
 E.push(['eth_test_f429', 'f429', 'eth_test/eth_test_f429.bin', ['ETH Test: done', 'ICMP reply OK', 'ICMP RX reply sent', 'DNS IP=093.184.216.034', 'UDP echo OK'], ['TIMEOUT!'], IRQETH, 'netsim', 900, 200000]);
-E.push(['eth_feat_test_f429', 'f429', 'eth_feat_test/eth_feat_test_f429.bin', ['PHY link OK', 'PHY AN restart OK', 'PHY force OK', 'PHY media RMII OK', 'PHY media MII OK', 'CSUM TX insert OK', 'CSUM RX IPHCE OK', 'CSUM RX PCE OK', 'MCAST OK', 'VLAN OK', 'PTP target OK', 'PTP drift OK', 'PTP TX snap OK', 'PTP RX snap OK', 'WOL OK', 'WOL filter OK', 'WIRE RATE OK', 'COLLIDE OK', 'COLLIDE DROP OK', 'RX RATE OK', 'PPS window done', 'WOKE BY WOL', 'FEAT Test: done'], ['FAIL', 'TIMEOUT'], IRQETHLP, 'netsim', 8000, 5000,
+E.push(['eth_feat_test_f429', 'f429', 'eth_feat_test/eth_feat_test_f429.bin', ['PHY link OK', 'PHY AN restart OK', 'PHY force OK', 'PHY media RMII OK', 'PHY media MII OK', 'CSUM TX insert OK', 'CSUM RX IPHCE OK', 'CSUM RX PCE OK', 'MCAST OK', 'VLAN OK', 'PTP target OK', 'PTP drift OK', 'PTP TX snap OK', 'PTP RX snap OK', 'WOL OK', 'WOL filter OK', 'WIRE RATE OK', 'COLLIDE OK', 'COLLIDE DROP OK', 'RX RATE OK', 'DEFER OK', 'DEFER DROP OK', 'LINK DOWN OK', 'LINK UP OK', 'PPS window done', 'WOKE BY WOL', 'FEAT Test: done'], ['FAIL', 'TIMEOUT'], IRQETHLP, 'netsim', 10000, 5000,
     // PPS scope probe: 200k inst at 32768 Hz (edge per ~5041 inst) ~= 39.
     (b) => { const n = b.eth_pps_count(); return (n >= 20 && n <= 60) ? null : ('pps_count=' + n); }]);
 E.push(['lwip_demo_f429', 'f429', 'lwip_demo/lwip_demo_f429.bin', ['LWIP init OK', 'LWIP DNS 093.184.216.034', 'LWIP TCP echo OK', 'LWIP TCP server OK', 'LWIP UDP echo OK', 'LWIP DEMO DONE'], ['FAIL'], IRQETH, 'netsim', 1200, 200000]);
@@ -175,7 +175,7 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
     });
     if (script === 'wav') bindings.audio_load_wav(makeWav());
     if (script === 'dcmi') bindings.dcmi_feed_frame(2, 2, DCMI_SMALL);
-    let uart = '', fed2 = false, fed3 = false, raised = 0, raising = false, echoed = false, collideDone = 0, usb = null;
+    let uart = '', fed2 = false, fed3 = false, raised = 0, raising = false, echoed = false, collideDone = 0, linkDown = false, linkUp = false, usb = null;
     let ok = false;
     for (let i = 0; i < iters; i++) {
         emu.step(step);
@@ -283,6 +283,15 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
         while (collideDone < arms) {
             collideDone++;
             try { bindings.eth_arm_collision(); } catch {}
+        }
+        // Wire link control (harness is the peer): drop/restore on markers.
+        if (!linkDown && uart.includes('LINK DOWN ARM')) {
+            linkDown = true;
+            try { bindings.eth_set_link(false); } catch {}
+        }
+        if (!linkUp && uart.includes('LINK UP ARM')) {
+            linkUp = true;
+            try { bindings.eth_set_link(true); } catch {}
         }
         const fault = emu.faultInfo();
         if (fault) { uart += `\n[FAULT ${JSON.stringify(fault)}]`; break; }

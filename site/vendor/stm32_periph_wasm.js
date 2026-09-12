@@ -708,6 +708,15 @@ export function eth_is_tx_poll() {
 }
 
 /**
+ * Wire link currently up.
+ * @returns {boolean}
+ */
+export function eth_link_up() {
+    const ret = wasm.eth_link_up();
+    return ret !== 0;
+}
+
+/**
  * Loopback active (MACCR LM). The driver re-injects TX into RX.
  * @returns {boolean}
  */
@@ -808,6 +817,14 @@ export function eth_rx_wire_busy(len) {
 }
 
 /**
+ * Set the wire link state (test-harness peer control).
+ * @param {boolean} up
+ */
+export function eth_set_link(up) {
+    wasm.eth_set_link(up);
+}
+
+/**
  * Re-arm the RX poll flag from JS (used when more packets are pending in gwRxQueue).
  * @param {number} desc_addr
  */
@@ -829,6 +846,16 @@ export function eth_signal_tx_poll(desc_addr) {
  */
 export function eth_take_collision() {
     const ret = wasm.eth_take_collision();
+    return ret !== 0;
+}
+
+/**
+ * True when a TX completing now must report deferral (half-duplex while
+ * a receive still occupies the wire).
+ * @returns {boolean}
+ */
+export function eth_tx_deferred() {
+    const ret = wasm.eth_tx_deferred();
     return ret !== 0;
 }
 

@@ -245,6 +245,11 @@ export function eth_is_rx_poll(): boolean;
 export function eth_is_tx_poll(): boolean;
 
 /**
+ * Wire link currently up.
+ */
+export function eth_link_up(): boolean;
+
+/**
  * Loopback active (MACCR LM). The driver re-injects TX into RX.
  */
 export function eth_loopback_tx(): boolean;
@@ -300,6 +305,11 @@ export function eth_rx_done(): void;
 export function eth_rx_wire_busy(len: number): void;
 
 /**
+ * Set the wire link state (test-harness peer control).
+ */
+export function eth_set_link(up: boolean): void;
+
+/**
  * Re-arm the RX poll flag from JS (used when more packets are pending in gwRxQueue).
  */
 export function eth_signal_rx_poll(desc_addr: number): void;
@@ -313,6 +323,12 @@ export function eth_signal_tx_poll(desc_addr: number): void;
  * Take a pending armed collision (one-shot, false when none armed).
  */
 export function eth_take_collision(): boolean;
+
+/**
+ * True when a TX completing now must report deferral (half-duplex while
+ * a receive still occupies the wire).
+ */
+export function eth_tx_deferred(): boolean;
 
 /**
  * Signal to the peripheral that TX descriptor processing is complete.
@@ -614,6 +630,7 @@ export interface InitOutput {
     readonly eth_get_tx_desc_addr: () => number;
     readonly eth_is_rx_poll: () => number;
     readonly eth_is_tx_poll: () => number;
+    readonly eth_link_up: () => number;
     readonly eth_loopback_tx: () => number;
     readonly eth_mac_accept: (a: number, b: number) => number;
     readonly eth_pps_count: () => number;
@@ -624,9 +641,11 @@ export interface InitOutput {
     readonly eth_rx_csum_status: (a: number, b: number) => number;
     readonly eth_rx_done: () => void;
     readonly eth_rx_wire_busy: (a: number) => void;
+    readonly eth_set_link: (a: number) => void;
     readonly eth_signal_rx_poll: (a: number) => void;
     readonly eth_signal_tx_poll: (a: number) => void;
     readonly eth_take_collision: () => number;
+    readonly eth_tx_deferred: () => number;
     readonly eth_tx_done: () => void;
     readonly eth_tx_wire_busy: (a: number) => void;
     readonly flash_erase_applied: () => void;

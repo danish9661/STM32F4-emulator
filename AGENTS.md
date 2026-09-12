@@ -3534,3 +3534,130 @@ above frames is firmware. What the model + drivers + firmware now cover:
   identical to stock), bundle + dropdown + boards entries.
 - **dma2d_test formal f429 build** (was stock-bin-on-f429-map by luck):
   family build is byte-identical; matrix now uses the `_f429` path.
+
+### Round 4 (2026-09-12): sourced filter layout, carrier/deferral, real LwIP
+- **RWUFFR sourced from the ESP32 EMAC header** (same Synopsys DWC_gmac
+  core): masks ptr 0–3 (bits 30:0, MSB zero), per-filter command bytes
+  ptr 4 (bit 3/11/19/27 = multicast-only), offsets ptr 5, CRCs ptr 6–7.
+  Replaced the provisional mask+offset layout (firmware reprogrammed).
+  Same header corrected two model behaviors: **PMT status is read-to-
+  clear, not W1C** (rewrote the arms + tests; driver patterns that read-
+  then-write still converge), and gave **GLOBU** (unicast filter
+  eligibility) + **PWRDWN** (receiver drops all, WOL still sees — feat
+  asserts normal-drop + magic-during-PD).
+- **Carrier + deferral**: `eth_set_link` (harness is the peer) drives
+  BMSR/PHYSTS link bits; dead-wire TX completes with NC (TS still
+  raises: error completion — an earlier cut wrongly expected a timeout,
+  and the FAIL hex `00010400` already showed NC set); half-duplex TX
+  inside `rx_busy_until` reports DB. Matrix link/collide hooks.
+  `eth_tx_deferred` is pure-read (safe to log); `eth_take_collision` is
+  one-shot — LOGGING IT CONSUMED THE ARM and faked a failure. Never
+  instrument a consume-once path by calling it.
+- **JS `&` vs `===` precedence**: `tk && (m & 0x800) === 0` parses as
+  `tk && (m & (0x800 === 0))` = always false (`===` binds tighter than
+  `&`). Parenthesize the whole comparison. Same bug family as the
+  bridge-u32 issue: JS bitwise code needs parens by default.
+- **DEFER must pipeline**: blocking on TX#1's paced TS consumes the
+  whole RX window before TX#2 runs (identical on silicon) — queue TX#1,
+  take delivery#1, fire TX#2 immediately, join after. Runs at 10M
+  (~170k window vs ~15k path); the rate is proven by WIRE/RX bands.
+- **RS fires at delivery, not after wire time** (revert of a plausible
+  mistake): pacing RS delayed the guest past the busy window, making
+  deferral unobservable by construction. Wire-busy feeds ONLY deferral
+  now; RXRATE band widened to 12k–80k.
+- **STOP determinism via stale-poll clearing**: a stale RX poll +
+  synchronous reply always pre-delivers before WFI (alignment-luck in
+  the old runs). The driver now drops polls with an empty queue (all
+  firmware re-arms periodically — eth_test gained the standard 0x3FF
+  re-arm to conform), so the trigger's magic can only arrive during
+  the sleep drain. Removed the pre-WFI re-arm (it re-armed the race).
+- **Real LwIP 2.2.1, NO_SYS=1 raw API** (vendored subset in
+  `lwip_demo/lwip/`, ~25 C files + `arch/` + `lwipopts.h`): sys_arch
+  (DWT-ms clock, xorshift rand, tiny libc, mini-printf for
+  LWIP_PLATFORM_DIAG), netif glue (pbuf copy, static 1600B scratch),
+  demo does DHCP/DNS/TCP-echo/TCP-server/UDP-echo with real timers.
+  Porting lessons, each an hour-class trap: (1) `sys_init()` is NOT
+  called under NO_SYS — DWT stayed off, sys_now()=0, timers dead
+  (call it explicitly); (2) LWIP_NO_CTYPE_H=1 (freestanding has no
+  libc ctype; provide atoi/memmove); (3) cc.h must NOT typedef
+  mem_ptr_t (arch.h owns it) — use stdint types throughout;
+  (4) sys_arch_protect/unprotect must NOT exist under NO_SYS (sys.h
+  only declares them with an OS); (5) startup must copy .data + zero
+  .bss (repo startups don't!) — xorshift(0) locks at 0 and DNS spun
+  forever on ephemeral ports (plus a zero-guard in f4_rand);
+  (6) netsim server seq must start at ISN+1 (SYN consumes one —
+  real stacks enforce this; the old firmware tolerated the overlap).
+
+### Round 5 (2026-09-12): head-only RX delivery (RBUS, no forward scan)
+- **The irq RX walk scanned forward past the head descriptor into guest
+  RAM** looking for any OWN entry. With single-desc guests (eth_test,
+  eth_irq_test, lwip) a frame arriving while the head still held an
+  unconsumed frame (2-step ISR latency vs back-to-back deliveries) read
+  garbage words as descriptors — an OWN-looking word diverted the frame
+  into the wild (or threw, caught silently). Symptom: the netsim return
+  ping vanished while its reply survived (`ICMP RX reply sent` missing).
+  Caught by tracing the walk's `[i]/rdes0` reads, not by review.
+- **Fix: head-only delivery (silicon RBUS semantics).** The DMA takes the
+  frame only if the polled head is DMA-owned; otherwise the frame stays
+  queued (and the poll stays armed) for the next poll. Never scan
+  forward — past a one-entry ring lies ordinary RAM. `injectRxIrq`
+  returns bool; `wDeliverRx` peeks (no consume on busy/drop paths) and
+  only shifts + clears poll on delivery; queue capped at 32 against a
+  hung guest. All irq firmwares re-arm the consumed head, so nothing
+  starves (eth_dhcp's 4-desc ring degrades to head-use, fine at DHCP
+  rates). Verified: eth_test + feat all-markers green.
+
+### Round 6 (2026-09-12): link/defer, USB/GPIO/DMA2D matrix, server role, STOP, real LwIP, PPS UI, head-only RX
+- **Link/carrier + deferral (model)**: `eth_set_link` (harness = peer)
+  drives BMSR/PHYSTS; dead-wire TX completes with NC (TS raises: error
+  completion); `eth_tx_deferred` reports half-duplex TX inside
+  `rx_busy_until` (driver ORs DB). Feat "LINK DOWN/UP OK", "DEFER OK",
+  "DEFER DROP OK" (full-duplex negative); `collideDone`/link hooks in
+  runOne (guest spins first so arms land before poll processing).
+- **USB in the matrix** (`usb` hook, `bare usb_cdc` f401+f429): replicates
+  test_usb.mjs with byte-exact checks; mismatches append `USBHOST FAIL`.
+  Hook bugs: op 0 must wait for ENUMDNE (early SETUP desyncs EP0); the
+  initiation branch must be `phase === 0` (`< 90` re-injected SETUP
+  forever — take-wait never ran).
+- **GPIOK** (`gpio_k_test/`, PK3 + ODR readback) and **dma2d_test formal
+  f429 build** (byte-identical to stock) with bundle/dropdown/boards
+  wiring for both.
+- **Socket server role** (`lwip_bind/listen/accept` shim + netsim TCP
+  client on UDP-:5004 trigger, with data-ACK branch): superseded below
+  by the real port (shim main.c replaced).
+- **STOP + WOL wake** ("WOKE BY WOL"): trigger reply queues at trigger
+  TX; STOP via WFI; sleep drain (`wDeliverRx(true)`) injects during
+  sleep; IRQ62 wakes; CYCCNT>50k proves real sleep. WKUP ISR acks
+  nothing on entry (W1C-ack race); thread mode acks after observing;
+  STOP arming W1Cs stale MPR away. Needs `lowpower: true` (IRQETHLP).
+- **Real LwIP 2.2.1, NO_SYS=1 raw API** (vendored `lwip_demo/lwip/` +
+  `arch/` + `lwipopts.h`, ~25 C files): sys_arch (DWT-ms clock,
+  xorshift rand + zero-guard, tiny libc, mini-printf), netif glue,
+  demo = real DHCP client → real DNS resolver → TCP echo client →
+  TCP echo server (listen/accept) → UDP echo. Netsim serves as
+  DHCP-server/DNS/echo peer (its server seq starts at ISN+1 — SYN
+  consumes one; the old firmware tolerated the overlap, lwIP doesn't).
+  Porting traps, each hour-class: `sys_init()` never runs under NO_SYS
+  (call it — DWT/timers dead otherwise); LWIP_NO_CTYPE_H=1; cc.h must
+  not typedef mem_ptr_t; sys_arch_protect must not exist under NO_SYS;
+  startup must copy .data + zero .bss (repo startups don't — xorshift(0)
+  locked at 0, DNS spun forever on ports); provide atoi/memmove.
+- **PPS UI**: `#ppsDot` + `#ppsInfo` panel (renderPps per frame, reset
+  per boot); `domChecks` in cdp_smoke (`[{sel, contains}]` after the
+  marker); `eth_feat_pps` browser case (full run to WOKE BY WOL +
+  ppsInfo edges). app.js arms collide/link hooks for `eth_feat_*` and
+  steps them at 20k (rate bands need fine steps; 100k overshoots all).
+- **Head-only RX (the lost-ping root cause)**: the irq walk scanned
+  forward into guest RAM for any OWN desc; a frame arriving during the
+  2-step ISR latency read garbage as descriptors (OWN-looking word
+  diverted it into the wild). Now: deliver only at the polled head or
+  hold queued with poll kept (silicon RBUS); queue capped at 32.
+  Stale polls (armed, queue empty) are dropped so a synchronous reply
+  can't pre-deliver before WFI (STOP determinism); all firmware re-arms
+  periodically (eth_test gained the 0x3FF re-arm).
+- **RS fires at delivery, not after wire time** (revert): pacing RS
+  delayed the guest past the busy window, making deferral unobservable
+  by construction; wire-busy feeds only deferral. RXRATE band 12k–80k.
+- **DEFER must pipeline** (queue TX#1, take delivery#1, fire TX#2,
+  join after): blocking on TX#1's paced TS eats the window first.
+  Runs at 10M (~170k vs ~15k path); rate proven by WIRE/RX bands.

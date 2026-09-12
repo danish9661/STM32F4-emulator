@@ -153,6 +153,9 @@ static int eth_send_frame(unsigned int len) {
 // Wait for one RX frame; returns len (0 = timeout). Re-arms the descriptor.
 static unsigned int eth_recv_frame(unsigned int timeout_iters) {
     for (unsigned int i = 0; i < timeout_iters; i++) {
+        // Re-arm periodically while waiting (the driver drops stale polls,
+        // so delivery needs a poll armed after the frame queued).
+        if ((i & 0x3FF) == 0) DMARPDR = 1;
         if (rx_flag) {
             rx_flag = 0;
             unsigned int len = (rx_desc[0] >> 16) & 0x3FFF;

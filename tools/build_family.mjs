@@ -34,8 +34,16 @@ const DEMOS = {
     eth_dhcp: { fams: ['f429'], srcs: ['startup.c', 'eth_dhcp.ino'] },
     eth_test: { fams: ['f429'] },
     eth_feat_test: { fams: ['f429'] },
-    lwip_demo: { fams: ['f429'] },
-    eth_irq_test: { fams: ['f429'] },
+    lwip_demo: { fams: ['f429'], srcs: ['startup.c', 'main.c', 'netif_f4.c', 'arch/sys_arch.c',
+        'lwip/core/init.c', 'lwip/core/mem.c', 'lwip/core/memp.c', 'lwip/core/netif.c',
+        'lwip/core/pbuf.c', 'lwip/core/raw.c', 'lwip/core/stats.c', 'lwip/core/sys.c',
+        'lwip/core/tcp.c', 'lwip/core/tcp_in.c', 'lwip/core/tcp_out.c', 'lwip/core/udp.c',
+        'lwip/core/timeouts.c', 'lwip/core/def.c', 'lwip/core/inet_chksum.c',
+        'lwip/core/dns.c', 'lwip/core/ip.c', 'lwip/core/ipv4/dhcp.c',
+        'lwip/core/ipv4/etharp.c', 'lwip/core/ipv4/icmp.c', 'lwip/core/ipv4/ip4.c',
+        'lwip/core/ipv4/ip4_addr.c', 'lwip/core/ipv4/ip4_frag.c',
+        'lwip/netif/ethernet.c'],
+        incs: ['-Ilwip/include', '-fno-builtin'] },    eth_irq_test: { fams: ['f429'] },
 };
 const FREERTOS_SRCS = ['startup.c', 'main.c', 'string.c', 'FreeRTOS/tasks.c', 'FreeRTOS/list.c',
     'FreeRTOS/queue.c', 'FreeRTOS/portable/GCC/ARM_CM3/port.c', 'FreeRTOS/portable/MemMang/heap_4.c'];
@@ -76,7 +84,7 @@ for (const [demo, cfg] of Object.entries(DEMOS)) {
         writeFileSync(`${dir}/link_${fam}.ld`, link);
         const out = `${demo}_${fam}`;
         try {
-            execFileSync(`${TC}gcc`, [...BASEFLAGS[flags].split(' '), `-DSTACK_TOP=${F.sp}`, `-DEXPECT_SP=${EXPECT_SP[fam]}`,
+            execFileSync(`${TC}gcc`, [...BASEFLAGS[flags].split(' '), ...(cfg.incs || []), `-DSTACK_TOP=${F.sp}`, `-DEXPECT_SP=${EXPECT_SP[fam]}`,
                 '-x', 'c', ...srcs, '-x', 'none', ...BASELD[flags].split(' '), '-T', `link_${fam}.ld`, '-o', `${out}.elf`],
                 { cwd: dir, stdio: 'pipe' });
             execFileSync(`${TC}objcopy`, ['-O', 'binary', `${out}.elf`, `${out}.bin`], { cwd: dir });

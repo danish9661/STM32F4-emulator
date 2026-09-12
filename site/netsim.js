@@ -399,20 +399,23 @@ export function createNetSim({ log = () => {} } = {}) {
                 // IP header starts at 14 and L4 at ipStart.
                 const ipTot = (frame[16] << 8) | frame[17];
                 const dlen = Math.max(0, Math.min(frame.length - ipStart - th, ipTot - (ipStart - 14) - th));
-                if (fl === 0x02) { // SYN
-                    echoSport = sport;
-                    log('TCP echo SYN -> SYN-ACK');
-                    replies.push(tcpSeg(7, sport, 0x12, echoSeq, seq + 1, null, srcIp));
-                } else if (dlen > 0 && (fl & 0x10)) { // data -> ACK + echo
-                    const payload = frame.subarray(ipStart + th, ipStart + th + dlen);
-                    log('TCP echo (' + dlen + 'B)');
-                    replies.push(tcpSeg(7, sport, 0x10, echoSeq, seq + dlen, null, srcIp));
-                    replies.push(tcpSeg(7, sport, 0x18, echoSeq, seq + dlen, payload, srcIp));
-                    echoSeq = (echoSeq + dlen) >>> 0;
-                } else if (fl & 0x01) { // FIN -> FIN-ACK
-                    replies.push(tcpSeg(7, sport, 0x11, echoSeq, seq + 1, null, srcIp));
-                }
-                return replies;
+            if (fl === 0x02) { // SYN
+                echoSport = sport;
+                log('TCP echo SYN -> SYN-ACK');
+                replies.push(tcpSeg(7, sport, 0x12, echoSeq, seq + 1, null, srcIp));
+                echoSeq = (echoSeq + 1) >>> 0; // SYN consumes one sequence number
+            } else if (dlen > 0 && (fl & 0x10)) { // data -> ACK + echo
+                const payload = frame.subarray(ipStart + th, ipStart + th + dlen);
+                log('TCP echo (' + dlen + 'B)');
+                replies.push(tcpSeg(7, sport, 0x10, echoSeq, seq + dlen, null, srcIp));
+                replies.push(tcpSeg(7, sport, 0x18, echoSeq, seq + dlen, payload, srcIp));
+                echoSeq = (echoSeq + dlen) >>> 0;
+            } else if (fl & 0x01) { // FIN -> FIN-ACK
+                log('TCP echo FIN -> FIN-ACK');
+                replies.push(tcpSeg(7, sport, 0x11, echoSeq, seq + dlen + 1, null, srcIp));
+                echoSeq = (echoSeq + 1) >>> 0;
+            }
+            return replies;
             }
             if (sport !== 0 || dport !== HTTP_PORT) {
                 // client -> server frames; learn the ephemeral port
@@ -432,6 +435,7 @@ export function createNetSim({ log = () => {} } = {}) {
                 stats.synAcks++;
                 log('TCP SYN -> SYN-ACK (seq=' + seq + ')');
                 replies.push(tcpFrame(0x12, srvSeq, seq + 1, null));
+                srvSeq = (srvSeq + 1) >>> 0; // SYN consumes one sequence number
             } else if ((fl & 0x18) === 0x18 && dlen > 0) { // PSH|ACK with data (HTTP GET)
                 const ack = seq + dlen;
                 log('HTTP GET (' + dlen + 'B) -> ACK + 200 response');
