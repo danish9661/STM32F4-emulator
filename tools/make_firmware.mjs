@@ -9,6 +9,10 @@ const firmwares = [
     ['eth_http', 'eth_http/eth_http.bin', 'eth_http.bin'],
     ['eth_dhcp', 'eth_dhcp/eth_dhcp.bin', 'eth_dhcp.bin'],
     ['eth_test', 'eth_test/eth_test.bin', 'eth_test.bin'],
+    ['eth_http_f429', 'eth_http/eth_http_f429.bin', 'eth_http_f429.bin'],
+    ['eth_dhcp_f429', 'eth_dhcp/eth_dhcp_f429.bin', 'eth_dhcp_f429.bin'],
+    ['eth_test_f429', 'eth_test/eth_test_f429.bin', 'eth_test_f429.bin'],
+    ['eth_irq_test_f429', 'eth_irq_test/eth_irq_test_f429.bin', 'eth_irq_test_f429.bin'],
     // bare-metal demos
     ['blinky', 'blinky/blinky.bin', 'blinky.bin'],
     // board variants (own link scripts/sizes/LEDs; VE/ZE share the stock bin)

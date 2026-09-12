@@ -28,10 +28,10 @@ if ! (exec 3<>/dev/tcp/127.0.0.1/8092) 2>/dev/null; then
 fi
 
 run_check() {
-  local name="$1" cfg="$2" log="$3" marker="$4"
+  local name="$1" cfg="$2" log="$3" marker="$4" dir="${5:-$1}" bin="${6:-$1.bin}"
   # NOTE: firmware/config paths are repo-root relative (../../ from $PKG);
   # the old "../$name" form resolved inside stm32-periph-wasm/ and failed.
-  (cd "$PKG" && node cli.mjs "../../$name/$name.bin" "$MAX_INST" --gateway --config="../../$name/$cfg") >"$log" 2>&1
+  (cd "$PKG" && node cli.mjs "../../$dir/$bin" "$MAX_INST" --gateway --config="../../$dir/$cfg") >"$log" 2>&1
   if grep -a -q "$marker" "$log"; then
     echo "PASS: $name (marker '$marker')"
   else
@@ -44,10 +44,17 @@ run_check() {
 run_check eth_http  config.yaml "$LOGDIR/verify_eth_http.log"  "TCP connected"
 run_check eth_dhcp  config.yaml "$LOGDIR/verify_eth_dhcp.log"  "=== DHCP SUCCESS ==="
 run_check eth_test  config.yaml "$LOGDIR/verify_eth_test.log"  "ETH Test: done"
+run_check eth_http_f429 config_f429.yaml "$LOGDIR/verify_eth_http_f429.log" "TCP connected" eth_http eth_http_f429.bin
+run_check eth_dhcp_f429 config_f429.yaml "$LOGDIR/verify_eth_dhcp_f429.log" "=== DHCP SUCCESS ===" eth_dhcp eth_dhcp_f429.bin
+run_check eth_test_f429 config_f429.yaml "$LOGDIR/verify_eth_test_f429.log" "ETH Test: done" eth_test eth_test_f429.bin
 
-# eth_http must also show zero TCP failures
+# eth_http must also show zero TCP failures (both maps)
 if grep -a -q "TCP fail" "$LOGDIR/verify_eth_http.log"; then
   echo "FAIL: eth_http reported TCP fail"
+  FAIL=1
+fi
+if grep -a -q "TCP fail" "$LOGDIR/verify_eth_http_f429.log"; then
+  echo "FAIL: eth_http_f429 reported TCP fail"
   FAIL=1
 fi
 

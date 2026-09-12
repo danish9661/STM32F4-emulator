@@ -3312,6 +3312,30 @@ define `BOARDS_OF_FIRMWARE`; F407 builds additionally blanket `ve`
   firmware can complete them — matrix expect-fails + no presets encode
   it. SAI-on-F401 re-verified absent (no silicon, not just SVD).
 
+### F429 Ethernet, all protocols (2026-09-12, UNCOMMITTED)
+Same sources + family link/SP (`STACK_TOP`, byte-identical stock
+rebuilds) for eth_http/dhcp/test/irq_test; SRAM layouts nm-verified
+IDENTICAL to F407 (the polling driver's hardcoded E addrs keep working).
+`cli.mjs` now honors `config.cpu.svd` (was hard-coded monox — the field
+existed but dead); 4× `config_f429.yaml` (Keil SVD, 256K RAM).
+- Gateway: http 3 rounds/0 fail, dhcp SUCCESS ×2, test done (all on the
+  Keil map, port 5070). irq_test via scripted PONG harness.
+- Netsim: full flow boot/dhcp/tcp/http/fin ×2 rounds; irq PING/PONG.
+- Protocols available everywhere: ARP (both directions), IPv4, UDP/
+  DHCP, TCP (handshake/data/FIN), HTTP, custom 0x1234 PING/PONG. No
+  firmware speaks ICMP/DNS/other-UDP — nothing to verify there (gVisor
+  would carry them).
+- Model finding: with a poll armed but `polladdr == 0`, `injectRxIrq`
+  falls back to the static E layout — right for eth_http, void for
+  irq-layout firmware. eth_irq_test_f429 passes the explicit
+  `eth: {rxDesc 0x20000050...}` like its F407 twin (not investigated
+  further; the walk works for dhcp/test).
+- `verify_ethernet.sh` now runs both trios (dir+bin args added) with a
+  TCP-fail gate per map. Browser: eth_http_f429 + eth_irq_test_f429
+  cases (IRQ_ETH wiring + ETH_RX_MAP entry). `pollingEth` substring
+  match covers `eth_http_f429` automatically.
+- VENDOR unchanged (no Rust this round); app 25, boards 5, firmware 16.
+
 ### Landing page rebuild (2026-09-11, UNCOMMITTED — do not commit till asked)
 `website/src/pages/index.js` + sections of `index.module.css` + config
 tagline. The old page described the pre-§23 tree (Unicorn CPU card,

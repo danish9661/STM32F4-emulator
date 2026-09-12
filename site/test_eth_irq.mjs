@@ -7,9 +7,13 @@ import { readFileSync } from 'fs';
 import * as bindings from '../site/vendor/stm32_periph_wasm.js';
 import { createEmulator } from '../site/emulator.js';
 
-const svdXml = readFileSync(new URL('../site/vendor/stm32f407.svd', import.meta.url), 'utf8');
+const svdFile = process.argv[3] || 'stm32f407';
+const svdXml = readFileSync(new URL(`../site/vendor/${svdFile}.svd`, import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('../site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const fw = new Uint8Array(readFileSync(new URL('../eth_irq_test/eth_irq_test.bin', import.meta.url)));
+const fw = new Uint8Array(readFileSync(new URL(process.argv[2] || '../eth_irq_test/eth_irq_test.bin', import.meta.url)));
+// Optional flash/ram sizes for non-F407 maps (argv[4]/argv[5]).
+const flashSize = process.argv[4] ? parseInt(process.argv[4]) : 0x100000;
+const ramSize = process.argv[5] ? parseInt(process.argv[5]) : 0x20000;
 
 // Firmware globals (nm eth_irq_test.elf)
 const eth = {
@@ -19,6 +23,7 @@ const eth = {
 const frames = [];
 const emu = await createEmulator({
     firmware: fw, bindings, svdXml, wasmInit: wasmBytes,
+    flash_size: flashSize, ram_size: ramSize,
     enable_irqs: true, irq_eth: true, eth,
     onTx: (pkt) => { frames.push(new Uint8Array(pkt)); },
 });

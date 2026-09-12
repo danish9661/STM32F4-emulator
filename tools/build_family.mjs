@@ -28,6 +28,10 @@ const DEMOS = {
     dac_demo: { fams: ['f429'] }, usb_cdc_test: { fams: ['f401', 'f429'] },
     fsmc_test: { fams: ['f429'] }, dcmi_test: { fams: ['f429'] },
     qspi_test: { fams: ['f429'] }, deep_sleep_demo: {}, ltdc_test: { fams: ['f429'] },
+    eth_http: { fams: ['f429'], srcs: ['startup.c', 'eth_http.ino'] },
+    eth_dhcp: { fams: ['f429'], srcs: ['startup.c', 'eth_dhcp.ino'] },
+    eth_test: { fams: ['f429'] },
+    eth_irq_test: { fams: ['f429'] },
 };
 const FREERTOS_SRCS = ['startup.c', 'main.c', 'string.c', 'FreeRTOS/tasks.c', 'FreeRTOS/list.c',
     'FreeRTOS/queue.c', 'FreeRTOS/portable/GCC/ARM_CM3/port.c', 'FreeRTOS/portable/MemMang/heap_4.c'];
@@ -56,7 +60,7 @@ for (const [demo, cfg] of Object.entries(DEMOS)) {
     const dir = `${root}/${demo}`;
     const linkSrc = readFileSync(`${dir}/link.ld`, 'utf8');
     if (!linkSrc.includes('LENGTH')) { console.log(`${demo}: no LENGTH link script, SKIP`); fail++; continue; }
-    const srcs = flags === 'freertos' ? FREERTOS_SRCS : ['startup.c', 'main.c'];
+    const srcs = flags === 'freertos' ? FREERTOS_SRCS : (cfg.srcs || ['startup.c', 'main.c']);
     for (const s of srcs) {
         if (!existsSync(`${dir}/${s}`)) { console.log(`${demo}: missing ${s}, SKIP fam loop`); fail++; continue; }
     }
@@ -69,7 +73,7 @@ for (const [demo, cfg] of Object.entries(DEMOS)) {
         const out = `${demo}_${fam}`;
         try {
             execFileSync(`${TC}gcc`, [...BASEFLAGS[flags].split(' '), `-DSTACK_TOP=${F.sp}`, `-DEXPECT_SP=${EXPECT_SP[fam]}`,
-                ...srcs, ...BASELD[flags].split(' '), '-T', `link_${fam}.ld`, '-o', `${out}.elf`],
+                '-x', 'c', ...srcs, '-x', 'none', ...BASELD[flags].split(' '), '-T', `link_${fam}.ld`, '-o', `${out}.elf`],
                 { cwd: dir, stdio: 'pipe' });
             execFileSync(`${TC}objcopy`, ['-O', 'binary', `${out}.elf`, `${out}.bin`], { cwd: dir });
             console.log(`${out}: ok`);

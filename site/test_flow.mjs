@@ -6,9 +6,13 @@ import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 import { createNetSim } from './netsim.js';
 
-const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
+const svdFile = process.argv[3] || 'stm32f407';
+const svdXml = readFileSync(new URL(`./vendor/${svdFile}.svd`, import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../eth_http/eth_http.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL(process.argv[2] || '../eth_http/eth_http.bin', import.meta.url)));
+// Optional flash/ram sizes for non-F407 maps (argv[4]/argv[5]).
+const flashSize = process.argv[4] ? parseInt(process.argv[4]) : 0x100000;
+const ramSize = process.argv[5] ? parseInt(process.argv[5]) : 0x20000;
 
 const maxInst = Number(process.env.MAX_INST || 20_000_000);
 const netsim = createNetSim({ log: (m) => console.log('[netsim] ' + m) });
@@ -18,6 +22,8 @@ const emu = await createEmulator({
     bindings,
     svdXml,
     wasmInit: wasmBytes,
+    flash_size: flashSize,
+    ram_size: ramSize,
     onTx: (frame) => {
         console.log(`[TX] ${frame.length}B`);
         for (const reply of netsim.onTx(frame)) emu.injectFrame(reply);

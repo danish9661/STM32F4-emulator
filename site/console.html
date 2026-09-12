@@ -525,6 +525,10 @@ canvas {
             <div class="custom-select-option selected" data-value="eth_http">eth_http — web client (DHCP+TCP+HTTP)</div>
             <div class="custom-select-option" data-value="eth_dhcp">eth_dhcp — DHCP loop</div>
             <div class="custom-select-option" data-value="eth_test">eth_test — raw ETH TX test</div>
+            <div class="custom-select-option" data-value="eth_http_f429">eth_http_f429 — web client on F429 (DHCP+TCP+HTTP)</div>
+            <div class="custom-select-option" data-value="eth_dhcp_f429">eth_dhcp_f429 — DHCP loop on F429</div>
+            <div class="custom-select-option" data-value="eth_test_f429">eth_test_f429 — raw ETH TX on F429</div>
+            <div class="custom-select-option" data-value="eth_irq_test_f429">eth_irq_test_f429 — interrupt-driven Ethernet (F429)</div>
             <div class="custom-select-group-label">Bare-metal demo</div>
             <div class="custom-select-option" data-value="blinky">blinky — LED blinker, no network</div>
             <div class="custom-select-group-label">Boards</div>
@@ -730,7 +734,7 @@ canvas {
             <div class="custom-select-option" data-value="rx_interrupt_test_f429">rx_interrupt_test_f429 — RX interrupt (F429)</div>
     </div>
     <select id="fwSelect" hidden>
-      <option value="eth_http">eth_http</option><option value="eth_dhcp">eth_dhcp</option><option value="eth_test">eth_test</option>
+      <option value="eth_http">eth_http</option><option value="eth_dhcp">eth_dhcp</option><option value="eth_test">eth_test</option><option value="eth_http_f429">eth_http_f429</option><option value="eth_dhcp_f429">eth_dhcp_f429</option><option value="eth_test_f429">eth_test_f429</option><option value="eth_irq_test_f429">eth_irq_test_f429</option>
       <option value="blinky">blinky</option><option value="blinky_f401">blinky_f401</option><option value="blinky_f411">blinky_f411</option><option value="blinky_f407g">blinky_f407g</option><option value="blinky_nucleo_f401">blinky_nucleo_f401</option><option value="blinky_nucleo_f411">blinky_nucleo_f411</option><option value="blinky_f429">blinky_f429</option><option value="blinky_f407ve">blinky_f407ve</option><option value="blinky_f407ze">blinky_f407ze</option><option value="arduino_bp_f401cc">arduino_bp_f401cc</option><option value="arduino_bp_f411ce">arduino_bp_f411ce</option><option value="arduino_nucleo_f401re">arduino_nucleo_f401re</option><option value="arduino_nucleo_f411re">arduino_nucleo_f411re</option><option value="arduino_disco_f407vg">arduino_disco_f407vg</option><option value="arduino_disco_f429zi">arduino_disco_f429zi</option><option value="arduino_black_f407ve">arduino_black_f407ve</option><option value="arduino_black_f407ze">arduino_black_f407ze</option><option value="adc_demo">adc_demo</option><option value="dac_demo">dac_demo</option><option value="pwm_demo">pwm_demo</option><option value="blink_serial">blink_serial</option><option value="timer_test">timer_test</option><option value="arduino_test">arduino_test</option><option value="hal_test">hal_test</option>
       <option value="periph_test">periph_test</option><option value="new_periph_test">new_periph_test</option><option value="deep_periph_test">deep_periph_test</option><option value="comprehensive_test">comprehensive_test</option><option value="eth_irq_test">eth_irq_test</option><option value="edge_test">edge_test</option><option value="i2s_sai_test">i2s_sai_test</option><option value="spi_tft_test">spi_tft_test</option><option value="audio_test">audio_test</option><option value="ltdc_test">ltdc_test</option><option value="oled_test">oled_test</option><option value="tft_test">tft_test</option><option value="buzzer_test">buzzer_test</option><option value="audio_play_test">audio_play_test</option><option value="rtc_test">rtc_test</option><option value="can_test">can_test</option><option value="can_demo">can_demo</option><option value="can_host_rx">can_host_rx</option><option value="watchdog_demo">watchdog_demo</option><option value="wwdg_demo">wwdg_demo</option><option value="wwdg_window_demo">wwdg_window_demo</option><option value="tim_capture_demo">tim_capture_demo</option><option value="qspi_test">qspi_test</option><option value="fpu_test">fpu_test</option><option value="fpu_irq_test">fpu_irq_test</option><option value="mpu_test">mpu_test</option>      <option value="usb_cdc_test">usb_cdc_test</option><option value="deep_sleep_demo">deep_sleep_demo</option><option value="test_firmware">test_firmware</option><option value="exti_test">exti_test</option><option value="flash_test">flash_test</option><option value="spi_flash_test">spi_flash_test</option><option value="freertos_test">freertos_test</option><option value="fsmc_test">fsmc_test</option><option value="dcmi_test">dcmi_test</option>
       <option value="crypto_test">crypto_test</option><option value="crypto_deep_test">crypto_deep_test</option><option value="rx_crypto_test">rx_crypto_test</option>
@@ -864,7 +868,7 @@ canvas {
     · <a href="about.html">About</a>
  </footer>
 
-<script type="module" src="app.js?v=24"></script>
+<script type="module" src="app.js?v=25"></script>
 <script>
 // Custom firmware dropdown (replaces native <select>)
 (() => {

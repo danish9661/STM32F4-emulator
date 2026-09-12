@@ -49,8 +49,20 @@ async function main() {
         console.log(`Using config(s): ${configPaths.join(', ')}`);
     }
 
-    const svdXml = readFileSync(new URL('../../monox/stm32f407.svd', import.meta.url), 'utf8');
+    const monoxSvd = readFileSync(new URL('../../monox/stm32f407.svd', import.meta.url), 'utf8');
     const wasmBytes = new Uint8Array(readFileSync(new URL('../../site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
+    // Honor config.cpu.svd (resolved relative to its config file) so board
+    // configs can select their own map (e.g. Keil F429 SVD); default monox.
+    let svdXml = monoxSvd;
+    if (config.cpu?.svd) {
+        try {
+            const cfgDir = configPaths.length
+                ? path.dirname(path.resolve(configPaths[configPaths.length - 1]))
+                : process.cwd();
+            svdXml = readFileSync(path.resolve(cfgDir, config.cpu.svd), 'utf8');
+            console.log(`Using SVD: ${config.cpu.svd}`);
+        } catch (e) { console.log(`SVD ${config.cpu.svd} unreadable, using monox (${e.message})`); }
+    }
 
     let firmware;
     let vector_table = 0x08000000;

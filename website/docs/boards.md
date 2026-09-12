@@ -62,8 +62,11 @@ prints + LED blink + SysTick `delay()`) is built for all eight targets
 - **DMA2D (F429)** — modeled (`dma2d.rs`: R2M/M2M/PFC/blend, TCIF/IRQ56)
   with a 5-phase IRQ-driven firmware proof (`dma2d_test`, in `npm test`
   and the browser). No gap remains.
-- **F429 Ethernet** — present on silicon but untested; all ETH presets
-  stay F407-only and the driver's descriptor layout assumes the F407 map.
+- **F429 Ethernet** — fully working: same-sources builds
+  (`eth_http/dhcp/test/irq_test_f429`, SRAM layouts nm-identical to
+  F407), gateway runs (DHCP→TCP→HTTP, DHCP loop, TX test) and netsim
+  flows on the Keil map; polling + IRQ paths, ARP/DHCP/TCP/HTTP all
+  covered. No firmware speaks ICMP/DNS — nothing to verify there.
 - **F429 GPIOK** — on silicon, covered by the generic GPIO bank, but no
   firmware drives a K pin yet.
 - **Known model gaps (fail identically on stock F407, not board issues)** —

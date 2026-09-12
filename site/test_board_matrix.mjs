@@ -8,6 +8,7 @@
 import { readFileSync } from 'node:fs';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
+import { createNetSim } from './netsim.js';
 
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 const svdCache = {};
@@ -130,6 +131,14 @@ bare('dcmi_test', ['f429'], ['=== DCMI Test: done ==='], ['FAIL'], {}, 'dcmi');
 bare('qspi_test', ['f429'], ['QSPI Test done'], ['QSPI FAIL'], { ext_devices: DEV.qspi });
 bare('ltdc_test', ['f429'], ['LTDC pixels OK']);
 E.push(['dma2d_test', 'f429', 'dma2d_test/dma2d_test.bin', ['=== DMA2D Test: done ==='], ['TIMEOUT', 'FAIL '], IRQ, null, 600, 100000]);
+// F429 Ethernet (netsim backend; same ARP/DHCP/TCP/HTTP coverage as the
+// gateway runs). eth_http runs polling (no IRQs); the rest use irq_eth.
+E.push(['eth_http_f429', 'f429', 'eth_http/eth_http_f429.bin', ['TCP connected'], ['TCP fail'], {}, 'netsim', 600, 100000]);
+const IRQETH = { enable_irqs: true, irq_eth: true };
+E.push(['eth_dhcp_f429', 'f429', 'eth_dhcp/eth_dhcp_f429.bin', ['=== DHCP SUCCESS ==='], null, IRQETH, 'netsim', 600, 100000]);
+E.push(['eth_test_f429', 'f429', 'eth_test/eth_test_f429.bin', ['ETH Test: done'], null, IRQETH, 'netsim', 600, 100000]);
+const IRQETH_LAYOUT = { rxDesc: 0x20000050, rxBuf: 0x2000005c, rxStride: 1536, rxDescs: 1 };
+E.push(['eth_irq_test_f429', 'f429', 'eth_irq_test/eth_irq_test_f429.bin', ['ETH IRQ Test: done'], ['TIMEOUT'], { ...IRQETH, eth: IRQETH_LAYOUT }, 'netsim', 600, 100000]);
 ino('blink_serial', ['disco_f429zi'], ['Hello from UART4!']);
 const UART4KEYS = ['disco_f407vg', 'disco_f429zi', 'black_f407ve', 'black_f407ze'];
 const HASHKEYS = ['disco_f407vg', 'disco_f429zi', 'black_f407ve', 'black_f407ze'];
@@ -151,9 +160,11 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
     try { fw = new Uint8Array(readFileSync(new URL('../' + bin, import.meta.url))); }
     catch { console.log(`[${label}] MISSING ${bin}`); fail++; failed.push(label + ' missing'); return 'fail'; }
     const B = BOARDS[boardKey] || ABOARDS[boardKey];
+    const netsim = script === 'netsim' ? createNetSim({}) : null;
     const emu = await createEmulator({
         firmware: fw, bindings, svdXml: svdFor(B.svd), wasmInit: wasmBytes,
         flash_size: B.flash, ram_size: B.ram, ...opts,
+        ...(netsim ? { onTx: (frame) => { for (const r of netsim.onTx(frame)) emu.injectFrame(r); } } : {}),
     });
     if (script === 'wav') bindings.audio_load_wav(makeWav());
     if (script === 'dcmi') bindings.dcmi_feed_frame(2, 2, DCMI_SMALL);

@@ -268,6 +268,10 @@ export const BOARDS_OF_FIRMWARE = {
     rx_interrupt_test_f429: ['stm32f429'],
     comprehensive_test_f429: ['stm32f429'],
     dma2d_test: ['stm32f429'],
+    eth_http_f429: ['stm32f429'],
+    eth_dhcp_f429: ['stm32f429'],
+    eth_test_f429: ['stm32f429'],
+    eth_irq_test_f429: ['stm32f429'],
 };
 
 export function boardsOf(fwName) {

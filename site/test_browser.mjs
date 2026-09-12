@@ -48,6 +48,8 @@ const CASES = [
     { label: 'mpu_f401', fw: 'mpu_test_f401', markers: ['MPU all PASS', 'MPU done'], timeoutMs: 60000 },
     { label: 'dma2d', fw: 'dma2d_test', markers: ['=== DMA2D Test: done ==='], timeoutMs: 60000 },
     { label: 'comprehensive_f429', fw: 'comprehensive_test_f429', markers: ['=== DONE ===', 'FAIL: 00000000'], timeoutMs: 120000 },
+    { label: 'eth_http_f429', fw: 'eth_http_f429', markers: ['TCP connected'], timeoutMs: 120000 },
+    { label: 'eth_irq_f429', fw: 'eth_irq_test_f429', markers: ['ETH IRQ Test: done'], failMarkers: ['TIMEOUT'], timeoutMs: 120000 },
 ];
 
 let failed = 0;
