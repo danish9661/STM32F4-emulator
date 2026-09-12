@@ -17,7 +17,7 @@ soaks, and CI, and the browser console (`site/`) for interactive demos.
 
 - Node 22+.
 - The WASM bindings + Unicorn in `stm32-periph-wasm/pkg/` (committed; only
-   rebuild if you change the Rust model — see [Building](#building-from-source)).
+  rebuild if you change the Rust model — see [Building](#building-from-source)).
 - For gateway runs: the built gateway `openhw-local-gateway/openhw-gw`
   (build with `cd openhw-local-gateway && go build -mod=vendor -o openhw-gw .`),
   and (for eth_http) an HTTP server at 127.0.0.1:8092 that the firmware
@@ -127,8 +127,9 @@ https://danish9661.github.io/stm32F4-emulator/ (GitHub Pages, CI-deployed).
 
 ### What you get
 
-- **Preset dropdown** — 67 bundled firmwares. Auto-boot with
-  `console.html?fw=eth_http`, `console.html?fw=blinky`, `console.html?fw=crypto_test`, … (or `console.html?fw=<name>`
+- **Preset dropdown** — 209 bundled firmware builds. Auto-boot with
+  `console.html?fw=eth_http`, `console.html?fw=blinky`,
+  `console.html?fw=crypto_test`, … (or `console.html?fw=<name>`
   for any preset).
 - **UART terminal** — firmware TX scrolls here; the input box sends bytes
   to the emulated USART (RX works — verified end-to-end). HTML spec strips

@@ -143,7 +143,8 @@ E.push(['eth_test_f429', 'f429', 'eth_test/eth_test_f429.bin', ['ETH Test: done'
 E.push(['eth_feat_test_f429', 'f429', 'eth_feat_test/eth_feat_test_f429.bin', ['PHY link OK', 'PHY AN restart OK', 'PHY force OK', 'PHY media RMII OK', 'PHY media MII OK', 'CSUM TX insert OK', 'CSUM RX IPHCE OK', 'CSUM RX PCE OK', 'MCAST OK', 'VLAN OK', 'PTP target OK', 'PTP drift OK', 'PTP TX snap OK', 'PTP RX snap OK', 'WOL OK', 'WOL filter OK', 'WIRE RATE OK', 'COLLIDE OK', 'COLLIDE DROP OK', 'RX RATE OK', 'DEFER OK', 'DEFER DROP OK', 'LINK DOWN OK', 'LINK UP OK', 'PPS window done', 'WOKE BY WOL', 'FEAT Test: done'], ['FAIL', 'TIMEOUT'], IRQETHLP, 'netsim', 10000, 5000,
     // PPS scope probe: 200k inst at 32768 Hz (edge per ~5041 inst) ~= 39.
     (b) => { const n = b.eth_pps_count(); return (n >= 20 && n <= 60) ? null : ('pps_count=' + n); }]);
-E.push(['lwip_demo_f429', 'f429', 'lwip_demo/lwip_demo_f429.bin', ['LWIP init OK', 'LWIP DNS 093.184.216.034', 'LWIP TCP echo OK', 'LWIP TCP server OK', 'LWIP UDP echo OK', 'LWIP DEMO DONE'], ['FAIL'], IRQETH, 'netsim', 1200, 200000]);
+E.push(['eth_pins_test', 'f429', 'eth_pins_test/eth_pins_test_f429.bin', ['PINS AF OK', 'PINS TX OK', 'PINS RX OK', 'PINS COL OK', 'PINS COL DROP OK', 'PINS IDLE OK', 'PINS ALL PASS'], ['FAIL'], IRQETH, 'netsim', 1200, 100000]);
+E.push(['lwip_demo_f429', 'f429', 'lwip_demo/lwip_demo_f429.bin', ['LWIP init OK', 'LWIP DNS 093.184.216.034', 'LWIP TCP echo OK', 'LWIP TCP server OK', 'LWIP SELECT OK', 'LWIP UDP echo OK', 'LWIP ERR OK', 'LWIP DEMO DONE'], ['FAIL'], IRQETH, 'netsim', 1200, 200000]);
 const IRQETH_LAYOUT = { rxDesc: 0x20000050, rxBuf: 0x2000005c, rxStride: 1536, rxDescs: 1 };
 E.push(['eth_irq_test_f429', 'f429', 'eth_irq_test/eth_irq_test_f429.bin', ['ETH IRQ Test: done'], ['TIMEOUT'], { ...IRQETH, eth: IRQETH_LAYOUT }, 'netsim', 600, 100000]);
 ino('blink_serial', ['disco_f429zi'], ['Hello from UART4!']);

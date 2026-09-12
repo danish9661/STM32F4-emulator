@@ -1,0 +1,77 @@
+[
+ {
+  "file": "intro.md",
+  "title": "Introduction",
+  "blurb": "What this is, try-it links, boards overview"
+ },
+ {
+  "file": "usage.md",
+  "title": "Usage guide",
+  "blurb": "Console, CLI, firmware loading, options"
+ },
+ {
+  "file": "boards.md",
+  "title": "Boards & chips",
+  "blurb": "Variant table, verification matrix, preset wiring"
+ },
+ {
+  "file": "boards/stm32f401.md",
+  "title": "Board: STM32F401",
+  "blurb": "36 presets, no CAN/ETH, BlackPill + Nucleo"
+ },
+ {
+  "file": "boards/stm32f411.md",
+  "title": "Board: STM32F411",
+  "blurb": "36 presets, F401 + SPI5"
+ },
+ {
+  "file": "boards/stm32f407.md",
+  "title": "Board: STM32F407",
+  "blurb": "Reference target, 64 presets, feature matrix"
+ },
+ {
+  "file": "boards/stm32f407ve.md",
+  "title": "Board: F407VE/ZE",
+  "blurb": "512K package, 66 presets"
+ },
+ {
+  "file": "boards/stm32f429.md",
+  "title": "Board: STM32F429",
+  "blurb": "DMA2D/LTDC/Ethernet proofs, 57 presets"
+ },
+ {
+  "file": "networking.md",
+  "title": "Networking / Ethernet",
+  "blurb": "Per-board support matrix, bridge + gateway"
+ },
+ {
+  "file": "peripherals.md",
+  "title": "Peripheral coverage",
+  "blurb": "Model depth per peripheral, IRQs, gaps"
+ },
+ {
+  "file": "architecture.md",
+  "title": "Architecture",
+  "blurb": "CPU core, driver, stepping, performance"
+ },
+ {
+  "file": "components.md",
+  "title": "Components / devices",
+  "blurb": "OLED, TFT, buzzer, RTC panels"
+ },
+ {
+  "file": "benchmarks.md",
+  "title": "Benchmarks",
+  "blurb": "MIPS, soak results, gateway throughput"
+ },
+ {
+  "file": "mcp.md",
+  "title": "MCP / AI usage",
+  "blurb": "Driving the emulator from AI agents"
+ },
+ {
+  "file": "progress-and-future.md",
+  "title": "Progress & future",
+  "blurb": "Changelog direction, open items"
+ }
+]

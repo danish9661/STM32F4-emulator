@@ -4,88 +4,52 @@ title: Boards
 description: Supported STM32F4 boards and chips — what is implemented, what was verified, and what is left.
 ---
 
-# Boards
+# Supported Boards & Chips
 
-Every supported board is a **Cortex-M4F** — one shared CPU core, no decoder
-work per board. A board variant is an SVD (register map), flash/RAM sizes,
-and pins (`site/boards.js`). Pick one from the **Board** menu on the
-[console](/stm32F4-emulator/console/console.html): the preset list filters
-to firmware built for it, and deep links work as
-`console.html?board=stm32f401` / `console.html?fw=arduino_disco_f407vg`.
+One shared Cortex-M4F CPU core runs every board byte-identically — a board
+differs only in SVD (register map), flash/RAM sizes, and clock
+(`site/boards.js` — no decoder work per board, see `docs/architecture.md`).
+Timing stays instruction-budget based on every chip.
 
-## Variants
-
-Sizes are the superset per SVD family (a smaller die's firmware runs
-unchanged — the initial SP comes from its own vector table).
-
-| Chip | Flash / RAM | Boards (Arduino-validated) | LED | Serial |
+| Board / chip | `board` name | Flash/RAM | Clock | Notes |
 |---|---|---|---|---|
-| STM32F401 | 512K / 96K | BlackPill F401CC | PC13 | USART1 |
-| | | Nucleo-F401RE | PA5 | USART2 |
-| STM32F411 | 512K / 128K | BlackPill F411CE | PC13 | USART1 |
-| | | Nucleo-F411RE | PA5 | USART2 |
-| STM32F407 | 1M / 192K | Discovery F407VG | PD12 | USART2 |
-| STM32F407VE/ZE | 512K / 192K | Black F407VE | PA6 | USART1 |
-| | | Black F407ZE | PF10 | USART1 |
-| STM32F429 | 2M / 256K | Discovery F429ZI | PG13 | USART1 |
+| BlackPill STM32F401CC | `stm32f401` | 512K/96K | 84 MHz | superset sizes cover the biggest die (RE); smaller-die firmware runs unchanged, SP comes from its own vector table |
+| Nucleo-F401RE | `stm32f401` | 512K/96K | 84 MHz | Arduino headers; `Serial` = USART2 |
+| BlackPill STM32F411CE | `stm32f411` | 512K/128K | 100 MHz | +SPI5 over F401 |
+| Nucleo-F411RE | `stm32f411` | 512K/128K | 100 MHz | Arduino headers; `Serial` = USART2 |
+| Discovery STM32F407VG (default) | `stm32f407` | 1M/192K | 168 MHz | reference target; 128K SRAM + 64K CCM mapped flat |
+| Black STM32F407VE | `stm32f407ve` | 512K/192K | 168 MHz | same die, new package; LED PA6, `Serial` = USART1 |
+| Black STM32F407ZE | `stm32f407ve` | 512K/192K | 168 MHz | LED PF10, `Serial` = USART1 |
+| Discovery STM32F429ZI | `stm32f429` | 2M/256K | 180 MHz | +DMA2D/LTDC/SAI/GPIOK/QSPI; FMC instead of FSMC |
 
-Blinky presets exist for all eight (`blinky_f401`, `blinky_f411`,
-`blinky_f407g`, `blinky_nucleo_f401`, `blinky_nucleo_f411`,
-`blinky_f429`, `blinky_f407ve`, `blinky_f407ze` — the VE/ZE ones reuse
-the stock blinky, so they blink PA5). The same Arduino sketch (Serial
-prints + LED blink + SysTick `delay()`) is built for all eight targets
-(`arduino_bp_f401cc`, …) — the full Arduino stack on every variant.
+DBGMCU IDCODE reads a constant (`0x10006411`) on every map — the model
+does not vary it per chip.
 
-## What is implemented
+## Per-chip notes (audited)
 
-- **Shared core** — CPU, FPU, MPU, and exception delivery are identical on
-  every board; board work never touches the decoder.
-- **Per-board maps** — Keil DFP SVDs in `site/vendor/stm32f*.svd` plus
-  sizes/labels in `site/boards.js`. SVDs without a system block get the
-  core SCB/MPU/SysTick/FPU windows registered automatically; the FSMC
-  controller is registered when the SVD omits it (F429 calls it FMC),
-  and `SAI`/`DBG` SVD names are accepted as aliases.
-- **~190 presets pass board-gated** — `site/test_board_matrix.mjs` (in
-  `npm test`) boots every portable demo on every compatible map and
-  asserts its completion markers: only passing pairs become presets
-  (`BOARDS_OF_FIRMWARE`). Silicon-absent peripherals (CAN/DAC on
-  F401/F411, SAI/USB gaps, UART4) fail honestly and stay unlisted.
-- **Real-firmware validation** — `site/test_arduino_boards.mjs` (in
-  `npm test`) boots the Arduino build per board and asserts banner +
-  ticks + LED toggles + no fault: **8/8 PASS**.
-- **Browser** — board menu with per-board preset filtering, `?board=`
-  deep links, and `test_browser.mjs` coverage (blinky per board, two
-  Arduino builds, plus device/IRQ/USB/DMA showcases per family).
+Silicon peripheral set vs emulator coverage, wiring, demos and quirks —
+one page per chip:
 
-## What is left
+- [STM32F401](boards/stm32f401.md) — 36 presets, no CAN/ETH/DAC/DCMI/FSMC
+- [STM32F411](boards/stm32f411.md) — 36 presets, F401 + SPI5
+- [STM32F407](boards/stm32f407.md) — 64 presets, reference target
+- [STM32F407VE/ZE](boards/stm32f407ve.md) — 66 presets, 512K flash package
+- [STM32F429](boards/stm32f429.md) — 57 presets, DMA2D/LTDC/Ethernet proofs
 
-- **DMA2D (F429)** — modeled (`dma2d.rs`: R2M/M2M/PFC/blend, TCIF/IRQ56)
-  with a 5-phase IRQ-driven firmware proof (`dma2d_test`, in `npm test`
-  and the browser). No gap remains.
-- **F429 Ethernet** — fully working: same-sources builds
-  (`eth_http/dhcp/test/irq_test/feat/lwip_f429`, SRAM layouts nm-identical
-  to F407), gateway runs (DHCP→TCP→HTTP, DHCP loop, TX test) and netsim
-  flows on the Keil map; polling + IRQ paths, ARP/IPv4/ICMP/UDP/DHCP/DNS/
-  TCP/HTTP/custom-PING all covered, plus PHY/MDIO, checksum offload, MAC
-  filtering, VLAN, PTP, WOL, wire pacing (`eth_feat_test`) and a
-  socket-style demo (`lwip_demo`). See `NETWORKING.md`.
-- **F429 GPIOK** — on silicon, covered by the generic GPIO bank, but no
-  firmware drives a K pin yet.
-- **Former model gaps, now closed** — DCMI empty-capture IRQ + SDIO
-  CMDSENT (comprehensive_test is 43/43 on 407 + 429) and the
-  `rx_interrupt_test` Arduino builds (converted to bare-metal; all 4 maps
-  pass). `new/deep_periph_test` stay boot-only F407 presets (step-cadence
-  sensitive by design; the browser passes them deterministically).
-- **M0+ chips are out of scope** — different core; see `cpu_bug.md`.
+Preset counts come from inverting `BOARDS_OF_FIRMWARE` in
+`site/boards.js`. The console filters the preset menu to the selected
+board (board-only demos hide on other chips; picking one auto-switches
+the chip), and deep links work as `console.html?board=stm32f401` /
+`console.html?fw=arduino_disco_f407vg`. The UART input box follows the
+board's native Serial port (`uartAddr`: USART2 `0x40004400` on
+Nucleo/Disc-F407).
 
-## Adding a board
+## Verification matrix
 
-1. Drop the chip SVD into `site/vendor/` (restore it after every
-   `wasm-pack` rebuild — the out-dir is wiped) and register sizes/label
-   in `site/boards.js`.
-2. Build the firmware with the right link script, top-of-RAM SP, and the
-   board's real LED/UART pins.
-3. Add a Node harness (`site/test_<name>.mjs`) and wire it into
-   `npm test`.
-4. List it in `BOARDS_OF_FIRMWARE`, add the dropdown entry in
-   `site/index.html`, and add a `test_browser.mjs` marker.
+- Arduino-cli firmware per target boots + ticks + LED toggles:
+  `node site/test_arduino_boards.mjs` **8/8** (BlackPill/Nucleo F401/F411,
+  Discovery F407VG/F429ZI, Black F407VE/ZE — USART1 or USART2 per board).
+- Portable demos on every compatible map: `node
+  site/test_board_matrix.mjs` (in `npm test`) — only passing
+  board+firmware pairs become presets.
+- Ethernet (F407/F429): gateway trio + netsim flows, `scripts/verify_ethernet.sh`.

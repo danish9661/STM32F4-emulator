@@ -1,7 +1,7 @@
 ---
 sidebar_position: 5
 title: Peripherals
-description: Full implementation matrix of all 33 emulated peripherals — register coverage, behavior level, and firmware coverage.
+description: Full implementation matrix of all 40 emulated peripherals — register coverage, behavior level, and firmware coverage.
 ---
 
 # Peripheral implementation matrix

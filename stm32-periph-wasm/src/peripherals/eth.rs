@@ -89,6 +89,12 @@ pub struct EthernetMac {
     // TX wire pacing: virtual-instruction count until the wire is free.
     // Set by eth_tx_wire_busy(len); TS completion waits for it.
     tx_busy_until: u64,
+    // COL stretch: set to the TX wire end when an armed collision is
+    // consumed (take). The COL pin reads HIGH until then — a collided
+    // transmission's observable footprint (documented model choice: on
+    // silicon COL pulses mid-frame, too fast for firmware to sample).
+    col_until: u64,
+    col_pending: bool,
     // RX wire pacing (same clock): set by eth_rx_wire_busy(len) at frame
     // delivery; RS completion waits for it.
     rx_busy_until: u64,
@@ -159,6 +165,8 @@ impl EthernetMac {
             phy_speed100: true, phy_full: true, phy_an_done: true, phy_done_at: 0,
             phy_link: true,
             tx_busy_until: 0,
+            col_until: 0,
+            col_pending: false,
             rx_busy_until: 0,
             tx_collide_armed: false,
             ptp_sec: 0, ptp_sub: 0,
@@ -1037,7 +1045,16 @@ pub fn eth_tx_wire_busy(sys: &System, len: u32) {
     let mhz: u64 = if with_mac(sys, |m| (m.maccr >> 14) & 1) != 0 { 100 } else { 10 };
     let inst = (len as u64 + 20) * 8 * 168 / mhz;
     let until = system::instruction_count() + inst;
-    with_dma_mut(sys, |d| d.tx_busy_until = until);
+    system::eth_set_wire_tx_busy_until(until);
+    with_dma_mut(sys, |d| {
+        d.tx_busy_until = until;
+        // A consumed collision stretches COL across this wire time.
+        if d.col_pending {
+            d.col_pending = false;
+            d.col_until = until;
+            system::eth_set_wire_col_until(until);
+        }
+    });
 }
 
 /// Driver entry: arm RX wire pacing for a delivered `len`-byte frame.
@@ -1046,6 +1063,7 @@ pub fn eth_rx_wire_busy(sys: &System, len: u32) {
     let mhz: u64 = if with_mac(sys, |m| (m.maccr >> 14) & 1) != 0 { 100 } else { 10 };
     let inst = (len as u64 + 20) * 8 * 168 / mhz;
     let until = system::instruction_count() + inst;
+    system::eth_set_wire_rx_busy_until(until);
     with_dma_mut(sys, |d| d.rx_busy_until = until);
 }
 
@@ -1060,9 +1078,15 @@ pub fn eth_arm_collision(sys: &System) {
 /// full-duplex the arm is silently dropped (silicon never collides).
 pub fn eth_take_collision(sys: &System) -> bool {
     let mut out = false;
+    // COL stretches only for applied (half-duplex) collisions — a
+    // full-duplex dropped arm leaves no footprint, like silicon.
+    let half = with_mac(sys, |m| (m.maccr >> 11) & 1) == 0;
     with_dma_mut(sys, |d| {
         out = d.tx_collide_armed;
         d.tx_collide_armed = false;
+        if (out && half) {
+            d.col_pending = true;
+        }
     });
     out
 }
@@ -1097,6 +1121,20 @@ pub fn eth_get_maccr(sys: &System) -> u32 {
     with_mac(sys, |m| m.maccr)
 }
 
+/// MII/RMII pin-mirror levels for the GPIO IDR hook: (tx_en, crs_dv,
+/// col). Reads the process-global wire mirrors (plain atomics — safe
+/// inside a peripheral slot borrow, unlike the with_* slot scanners).
+/// TX_EN is HIGH across the paced TX wire time; CRS_DV across the RX
+/// wire time; COL from an applied collision until that TX's wire end.
+pub fn eth_mii_signals(_sys: &System) -> (bool, bool, bool) {
+    let now = system::instruction_count();
+    (
+        now < system::eth_wire_tx_busy_until(),
+        now < system::eth_wire_rx_busy_until(),
+        now < system::eth_wire_col_until(),
+    )
+}
+
 /// Driver entry: loopback active (MACCR LM). The driver re-injects the
 /// transmitted frame into RX; ROD filtering happens in accept().
 pub fn eth_loopback_tx(sys: &System) -> bool {
@@ -1124,8 +1162,7 @@ pub fn eth_pps_count(sys: &System) -> u32 {
 /// Driver entry: PPS pin level (square wave at the PTPPPSCR rate, 50%
 /// duty from the edge residue). The readable model of the PPS output —
 /// a harness samples this like a logic analyzer on the pin.
-pub fn eth_pps_level(sys: &System) -> bool {
-    with_ptp(sys, |p| {
+pub fn eth_pps_level(sys: &System) -> bool {    with_ptp(sys, |p| {
         if p.ptptscr & 1 == 0 {
             return 0;
         }
@@ -1611,5 +1648,68 @@ mod gap5_tests {
         with_mac_mut(&sys, |m| m.maccr &= !(1 << 11));
         eth_rx_wire_busy(&sys, 1200);
         assert!(eth_tx_deferred(&sys));
+    }
+}
+
+#[cfg(test)]
+mod gap6_tests {
+    use super::*;
+    use crate::system::test_dummy_system;
+
+    static G6_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const GPIOA_IDR: u32 = 0x40020010;
+    const GPIOB_IDR: u32 = 0x40020410;
+    const GPIOC_IDR: u32 = 0x40020810;
+    const SYSCFG_PMC: u32 = 0x40013804;
+
+    fn idr(sys: &std::rc::Rc<crate::system::System>, addr: u32, bit: u32) -> bool {
+        sys.p.read(sys, addr, 4) & (1 << bit) != 0
+    }
+
+    fn clean_busy() {
+        // Wire mirrors are process-global (like the other ETH_* atomics);
+        // zero them so parallel tests don't leak state into each other.
+        crate::system::eth_set_wire_tx_busy_until(0);
+        crate::system::eth_set_wire_rx_busy_until(0);
+        crate::system::eth_set_wire_col_until(0);
+    }
+
+    #[test]
+    fn rmii_mirrors_follow_wire() {
+        let _g = G6_LOCK.lock().unwrap();
+        clean_busy();
+        let sys = test_dummy_system();
+        sys.p.write(&sys, SYSCFG_PMC, 4, 1 << 23); // RMII
+        sys.p.write(&sys, 0x4002_8000, 4, (1 << 14) | (1 << 2) | (1 << 3)); // FES
+        // Idle: TX_EN/CRS/RXD low, MDIO/MDC high, COL low (MII-gated).
+        assert!(!idr(&sys, GPIOB_IDR, 11));
+        assert!(!idr(&sys, GPIOA_IDR, 7));
+        assert!(!idr(&sys, GPIOC_IDR, 4));
+        assert!(idr(&sys, GPIOA_IDR, 2));
+        assert!(idr(&sys, GPIOC_IDR, 1));
+        assert!(!idr(&sys, GPIOA_IDR, 3));
+        // TX wire busy -> TX_EN high; RX busy -> CRS/RXD high.
+        eth_tx_wire_busy(&sys, 1200);
+        eth_rx_wire_busy(&sys, 1200);
+        assert!(idr(&sys, GPIOB_IDR, 11));
+        assert!(idr(&sys, GPIOA_IDR, 7));
+        assert!(idr(&sys, GPIOC_IDR, 4));
+        assert!(idr(&sys, GPIOC_IDR, 5));
+    }
+
+    #[test]
+    fn col_mirror_mii_gated() {
+        let _g = G6_LOCK.lock().unwrap();
+        clean_busy();
+        let sys = test_dummy_system();
+        sys.p.write(&sys, 0x4002_8000, 4, (1 << 14) | (1 << 2) | (1 << 3)); // FES, DM=0
+        sys.p.write(&sys, SYSCFG_PMC, 4, 0); // MII
+        eth_arm_collision(&sys);
+        assert!(eth_take_collision(&sys));
+        eth_tx_wire_busy(&sys, 1200);
+        assert!(idr(&sys, GPIOA_IDR, 3)); // COL high across the wire time
+        // RMII select hides COL again.
+        sys.p.write(&sys, SYSCFG_PMC, 4, 1 << 23);
+        assert!(!idr(&sys, GPIOA_IDR, 3));
     }
 }

@@ -1,15 +1,18 @@
 // lwip_demo: REAL LwIP 2.2.1 (vendored in lwip/, NO_SYS=1 raw API) on the
-// bare-metal F4 Ethernet driver. No clean-room stack: DHCP, DNS, ARP,
-// TCP and UDP are lwIP's own; netsim (or the real gateway) is the peer.
+// bare-metal F4 Ethernet driver, driven through the BSD-style socket
+// layer (lwip_sock.c: socket/bind/listen/accept/connect/send/recv/
+// sendto/recvfrom/close/select + real err_t codes). No clean-room stack:
+// DHCP, DNS, ARP, TCP and UDP are lwIP's own; netsim (or the real
+// gateway) is the peer.
 // Demo: DHCP bind -> resolve example.com -> TCP echo client :7 ->
-// TCP echo server :7 (netsim connects) -> UDP echo -> DONE.
+// TCP echo server :7 (select-gated, netsim connects) -> UDP echo ->
+// misuse probes -> DONE.
 #include "defs.h"
 
 #include "lwip/opt.h"
 #include "lwip/init.h"
 #include "lwip/sys.h"
 #include "lwip/netif.h"
-#include "lwip/etharp.h"
 #include "netif/ethernet.h"
 #include "lwip/dhcp.h"
 #include "lwip/dns.h"
@@ -17,9 +20,14 @@
 #include "lwip/udp.h"
 #include "lwip/timeouts.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/err.h"
+#include "lwip_sock.h"
+
+#define AF_INET 2
+#define SOCK_STREAM 1
+#define SOCK_DGRAM 2
 
 const unsigned char f4_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
-static const unsigned char echo_srv[4] = {192, 168, 4, 1};
 
 static volatile unsigned int tx_desc[2] __attribute__((aligned(8))) = { 0 };
 static volatile int eth_done = 0;
@@ -54,6 +62,7 @@ static void eth_hw_init(void) {
     DMARPDR = 1;
 }
 
+// Raw TX: queue the frame, wait for TS (bounded). Returns 1 on completion.
 int raw_send(const unsigned char *data, unsigned int len) {
     unsigned int n = len < 60 ? 60 : len;
     for (unsigned int i = 0; i < n; i++)
@@ -85,123 +94,37 @@ int netif_f4_poll(struct netif *netif);
 err_t netif_f4_init(struct netif *netif);
 
 static struct netif f4_ni;
-static volatile int have_ip = 0, dns_done = 0, dns_ok = 0;
-static volatile int tcp_echo_ok = 0, tcp_fail = 0;
-static volatile int srv_echo_ok = 0;
-static volatile int udp_echo_ok = 0;
-static ip_addr_t srv_ip;
 
-static void uart_ip(const unsigned char *ip) {
-    uart_putchar('0' + ip[0] / 100); uart_putchar('0' + (ip[0] % 100) / 10); uart_putchar('0' + ip[0] % 10);
+static void uart_ip_bytes(unsigned int ip) {    uart_putchar('0' + ((ip >> 24) & 0xFF) / 100);
+    uart_putchar('0' + (((ip >> 24) & 0xFF) % 100) / 10);
+    uart_putchar('0' + (((ip >> 24) & 0xFF) % 10));
     uart_putchar('.');
-    uart_putchar('0' + ip[1] / 100); uart_putchar('0' + (ip[1] % 100) / 10); uart_putchar('0' + ip[1] % 10);
+    uart_putchar('0' + ((ip >> 16) & 0xFF) / 100);
+    uart_putchar('0' + (((ip >> 16) & 0xFF) % 100) / 10);
+    uart_putchar('0' + (((ip >> 16) & 0xFF) % 10));
     uart_putchar('.');
-    uart_putchar('0' + ip[2] / 100); uart_putchar('0' + (ip[2] % 100) / 10); uart_putchar('0' + ip[2] % 10);
+    uart_putchar('0' + ((ip >> 8) & 0xFF) / 100);
+    uart_putchar('0' + (((ip >> 8) & 0xFF) % 100) / 10);
+    uart_putchar('0' + (((ip >> 8) & 0xFF) % 10));
     uart_putchar('.');
-    uart_putchar('0' + ip[3] / 100); uart_putchar('0' + (ip[3] % 100) / 10); uart_putchar('0' + ip[3] % 10);
+    uart_putchar('0' + (ip & 0xFF) / 100);
+    uart_putchar('0' + ((ip & 0xFF) % 100) / 10);
+    uart_putchar('0' + ((ip & 0xFF) % 10));
 }
 
-static void uart_ip4(const ip4_addr_t *ip) {
-    uart_ip((unsigned char *)&ip->addr);
-}
-
-static err_t tcp_srv_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err);
-
-static void dns_cb(const char *name, const ip_addr_t *ipaddr, void *arg) {
-    (void)name; (void)arg;
-    if (ipaddr) {
-        ip_addr_copy(srv_ip, *ipaddr);
-        dns_ok = 1;
-    }
-    dns_done = 1;
-}
-
-static err_t tcp_connected_cb(void *arg, struct tcp_pcb *tpcb, err_t err) {
-    (void)arg;
-    if (err != ERR_OK) { tcp_fail = 1; return ERR_OK; }
-    tcp_write(tpcb, "LWIP", 4, TCP_WRITE_FLAG_COPY);
-    tcp_output(tpcb);
-    return ERR_OK;
-}
-
-static err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
-    (void)arg;
-    if (!p) { tcp_close(tpcb); return ERR_OK; } // FIN
-    if (err == ERR_OK && p->tot_len == 4) {
-        char b[4];
-        pbuf_copy_partial(p, b, 4, 0);
-        if (b[0] == 'L' && b[1] == 'W' && b[2] == 'I' && b[3] == 'P') {
-            tcp_echo_ok = 1;
-            tcp_recved(tpcb, p->tot_len);
-            pbuf_free(p);
-            tcp_close(tpcb);
-            return ERR_OK;
-        }
-    }
-    tcp_fail = 1;
-    pbuf_free(p);
-    tcp_close(tpcb);
-    return ERR_OK;
-}
-
-static void tcp_err_cb(void *arg, err_t err) {
-    (void)arg; (void)err;
-    tcp_fail = 1;
-}
-
-static err_t tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
-    (void)arg;
-    if (err != ERR_OK) return ERR_ABRT;
-    tcp_recv(newpcb, tcp_srv_recv_cb);
-    tcp_err(newpcb, tcp_err_cb);
-    return ERR_OK;
-}
-
-static err_t tcp_srv_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
-    (void)arg;
-    if (!p) { tcp_close(tpcb); return ERR_OK; }
-    if (err == ERR_OK && p->tot_len == 3) {
-        char b[3];
-        pbuf_copy_partial(p, b, 3, 0);
-        if (b[0] == 'S' && b[1] == 'R' && b[2] == 'V') {
-            tcp_recved(tpcb, p->tot_len);
-            pbuf_free(p);
-            tcp_write(tpcb, "SRV", 3, TCP_WRITE_FLAG_COPY);
-            tcp_output(tpcb);
-            srv_echo_ok = 1;
-            tcp_close(tpcb);
-            return ERR_OK;
-        }
-    }
-    pbuf_free(p);
-    tcp_close(tpcb);
-    return ERR_OK;
-}
-
-static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
-                         const ip_addr_t *addr, u16_t port) {
-    (void)arg; (void)pcb; (void)addr; (void)port;
-    if (p && p->tot_len == 8) {
-        char b[8];
-        pbuf_copy_partial(p, b, 8, 0);
-        if (b[0] == 'U' && b[7] == 'O') udp_echo_ok = 1;
-    }
-    if (p) pbuf_free(p);
-}
-
-// Pump stack + timers until cond() or budget (loop iterations) exhausts.
-static int pump_until(int (*cond)(void), int budget) {
-    for (int i = 0; i < budget && !cond(); i++) {
+static int pump_net(int budget) {
+    for (int i = 0; i < budget; i++) {
         netif_f4_poll(&f4_ni);
         sys_check_timeouts();
     }
-    return cond() ? 0 : -1;
+    return 0;
 }
-static int c_ip(void) { return have_ip; }
-static int c_dns(void) { return dns_done; }
-static int c_techo(void) { return tcp_echo_ok || tcp_fail; }
-static int c_secho(void) { return srv_echo_ok; }
-static int c_uecho(void) { return udp_echo_ok; }
+
+// Network-order u32 (lwIP internals) -> human order (first octet high).
+static unsigned int ip_n2h(unsigned int n) {
+    return ((n & 0xFF) << 24) | (((n >> 8) & 0xFF) << 16) |
+           (((n >> 16) & 0xFF) << 8) | ((n >> 24) & 0xFF);
+}
 
 int main(void) {
     uart_init();
@@ -209,111 +132,128 @@ int main(void) {
     sys_init(); // DWT on (NO_SYS never calls this; sys_now needs it)
     eth_hw_init();
     lwip_init();
-    ip4_addr_t ip, mask, gw;
-    IP4_ADDR(&ip, 0, 0, 0, 0);
-    IP4_ADDR(&mask, 0, 0, 0, 0);
-    IP4_ADDR(&gw, 0, 0, 0, 0);
-    netif_add(&f4_ni, &ip, &mask, &gw, NULL, netif_f4_init, ethernet_input);
-    netif_set_hostname(&f4_ni, "stm32f4");
-    netif_set_default(&f4_ni);
-    netif_set_link_up(&f4_ni);
-    netif_set_up(&f4_ni);
+    lwip_sock_init(&f4_ni);
+    {
+        ip4_addr_t ip, mask, gw;
+        IP4_ADDR(&ip, 0, 0, 0, 0);
+        IP4_ADDR(&mask, 0, 0, 0, 0);
+        IP4_ADDR(&gw, 0, 0, 0, 0);
+        netif_add(&f4_ni, &ip, &mask, &gw, NULL, netif_f4_init, ethernet_input);
+        netif_set_hostname(&f4_ni, "stm32f4");
+        netif_set_default(&f4_ni);
+        netif_set_link_up(&f4_ni);
+        netif_set_up(&f4_ni);
+    }
     uart_puts("LWIP init OK\r\n");
     dhcp_start(&f4_ni);
 
     // DHCP bind (netsim serves Offer/Ack; the gateway serves for real).
     {
         int guard = 0;
-        while (!have_ip && guard++ < 400000) {
-            netif_f4_poll(&f4_ni);
-            sys_check_timeouts();
-            if (!ip4_addr_isany_val(*netif_ip4_addr(&f4_ni))) have_ip = 1;
+        while (ip4_addr_isany_val(*netif_ip4_addr(&f4_ni))) {
+            pump_net(1000);
+            if (++guard > 400) { uart_puts("LWIP DHCP FAIL\r\n"); while (1); }
         }
-        if (!have_ip) { uart_puts("LWIP DHCP FAIL\r\n"); while (1); }
         uart_puts("LWIP bound ");
-        uart_ip4(netif_ip4_addr(&f4_ni));
+        uart_ip_bytes(ip_n2h(netif_ip4_addr(&f4_ni)->addr));
         uart_puts("\r\n");
     }
 
     // DNS resolve (canned A 93.184.216.34 by netsim).
     {
-        err_t e = dns_gethostbyname("example.com", &srv_ip, dns_cb, NULL);
-        if (e == ERR_OK) { dns_ok = 1; dns_done = 1; }
-        else if (e != ERR_INPROGRESS) { uart_puts("LWIP DNS FAIL\r\n"); while (1); }
-        if (pump_until(c_dns, 200000)) { uart_puts("LWIP DNS FAIL\r\n"); while (1); }
-        if (!dns_ok) { uart_puts("LWIP DNS FAIL\r\n"); while (1); }
-        unsigned char *a = (unsigned char *)&srv_ip.addr;
-        if (!(a[0] == 93 && a[1] == 184 && a[2] == 216 && a[3] == 34)) {
+        unsigned int ip = 0;
+        if (lwip_gethostbyname("example.com", &ip) != ERR_OK) {
+            uart_puts("LWIP DNS FAIL\r\n"); while (1);
+        }
+        if (((ip >> 24) & 0xFF) != 93 || ((ip >> 16) & 0xFF) != 184 ||
+            ((ip >> 8) & 0xFF) != 216 || (ip & 0xFF) != 34) {
             uart_puts("LWIP DNS FAIL\r\n"); while (1);
         }
         uart_puts("LWIP DNS 093.184.216.034\r\n");
     }
 
-    // TCP echo client to the test peer :7 (netsim echoes any dst IP).
+    // TCP echo client to the test peer :7.
     {
-        ip4_addr_t peer;
-        IP4_ADDR(&peer, 192, 168, 4, 1);
-        struct tcp_pcb *t = tcp_new();
-        if (!t) { uart_puts("LWIP TCP PCB FAIL\r\n"); while (1); }
-        tcp_recv(t, tcp_recv_cb);
-        tcp_err(t, tcp_err_cb);
-        if (tcp_connect(t, &peer, 7, tcp_connected_cb) != ERR_OK) {
+        int s = lwip_socket(AF_INET, SOCK_STREAM);
+        unsigned char rbuf[16];
+        int n;
+        if (s < 0 || lwip_connect(s, 0xC0A80401, 7) != ERR_OK) {
             uart_puts("LWIP TCP CONNECT FAIL\r\n"); while (1);
         }
-        if (pump_until(c_techo, 200000) || tcp_fail || !tcp_echo_ok) {
-            uart_puts("LWIP TCP ECHO FAIL\r\n"); while (1);
+        {
+            unsigned char msg[4] = { 'L', 'W', 'I', 'P' };
+            if (lwip_send(s, msg, 4) != 4) { uart_puts("LWIP TCP SEND FAIL\r\n"); while (1); }
         }
-        uart_puts("LWIP TCP echo OK\r\n");
+        n = lwip_recv(s, rbuf, sizeof(rbuf));
+        if (n == 4 && rbuf[0] == 'L' && rbuf[1] == 'W' && rbuf[2] == 'I' && rbuf[3] == 'P')
+            uart_puts("LWIP TCP echo OK\r\n");
+        else { uart_puts("LWIP TCP ECHO FAIL\r\n"); while (1); }
+        lwip_closesocket(s);
     }
 
-    // TCP echo server on :7 (netsim connects as a client on trigger).
+    // TCP echo server on :7, gated by select (netsim connects on trigger).
     {
-        struct udp_pcb *trig = udp_new();
-        ip4_addr_t gwip;
-        IP4_ADDR(&gwip, 192, 168, 4, 1);
-        struct pbuf *g = pbuf_alloc(PBUF_TRANSPORT, 2, PBUF_RAM);
-        if (g) {
-            ((char *)g->payload)[0] = 'G'; ((char *)g->payload)[1] = 'O';
-            udp_sendto(trig, g, &gwip, 5004);
-            pbuf_free(g);
-        }
-        udp_remove(trig);
-        struct tcp_pcb *l = tcp_new();
-        if (!l || tcp_bind(l, IP_ADDR_ANY, 7) != ERR_OK) {
+        int t = lwip_socket(AF_INET, SOCK_STREAM);
+        int u0 = lwip_socket(AF_INET, SOCK_DGRAM);
+        unsigned char go[2] = { 'G', 'O' };
+        if (t < 0 || u0 < 0) { uart_puts("LWIP SRV SETUP FAIL\r\n"); while (1); }
+        lwip_sendto(u0, go, 2, 0xC0A80401, 5004); // trigger: netsim SYNs us
+        lwip_closesocket(u0);
+        if (lwip_bind(t, 7) != ERR_OK || lwip_listen(t) != ERR_OK) {
             uart_puts("LWIP SRV SETUP FAIL\r\n"); while (1);
         }
-        struct tcp_pcb *ll = tcp_listen_with_backlog(l, 1);
-        if (!ll) { uart_puts("LWIP SRV SETUP FAIL\r\n"); while (1); }
-        tcp_accept(ll, tcp_accept_cb);
-        if (pump_until(c_secho, 200000) || !srv_echo_ok) {
-            uart_puts("LWIP SRV ECHO FAIL\r\n"); while (1);
+        // select() must report the listen fd readable once the SYN lands.
+        {
+            int r = lwip_select(1u << t, 30000);
+            if (r != 1) { uart_puts("LWIP SELECT FAIL\r\n"); while (1); }
+            uart_puts("LWIP SELECT OK\r\n");
         }
-        tcp_close(ll);
-        uart_puts("LWIP TCP server OK\r\n");
+        {
+            unsigned int rip = 0, rport = 0;
+            int c = lwip_accept(t, &rip, &rport);
+            unsigned char sbuf[16];
+            int k;
+            if (c < 0) { uart_puts("LWIP ACCEPT FAIL\r\n"); while (1); }
+            k = lwip_recv(c, sbuf, sizeof(sbuf));
+            if (k == 3 && sbuf[0] == 'S' && sbuf[1] == 'R' && sbuf[2] == 'V') {
+                if (lwip_send(c, sbuf, 3) != 3) { uart_puts("LWIP SRV SEND FAIL\r\n"); while (1); }
+                uart_puts("LWIP TCP server OK\r\n");
+            } else { uart_puts("LWIP SRV ECHO FAIL\r\n"); while (1); }
+            lwip_closesocket(c);
+        }
+        lwip_closesocket(t);
     }
 
     // UDP echo to the test peer :7.
     {
-        struct udp_pcb *u = udp_new();
-        ip4_addr_t peer;
-        IP4_ADDR(&peer, 192, 168, 4, 1);
-        if (!u || udp_bind(u, IP_ADDR_ANY, 49170) != ERR_OK) {
-            uart_puts("LWIP UDP SETUP FAIL\r\n"); while (1);
+        int u = lwip_socket(AF_INET, SOCK_DGRAM);
+        unsigned char umsg[8] = { 'U', 'D', 'P', ' ', 'E', 'C', 'H', 'O' };
+        unsigned char ubuf[16];
+        int m;
+        if (u < 0) { uart_puts("LWIP UDP SETUP FAIL\r\n"); while (1); }
+        if (lwip_sendto(u, umsg, 8, 0xC0A80401, 7) != 8) {
+            uart_puts("LWIP UDP SEND FAIL\r\n"); while (1);
         }
-        udp_recv(u, udp_recv_cb, NULL);
-        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, 8, PBUF_RAM);
-        if (!p) { uart_puts("LWIP UDP SETUP FAIL\r\n"); while (1); }
+        m = lwip_recvfrom(u, ubuf, sizeof(ubuf), 0, 0);
+        if (m == 8 && ubuf[0] == 'U' && ubuf[7] == 'O') uart_puts("LWIP UDP echo OK\r\n");
+        else { uart_puts("LWIP UDP ECHO FAIL\r\n"); while (1); }
+        lwip_closesocket(u);
+    }
+
+    // Misuse probes: real lwIP err_t codes, no crash.
+    {
+        int ok = 1;
+        if (lwip_socket(99, SOCK_STREAM) != ERR_VAL) ok = 0;
+        if (lwip_closesocket(9) != ERR_VAL) ok = 0;
         {
-            char *d = (char *)p->payload;
-            d[0]='U'; d[1]='D'; d[2]='P'; d[3]=' '; d[4]='E'; d[5]='C'; d[6]='H'; d[7]='O';
+            int s = lwip_socket(AF_INET, SOCK_STREAM);
+            unsigned char b[4];
+            if (s < 0 || lwip_send(s, b, 4) != ERR_CONN) ok = 0;
+            if (lwip_recv(s, b, 4) != ERR_CONN) ok = 0;
+            lwip_closesocket(s);
         }
-        udp_sendto(u, p, &peer, 7);
-        pbuf_free(p);
-        if (pump_until(c_uecho, 200000) || !udp_echo_ok) {
-            uart_puts("LWIP UDP ECHO FAIL\r\n"); while (1);
-        }
-        udp_remove(u);
-        uart_puts("LWIP UDP echo OK\r\n");
+        if (ok) uart_puts("LWIP ERR OK\r\n");
+        else uart_puts("LWIP ERR FAIL\r\n");
     }
 
     uart_puts("LWIP DEMO DONE\r\n");

@@ -279,6 +279,8 @@ export const BOARDS_OF_FIRMWARE = {
     eth_feat_test_f429: ['stm32f429'],
     lwip_demo: ['stm32f407'],
     lwip_demo_f429: ['stm32f429'],
+    eth_pins_test: ['stm32f407'],
+    eth_pins_test_f429: ['stm32f429'],
 };
 
 export function boardsOf(fwName) {

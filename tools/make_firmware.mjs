@@ -227,6 +227,8 @@ const firmwares = [
     ['dma2d_test_f429', 'dma2d_test/dma2d_test_f429.bin', 'dma2d_test_f429.bin'],
     ['gpio_k_test', 'gpio_k_test/gpio_k_test.bin', 'gpio_k_test.bin'],
     ['gpio_k_test_f429', 'gpio_k_test/gpio_k_test_f429.bin', 'gpio_k_test_f429.bin'],
+    ['eth_pins_test', 'eth_pins_test/eth_pins_test.bin', 'eth_pins_test.bin'],
+    ['eth_pins_test_f429', 'eth_pins_test/eth_pins_test_f429.bin', 'eth_pins_test_f429.bin'],
     ['dma2d_test_f429', 'dma2d_test/dma2d_test_f429.bin', 'dma2d_test_f429.bin'],
     // doom (doomgeneric F407 port; needs doom1.wad served alongside)
     ['doom', 'doom/doom.bin', 'doom.bin'],

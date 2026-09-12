@@ -6,7 +6,13 @@ const sidebars = {
       type: 'category',
       label: 'Getting Started',
       collapsed: false,
-      items: ['usage', 'boards', 'components'],
+      items: ['usage', 'networking', 'components'],
+    },
+    {
+      type: 'category',
+      label: 'Boards',
+      collapsed: false,
+      items: ['boards', 'boards/stm32f401', 'boards/stm32f411', 'boards/stm32f407', 'boards/stm32f407ve', 'boards/stm32f429'],
     },
     {
       type: 'category',

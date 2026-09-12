@@ -184,6 +184,24 @@ pub fn eth_get_rx_desc_addr() -> u32 { ETH_RX_DESC_ADDR.load(Ordering::Acquire) 
 pub fn eth_set_done(flags: u8) { ETH_DONE.fetch_or(flags, Ordering::Release); }
 pub fn eth_take_done() -> u8 { ETH_DONE.swap(0, Ordering::Acquire) }
 
+// Wire-busy mirrors for the GPIO pin-level callbacks (MII/RMII TX_EN,
+// CRS_DV, COL). Written alongside the Dma instance fields by the same
+// setters; read with plain atomic loads because the callbacks run
+// INSIDE a peripheral slot borrow (Gpio::read) where the slot-scanning
+// with_* helpers would re-borrow the held slot and panic. RULE: never
+// call a with_* slot scanner while any peripheral borrow is held —
+// inside Peripheral::read/write/tick, or any callback they invoke.
+static ETH_TX_BUSY_UNTIL: AtomicU64 = AtomicU64::new(0);
+static ETH_RX_BUSY_UNTIL: AtomicU64 = AtomicU64::new(0);
+static ETH_COL_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+pub fn eth_wire_tx_busy_until() -> u64 { ETH_TX_BUSY_UNTIL.load(Ordering::Acquire) }
+pub fn eth_wire_rx_busy_until() -> u64 { ETH_RX_BUSY_UNTIL.load(Ordering::Acquire) }
+pub fn eth_wire_col_until() -> u64 { ETH_COL_UNTIL.load(Ordering::Acquire) }
+pub(crate) fn eth_set_wire_tx_busy_until(v: u64) { ETH_TX_BUSY_UNTIL.store(v, Ordering::Release); }
+pub(crate) fn eth_set_wire_rx_busy_until(v: u64) { ETH_RX_BUSY_UNTIL.store(v, Ordering::Release); }
+pub(crate) fn eth_set_wire_col_until(v: u64) { ETH_COL_UNTIL.store(v, Ordering::Release); }
+
 // FLASH programming/erase state shared with the JS driver (which applies the
 // actual memory mutations to guest memory).
 static FLASH_PROGRAMMING: AtomicBool = AtomicBool::new(false);
@@ -825,6 +843,9 @@ pub fn reset_globals() {
     CURRENT_IPSR.store(0, Relaxed);
     ETH_TX_POLL.store(false, Relaxed);
     ETH_RX_POLL.store(false, Relaxed);
+    ETH_TX_BUSY_UNTIL.store(0, Relaxed);
+    ETH_RX_BUSY_UNTIL.store(0, Relaxed);
+    ETH_COL_UNTIL.store(0, Relaxed);
     ETH_DONE.store(0, Relaxed);
     ETH_TX_DESC_ADDR.store(0, Relaxed);
     ETH_RX_DESC_ADDR.store(0, Relaxed);

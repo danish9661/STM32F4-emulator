@@ -17,8 +17,8 @@ LDFLAGS = -mcpu=cortex-m4 -mthumb -mfloat-abi=soft -nostdlib -T link.ld -Wl,-gc-
 
 all: lwip_demo.bin
 
-lwip_demo.elf: startup.c main.c netif_f4.c arch/sys_arch.c link.ld $(LWIP_SRCS)
-	$(CC) $(CFLAGS) startup.c main.c netif_f4.c arch/sys_arch.c $(LWIP_SRCS) $(LDFLAGS) -o lwip_demo.elf
+lwip_demo.elf: startup.c main.c netif_f4.c lwip_sock.c arch/sys_arch.c link.ld $(LWIP_SRCS)
+	$(CC) $(CFLAGS) startup.c main.c netif_f4.c lwip_sock.c arch/sys_arch.c $(LWIP_SRCS) $(LDFLAGS) -o lwip_demo.elf
 
 lwip_demo.bin: lwip_demo.elf
 	$(OBJCOPY) -O binary lwip_demo.elf lwip_demo.bin

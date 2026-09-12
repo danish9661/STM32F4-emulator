@@ -58,7 +58,7 @@ const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_interrupt_test_f401', 'r
 // Interrupt-driven ETH firmware: the guest ETH_IRQHandler (run by the pump)
 // reads DMASR and scans rx_desc itself, so the driver must not write the
 // SRAM irq_flag/rx_frame_idx globals (irq_eth mode in emulator.js).
-const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test', 'eth_dhcp', 'eth_test', 'eth_irq_test_f429', 'eth_dhcp_f429', 'eth_test_f429', 'eth_feat_test', 'eth_feat_test_f429', 'lwip_demo', 'lwip_demo_f429']);
+const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test', 'eth_dhcp', 'eth_test', 'eth_irq_test_f429', 'eth_dhcp_f429', 'eth_test_f429', 'eth_feat_test', 'eth_feat_test_f429', 'lwip_demo', 'lwip_demo_f429', 'eth_pins_test', 'eth_pins_test_f429']);
 
 // FreeRTOS firmware: SVC/PendSV/SysTick delivery (inline in the Rust core).
 const FREERTOS_FIRMWARES = new Set(['freertos_test', 'freertos_test_f411', 'freertos_test_f429']);

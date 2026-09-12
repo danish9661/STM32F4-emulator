@@ -42,12 +42,14 @@ impl Default for GpioPorts {
             Default::default();
         let write_callbacks: [Vec<(u8, Box<dyn FnMut(&System, bool)>)>; NUM_PORTS] =
             Default::default();
-        GpioPorts {
+        let mut g = GpioPorts {
             read_callbacks,
             write_callbacks,
             input_state: [0; NUM_PORTS],
             output_state: [0; NUM_PORTS],
-        }
+        };
+        g.register_eth_mirrors();
+        g
     }
 }
 
@@ -61,6 +63,41 @@ impl GpioPorts {
 
     pub fn add_read_callback(&mut self, pin: Pin, cb: impl FnMut(&System) -> bool + 'static) {
         self.read_callbacks[pin.port as usize].push((pin.pin, Box::new(cb)));
+    }
+
+    /// Ethernet MII/RMII pin mirrors (RMII AF11 wiring + MII COL): live
+    /// activity levels ORed into IDR reads. TX_EN (PB11) is HIGH across
+    /// the paced TX wire time; CRS_DV (PA7) and the RXD activity mirror
+    /// (PC4/PC5) across the RX wire time; COL (PA3) from an applied
+    /// collision until that TX's wire end; MDIO (PA2)/MDC (PC1) idle
+    /// HIGH (pull-ups; MDIO ops complete within a tick). RMII mirrors
+    /// apply when SYSCFG PMC selects RMII, COL when it selects MII;
+    /// firmware muxes AF itself (the model ORs like any input — leave
+    /// ODR alone on these pins). Nibble data and clocks are electrical-
+    /// only: no firmware can sample 25/50 MHz data, so activity levels
+    /// are the complete observable contract.
+    pub fn register_eth_mirrors(&mut self) {
+        // SYSCFG PMC bit 23: 1 = RMII, 0 = MII.
+        fn rmii(sys: &System) -> bool {
+            sys.p.syscfg.borrow().pmc & 0x80_0000 != 0
+        }
+        self.add_read_callback(Pin::new(1, 11), move |sys: &System| {
+            rmii(sys) && crate::peripherals::eth::eth_mii_signals(sys).0
+        });
+        self.add_read_callback(Pin::new(0, 7), move |sys: &System| {
+            rmii(sys) && crate::peripherals::eth::eth_mii_signals(sys).1
+        });
+        self.add_read_callback(Pin::new(2, 4), move |sys: &System| {
+            rmii(sys) && crate::peripherals::eth::eth_mii_signals(sys).1
+        });
+        self.add_read_callback(Pin::new(2, 5), move |sys: &System| {
+            rmii(sys) && crate::peripherals::eth::eth_mii_signals(sys).1
+        });
+        self.add_read_callback(Pin::new(0, 2), |_| true); // MDIO idle
+        self.add_read_callback(Pin::new(2, 1), |_| true); // MDC idle
+        self.add_read_callback(Pin::new(0, 3), move |sys: &System| {
+            !rmii(sys) && crate::peripherals::eth::eth_mii_signals(sys).2
+        });
     }
 
     pub fn add_write_callback(&mut self, pin: Pin, cb: impl FnMut(&System, bool) + 'static) {

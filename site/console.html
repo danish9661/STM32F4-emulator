@@ -358,13 +358,26 @@ input[type=checkbox]:checked::after {
   display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0;
   background: #141a26; border: 1px solid var(--border); border-radius: var(--radius-sm);
   box-shadow: 0 8px 32px rgba(0,0,0,0.5); z-index: 1000;
-  max-height: 320px; overflow-y: auto;
+  max-height: min(320px, 60vh); overflow-y: auto;
   scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+}
+/* Drop-up: when the trigger sits near the bottom of the viewport the list
+   would be clipped by the sidebar scroll container — open above instead. */
+.custom-select.up .custom-select-dropdown {
+  top: auto; bottom: calc(100% + 4px);
+  box-shadow: 0 -8px 32px rgba(0,0,0,0.5);
 }
 .custom-select-dropdown::-webkit-scrollbar { width: 6px; }
 .custom-select-dropdown::-webkit-scrollbar-track { background: transparent; }
 .custom-select-dropdown::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 .custom-select.open .custom-select-dropdown { display: block; }
+/* Detached (open) state: the list lives directly under <body> so neither
+   the panel's overflow:hidden nor its backdrop-filter (a fixed-position
+   containing block) can clip or offset it. Visibility is driven by
+   .detached instead of the .open descendant selector. */
+.custom-select-dropdown.detached {
+  display: block; position: fixed; z-index: 1000;
+}
 .custom-select-group-label {
   font-size: 10px; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.08em; color: var(--green); padding: 8px 12px 4px;
@@ -488,6 +501,7 @@ canvas {
   <h1>STM32F407 in the Browser</h1>
   <span class="tagline">Real Cortex-M4 firmware on an emulated MCU — <b>Rust CPU + peripherals</b>, all WebAssembly</span>
   <a class="doomLink" href="doom.html">▶ Play DOOM</a>
+  <a class="doomLink aboutLink" href="docs.html">Docs</a>
   <a class="doomLink aboutLink" href="about.html">About</a>
   <span id="status"><span class="dot" id="dot"></span><span id="statusText">booting…</span></span>
 </header>
@@ -533,6 +547,8 @@ canvas {
             <div class="custom-select-option" data-value="eth_feat_test_f429">eth_feat_test_f429 — feature suite on F429</div>
             <div class="custom-select-option" data-value="lwip_demo">lwip_demo — socket-style TCP/UDP echo</div>
             <div class="custom-select-option" data-value="lwip_demo_f429">lwip_demo_f429 — socket demo on F429</div>
+            <div class="custom-select-option" data-value="eth_pins_test">eth_pins_test — MII/RMII pin mirrors</div>
+            <div class="custom-select-option" data-value="eth_pins_test_f429">eth_pins_test_f429 — pin mirrors on F429</div>
             <div class="custom-select-group-label">Bare-metal demo</div>
             <div class="custom-select-option" data-value="blinky">blinky — LED blinker, no network</div>
             <div class="custom-select-group-label">Boards</div>
@@ -741,7 +757,7 @@ canvas {
             <div class="custom-select-option" data-value="rx_interrupt_test_f429">rx_interrupt_test_f429 — RX interrupt (F429)</div>
     </div>
     <select id="fwSelect" hidden>
-      <option value="eth_http">eth_http</option><option value="eth_dhcp">eth_dhcp</option><option value="eth_test">eth_test</option><option value="eth_http_f429">eth_http_f429</option><option value="eth_dhcp_f429">eth_dhcp_f429</option><option value="eth_test_f429">eth_test_f429</option><option value="eth_irq_test_f429">eth_irq_test_f429</option><option value="eth_feat_test">eth_feat_test</option><option value="eth_feat_test_f429">eth_feat_test_f429</option><option value="lwip_demo">lwip_demo</option><option value="lwip_demo_f429">lwip_demo_f429</option>
+      <option value="eth_http">eth_http</option><option value="eth_dhcp">eth_dhcp</option><option value="eth_test">eth_test</option><option value="eth_http_f429">eth_http_f429</option><option value="eth_dhcp_f429">eth_dhcp_f429</option><option value="eth_test_f429">eth_test_f429</option><option value="eth_irq_test_f429">eth_irq_test_f429</option><option value="eth_feat_test">eth_feat_test</option><option value="eth_feat_test_f429">eth_feat_test_f429</option><option value="lwip_demo">lwip_demo</option><option value="lwip_demo_f429">lwip_demo_f429</option><option value="eth_pins_test">eth_pins_test</option><option value="eth_pins_test_f429">eth_pins_test_f429</option>
       <option value="blinky">blinky</option><option value="blinky_f401">blinky_f401</option><option value="blinky_f411">blinky_f411</option><option value="blinky_f407g">blinky_f407g</option><option value="blinky_nucleo_f401">blinky_nucleo_f401</option><option value="blinky_nucleo_f411">blinky_nucleo_f411</option><option value="blinky_f429">blinky_f429</option><option value="blinky_f407ve">blinky_f407ve</option><option value="blinky_f407ze">blinky_f407ze</option><option value="arduino_bp_f401cc">arduino_bp_f401cc</option><option value="arduino_bp_f411ce">arduino_bp_f411ce</option><option value="arduino_nucleo_f401re">arduino_nucleo_f401re</option><option value="arduino_nucleo_f411re">arduino_nucleo_f411re</option><option value="arduino_disco_f407vg">arduino_disco_f407vg</option><option value="arduino_disco_f429zi">arduino_disco_f429zi</option><option value="arduino_black_f407ve">arduino_black_f407ve</option><option value="arduino_black_f407ze">arduino_black_f407ze</option><option value="adc_demo">adc_demo</option><option value="dac_demo">dac_demo</option><option value="pwm_demo">pwm_demo</option><option value="blink_serial">blink_serial</option><option value="timer_test">timer_test</option><option value="arduino_test">arduino_test</option><option value="hal_test">hal_test</option>
       <option value="periph_test">periph_test</option><option value="new_periph_test">new_periph_test</option><option value="deep_periph_test">deep_periph_test</option><option value="comprehensive_test">comprehensive_test</option><option value="eth_irq_test">eth_irq_test</option><option value="edge_test">edge_test</option><option value="i2s_sai_test">i2s_sai_test</option><option value="spi_tft_test">spi_tft_test</option><option value="audio_test">audio_test</option><option value="ltdc_test">ltdc_test</option><option value="oled_test">oled_test</option><option value="tft_test">tft_test</option><option value="buzzer_test">buzzer_test</option><option value="audio_play_test">audio_play_test</option><option value="rtc_test">rtc_test</option><option value="can_test">can_test</option><option value="can_demo">can_demo</option><option value="can_host_rx">can_host_rx</option><option value="watchdog_demo">watchdog_demo</option><option value="wwdg_demo">wwdg_demo</option><option value="wwdg_window_demo">wwdg_window_demo</option><option value="tim_capture_demo">tim_capture_demo</option><option value="qspi_test">qspi_test</option><option value="fpu_test">fpu_test</option><option value="fpu_irq_test">fpu_irq_test</option><option value="mpu_test">mpu_test</option>      <option value="usb_cdc_test">usb_cdc_test</option><option value="deep_sleep_demo">deep_sleep_demo</option><option value="test_firmware">test_firmware</option><option value="exti_test">exti_test</option><option value="flash_test">flash_test</option><option value="spi_flash_test">spi_flash_test</option><option value="freertos_test">freertos_test</option><option value="fsmc_test">fsmc_test</option><option value="dcmi_test">dcmi_test</option>
       <option value="crypto_test">crypto_test</option><option value="crypto_deep_test">crypto_deep_test</option><option value="rx_crypto_test">rx_crypto_test</option>
@@ -881,7 +897,7 @@ canvas {
     · <a href="about.html">About</a>
  </footer>
 
-<script type="module" src="app.js?v=28"></script>
+<script type="module" src="app.js?v=33"></script>
 <script>
 // Custom firmware dropdown (replaces native <select>)
 (() => {
@@ -896,12 +912,66 @@ canvas {
     opt.classList.add('selected');
     trigger.textContent = opt.textContent;
     hiddenSelect.value = opt.dataset.value;
+    closeDropdown();
+  }
+
+  function closeDropdown() {
+    if (!wrap.classList.contains('open')) return;
     wrap.classList.remove('open');
+    dropdown.classList.remove('detached');
+    dropdown.style.position = '';
+    dropdown.style.left = '';
+    dropdown.style.top = '';
+    dropdown.style.bottom = '';
+    dropdown.style.width = '';
+    dropdown.style.maxHeight = '';
+    wrap.appendChild(dropdown); // restore original place after trigger
+  }
+
+  function placeDropdown() {
+    // The list is a direct child of <body> while open (see .detached), so
+    // fixed coordinates are viewport-true and escape the panel entirely.
+    document.body.appendChild(dropdown);
+    dropdown.classList.add('detached');
+    const r = trigger.getBoundingClientRect();
+    const need = Math.min(dropdown.scrollHeight || 320, 320);
+    const below = window.innerHeight - r.bottom;
+    const above = r.top;
+    const up = below < need && above > below;
+    wrap.classList.toggle('up', up);
+    const room = Math.floor((up ? above : below) - 8);
+    dropdown.style.maxHeight = room < need ? Math.max(120, room) + 'px' : '';
+    dropdown.style.position = 'fixed';
+    dropdown.style.left = r.left + 'px';
+    dropdown.style.width = r.width + 'px';
+    if (up) {
+      dropdown.style.top = 'auto';
+      dropdown.style.bottom = (window.innerHeight - r.top + 4) + 'px';
+    } else {
+      dropdown.style.bottom = 'auto';
+      dropdown.style.top = (r.bottom + 4) + 'px';
+    }
   }
 
   trigger.addEventListener('click', (e) => {
     e.stopPropagation();
-    wrap.classList.toggle('open');
+    if (wrap.classList.contains('open')) { closeDropdown(); return; }
+    wrap.classList.add('open');
+    placeDropdown();
+    // Reopen at the selected option: the list element keeps its scrollTop
+    // across opens, otherwise every reopen starts mid-list with the top
+    // row half-clipped. Done manually (not scrollIntoView) so only the
+    // list scrolls — scrollIntoView would also yank the sidebar/page.
+    // The 30px clears the sticky group label.
+    const sel = dropdown.querySelector('.custom-select-option.selected');
+    if (sel) {
+      let y = 0;
+      for (const sib of dropdown.children) {
+        if (sib === sel) break;
+        if (sib.style.display !== 'none') y += sib.getBoundingClientRect().height;
+      }
+      dropdown.scrollTop = Math.max(0, y - 30);
+    }
   });
 
   options.forEach(opt => {
@@ -911,7 +981,16 @@ canvas {
     });
   });
 
-  document.addEventListener('click', () => wrap.classList.remove('open'));
+  document.addEventListener('click', () => closeDropdown());
+  // A floating list desyncs from its trigger on scroll/resize — just
+  // close it (native selects do the same). Ignore scrolls inside the list
+  // itself: while detached it lives under <body>, outside wrap.
+  document.addEventListener('scroll', (e) => {
+    if (!wrap.classList.contains('open')) return;
+    if (wrap.contains(e.target) || dropdown.contains(e.target)) return;
+    closeDropdown();
+  }, true);
+  window.addEventListener('resize', () => closeDropdown());
 
   // Expose setter so app.js can still set firmware programmatically
   window.__setFwSelect = (val) => {

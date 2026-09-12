@@ -3661,3 +3661,28 @@ above frames is firmware. What the model + drivers + firmware now cover:
 - **DEFER must pipeline** (queue TX#1, take delivery#1, fire TX#2,
   join after): blocking on TX#1's paced TS eats the window first.
   Runs at 10M (~170k vs ~15k path); rate proven by WIRE/RX bands.
+
+### Round 7 (2026-09-12): pin mirrors, BSD sockets over real LwIP
+- **MII/RMII pin mirrors (the observable half of "pin voltages")**:
+  `register_eth_mirrors` in `GpioPorts::default()` ORs activity levels
+  into IDR reads — TX_EN PB11 across the paced TX window, CRS_DV PA7 +
+  RXD PC4/PC5 across the RX window, COL PA3 stretched across a collided
+  TX, MDIO/MDC idle HIGH; RMII set gated on PMC==RMII, COL on PMC==MII.
+  Firmware muxes AF11 itself. Nibble data + clocks stay electrical-only
+  (Nyquist: no firmware can sample 25/50 MHz) — levels + COL events are
+  the complete contract. `eth_pins_test/` proves every pin HIGH and LOW.
+- **Reentrancy rule (hard-won, document-or-repeat)**: the `with_*` slot
+  scanners iterate + borrow EVERY peripheral slot, so calling one from
+  inside any slot-held context (Peripheral::read/write/tick, or GPIO
+  read callbacks) panics with "already borrowed". Pin callbacks (and
+  anything in a peripheral path) may touch ONLY process-global atomics
+  — hence `ETH_*_BUSY_UNTIL`/`COL_UNTIL` mirrors in system.rs (also in
+  `reset_globals`), and `eth_mii_signals` reads atomics, never slots.
+- **BSD sockets over real lwIP** (`lwip_demo/lwip_sock.c`): socket/bind/
+  listen/accept/connect/send/recv/sendto/recvfrom/close/select/gethostby-
+  name over raw PCBs with a pumploop (blocking calls pump netif +
+  timers); `select()` is level-triggered polling with real timeout;
+  real `err_t` codes flow through (misuse probes assert ERR_VAL/
+  ERR_CONN). Byte-order contract: API u32s are human order
+  (0xC0A80401), converted at the lwIP boundary (h2n/n2h) — mixing raw
+  pointer casts with shifts silently reverses octets on LE.

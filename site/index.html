@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="description" content="STM32F4 emulator landing: launch the live browser console (67 firmware presets, 8 boards) or play DOOM on an emulated STM32F407." />
-<title>STM32F4 Emulator — live console, DOOM, 67 firmware presets</title>
+<meta name="description" content="STM32F4 emulator landing: launch the live browser console (209 firmware builds, 5 chips) or play DOOM on an emulated STM32F407." />
+<title>STM32F4 Emulator — live console, DOOM, 209 firmware builds</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
@@ -126,6 +126,7 @@ footer a:hover { text-decoration: underline; }
   <nav>
     <a href="console.html">Console</a>
     <a href="doom.html">DOOM</a>
+    <a href="docs.html">Docs</a>
     <a href="about.html">About</a>
   </nav>
 </header>
@@ -140,8 +141,8 @@ footer a:hover { text-decoration: underline; }
     </div>
     <div class="stats">
       <div class="stat"><b>40</b><span>Peripherals</span></div>
-      <div class="stat"><b>67</b><span>Firmware presets</span></div>
-      <div class="stat"><b>8</b><span>Boards</span></div>
+      <div class="stat"><b>209</b><span>Firmware builds</span></div>
+      <div class="stat"><b>5</b><span>Chips</span></div>
       <div class="stat"><b>35</b><span>FPS DOOM</span></div>
     </div>
   </div>
@@ -149,12 +150,27 @@ footer a:hover { text-decoration: underline; }
     <a class="card" href="console.html">
       <div class="k">🖥️</div>
       <h3>Live Console</h3>
-      <p>67 firmware presets across 5 chips — networking, displays, USB, FreeRTOS, sensors. UART terminal, GPIO grid, packet viewer.</p>
+      <p>209 firmware builds across 5 chips — networking, displays, USB, FreeRTOS, sensors. UART terminal, GPIO grid, packet viewer.</p>
     </a>
     <a class="card" href="doom.html">
       <div class="k">💀</div>
       <h3>DOOM</h3>
       <p>Full DOOM 1 shareware at 35 FPS on the emulated F407 — audio, saves, attract mode. WASD + mouse.</p>
+    </a>
+    <a class="card" href="docs.html">
+      <div class="k">📚</div>
+      <h3>Documentation</h3>
+      <p>Usage, <code>boards</code> per-chip guides, Ethernet networking, peripheral coverage, architecture, benchmarks.</p>
+    </a>
+    <a class="card" href="doc.html?f=boards.md">
+      <div class="k">🔌</div>
+      <h3>Boards &amp; chips</h3>
+      <p>F401, F411, F407, F407VE/ZE, F429 — sizes, Arduino targets, preset wiring, verification matrix.</p>
+    </a>
+    <a class="card" href="doc.html?f=networking.md">
+      <div class="k">🌐</div>
+      <h3>Networking</h3>
+      <p>MAC/PHY, filters, VLAN, PTP, WOL, LwIP sockets — over the canned netsim peer or the real gVisor gateway.</p>
     </a>
     <div class="card">
       <div class="k">📦</div>
@@ -168,11 +184,12 @@ footer a:hover { text-decoration: underline; }
     <a href="console.html?fw=eth_http">eth_http</a> ·
     <a href="console.html?fw=can_test">can_test</a> ·
     <a href="console.html?fw=usb_cdc_test">usb_cdc_test</a> ·
-    <a href="console.html?board=stm32f401">F401 board</a>
+    <a href="console.html?board=stm32f401">F401 board</a> ·
+    <a href="console.html?board=stm32f429">F429 board</a>
   </div>
 </main>
 <footer>
-  Rust Thumb-2 CPU + peripheral model (WASM) + a small JS driver — everything runs locally in your tab. Docs: <a href="about.html">About</a>.
+  Rust Thumb-2 CPU + peripheral model (WASM) + a small JS driver — everything runs locally in your tab. Docs: <a href="docs.html">Docs</a> · <a href="about.html">About</a>.
 </footer>
 </body>
 </html>
