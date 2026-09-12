@@ -207,7 +207,7 @@ async function main() {
         let timedOut = false;
         gwDialSeq++;
         if (process.env.DBG_GW) console.log(`[GW] dial #${gwDialSeq} at ${Date.now()}`);
-        try { ws = new WebSocket('ws://127.0.0.1:5099/api/network-gateway'); }
+        try { ws = new WebSocket('ws://127.0.0.1:5070/api/network-gateway'); }
         catch (e) { resolve(null); return; }
         ws.binaryType = 'arraybuffer';
         ws.onclose = (ev) => { if (process.env.DBG_GW) console.log(`[GW] dial #${gwDialSeq} closed code=${ev.code}`); };

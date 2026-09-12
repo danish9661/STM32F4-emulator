@@ -49,7 +49,7 @@ var (
 	globalVN      *virtualnetwork.VirtualNetwork
 )
 
-const PORT = "5099"
+const PORT = "5070"
 
 func main() {
 	fmt.Println("===================================================")

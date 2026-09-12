@@ -710,7 +710,7 @@ MIPS, 7.48 rounds/s) — up from the pre-speed 2x100M soak (526+529 rounds,
 ~1.0 MIPS). A repeat soak on a gateway polluted with 300+ stale sessions
 failed at the first SYN with `TCP fl=10` + recv-wait stall (the documented
 environmental flake) — restart the gateway (`kill <pid>`, relaunch
-`openhw-gw -port 5099`) before long soaks.
+`openhw-gw -port 5070`) before long soaks.
 
 **2026-08-09 update** (wedge fix + no-restart default, see §7): the same
 100M soak now runs **604 TCP connected, 0 TCP fail, 0 `fl=18`, 0 timeouts
@@ -1345,7 +1345,7 @@ racing a pure-JS parser — so it needed a **device-side tap in Rust**.
   done-marker, rx_interrupt CRC via the UI input box, save button);
   `/tmp/opencode/gw_web_smoke.mjs` (boots eth_http in the page with the real
   gateway: assert TCP connected + HTTP body + !CONN + live TX/RX counts +
-  gateway RX frames in the viewer). Gateway smoke needs openhw-gw on 5099
+  gateway RX frames in the viewer). Gateway smoke needs openhw-gw on 5070
   (relaunch with `setsid nohup ./openhw-gw &` — `pkill -f openhw-gw`
   self-matches the shell, use the full path pattern or kill by pid) and the
   local HTTP server on 8092 (`node /tmp/opencode/http_server.js`).

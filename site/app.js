@@ -242,7 +242,7 @@ const gwLabel = () => `${gw.connected ? 'connected — ' + gw.tx + ' TX / ' + gw
 const refreshGwLabel = () => { if (gw.connected) $('gwStatus').textContent = gwLabel(); };
 
 const connectGateway = () => {
-    const url = $('gwUrl').value.trim() || 'ws://127.0.0.1:5099/api/network-gateway';
+    const url = $('gwUrl').value.trim() || 'ws://127.0.0.1:5070/api/network-gateway';
     if (!/^wss?:\/\//.test(url)) return setGwStatus(false, 'bad URL — expected ws:// or wss://');
     if (gw.ws) {
         try { gw.ws.close(); } catch (e) {}

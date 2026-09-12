@@ -73,7 +73,7 @@ restart (default since 2026-08-09).
   trusting a 0-round result — a dead gateway burns the whole budget in the
   DHCP wait (documented in AGENTS.md §10).
 - After a long soak, restart the gateway (`kill <pid>`, relaunch
-  `openhw-gw -port 5099`) if the next run shows `TCP fl=10` + recv-wait
+  `openhw-gw -port 5070`) if the next run shows `TCP fl=10` + recv-wait
   stall — that's stale-session pollution, not a code regression.
 
 ## How to measure

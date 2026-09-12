@@ -3,7 +3,7 @@
 This is the standalone **SLIRP/NAT Proxy & Multiplayer Bridge** for OpenHW Studio, written in **Go** using Google's `gVisor` virtual network stack! It bridges the gap between the browser-based ESP32 simulation sandbox and your native operating system's networking stack.
 
 ## 🚀 How it Works
-When a user toggles the **"Private IoT Gateway"** in the OpenHW Studio UI, the simulated ESP32 stops routing its raw 802.11 Wi-Fi frames to the public cloud. Instead, it forwards them over a WebSocket (`ws://localhost:5099`) directly to this script running on your local machine.
+When a user toggles the **"Private IoT Gateway"** in the OpenHW Studio UI, the simulated ESP32 stops routing its raw 802.11 Wi-Fi frames to the public cloud. Instead, it forwards them over a WebSocket (`ws://localhost:5070`) directly to this script running on your local machine.
 
 This Go application feeds those raw Ethernet frames directly into `gvisor-tap-vsock`. gVisor acts exactly like a real hardware router — it terminates the virtual TCP/IP connection and establishes real operating system network sockets to fulfill the requests!
 
@@ -59,7 +59,7 @@ If you have Go installed, you can cross-compile the gateway for different operat
 ```bash
 GOOS=windows GOARCH=amd64 go build -o openhw-gateway-windows.exe main.go
 ```
-*Users just double-click this `.exe` and the gateway starts instantly on port 5099.*
+*Users just double-click this `.exe` and the gateway starts instantly on port 5070.*
 
 **2. Build for macOS (Intel):**
 ```bash
