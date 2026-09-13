@@ -692,8 +692,19 @@ int main(void) {
             tx_desc[0] = 0x80000000 | ((14 + 20 + 8 + 1200) & 0x3FFF);
             tx_desc[1] = (unsigned int)&tx_frame[0];
             DMATDLAR = (unsigned int)&tx_desc[0];
-            { unsigned int gen = eth_done_gen; eth_done = 0; DMATPDR = 1;
-              for (int i = 0; i < 2000000 && eth_done_gen == gen; i++); }
+            // PIPELINED: do NOT wait TX#1's paced TS here — that wait
+            // (~170k at 10M for a 1242 B frame) consumes the entire RX
+            // wire window the deferral check keys off: l1 delivers ~at
+            // TX#1's poll service, so rx_busy_until closes together with
+            // TX#1's TS, and TX#2 always samples "wire idle" (db=0 with
+            // everything else green — the observed signature). Queue TX#1
+            // and collect its loopback straight away; l1>0 proves TX#1
+            // was serviced. TX#2 then fires ~25k after delivery, deep
+            // inside the ~170k window. Snapshot the TX#1 generation
+            // BEFORE DMATPDR=1 (same single-flag rule as
+            // eth_send_frame): the ISR stamps every completion, so the
+            // loop below exits on TX#1's own TS, not a stale one.
+            { unsigned int gen1 = eth_done_gen; eth_done = 0; DMATPDR = 1; }
             unsigned int l1 = eth_recv_frame(200000);
             int db = 0, ok2 = 0, consumed = 0;
             if (l1) {
@@ -703,8 +714,16 @@ int main(void) {
                 tx_desc[0] = 0x80000000 | ((14 + 20 + 12) & 0x3FFF);
                 tx_desc[1] = (unsigned int)&tx_frame[0];
                 DMATDLAR = (unsigned int)&tx_desc[0];
-                // Generation wait for TX#2 as well (same aliasing rule —
-                // the raw DMATPDR=1 here used to inherit TX#1's done).
+                // Generation wait for TX#2 (its completion is what the
+                // join loop + DB verdict read). TX#1's TS is intentionally
+                // NOT waited on first (see above); l1>0 is the proof TX#1
+                // was serviced. Snapshot the TX#2 generation BEFORE
+                // DMATPDR=1: the ISR stamps every completion, so a gen
+                // snapshot taken after the write could already include
+                // TX#2's own TS (paced to ~0 in fast model paths) and the
+                // wait would inherit the NEXT completion — or a still-
+                // pending TX#1 TS landing between snapshot and write would
+                // alias as TX#2's (same single-flag rule as eth_send_frame).
                 { unsigned int gen2 = eth_done_gen; eth_done = 0; DMATPDR = 1;
                   for (int i = 0; i < 2000000 && eth_done_gen == gen2; i++); }
                 // Join: both paced completions + TX#2's loopback back.
@@ -717,7 +736,7 @@ int main(void) {
                 db = (tx_desc[0] & 0x1) != 0;
             }
             if (db && ok2 && consumed) uart_puts("DEFER OK\r\n");
-            else uart_puts("DEFER FAIL\r\n");
+            else { uart_puts("DEFER FAIL db="); uart_hex32(db); uart_puts(" ok2="); uart_hex32(ok2); uart_puts(" consumed="); uart_hex32(consumed); uart_puts(" l1="); uart_hex32(l1); uart_puts(" t0="); uart_hex32(tx_desc[0]); uart_puts("\r\n"); }
         }
         MACCR |= (1 << 11); // DM=1 full-duplex
         {
@@ -1201,13 +1220,31 @@ int main(void) {
                         for (volatile int i = 0; i < 40000; i++);
                         if (DMASR & (1 << 7)) uart_puts("RBUS OK\r\n");
                         else uart_puts("RBUS FAIL\r\n");
-                        // Release: re-arm the head, f2 delivers, RBUS clears.
+                        // Release: re-arm the head so the held f2 can
+                        // deliver, then collect it through eth_recv_frame
+                        // (NOT a bare rx_flag spin): that is the only path
+                        // that re-arms the descriptor (rx_desc[0] OWN) after
+                        // consuming a frame. A bare `rx_flag=0` consume
+                        // leaves the head CPU-owned, so the NEXT phase's
+                        // first delivery RBUS-holds and its wait times out
+                        // (observed: RBUS CLEAR "passed" on a stale flag
+                        // while the head stayed 0x003C0000, starving the MFC
+                        // burst and everything after it, JABBER WD first).
+                        // The manual re-arm below is NOT optional:
+                        // eth_recv_frame never re-arms a CPU-owned head it
+                        // didn't itself collect from (deadlock otherwise).
+                        // (The sampler ISR only sets rx_flag on RS; the
+                        // ownership bit in rx_desc[0] is what the driver
+                        // delivers against. The re-arm MUST come after the
+                        // settle spin: re-arming before sampling the RBUS
+                        // latch above lets f2 deliver immediately and the
+                        // latch clears before the sample — RBUS OK reads
+                        // FAIL even though the hold was real. The release
+                        // wait below spans MANY polls, so the single re-arm
+                        // here is enough to start it.)
                         rx_desc[0] = 0x80000000 | 1536;
                         DMARPDR = 1;
-                        int f2 = 0;
-                        for (int i = 0; i < 20000 && !f2; i++) {
-                            if (rx_flag) { rx_flag = 0; f2 = 1; }
-                        }
+                        int f2 = eth_recv_frame(20000);
                         if (f2 && !(DMASR & (1 << 7))) uart_puts("RBUS CLEAR OK\r\n");
                         else uart_puts("RBUS CLEAR FAIL\r\n");
                         (void)eth_recv_frame(20000); // drain + re-arm clean
@@ -1218,6 +1255,14 @@ int main(void) {
         // MFC + ROS: no re-arm, 36 rapid loopback TX (queue cap is 32).
         // Prologue: burn any stale armed poll first so nothing delivers
         // mid-loop (delivery would consume queue space and rx_flag).
+        // DRAIN first: the queue may still hold undelivered frames from
+        // earlier phases (e.g. RBUS CLEAR's f2 if the release wait timed
+        // out, or any backlog) — those would occupy slots the 36 need
+        // and silently shrink the overflow below the MFC trip point.
+        // (Observed: q=32 stuck from the RBUS phase onward; the MFC
+        // burst produced 0 missed frames and every later phase starved,
+        // JABBER WD first.)
+        for (int k = 0; k < 40; k++) (void)eth_recv_frame(2000);
         (void)eth_recv_frame(100);
         rx_flag = 0;
         for (volatile int i = 0; i < 6000; i++);
@@ -1242,8 +1287,30 @@ int main(void) {
                 if (!(DMASR & (1 << 4))) uart_puts("ROS CLEAR OK\r\n");
                 else uart_puts("ROS CLEAR FAIL\r\n");
             } else uart_puts("ROS FAIL\r\n");
-            // Drain everything, prove the queue is empty after.
-            for (int k = 0; k < 40; k++) (void)eth_recv_frame(2000);
+            // Drain everything, prove the queue is empty after. The drain
+            // MUST run until CONSECUTIVE zeros with driver steps between
+            // rounds (not a fixed count): each iteration only collects ONE
+            // frame, and any leftover (e.g. the 36-burst tail when the
+            // driver lags the guest) would sit in the JS queue and
+            // complete a LATER phase's wait — the next RX flag the guest
+            // sees would be stale (observed: JABBER's no_rx check fired on
+            // an MFC-burst leftover, and JABBER WD's first recv_frame
+            // returned it with len 60 instead of the 1500 B loopback).
+            // Draining needs driver steps, not just guest spins: each
+            // eth_recv_frame only re-arms + polls, and the queued burst
+            // only moves when the emulator steps. So every drain round
+            // ends with a real delay (6000 nops ≈ driver steps). A single
+            // zero right after a collect may just mean the driver hasn't
+            // delivered the next one yet — hence 3 consecutive zeros.
+            // (A fixed-count drain passed vacuously with 18+ frames still
+            // queued — MFC DRAIN OK while q=18 — because guest spins
+            // consume nothing without interleaved driver steps.)
+            int zeros = 0;
+            for (int k = 0; k < 200 && zeros < 3; k++) {
+                if (eth_recv_frame(2000)) zeros = 0;
+                else zeros++;
+                for (volatile int i = 0; i < 6000; i++);
+            }
             if (!eth_recv_frame(500)) uart_puts("MFC DRAIN OK\r\n");
             else uart_puts("MFC DRAIN FAIL\r\n");
         }
@@ -1257,6 +1324,13 @@ int main(void) {
         static unsigned char jab_buf[2200];
         MACCR |= (1 << 12); // LM
         // 2100 B with WD=0 (limit 2048): JT status, TS completes, no RX.
+        // no_rx is sampled BEFORE the TX wait (deferred check): the RX
+        // completion for a jabber frame must never arrive, but sampling
+        // the flag only after the multi-million-iteration TX wait aliases
+        // a STALE completion from any earlier phase (the flag is sticky
+        // until consumed — the same aliasing the TX path avoids with its
+        // gen snapshot). Snapshot first, wait, then require no NEW flag.
+        int rx_before = rx_flag;
         for (int i = 0; i < 14; i++) jab_buf[i] = 0;
         for (int i = 0; i < 6; i++) { jab_buf[i] = my_mac[i]; jab_buf[6 + i] = my_mac[i]; }
         jab_buf[12] = 0x08; jab_buf[13] = 0x00;
@@ -1276,7 +1350,8 @@ int main(void) {
             int ok = 0;
             for (int i = 0; i < 2000000 && !ok; i++) if (eth_done_gen != jgen) ok = 1;
             int jt = (tx_desc[0] & 0x4000) != 0;
-            int no_rx = !rx_flag;
+            int no_rx = (rx_flag == rx_before);
+            rx_flag = 0; // consume any stale flag so later phases start clean
             if (ok && jt && no_rx) uart_puts("JABBER OK\r\n");
             else { uart_puts("JABBER FAIL ok="); uart_hex32(ok); uart_puts(" t0="); uart_hex32(tx_desc[0]); uart_puts(" rx="); uart_hex32(rx_flag); uart_puts("\r\n"); }
         }

@@ -1347,7 +1347,17 @@ pub fn eth_rx_csum_status(frame: &[u8]) -> u32 {
             }
             let udp_len = (((frame[l4 + 4] as usize) << 8) | frame[l4 + 5] as usize).max(8);
             if frame[l4 + 6] == 0 && frame[l4 + 7] == 0 {
-                st |= 4; // checksum field zero = none transmitted; not an error
+                // Checksum field zero = sender omitted it (RFC 768: the
+                // transmitter puts zero, meaning "no checksum computed" —
+                // every stack does this for loopback/local UDP, including
+                // this firmware's own TX path). The receiver MUST skip
+                // validation (NOT flag PCE): with the field zeroed the
+                // pseudo-header sum can never be 0, so validating would
+                // mark every legitimate no-checksum frame bad. (Observed:
+                // the DEFER probe's own loopback frames carry a zeroed UDP
+                // field — the model flagged PCE and the driver dropped
+                // them, failing DEFER even though delivery was correct.)
+                st |= 4; // has-L4 for the status bits, but OK by omission
                 return st | 8;
             }
             // Length check: the UDP length field must fit the frame

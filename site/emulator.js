@@ -140,6 +140,13 @@ export async function createEmulator(opts) {
                 // but the DMA never reports a runt — frames shorter than
                 // 64 B (60 B payload + 4 B FCS the MAC strips) pad to 60.
                 // A 50 B loopback frame therefore reports 60 (0x3C).
+                // (Enhanced-desc layouts only: the PTP snapshot at +24
+                // needs a 32-byte descriptor. On a short layout (fewer
+                // than 32 bytes before the next descriptor/buffer) the
+                // +24 write would clobber the NEXT descriptor or the RX
+                // buffer — observed as RBUS CLEAR FAIL with rx0 stuck at
+                // 0x003C0000 on the single-desc feat layout. Gate on the
+                // configured stride.)
                 const wire = len < 60 ? 60 : len;
                 const out = new Uint8Array(wire);
                 out.set(frame.subarray(0, len));
@@ -147,7 +154,7 @@ export async function createEmulator(opts) {
                 const wb = new Uint8Array(4);
                 new DataView(wb.buffer).setUint32(0, (wire << 16) | rdesExtra, true);
                 memWrite(BigInt(listBase), wb);
-                if (eth_ptp_tse()) {
+                if (eth_ptp_tse() && (E.rxStride || 0) >= 32) {
                     const sb = new Uint8Array(8);
                     const sdv = new DataView(sb.buffer);
                     sdv.setUint32(0, eth_ptp_sec(), true);
@@ -712,12 +719,21 @@ export async function createEmulator(opts) {
             // (60 B payload + 4 B FCS the MAC strips) are padded to 60.
             // A 50 B loopback frame therefore reports 60 (0x3C), and
             // firmware must accept len >= its payload, not len ==.
+            // FEF GATE (silicon): the checksum engine must actually RUN
+            // for a frame to be "checksum-bad". With IPCO off the engine
+            // is off, st==0, nothing is bad, and FEF is irrelevant — the
+            // frame always delivers. Computing status unconditionally
+            // and dropping on it starved every IPCO-off phase (RBUS f2
+            // held forever behind a CPU-owned head: RBUS CLEAR FAIL,
+            // then JABBER WD + all downstream filters).
             let rdesExtra = 0, csumBad = false;
             try {
-                const st = eth_ipco_on() ? (eth_rx_csum_status(frame) >>> 0) : 0;
-                if ((st & 1) && !(st & 2)) { rdesExtra |= 0x80; csumBad = true; }
-                if ((st & 4) && !(st & 8)) { rdesExtra |= 0x01; csumBad = true; }
-                if (csumBad) rdesExtra |= 0x8000; // ES error summary
+                if (eth_ipco_on()) {
+                    const st = (eth_rx_csum_status(frame) >>> 0);
+                    if ((st & 1) && !(st & 2)) { rdesExtra |= 0x80; csumBad = true; }
+                    if ((st & 4) && !(st & 8)) { rdesExtra |= 0x01; csumBad = true; }
+                    if (csumBad) rdesExtra |= 0x8000; // ES error summary
+                }
             } catch {}
             // Forward-error-frames gate: checksum-bad frames are dropped
             // unless FEF forwards them or DTCEFD disables the drop.

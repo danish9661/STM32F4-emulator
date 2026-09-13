@@ -3,11 +3,11 @@
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
 import * as bindings from './vendor/stm32_periph_wasm.js?v=27';
-import { createEmulator } from './emulator.js?v=1';
+import { createEmulator } from './emulator.js?v=2';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
 import { boardsOf, boardForSelection, BOARDS } from './boards.js?v=6';
-import { FIRMWARES } from './firmware.js?v=22';
+import { FIRMWARES } from './firmware.js?v=23';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
 

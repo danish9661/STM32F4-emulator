@@ -1,8 +1,8 @@
 # STM32F4 Emulator — Handover Document
 **Date:** 2026-09-13  
 **Repo:** `/home/danish1075/Documents/stm32 F4` (note: space in path — always quote)  
-**Branch:** `main` (dirty, uncommitted fixes)  
-**Last commit:** `3c8ffe5` (green board 2026-09-08)
+**Branch:** `main` (dirty, uncommitted fixes)
+**Last commit:** `dfc9dbf` (TST fix 2026-09-13; this session's DEFER work is uncommitted on top)
 
 ---
 
@@ -41,15 +41,33 @@ scripts/verify_ethernet.sh  # Regression: runs all 3 ETH firmwares end-to-end
 
 ## 2. Current State (What We Were Doing)
 
-**Target:** Debug `eth_feat_test` — 60-phase Ethernet feature matrix (IP checksum offload, jabber watchdog, defer/collision, hash/perfect/SA/DA/RA filtering, VLAN, PTP, WOL, wire pacing, LwIP sockets, STOP+WOL wake, PHY/MDIO).  
-**Status:** **50/60 phases PASS** (was 49/60 — IPCO OFF fixed by the TST fix), 10 FAIL. Core CPU tests: **180/180 PASS** (cargo, single-threaded).
+**Target:** Debug `eth_feat_test` — 60-phase Ethernet feature matrix (IP checksum offload, jabber watchdog, defer/collision, hash/perfect/SA/DA/RA filtering, VLAN, PTP, WOL, wire pacing, LwIP sockets, STOP+WOL wake, PHY/MDIO).
+**Status:** **60/60 phases PASS on f407 AND f429** (probe `5000x20000`, matrix `4200x20000`, full `test_board_matrix` 153/153). DEFER was the last FAIL; root cause was the firmware pipeline (this session), not the model.
 
-### Failing Phases
+### SOLVED this session: DEFER (was the only FAIL at 59/60)
+Diag (from the new `DEFER FAIL db=/ok2=/consumed=/l1=/t0=` print):
+`db=0 ok2=1 consumed=1 l1=0x4DA t0=0x2000002E` — everything green except the
+DB bit itself. Root cause: the firmware waited TX#1's **paced** TS (~170k
+inst at 10M for a 1242 B frame) before firing TX#2. But delivery#1 lands at
+TX#1's poll service, so `rx_busy_until` closes together with TX#1's TS, and
+TX#2 always sampled "wire idle". Fix (firmware only, NO model change — the
+model timing was correct): queue TX#1 and collect its loopback straight away
+(`l1>0` proves TX#1 was serviced);
+TX#2 then fires ~25k after delivery, deep inside the ~170k window. Full
+comment block in `eth_feat_test/main.c` (~line 695). Gen snapshots stay
+BEFORE `DMATPDR=1` on both TX#1/TX#2 (single-flag rule). Verified 60/60 on
+both maps + full matrix 153/153.
+**Lesson (do not re-learn):** a "wait for TS then send" pipeline places the
+second TX at the END of the first frame's wire window by construction —
+on silicon too. Deferral needs overlap, so never wait the paced completion
+of the frame that opens the window.
+
+### Failing Phases (historical — all green now, kept for archaeology)
 | Phase | Symptom |
 |-------|---------|
-| **JABBER WD** | `ok=1, t0=0x200005DC, len=0` — TX completes, but RX wait times out. Frame IS in rx_buf (`00000002...`) yet `eth_recv_frame` returns 0. RX head stays `0x003C0000`, rxpoll=1, NIS stuck set (`dmasr=0x20360098`). |
-| **DEFER** | Phase 8b DEFER OK / DEFER DROP OK missing. |
-| **HPF/SAF/RA/SAIF** | All 10 filter phases missing (MISS) — downstream of JABBER WD (no RX frames delivered → no filter matches). |
+| **JABBER WD** (OLD) | `ok=1, t0=0x200005DC, len=0` — TX completes, but RX wait times out. Frame IS in rx_buf (`00000002...`) yet `eth_recv_frame` returns 0. RX head stays `0x003C0000`, rxpoll=1, NIS stuck set (`dmasr=0x20360098`). |
+| **DEFER** (OLD) | Phase 8b DEFER OK / DEFER DROP OK missing. |
+| **HPF/SAF/RA/SAIF** (OLD) | All 10 filter phases missing (MISS) — downstream of JABBER WD (no RX frames delivered → no filter matches). |
 
 ### Failing Phases (OLD — IPCO row SOLVED, kept for archaeology)
 | Phase | Symptom |
@@ -190,12 +208,13 @@ $TOOLCHAIN/objdump -d eth_feat_test/eth_feat_test.elf | grep -A30 '<main>:'
    - Next: instrument SAME-step TX-capture → rxQueue → wDeliverRx → RS → ISR → flag with per-step `t0/rx0/flag/gen/rxp/dmasr` sampling from the WD `str r0,[r2,#4]` (DMATPDR write @0x8002A18). Key question: does the loopback frame deliver while the waiter spins, or does it sit queued behind a CPU-owned head (RBUS hold) because the MFC-burst prologue left the head CPU-owned?
 2. **DEFER**: phase 8b; diagnose after JABBER WD (may share the RX-delivery root cause).
 3. **DO NOT touch**: `mcmp` (exonerated), 16-bit TST (fixed), VLAN gate (fixed), `VENDOR_V` (27, current).
-4. Rebuild + probe loop:
-   ```bash
-   cd stm32-periph-wasm && wasm-pack build --release --target nodejs && cp pkg/stm32_periph_wasm_bg.wasm ../site/vendor/
-   cargo test --release -- --test-threads=1   # 180/180 (parallel has a PRE-EXISTING BOOT_LOCK-gap flake: 15 fails, all lockless-snippet races; NOT caused by the TST fix — verify with --test-threads=1)
-   node .pw-scratch/feat_probe.mjs f407 2500 20000
-   ```
+4. Rebuild + probe loop (DEFER fix is firmware-only — no wasm rebuild needed this round):
+    ```bash
+    export TOOLCHAIN="$HOME/.arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/arm-none-eabi-"
+    make -C eth_feat_test && node tools/build_family.mjs eth_feat_test && node tools/make_firmware.mjs
+    node .pw-scratch/feat_probe.mjs f407 4200 20000   # 60/60 both maps
+    node site/test_board_matrix.mjs                  # 153/153 full
+    ```
 
 ## 7. Important Gotchas (appended 2026-09-13)
 - **`getRegisters().PC` lies during exception entry**: it reports the HANDLER pc (0x800043d) while the trace shows thread code still executing — the core updates r15 at entry before the first handler instruction retires. Use `LR == 0xFFFFFFF9/FD` (not PC) to tell handler vs thread mode, and the PC trace (not register sampling) for verdict-site work.

@@ -14,7 +14,7 @@
 // worker scripts are cached exactly as hard as module scripts, and a stale
 // copy looks precisely like the bug you thought you just fixed.
 import * as bindings from './vendor/stm32_periph_wasm.js?v=27';
-import { createEmulator } from './emulator.js';
+import { createEmulator } from './emulator.js?v=2';
 
 // ── pacing (unchanged from the pre-worker main-thread loop) ──
 // The guest's DG_SleepMs(15) is a no-op, and the guest advances its own frame
