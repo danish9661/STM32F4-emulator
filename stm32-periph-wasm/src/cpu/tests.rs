@@ -3097,3 +3097,80 @@ fn ldrb_preindexed_rt_eq_rn_load_wins() {
     assert_eq!(cpu.regs.r[0], 0xBB, "Rt==Rn pre-indexed: loaded byte wins");
     assert_eq!(cpu.regs.r[2], 0x20000671, "Rn advanced by 1");
 }
+
+#[test]
+fn tst16_preserves_rn_and_sets_z() {
+    // 16-bit TST `tst r2, r3` (421A, sop=8) is a TEST op: N/Z from
+    // r2&r3, Rn preserved, C/V untouched. The first cut dispatched it
+    // as SUB-flags (`sub_flags(a,b,1)`), which set Z from r2-r3: with
+    // r2=0x3C0000, r3=0x8081 the verdict TST read Z=0 (0x3C0000-0x8081
+    // != 0) instead of Z=1 (0x3C0000&0x8081 == 0), so the IPCO-OFF
+    // `beq` never took and the phase always FAILed with the frame
+    // sitting correctly in RAM. (A `rs != rd` writeback guard was
+    // tried first — wrong fix: TST must not write back at all, and it
+    // left the flags wrong.)
+    let _g = lock_boot();
+    let mut img = vec![0u8; 0x200];
+    fn w32(img: &mut Vec<u8>, off: usize, v: u32) {
+        img[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    fn w16(img: &mut Vec<u8>, off: usize, v: u16) {
+        img[off..off + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    w32(&mut img, 0x00, 0x20002000); // SP
+    w32(&mut img, 0x04, 0x08000101); // reset -> main
+    for v in 2..16u32 {
+        w32(&mut img, (v * 4) as usize, 0x08000101);
+    }
+    // main @0x100:
+    //   tst r2, r3            (421A)
+    //   beq good              (D000 -> 0x108; skipped on Z=0)
+    //   movs r0, #1           (bad marker)
+    //   good: movs r0, #2
+    //   b .                   (spin)
+    for (o, v) in [
+        (0x100, 0x421Au16),
+        (0x102, 0xD000u16),
+        (0x104, 0x2001u16),
+        (0x106, 0x2002u16),
+        (0x108, 0xE7FEu16),
+    ] {
+        w16(&mut img, o, v);
+    }
+    // Case 1 (Z=1): r2=0x3C0000, r3=0x8081 -> 0x3C0000&0x8081==0.
+    // (r2-r3 = 0x33FF7F != 0 would MISSET Z under the SUB bug.)
+    let (mut cpu, mut mem) = boot(&img);
+    let sys = crate::sys();
+    cpu.regs.r[2] = 0x003C0000;
+    cpu.regs.r[3] = 0x00008081;
+    cpu.regs.r[15] = 0x08000101;
+    cpu.deliver_irqs = true;
+    for i in 0..4 {
+        cpu.run(sys, &mut mem, 1);
+        if cpu.fault.is_some() {
+            panic!("fault after {} steps: {:?}", i, cpu.fault);
+        }
+    }
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[0], 2, "tst Z=1 must take beq");
+    assert_eq!(cpu.regs.r[2], 0x003C0000, "tst must not write Rn");
+    // Case 2 (Z=0): r2=0xFF00, r3=0x0F00 -> 0x0F00 != 0, so beq
+    // falls through to the bad marker (3 steps: tst, beq-ntaken,
+    // movs #1 — a 4th step would run the good marker and overwrite
+    // r0=1 with 2, which is what the first cut asserted against).
+    let (mut cpu, mut mem) = boot(&img);
+    let sys = crate::sys();
+    cpu.regs.r[2] = 0xFF00;
+    cpu.regs.r[3] = 0x0F00;
+    cpu.regs.r[15] = 0x08000101;
+    cpu.deliver_irqs = true;
+    for i in 0..3 {
+        cpu.run(sys, &mut mem, 1);
+        if cpu.fault.is_some() {
+            panic!("fault after {} steps: {:?}", i, cpu.fault);
+        }
+    }
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[0], 1, "tst Z=0 must fall through to bad marker");
+    assert_eq!(cpu.regs.r[2], 0xFF00, "tst must not write Rn");
+}

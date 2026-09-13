@@ -129,7 +129,11 @@ static int eth_send_frame(unsigned int len, unsigned int tdes_flags) {
 }
 
 // ---- memcmp (freestanding: no libc — the Makefile links -nostdlib,
-// so __builtin_memcmp would emit a call to a missing symbol) ----
+// so __builtin_memcmp would emit a call to a missing symbol).
+// (Indexing form, NOT pointer-chase: `p[i] != q[i]` keeps both bases
+// loop-invariant so the LDRBs stay simple offset loads. Verified in
+// the disassembly: F890/F880-class plain LDRB-immediate, no
+// post-indexed writeback pair to mis-decide.)
 static int mcmp(const void *a, const void *b, unsigned int n) {
     const unsigned char *p = (const unsigned char *)a, *q = (const unsigned char *)b;
     for (unsigned int i = 0; i < n; i++) if (p[i] != q[i]) return (int)p[i] - (int)q[i];
@@ -867,8 +871,13 @@ int main(void) {
             else uart_puts("SARC FAIL\r\n");
         } else uart_puts("SARC SEND FAIL\r\n");
         MACCR &= ~(3u << 28); // SARC off: SA preserved
-        for (int i = 0; i < 6; i++) tx_frame[6 + i] = 0;
-        // Rebuild (ip_header rewrote SA): zero again, resend.
+        // NOTE: ip_header() rewrites tx_frame[6..11] with my_mac (its
+        // header build stamps the SA bytes), so re-zero AFTER the
+        // rebuild, not before. (An earlier revision zeroed before
+        // ip_header and re-zeroed after — the pre-zero was dead; worse,
+        // phase 11a's SARC=replace wire-stamp then leaked into later
+        // phases whenever a rebuild forgot the post-zero. The post-zero
+        // below is the load-bearing one — do NOT move it above.)
         off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
         tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
@@ -897,6 +906,12 @@ int main(void) {
     // (LEN fmt: RDES0 reports the TRUE frame length — 50 here, since
     // the driver reports what the MAC received, not the padded wire
     // length. The buffer slot is still a full 60 B.)
+    // (SA EXPECTATION: my_mac (02:00:..:01) — SARC is OFF since phase
+    // 11's tail (`MACCR &= ~(3u<<28)` above), and ip_header() stamps
+    // my_mac into tx_frame[6..11] at every rebuild. If this probe ever
+    // sees SA zeros again, SARC leaked back on (check phase 11's tail
+    // write survived the MACCR mask 0x32CF7EFC) — do NOT "fix" it by
+    // matching zeros here.)
     // (HEAD HYGIENE: eth_recv_frame re-arms the head on every frame it
     // collects AND heartbeats the poll while waiting, so no manual
     // rx_desc[0]/DMARPDR writes are needed around these probes. An
@@ -938,18 +953,30 @@ int main(void) {
             // above already proved its silence, so the first match IS
             // this frame.
             // LEN fmt: the DMA pads runts — expect 60 (see note above).
-            // (Comparison form: mcmp (local memcmp — freestanding, no
-            // libc), NOT hand chains. Three hand-rolled revisions
-            // (chained-&&, halfwords, CLZ-loop) all mis-evaluated under
-            // -O2 despite the dump showing equal bytes — each folded
-            // into a bit-test the core gets wrong. mcmp is a real
-            // function call the compiler cannot fold into those shapes;
-            // if THIS still fails, the suspect is definitively the
-            // core's LDRB path, not GCC.)
+            // (Single-call form: hoist mcmp OUT of the if-chain. An
+            // earlier revision called mcmp inline inside the && chain;
+            // GCC open-coded the call INTO the chain as a post-indexed
+            // LDRB pair whose Rt==Rn writeback the core got wrong...
+            // no — the core is exonerated (native LDRB tests green).
+            // The hoist is belt-and-braces anyway: one call, one int
+            // result, then plain integer compares.)
             unsigned int len = 0;
             for (int r = 0; r < 10 && !len; r++) {
                 unsigned int l = eth_recv_frame(20000);
-                if (l == 60 && mcmp((const void *)&rx_buf[6], (const void *)my_mac, 6) == 0 &&
+                int mc = mcmp((const void *)&rx_buf[6], (const void *)my_mac, 6);
+                // DIAG (temporary): print match inputs per round.
+                uart_puts("OFF r l=");
+                uart_hex32(l);
+                uart_puts(" mc=");
+                uart_hex32((unsigned int)mc);
+                uart_puts(" sa=");
+                uart_hex32(rx_buf[6]);
+                uart_hex32(my_mac[0]);
+                uart_puts(" p=");
+                uart_hex32(rx_buf[34]);
+                uart_hex32((5009 >> 8));
+                uart_puts("\r\n");
+                if (l == 60 && mc == 0 &&
                     rx_buf[34] == (5009 >> 8) && rx_buf[35] == (5009 & 0xFF)) len = l;
             }
             if (!len) {
@@ -959,18 +986,8 @@ int main(void) {
                 DMARPDR = 1;
                 for (int r = 0; r < 10 && !len; r++) {
                     unsigned int l = eth_recv_frame(20000);
-                    if (l == 60 && mcmp((const void *)&rx_buf[6], (const void *)my_mac, 6) == 0 &&
-                        rx_buf[34] == (5009 >> 8) && rx_buf[35] == (5009 & 0xFF)) len = l;
-                }
-            }
-            if (!len) {
-                // Held-frame retry (RBUS): just re-arm the poll and
-                // collect (the head + queued frame are untouched — only
-                // the poll was consumed by the held attempt).
-                DMARPDR = 1;
-                for (int r = 0; r < 10 && !len; r++) {
-                    unsigned int l = eth_recv_frame(20000);
-                    if (l == 60 && mcmp((const void *)&rx_buf[6], (const void *)my_mac, 6) == 0 &&
+                    int mc = mcmp((const void *)&rx_buf[6], (const void *)my_mac, 6);
+                    if (l == 60 && mc == 0 &&
                         rx_buf[34] == (5009 >> 8) && rx_buf[35] == (5009 & 0xFF)) len = l;
                 }
             }

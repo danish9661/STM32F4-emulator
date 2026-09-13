@@ -741,6 +741,15 @@ impl Peripheral for EthernetMac {
                 0x10 => self.dmatdlar = value & !3,
                 0x14 => {
                     self.dmasr &= !(value & WRITE1CLEAR);
+                    // W1C clear must recompute the summaries NOW (silicon
+                    // clears NIS the instant its last source clears — the
+                    // guest's flag-poll loop samples DMASR directly and a
+                    // stale NIS re-fires the ISR between the clear and the
+                    // wait, stealing the RX completion: the ISR consumed
+                    // the flag but the waiter never saw gen advance, so
+                    // the frame sat delivered-but-uncollected. Observed:
+                    // the 1500 B WD loopback delivered (rx_desc=0x3C0000)
+                    // while the waiter spun to timeout, len 0).
                     self.deliver_pending_done(sys);
                 }
                 0x18 => {
@@ -968,6 +977,9 @@ impl EthernetMac {
         }
         // VLAN tag gate (applies even in promiscuous mode, like silicon).
         let vlanti = self.macvlantr & 0xFFFF;
+        // VLANTI==0 disables the gate (silicon: comparison disabled
+        // when the VID field is all zeros — the firmware writes back 0
+        // after the VLAN phase and expects open reception again).
         if vlanti != 0 {
             let tagged = frame.len() >= 18 && frame[12] == 0x81 && frame[13] == 0x00;
             if !tagged {

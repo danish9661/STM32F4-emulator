@@ -1161,7 +1161,9 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
                 cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
             }
             8 => {
-                sub_flags(cpu, a, b, 1);
+                // TST (test, no writeback): N/Z from Rd&Rs, Rd
+                // preserved, C/V untouched (nz() only writes N/Z).
+                nz(cpu, a & b);
             }
             9 => {
                 // RSB (negate): Rd = 0 - Rs, with flags
