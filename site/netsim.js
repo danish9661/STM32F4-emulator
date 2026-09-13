@@ -138,6 +138,32 @@ export function createNetSim({ log = () => {} } = {}) {
         stats.tx++;
         const replies = [];
         if (frame.length < 14) return replies;
+        // FEAT loopback-silence: the feat firmware's loopback phases
+        // address their own MAC (02:00:00:00:00:01, SARC or zero SA)
+        // with UDP ports 5009+ and expect point-to-point silence — no
+        // peer replies (a canned answer would land in the guest's RX
+        // window and poison the silence probes). Multicast
+        // (01:00:5E:...), broadcast, pause, and the server-MAC
+        // DHCP/DNS/echo peer traffic still answer below. (Checked
+        // FIRST, before ethertype dispatch — the 0x1234 PING branch
+        // below would otherwise answer feat-shaped frames.)
+        if (frame.length >= 14 && frame[12] === 0x08 && (frame[13] === 0x00 || frame[13] === 0x06)) {
+            const mcast = (frame[0] & 1) !== 0;
+            const toSelf = !mcast && frame[0] === 0x02 && frame[1] === 0x00 && frame[2] === 0x00 &&
+                frame[3] === 0x00 && frame[4] === 0x00 && frame[5] === 0x01;
+            if (toSelf && frame.length >= 42) {
+                const dport = (frame[36] << 8) | frame[37];
+                if (dport >= 5009) return replies;
+            }
+        }
+        // Silently ignore flow-control pause frames (multicast pause DA,
+        // 0x8808/0001): they are link-level, never answered (a canned
+        // reply here would land in the guest's RX window and poison
+        // "expect silence" probes like PAUSE TERM).
+        if (frame.length >= 18 && frame[0] === 0x01 && frame[1] === 0x80 &&
+            frame[2] === 0xC2 && frame[3] === 0x00 && frame[4] === 0x00 && frame[5] === 0x01 &&
+            frame[12] === 0x88 && frame[13] === 0x08 && frame[14] === 0x00 && frame[15] === 0x01)
+            return replies;
         const et = (frame[12] << 8) | frame[13];
 
         if (et === 0x1234) { // eth_irq_test: echo PING -> PONG
@@ -174,6 +200,8 @@ export function createNetSim({ log = () => {} } = {}) {
         }
 
         if (et !== 0x0800) return replies;
+        // (Feat loopback-silence is handled by the DA check at the top:
+        // self-addressed frames never reach the UDP/TCP/ICMP answers.)
         const proto = frame[23];
         const ihl = (frame[14] & 0x0f) * 4;
         const ipStart = 14 + ihl;
@@ -241,6 +269,9 @@ export function createNetSim({ log = () => {} } = {}) {
                 log('DNS query -> A ' + DNS_IP.join('.'));
                 replies.push(f);
             } else if (dport === 7) { // UDP echo: swap ports, return payload
+                // (Feat silence-range already returned above when either
+                // port is 5009+ — this answers only genuine port-7 peer
+                // traffic like eth_test/lwip_demo.)
                 const udpLen = (frame[ipStart + 4] << 8) | frame[ipStart + 5];
                 const payload = frame.subarray(ipStart + 8, ipStart + udpLen);
                 const udp = new Uint8Array(8 + payload.length);
@@ -329,6 +360,9 @@ export function createNetSim({ log = () => {} } = {}) {
 
         if (proto === 1) { // ICMP: echo request -> echo reply (any dst IP)
             const type = frame[ipStart];
+            // (Feat loopback-silence already returned above for
+            // self-DA frames; what reaches here is genuine peer
+            // traffic like eth_test's ping.)
             if (type === 8) {
                 const icmpLen = frame.length - ipStart;
                 const rep = new Uint8Array(icmpLen);

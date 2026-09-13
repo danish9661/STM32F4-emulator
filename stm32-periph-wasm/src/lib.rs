@@ -402,6 +402,12 @@ pub fn eth_clear_rx_poll() { system::eth_clear_rx_poll(); }
 #[wasm_bindgen]
 pub fn eth_tx_done() { system::eth_set_done(1); }
 
+/// Immediate error completion (dead-wire NC / jabber JT): TS raises on
+/// the next tick with no wire wait (the driver already wrote the error
+/// status into the descriptor).
+#[wasm_bindgen]
+pub fn eth_tx_done_now() { system::eth_set_done(4); }
+
 /// Signal to the peripheral that RX descriptor processing is complete.
 /// Call this after writing received data into RX buffers.
 #[wasm_bindgen]

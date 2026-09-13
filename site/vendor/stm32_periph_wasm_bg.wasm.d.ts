@@ -61,6 +61,7 @@ export const eth_take_collision: () => number;
 export const eth_take_pause_tx: () => number;
 export const eth_tx_deferred: () => number;
 export const eth_tx_done: () => void;
+export const eth_tx_done_now: () => void;
 export const eth_tx_jabber_limit: () => number;
 export const eth_tx_sarc: () => number;
 export const eth_tx_wire_busy: (a: number) => void;

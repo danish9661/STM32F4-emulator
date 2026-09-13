@@ -71,6 +71,7 @@ export async function createEmulator(opts) {
         eth_mac_accept, eth_rx_csum_status, eth_check_wol, eth_tx_wire_busy,
         eth_rx_wire_busy, eth_arm_collision, eth_take_collision,
         eth_set_link, eth_link_up, eth_tx_deferred,
+        eth_tx_done_now,
         eth_get_maccr, eth_loopback_tx, eth_ptp_tse, eth_ptp_sec, eth_ptp_sub,
         eth_station_addr, eth_tx_sarc, eth_ipco_on, eth_fwd_csum_bad,
         eth_tx_jabber_limit, eth_pause_rx, eth_take_pause_tx,
@@ -124,7 +125,16 @@ export async function createEmulator(opts) {
                 return false;
             }
             try {
-                memWrite(BigInt(rdes1), frame.subarray(0, len));
+                // Report the TRUE frame length (what the MAC received),
+                // NOT the padded wire length: RDES0[29:16] is the frame
+                // length field and silicon reports the actual frame (a
+                // 50 B IP frame reads 50, not 60 — the padding is wire
+                // filler the MAC strips). The BUFFER still gets the full
+                // 60 B slot (zero-filled tail) so short reads never see
+                // stale bytes.
+                const out = new Uint8Array(len < 60 ? 60 : len);
+                out.set(frame.subarray(0, len));
+                memWrite(BigInt(rdes1), out);
                 const wb = new Uint8Array(4);
                 new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
                 memWrite(BigInt(listBase), wb);
@@ -140,7 +150,11 @@ export async function createEmulator(opts) {
         }
         const idx = E.rxInjectIdx;
         E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
-        memWrite(BigInt(E.rxBuf + idx * E.rxStride), frame.subarray(0, len));
+        // True length in RDES0, zero-filled 60 B slot in the buffer
+        // (same rule as the IRQ path above).
+        const out = new Uint8Array(len < 60 ? 60 : len);
+        out.set(frame.subarray(0, len));
+        memWrite(BigInt(E.rxBuf + idx * E.rxStride), out);
         const wb = new Uint8Array(4);
         new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
         memWrite(BigInt(E.rxDesc + idx * 8), wb);
@@ -684,6 +698,11 @@ export async function createEmulator(opts) {
             }
             // RX checksum status -> RDES0 IPHCE(7)/PCE(0)/ES(15), gated
             // by IPCO (engine off reports nothing, like silicon).
+            // LEN RULE (silicon): RDES0[29:16] is the FRAME length but
+            // the DMA never reports a runt — frames shorter than 64 B
+            // (60 B payload + 4 B FCS the MAC strips) are padded to 60.
+            // A 50 B loopback frame therefore reports 60 (0x3C), and
+            // firmware must accept len >= its payload, not len ==.
             let rdesExtra = 0, csumBad = false;
             try {
                 const st = eth_ipco_on() ? (eth_rx_csum_status(frame) >>> 0) : 0;
@@ -709,7 +728,11 @@ export async function createEmulator(opts) {
                 const descAddr = E.rxDesc + idx * 8;
                 const bufAddr = E.rxBuf + idx * E.rxStride;
                 try {
-                    wuc.mem_write(BigInt(bufAddr), frame.subarray(0, len));
+                    // True length in RDES0, zero-filled 60 B slot (same
+                    // rule as injectRxIrq above).
+                    const out = new Uint8Array(len < 60 ? 60 : len);
+                    out.set(frame.subarray(0, len));
+                    wuc.mem_write(BigInt(bufAddr), out);
                     const wb = new Uint8Array(4);
                     new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
                     wuc.mem_write(BigInt(descAddr), wb);
@@ -773,13 +796,30 @@ export async function createEmulator(opts) {
                     const dv = new DataView(desc.buffer, desc.byteOffset, desc.byteLength);
                     const tdes0 = dv.getUint32(0, true);
                     const tdes1 = dv.getUint32(4, true);
-                    if (tdes0 & 0x80000000) {
+                    // EMPTY-POLL GUARD: OWN set but len 0 (or null buffer)
+                    // is not a frame — the guest hasn't programmed this
+                    // descriptor yet. Service it as an empty completion
+                    // (OWN-clear + TS, no wire, no note): silicon
+                    // completes zero-length descriptors the same way,
+                    // and dropping the poll WITHOUT completing would
+                    // wedge the guest's TX wait (its OWN bit never
+                    // clears — observed: 46 back-to-back re-polls of
+                    // len-0x2E while the guest spun).
+                    if ((tdes0 & 0x80000000) && ((tdes0 & 0x3FFF) === 0 || (tdes1 & 0xFFFFFFFC) === 0)) {
+                        const wb = new Uint8Array(4);
+                        new DataView(wb.buffer).setUint32(0, tdes0 & ~0x80000000, true);
+                        wuc.mem_write(BigInt(descAddr), wb);
+                        eth_clear_tx_poll();
+                        eth_tx_done();
+                        if (!irq_eth) wwrite32(E.irqFlag, wread32(E.irqFlag) | 1);
+                    } else if (tdes0 & 0x80000000) {
                         const bufAddr = tdes1 & 0xFFFFFFFC;
                         const bufSize = tdes0 & 0x3FFF;
                         if (ENV.WASM_DBG) console.log(`[wasm-tx] tdes0=0x${tdes0.toString(16)} buf=0x${bufAddr.toString(16)} len=${bufSize}`);
-                        let linkUp = true, captured = false;
+                        let linkUp = true, captured = false, txJabber = false, txDeadWire = false, txEc = 0;
                         try { linkUp = eth_link_up(); } catch {}
                         if (!linkUp) {
+                            txDeadWire = true;
                             // Dead wire: NC status, nothing on the wire.
                             // Completion still raises TS (error completion,
                             // like silicon) — the driver learns it from NC.
@@ -791,6 +831,7 @@ export async function createEmulator(opts) {
                         let jlim = 2048;
                         try { jlim = eth_tx_jabber_limit() >>> 0; } catch {}
                         if (bufAddr !== 0 && bufSize > jlim) {
+                            txJabber = true;
                             // Jabber (over the WD limit): JT status, TS
                             // error completion, nothing on the wire.
                             const wb = new Uint8Array(4);
@@ -820,10 +861,8 @@ export async function createEmulator(opts) {
                             // (guest buffer keeps the original bytes).
                             try {
                                 const sarc = eth_tx_sarc() >>> 0;
-                                if (process.env.ETHDBG) console.log('[sarc] mode=' + sarc + ' len=' + pkt.length + ' sa-before=' + Array.from(pkt.subarray(6, 12)).map((b) => b.toString(16).padStart(2, '0')).join(':'));
                                 if ((sarc === 2 || sarc === 3) && pkt.length >= 12) {
                                     const sa = eth_station_addr();
-                                    if (process.env.ETHDBG) console.log('[sarc] station=' + sa.toString(16));
                                     for (let i = 0; i < 6; i++) {
                                         pkt[6 + i] = Number((sa >> BigInt(8 * (5 - i))) & 0xFFn);
                                     }
@@ -838,41 +877,70 @@ export async function createEmulator(opts) {
                                 onTx(pkt, { bufAddr, len: bufSize });
                             }
                         }
+                        // Shared normal-completion writeback (NOT for jabber:
+                        // the JT word above is final — falling through here
+                        // would overwrite JT with a normal completion).
+                        if (!txJabber) {
                         const wb = new Uint8Array(4);
                         // Single-node collision report: an armed collision
                         // ORs EC + CC=15 into the writeback, but only in
                         // half-duplex (silicon never collides full-duplex).
-                        let ec = 0;
+                        // NOTE: `txEc` is function-scope (declared with
+                        // linkUp/captured above) — the MMC note below the
+                        // block reads it. Do NOT re-scope it here (a
+                        // block-local `let ec` throws ReferenceError at the
+                        // note call, swallowed by its catch — that silenced
+                        // ALL TX counting once before).
+                        txEc = 0;
                         try {
                             // NOTE: (x & MASK) === 0 needs the inner parens —
                             // & binds looser than === in JS.
                             // Single take() call: it is one-shot, and even
                             // logging it would consume the arm.
                             const tk = eth_take_collision();
-                            if (tk && ((eth_get_maccr() & 0x800) === 0)) ec = 0x100 | (0xF << 3);
+                            if (tk && ((eth_get_maccr() & 0x800) === 0)) txEc = 0x100 | (0xF << 3);
                         } catch {}
                         // CSMA/CD deferral: half-duplex TX while a receive
                         // still occupies the wire reports DB (TS normal).
                         try {
                             const df = eth_tx_deferred();
-                            if (df) ec |= 0x1;
+                            if (df) txEc |= 0x1;
                         } catch {}
-                        new DataView(wb.buffer).setUint32(0, (tdes0 & ~0x80000000) | 0x20000000 | ttss | ec, true);
+                        new DataView(wb.buffer).setUint32(0, (tdes0 & ~0x80000000) | 0x20000000 | ttss | txEc, true);
                         wuc.mem_write(BigInt(descAddr), wb);
-                        }
+                        } // end if (!txJabber) normal writeback
+                        } // end link-up else (normal + jabber writeback)
                         if (captured) {
-                            try { eth_note_tx((ec & 0x100) !== 0); } catch {}
+                            try { eth_note_tx((txEc & 0x100) !== 0); } catch {}
                         }
+                        eth_clear_tx_poll();
+                        // Wire pacing: TS completion waits for the frame's
+                        // wire time (normal path only — jabber/dead-wire
+                        // use done_now below, empty never reaches here).
+                        try { if (captured) eth_tx_wire_busy(lastTxLen); } catch {}
+                        try {
+                            if (txDeadWire || txJabber) eth_tx_done_now();
+                            else eth_tx_done();
+                        } catch { try { eth_tx_done(); } catch {} }
+                        if (!irq_eth) wwrite32(E.irqFlag, wread32(E.irqFlag) | 1);
+                    } // end OWN-bit branch (descAddr serviced)
+                    else if (tdes0 & 0x80000000) {
+                        // OWN set but empty (len 0 / null buffer): the
+                        // guard above already completed it (OWN-clear +
+                        // TS). Nothing more to do.
+                        eth_clear_tx_poll();
+                        return;
                     }
-                }
+                    // OWN clear: stale re-poll of an already-completed
+                    // descriptor. Drop the poll, complete nothing (the
+                    // frame's TS already fired when OWN cleared).
+                    eth_clear_tx_poll();
+                    return;
+                } // end descAddr !== 0
+                // descAddr === 0 (poll armed before DMATDLAR programmed):
+                // nothing to service; drop the poll.
                 eth_clear_tx_poll();
-                // Wire pacing: TS completion waits for the frame's wire
-                // time at the FES speed (168 MHz virtual clock) — only
-                // when a frame actually left (not dead-wire NC, jabber,
-                // or empty).
-                try { if (captured) eth_tx_wire_busy(lastTxLen); } catch {}
-                eth_tx_done();
-                if (!irq_eth) wwrite32(E.irqFlag, wread32(E.irqFlag) | 1);
+                return;
             }
             if (eth_is_rx_poll() && rxQueue.length > 0) wDeliverRx(false);
             // Stale polls (armed, queue empty) are dropped: delivery then

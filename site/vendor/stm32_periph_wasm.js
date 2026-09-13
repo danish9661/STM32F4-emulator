@@ -964,6 +964,15 @@ export function eth_tx_done() {
 }
 
 /**
+ * Immediate error completion (dead-wire NC / jabber JT): TS raises on
+ * the next tick with no wire wait (the driver already wrote the error
+ * status into the descriptor).
+ */
+export function eth_tx_done_now() {
+    wasm.eth_tx_done_now();
+}
+
+/**
  * TX jabber limit from MACCR WD (2048, or 16383 with WD set).
  * @returns {number}
  */

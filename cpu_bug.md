@@ -150,3 +150,41 @@ Observed (core): ... + exact pc/opcode/faultinfo
 Pointers: (files/lines)
 Status: OPEN
 ```
+
+### 13. Branch PC base: RAW pc+4 is correct for B/BL (NOT word-aligned) — CORRECTED
+Trigger: Arduino AnalogWave `wave.begin()` never took effect (no GPT,
+no DTC, LED off, no fault) — first suspected as a BL PC-align bug.
+Analysis (CORRECTED after llvm cross-check): for `bl setup` at 0x9ed6
+(F7FA F913, off=-24026) raw pc+4 lands exactly on 0x4100 (llvm agrees);
+word-aligned (pc+4)&~3 lands on 0x40FE (wrong). Same for `bl main` at
+0x7b4e (raw 0x44EC = llvm's target; aligned 0x44EA = wrong). A trial
+align-everything patch broke Reset_Handler->main immediately (HardFault
+at 0x7b50), confirming raw pc+4 is the silicon rule HERE (the
+`(addr+4)&~3` rule applies to LDR-literal/TBB data accesses, which the
+core already does, and to R15 *reads* — not to branch offset bases).
+The AnalogWave stall is therefore NOT a branch bug: setup runs, begin
+runs, begin returns false (or DTC never fires) — under separate
+investigation in uno-r4 (BKPT-as-nop change already landed for the
+abort() trap at setup+0x20). Lesson: end-PC sampling misses one-shot
+init code (setup ~10 instr inside one 500-step); use state signals
+(DTCVBR/DADR/PORT), not PC sampling, for init tracing.
+Pointers: uno-r4 `core/*/src/cpu/thumb.rs` (reverted, raw pc+4 kept).
+Status: CLOSED (no bug — decoder was right).
+Trigger: Arduino AnalogWave `wave.begin()` (any sketch whose `bl target`
+sits at pc&2 != 0): `bl setup` at 0x9ed6 never lands — setup/begin/DTC
+never run, sketch spins in `loop`, no fault (looks like a peripheral
+stall, not a CPU bug).
+Expected (silicon): Thumb PC reads `(addr+4)&~3` (word-aligned), so BL
+from 0x9ed6 uses base 0x9ed8 and lands on setup at 0x4100 (llvm-objdump
+agrees).
+Observed (core): `thumb.rs` BL/B.W used raw `pc+4` (0x9eda), landing at
+0x4102 — setup runs minus its `push {r3,lr}`, returns via `pop {r3,pc}`
+to garbage, and by luck lands back in the main loop. Other firmwares
+passed by luck (calls from pc&2==0 are unaffected; +2 on others usually
+lands benignly). Native repro: hand-assembled `LDR r0,=PORT1 /
+LDR r1,=bits / STR` pair needs the `0x4804/0x4905` staggered pair
+because of the same alignment rule (proven in the EK zero-boot test).
+Pointers: uno-r4 `core/*/src/cpu/thumb.rs` BL arm + B.W arm
+(`pc.wrapping_add(4)` → `(pc.wrapping_add(4)) & !3`); same for CBZ/CBNZ
+and B.cond/B (16-bit, same rule). LDR-literal/TBB already align.
+Status: CLOSED — see CORRECTED analysis above.

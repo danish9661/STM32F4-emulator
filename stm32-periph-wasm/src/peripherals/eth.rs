@@ -714,19 +714,28 @@ impl Peripheral for EthernetMac {
                 }
                 0x04 => {
                     self.dmatpdr = value;
-                    if self.tx_enabled {
-                        system::eth_signal_tx_poll(self.dmatdlar);
-                    }
+                    // Signal whenever the OWN bit is set (a live request),
+                    // not only when the DMA is already enabled: firmware
+                    // programs DMATDLAR *then* DMATPDR, and a poll armed
+                    // against a stale (zero) list base is dropped by the
+                    // driver anyway. Gating on tx_enabled lost the very
+                    // first frame whenever the enable write raced the
+                    // first poll.
+                    system::eth_signal_tx_poll(self.dmatdlar);
                 }
                 0x08 => {
                     self.dmarpdr = value;
-                    if self.rx_enabled {
-                        system::eth_signal_rx_poll(self.dmardlar);
-                    }
-                    // Re-arm retries delivery: a latched head-busy stall
-                    // clears (it re-arms only if the head freed meanwhile;
-                    // a still-busy head re-latches on the next attempt).
-                    self.dmasr &= !DMA_RBUS;
+                    // Same: signal whenever headed (the driver drops
+                    // stale polls with an empty queue, and delivery
+                    // requires a DMA-owned head — so an early/extra
+                    // signal is harmless but a missing one starves RX).
+                    system::eth_signal_rx_poll(self.dmardlar);
+                    // NOTE: no RBUS clear here. RBUS is sticky status (like
+                    // silicon): it clears on delivery success
+                    // (eth_rx_stall_clear) or guest W1C to DMASR bit 7. A
+                    // re-arm with a still-busy head re-latches on the next
+                    // delivery attempt; clearing here let the guest's own
+                    // re-arm loop erase the latch before sampling it.
                 }
                 0x0C => self.dmardlar = value & !3,
                 0x10 => self.dmatdlar = value & !3,
@@ -773,6 +782,12 @@ impl Peripheral for EthernetMac {
                 let done = system::eth_take_done();
                 if done & 1 != 0 {
                     self.pending_tx_done = true;
+                }
+                if done & 4 != 0 {
+                    // Immediate error completion (dead-wire NC / jabber):
+                    // TS now, no wire wait (the status word — written by
+                    // the driver before signalling — carries the error).
+                    self.dmasr |= DMA_TS;
                 }
                 if done & 2 != 0 {
                     self.pending_rx_done = true;
@@ -1323,7 +1338,17 @@ pub fn eth_rx_csum_status(frame: &[u8]) -> u32 {
                 st |= 4; // checksum field zero = none transmitted; not an error
                 return st | 8;
             }
-            let take = (l4 + udp_len).min(frame.len());
+            // Length check: the UDP length field must fit the frame
+            // (else the checksum is over bytes we don't have — a
+            // truncated/oversized claim, which silicon flags as an
+            // error, NOT as "good"). The old code clamped `take` to
+            // frame.len() and checksummed the truncation, which passes
+            // vacuously whenever the claimed length exceeds the frame.
+            if l4 + udp_len > frame.len() {
+                st |= 4;
+                return st; // PCE: length mismatch, no OK bit
+            }
+            let take = l4 + udp_len;
             let mut pseudo = Vec::with_capacity(12 + take - l4);
             pseudo.extend_from_slice(&frame[l3 + 12..l3 + 20]);
             pseudo.push(0);
@@ -1944,6 +1969,14 @@ mod tests {
         bad_udp[40] ^= 0xFF;
         let st = eth_rx_csum_status(&bad_udp);
         assert_eq!(st & 0b1100, 0b0100);
+        // Length mismatch: UDP length field exceeds the frame — PCE
+        // with no OK bit (silicon flags the truncation as an error).
+        // (Guards the jabber-WD class: a 1500 B frame claiming 2066 B
+        // of UDP must not verify against its own truncation.)
+        let mut bad_len = f.clone();
+        bad_len[38] = 0x08; bad_len[39] = 0x12; // claim 2066, frame has 8
+        let st2 = eth_rx_csum_status(&bad_len);
+        assert_eq!(st2 & 0b1100, 0b0100);
     }
 
     #[test]

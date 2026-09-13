@@ -7,7 +7,14 @@
 #include "defs.h"
 
 static volatile unsigned int tx_desc[8] __attribute__((aligned(8))) = { 0 };
+// TX completion generation counter: the ISR stamps every completion.
+// eth_send_frame waits on a FRESH generation (not a sticky flag), so a
+// stale completion from an earlier frame can never satisfy a later TX
+// (the classic single-flag aliasing: TX#2 sees TX#1's done bit and
+// returns before its own frame is captured — observed as "sent"
+// descriptors the driver never processed).
 static volatile int eth_done = 0;
+static volatile unsigned int eth_done_gen = 0;
 // RX descriptor is 32 bytes (enhanced layout) so the driver can write the
 // PTP snapshot at RDES6/7 (+24/+28).
 static volatile unsigned int rx_desc[8] __attribute__((aligned(8))) = { 0 };
@@ -21,13 +28,18 @@ void ETH_IRQHandler(void) {
     unsigned int sr = DMASR;
     if (sr & (1 << 0)) { // TS bit
         eth_done = 1;
+        eth_done_gen++;
         DMASR = (1 << 0) | (1 << 16) | (1 << 14);
     }
     if (sr & (1 << 6)) { // RS bit
         rx_flag = 1;
         DMASR = (1 << 6) | (1 << 16) | (1 << 14);
     }
-    if (!(sr & ((1 << 0) | (1 << 6)))) ptp_flag = 1; // e.g. PTP target
+    // AIS without NIS (error summary, e.g. JT/NC with no TS yet):
+    // still a completion — wake the TX wait so error paths never
+    // hang the 2M poll (the status word says which error).
+    if (!(sr & ((1 << 0) | (1 << 6))) && (sr & (1 << 14))) { eth_done = 1; eth_done_gen++; }
+    if (!(sr & ((1 << 0) | (1 << 6))) && !(sr & (1 << 14))) ptp_flag = 1; // e.g. PTP target
 }
 
 void ETH_WKUP_IRQHandler(void) {
@@ -64,9 +76,21 @@ static unsigned int ip_header(unsigned char *dst_mac, unsigned char *dst_ip,
 
 // Wait for one RX frame; returns len (0 = timeout). Stashes RDES0 (status
 // bits) before re-arming the descriptor.
+//
+// OWNERSHIP CONTRACT (single-desc head, head-only RBUS delivery): the
+// driver delivers ONLY when a poll is armed AND the head is DMA-owned.
+// So every wait here re-arms periodically (the `(i & 0x3F) == 0`
+// DMARPDR=1): without it a frame queued while no poll is armed would
+// sit forever (the stale-poll drop consumes lone arms). Re-arming is
+// always safe: on a DMA-owned head it is a no-op heartbeat; on a
+// CPU-owned (consumed) head it just re-arms; the RBUS hold path only
+// triggers when a frame is QUEUED against a busy head, which cannot
+// happen here (one frame in flight per wait). Do NOT remove the
+// heartbeat — a bare flag poll starves delivery (observed: VLAN/PTP/
+// WOL all timed out the moment it was removed).
 static unsigned int eth_recv_frame(unsigned int timeout_iters) {
     for (unsigned int i = 0; i < timeout_iters; i++) {
-        if ((i & 0x3F) == 0) DMARPDR = 1; // keep the poll armed
+        if ((i & 0x3F) == 0) DMARPDR = 1; // heartbeat: keep the poll armed
         if (rx_flag) {
             rx_flag = 0;
             last_rdes0 = rx_desc[0];
@@ -85,9 +109,13 @@ static int eth_send_frame(unsigned int len, unsigned int tdes_flags) {
     tx_desc[0] = 0x80000000 | tdes_flags | (len & 0x3FFF);
     tx_desc[1] = (unsigned int)&tx_frame[0];
     DMATDLAR = (unsigned int)&tx_desc[0];
+    // Generation wait: snapshot BEFORE arming the poll so only THIS
+    // frame's completion satisfies us (a sticky flag would alias an
+    // earlier frame's completion — see the decl comment).
+    unsigned int gen = eth_done_gen;
     eth_done = 0;
     DMATPDR = 1;
-    for (int i = 0; i < 2000000; i++) if (eth_done) return 1;
+    for (int i = 0; i < 2000000; i++) if (eth_done_gen != gen) return 1;
     return 0;
 }
 
@@ -255,7 +283,7 @@ int main(void) {
         unsigned int h2 = crc32((unsigned char *)g2, 6) >> 26;
         if (h1 < 32) MACHTLR = 1 << h1; else MACHTHR = 1 << (h1 - 32);
         MACFFR = 1 << 2; // HM
-        unsigned int off = ip_header(gw_mac, gw_ip, 17, 8 + 4);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
         tx_frame[off] = 5001 >> 8; tx_frame[off + 1] = 5001 & 0xFF;
         tx_frame[off + 2] = 5001 >> 8; tx_frame[off + 3] = 5001 & 0xFF;
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
@@ -293,7 +321,7 @@ int main(void) {
     // ---- 5. VLAN ----
     {
         MACVLANTR = 7; // accept only VID 7
-        unsigned int off = ip_header(gw_mac, gw_ip, 17, 8 + 4);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
         tx_frame[off] = 5002 >> 8; tx_frame[off + 1] = 5002 & 0xFF;
         tx_frame[off + 2] = 5002 >> 8; tx_frame[off + 3] = 5002 & 0xFF;
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
@@ -401,7 +429,7 @@ int main(void) {
         wkp_flag = 0;
         MACPMTCTL = 0x2; // MPE
         MACIMR |= (1 << 3); // PMTIM
-        unsigned int off = ip_header(gw_mac, gw_ip, 17, 8 + 4);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
         tx_frame[off] = 5003 >> 8; tx_frame[off + 1] = 5003 & 0xFF;
         tx_frame[off + 2] = 5003 >> 8; tx_frame[off + 3] = 5003 & 0xFF;
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
@@ -531,9 +559,17 @@ int main(void) {
     // land on a step boundary (driver runs between steps), so allow
     // one step of overshoot on top: assert 10k < d < 40k. A broken
     // (instant) pacer would finish within a single step (<=5k).
+    // NOTE: d measures GUEST instructions from dwt_zero() to the TS
+    // poll exit — it INCLUDES the wire wait (the guest spins until
+    // the ISR fires) but NOT the loopback RX (drained after).
+    //
+    // STEP-SIZE RULE: run the rate bands at 20k steps (matrix entry
+    // uses 5000 — see below). d can only resolve to a step boundary,
+    // so steps must be << the 16.7k wire time or the band assertion
+    // is meaningless (at 1k steps d reads ~1 step either way).
     {
         dwt_on();
-        unsigned int off = ip_header(gw_mac, gw_ip, 17, 8 + 1200);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 1200);
         tx_frame[off] = 0; tx_frame[off + 1] = 7;
         tx_frame[off + 2] = 0; tx_frame[off + 3] = 7;
         tx_frame[off + 4] = (1200 + 8) >> 8; tx_frame[off + 5] = (1200 + 8) & 0xFF;
@@ -577,7 +613,7 @@ int main(void) {
         uart_puts("COLLIDE ARM\r\n");
         for (volatile int i = 0; i < 20000; i++);
         {
-            unsigned int off = ip_header((unsigned char *)gw_mac, gw_ip, 17, 8 + 4);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
             tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
             if (eth_send_frame(14 + 20 + 12, 0)) {
@@ -590,6 +626,9 @@ int main(void) {
 
     // ---- 8c. RX wire pacing: loopback 1200B, DWT from send to recv ----
     // Covers TX pacing (~17k) + RX pacing (~17k) + step overshoot.
+    // NOTE: d is sampled AFTER the loopback frame is received, so it
+    // covers TX wire + RX wire + the ISR round trips (unlike WIRE,
+    // which stops at TS). Expect ~35k.
     {
         MACCR |= (1 << 12); // LM loopback
         unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 1200);
@@ -626,8 +665,8 @@ int main(void) {
             tx_desc[0] = 0x80000000 | ((14 + 20 + 8 + 1200) & 0x3FFF);
             tx_desc[1] = (unsigned int)&tx_frame[0];
             DMATDLAR = (unsigned int)&tx_desc[0];
-            eth_done = 0;
-            DMATPDR = 1;
+            { unsigned int gen = eth_done_gen; eth_done = 0; DMATPDR = 1;
+              for (int i = 0; i < 2000000 && eth_done_gen == gen; i++); }
             unsigned int l1 = eth_recv_frame(200000);
             int db = 0, ok2 = 0, consumed = 0;
             if (l1) {
@@ -637,7 +676,10 @@ int main(void) {
                 tx_desc[0] = 0x80000000 | ((14 + 20 + 12) & 0x3FFF);
                 tx_desc[1] = (unsigned int)&tx_frame[0];
                 DMATDLAR = (unsigned int)&tx_desc[0];
-                DMATPDR = 1;
+                // Generation wait for TX#2 as well (same aliasing rule —
+                // the raw DMATPDR=1 here used to inherit TX#1's done).
+                { unsigned int gen2 = eth_done_gen; eth_done = 0; DMATPDR = 1;
+                  for (int i = 0; i < 2000000 && eth_done_gen == gen2; i++); }
                 // Join: both paced completions + TX#2's loopback back.
                 // (Bounded: 40 rounds worst-case, fast path exits early.)
                 for (int i = 0; i < 40 && (!ok2 || !consumed); i++) {
@@ -732,7 +774,7 @@ int main(void) {
     {
         wkp_flag = 0;
         MACPMTCTL = 0x20 | 0x2; // W1C stale MPR away, arm MPE (PMTIM set)
-        unsigned int off = ip_header(gw_mac, gw_ip, 17, 8 + 4);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
         tx_frame[off] = 5003 >> 8; tx_frame[off + 1] = 5003 & 0xFF;
         tx_frame[off + 2] = 5003 >> 8; tx_frame[off + 3] = 5003 & 0xFF;
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
@@ -767,19 +809,33 @@ int main(void) {
     // keeps the original bytes. Loopback proves the wire copy.
     // (LM MUST be on: the frame returns via the driver's loopback
     // re-injection, not the wire — without it nothing is received.)
+    // NOTE: netsim answers NON-loopback frames; during SARC LM must
+    // stay on for the whole phase (any LM-off window lets a frame
+    // escape to netsim, whose reply then lands in OUR rx_buf and
+    // poisons the SA/len asserts below).
     {
         unsigned int stale = drain_rx();
         uart_puts("SARC drain=");
         uart_hex32(stale);
         uart_puts("\r\n");
         MACCR |= (1 << 12); // LM
+        // NOTE: ip_header addresses the frame at my_mac — but the SARC
+        // asserts below need DA=my_mac too (loopback frames must pass
+        // our own accept filter). SARC replaces only the SA bytes.
         unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
         tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
         for (int i = 0; i < 6; i++) tx_frame[6 + i] = 0; // zero SA
         MACCR = (MACCR & ~(3u << 28)) | (3u << 28); // SARC=replace
         if (eth_send_frame(14 + 20 + 12, 0)) {
-            unsigned int len = eth_recv_frame(20000);
+            // Our frame: SA was zeroed pre-TX (SARC stamped the wire
+            // copy, guest buffer kept zeros) — match zeros, not bare
+            // presence (a stray peer reply carries a real SA).
+            unsigned int len = 0;
+            for (int r = 0; r < 10 && !len; r++) {
+                unsigned int l = eth_recv_frame(20000);
+                if (l && rx_buf[6] == 0x02 && rx_buf[11] == 0x01) len = l;
+            }
             int sa_ok = len && rx_buf[6] == 0x02 && rx_buf[7] == 0x00 &&
                 rx_buf[8] == 0x00 && rx_buf[9] == 0x00 &&
                 rx_buf[10] == 0x00 && rx_buf[11] == 0x01;
@@ -795,7 +851,13 @@ int main(void) {
         tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
         for (int i = 0; i < 6; i++) tx_frame[6 + i] = 0;
         if (eth_send_frame(14 + 20 + 12, 0)) {
-            unsigned int len = eth_recv_frame(20000);
+            // Our frame: SA zeros preserved (SARC off) — match zeros,
+            // not bare presence.
+            unsigned int len = 0;
+            for (int r = 0; r < 10 && !len; r++) {
+                unsigned int l = eth_recv_frame(20000);
+                if (l && rx_buf[6] == 0 && rx_buf[11] == 0) len = l;
+            }
             if (len && rx_buf[6] == 0 && rx_buf[11] == 0) uart_puts("SARC OFF OK\r\n");
             else uart_puts("SARC OFF FAIL\r\n");
         } else uart_puts("SARC OFF SEND FAIL\r\n");
@@ -806,6 +868,15 @@ int main(void) {
     // FEF is still set from the checksum block: clear it and a bad-IP
     // frame must NOT arrive; with FEF set but IPCO clear it arrives
     // with NO status bits. Defaults restored after.
+    // (UDP port: use 5009+ — the loopback-silence range netsim never
+    // answers. Ports 5001-5008 get canned peer replies which would
+    // land in rx_buf and poison the SA/len asserts.)
+    // (assert style: compare against the EXPECTED frame — a stray peer
+    // reply has a different SA/len, so a bare `len != 0` check would
+    // pass vacuously on garbage. All checks below key on content.)
+    // (LEN fmt: RDES0 reports the TRUE frame length — 50 here, since
+    // the driver reports what the MAC received, not the padded wire
+    // length. The buffer slot is still a full 60 B.)
     {
         MACCR |= (1 << 12); // LM
         DMAOMR &= ~(1 << 7); // FEF=0: error frames drop
@@ -815,17 +886,67 @@ int main(void) {
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 16;
         tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
         tx_frame[14 + 10] = 0x12; tx_frame[14 + 11] = 0x34; // bad IP cksum
+        // DROP probe: the bad frame (FEF=0) must never arrive. Match
+        // content (our SA/ports) so a stray peer reply can't satisfy
+        // or poison this.
+        // HEAD HYGIENE (single-desc rule): this probe's terminal recvs
+        // all run EMPTY (the drop consumes nothing), so the head state
+        // is whatever the previous phase left. Re-arm explicitly BEFORE
+        // the send so the (dropped-or-not) outcome can't strand a stale
+        // poll/head pair into the OFF probe below. Same after: the OFF
+        // probe re-arms before ITS send. Ownership is per-probe
+        // explicit, never inherited.
+        rx_desc[0] = 0x80000000 | 1536;
+        DMARPDR = 1;
         if (eth_send_frame(14 + 20 + 16, 0)) {
-            unsigned int len = eth_recv_frame(5000);
-            if (!len) uart_puts("FEF DROP OK\r\n");
+            int got = 0;
+            for (int r = 0; r < 10 && !got; r++) {
+                unsigned int len = eth_recv_frame(500);
+                if (len && rx_buf[6] == my_mac[0] && rx_buf[11] == my_mac[5] &&
+                    rx_buf[34] == (5009 >> 8) && rx_buf[35] == (5009 & 0xFF)) got = 1;
+            }
+            if (!got) uart_puts("FEF DROP OK\r\n");
             else uart_puts("FEF DROP FAIL\r\n");
         } else uart_puts("FEF DROP SEND FAIL\r\n");
         DMAOMR |= (1 << 7); // FEF=1 again
         MACCR &= ~(1 << 10); // IPCO=0: engine off, no status
+        // NOTE: RDES0[29:16] is the frame-length field — the DMA pads
+        // runts, so a 50 B loopback delivery reads len 60 (0x3C) with
+        // NO error bits, which is exactly what this check asserts (the
+        // mask covers only the IPHCE/PCE/ES status bits, never the
+        // length; the content match proves it is OUR frame).
+        // Per-probe head hygiene (see above): re-arm explicitly.
+        rx_desc[0] = 0x80000000 | 1536;
+        DMARPDR = 1;
         if (eth_send_frame(14 + 20 + 16, 0)) {
-            unsigned int len = eth_recv_frame(20000);
+            // Our frame: SA==station (SARC off here), our ports.
+            // Match content, not bare presence (stray peer replies have
+            // a different SA and must not satisfy this). The barrier
+            // above already proved the queue empty, so the first match
+            // IS this frame.
+            // LEN fmt: the DMA pads runts — expect 60 (see note above).
+            // (Single exit value: `len` carries the match OUT of the
+            // loop — earlier revisions shadowed it with a loop-local
+            // `l`, which is why a matching frame still read len=0.)
+            unsigned int len = 0;
+            for (int r = 0; r < 10 && !len; r++) {
+                unsigned int l = eth_recv_frame(20000);
+                if (l == 60 && rx_buf[6] == my_mac[0] && rx_buf[11] == my_mac[5] &&
+                    rx_buf[34] == (5009 >> 8) && rx_buf[35] == (5009 & 0xFF)) len = l;
+            }
+            if (!len) {
+                // Held-frame retry (RBUS): just re-arm the poll and
+                // collect (the head + queued frame are untouched — only
+                // the poll was consumed by the held attempt).
+                DMARPDR = 1;
+                for (int r = 0; r < 10 && !len; r++) {
+                    unsigned int l = eth_recv_frame(20000);
+                    if (l == 60 && rx_buf[6] == my_mac[0] && rx_buf[11] == my_mac[5] &&
+                        rx_buf[34] == (5009 >> 8) && rx_buf[35] == (5009 & 0xFF)) len = l;
+                }
+            }
             if (len && !(last_rdes0 & ((1 << 7) | 1 | (1 << 15)))) uart_puts("IPCO OFF OK\r\n");
-            else { uart_puts("IPCO OFF FAIL "); uart_hex32(last_rdes0); uart_puts("\r\n"); }
+            else { uart_puts("IPCO OFF FAIL len="); uart_hex32(len); uart_puts(" rdes0="); uart_hex32(last_rdes0); uart_puts("\r\n"); }
         } else uart_puts("IPCO OFF SEND FAIL\r\n");
         DMAOMR &= ~(1 << 7); // FEF back to default (drop)
         MACCR &= ~(1 << 12);
@@ -839,7 +960,11 @@ int main(void) {
         MACCR |= (1 << 11); // DM=1 (pause is full-duplex only)
         MACCR |= (1 << 12); // LM
         dwt_on();
-        // a) RX pause terminates + stalls.
+        // a) RX pause terminates + stalls. NOTE: the pause frame is
+        // 60 B but eth_send_frame pads sub-60 payloads — pass 60
+        // explicitly (the pad path also writes 60, identical).
+        // (Delivery pads short frames to 60 B like the wire, so PWTS/
+        // stall asserts must not depend on sub-60 lengths.)
         MACFCR = (1 << 2); // RFCE
         tx_frame[0] = 0x01; tx_frame[1] = 0x80; tx_frame[2] = 0xC2;
         tx_frame[3] = 0x00; tx_frame[4] = 0x00; tx_frame[5] = 0x01;
@@ -848,6 +973,9 @@ int main(void) {
         tx_frame[14] = 0x00; tx_frame[15] = 0x01;
         tx_frame[16] = 0x00; tx_frame[17] = 100; // quanta=100
         for (int i = 18; i < 60; i++) tx_frame[i] = 0;
+        // stall BEFORE sampling PWTS (the bit is live only while the
+        // pause holds TX — sampling it after the stall wait would race
+        // the hold expiry at fine step sizes).
         if (eth_send_frame(60, 0)) {
             int got = 0;
             for (int r = 0; r < 6; r++) if (eth_recv_frame(500)) got = 1;
@@ -868,6 +996,13 @@ int main(void) {
             } else uart_puts("PAUSE STALL SEND FAIL\r\n");
         } else uart_puts("PAUSE SEND FAIL\r\n");
         // b) UPFD: pause to our own DA terminates too.
+        // (Clear any stale queue first: the pause under test must be
+        // the next delivery, not a leftover. NOTE: drain BEFORE
+        // setting RFCE/UPFD — drain's own loopback twin (sent while
+        // RFCE was still clear) may legitimately DELIVER, and that is
+        // fine; what matters is the queue is empty when the pause
+        // under test goes out.)
+        drain_rx();
         MACFCR = (1 << 2) | (1 << 3); // RFCE + UPFD
         for (int i = 0; i < 6; i++) tx_frame[i] = my_mac[i];
         for (int i = 0; i < 6; i++) tx_frame[6 + i] = my_mac[i];
@@ -980,6 +1115,15 @@ int main(void) {
         if (DMASR & (1 << 29)) uart_puts("DMASR TSTS OK\r\n");
         else uart_puts("DMASR TSTS FAIL\r\n");
         // RBUS: deliver f1 and HOLD the head (no re-arm), then queue f2.
+        // (Single-desc head: this block manages ownership explicitly —
+        // the ONLY place that bypasses eth_recv_frame's heartbeat. The
+        // f1 wait below polls rx_flag WITHOUT re-arming (the initial
+        // DMARPDR=1 armed it); after consuming f1's flag the head stays
+        // CPU-owned, so the settle spin also re-arms NOTHING — one
+        // DMARPDR=1 then a bare spin lets the hold latch reach the
+        // DMASR sample undisturbed. The heartbeat's absence is SAFE
+        // here only because each wait expects exactly one known frame
+        // with a pre-armed poll.)
         DMARPDR = 1;
         {
             unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
@@ -991,7 +1135,6 @@ int main(void) {
             if (eth_send_frame(14 + 20 + 12, 0)) {
                 int f1 = 0;
                 for (int i = 0; i < 20000 && !f1; i++) {
-                    if ((i & 0x3F) == 0) DMARPDR = 1;
                     if (rx_flag) f1 = 1;
                 }
                 rx_flag = 0; // consume the flag, HOLD the descriptor
@@ -1004,11 +1147,12 @@ int main(void) {
                     tx_frame[off2 + 8] = 'R'; tx_frame[off2 + 9] = '2';
                     if (eth_send_frame(14 + 20 + 12, 0)) {
                         // Settle: f2's TX capture plus its delivery attempt
-                        // need a few driver steps (its head-busy hold must
-                        // land before we sample RBUS).
-                        for (int i = 0; i < 8000; i++) {
-                            if ((i & 0x3F) == 0) DMARPDR = 1;
-                        }
+                        // need driver steps. Re-arm ONCE (the hold needs a
+                        // poll to attempt against); then spin WITHOUT
+                        // re-arming so nothing clears the latch before the
+                        // DMASR sample below.
+                        DMARPDR = 1;
+                        for (volatile int i = 0; i < 40000; i++);
                         if (DMASR & (1 << 7)) uart_puts("RBUS OK\r\n");
                         else uart_puts("RBUS FAIL\r\n");
                         // Release: re-arm the head, f2 delivers, RBUS clears.
@@ -1016,7 +1160,6 @@ int main(void) {
                         DMARPDR = 1;
                         int f2 = 0;
                         for (int i = 0; i < 20000 && !f2; i++) {
-                            if ((i & 0x3F) == 0) DMARPDR = 1;
                             if (rx_flag) { rx_flag = 0; f2 = 1; }
                         }
                         if (f2 && !(DMASR & (1 << 7))) uart_puts("RBUS CLEAR OK\r\n");
@@ -1080,29 +1223,35 @@ int main(void) {
         tx_desc[0] = 0x80000000 | 2100;
         tx_desc[1] = (unsigned int)&jab_buf[0];
         DMATDLAR = (unsigned int)&tx_desc[0];
+        unsigned int jgen = eth_done_gen;
         eth_done = 0;
         DMATPDR = 1;
         {
             int ok = 0;
-            for (int i = 0; i < 2000000 && !ok; i++) if (eth_done) ok = 1;
+            for (int i = 0; i < 2000000 && !ok; i++) if (eth_done_gen != jgen) ok = 1;
             int jt = (tx_desc[0] & 0x4000) != 0;
             int no_rx = !rx_flag;
             if (ok && jt && no_rx) uart_puts("JABBER OK\r\n");
-            else uart_puts("JABBER FAIL\r\n");
+            else { uart_puts("JABBER FAIL ok="); uart_hex32(ok); uart_puts(" t0="); uart_hex32(tx_desc[0]); uart_puts(" rx="); uart_hex32(rx_flag); uart_puts("\r\n"); }
         }
         // WD=1 (limit 16383): a 1500 B frame transmits normally, no JT.
+        // (No pre-send re-arm: the JABBER probe never delivers, so no
+        // head was consumed and the last live re-arm still stands —
+        // same reasoning as the IPCO probe above.)
         MACCR |= (1 << 23);
         tx_desc[0] = 0x80000000 | 1500;
         tx_desc[1] = (unsigned int)&jab_buf[0];
         DMATDLAR = (unsigned int)&tx_desc[0];
+        unsigned int wgen = eth_done_gen;
         eth_done = 0;
         DMATPDR = 1;
         {
             int ok = 0;
-            for (int i = 0; i < 2000000 && !ok; i++) if (eth_done) ok = 1;
+            for (int i = 0; i < 2000000 && !ok; i++) if (eth_done_gen != wgen) ok = 1;
             unsigned int len = eth_recv_frame(200000);
+            if (!len) len = eth_recv_frame(200000); // held-frame retry
             if (ok && !(tx_desc[0] & 0x4000) && len == 1500) uart_puts("JABBER WD OK\r\n");
-            else uart_puts("JABBER WD FAIL\r\n");
+            else { uart_puts("JABBER WD FAIL ok="); uart_hex32(ok); uart_puts(" t0="); uart_hex32(tx_desc[0]); uart_puts(" len="); uart_hex32(len); uart_puts("\r\n"); }
         }
         MACCR &= ~(1 << 23);
         DMAOMR &= ~(1 << 7); // FEF back to default (drop)

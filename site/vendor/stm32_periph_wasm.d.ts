@@ -394,6 +394,13 @@ export function eth_tx_deferred(): boolean;
 export function eth_tx_done(): void;
 
 /**
+ * Immediate error completion (dead-wire NC / jabber JT): TS raises on
+ * the next tick with no wire wait (the driver already wrote the error
+ * status into the descriptor).
+ */
+export function eth_tx_done_now(): void;
+
+/**
  * TX jabber limit from MACCR WD (2048, or 16383 with WD set).
  */
 export function eth_tx_jabber_limit(): number;
@@ -725,6 +732,7 @@ export interface InitOutput {
     readonly eth_take_pause_tx: () => number;
     readonly eth_tx_deferred: () => number;
     readonly eth_tx_done: () => void;
+    readonly eth_tx_done_now: () => void;
     readonly eth_tx_jabber_limit: () => number;
     readonly eth_tx_sarc: () => number;
     readonly eth_tx_wire_busy: (a: number) => void;
