@@ -3043,3 +3043,57 @@ fn ldrb_postindexed_imm8_writes_back() {
     assert_eq!(cpu.regs.r[0], 0xBB, "second post-indexed byte");
     assert_eq!(cpu.regs.r[3], 0x20000672, "Rn advanced by 2 total");
 }
+
+#[test]
+fn ldrb_preindexed_rt_eq_rn_load_wins() {
+    // Pre-indexed LDRB-imm8 with Rt == Rn (`ldrb.w r0, [r2, #1]!` =
+    // F812 0F01): the loaded byte must win over the writeback (silicon
+    // writeback-then-load order). The old order (load-write first,
+    // writeback second) left base+off in Rt — every mcmp second-byte
+    // compare read the POINTER, failing the whole IPCO/SAF/JABBER-WD
+    // content match with the frame sitting correctly in RAM.
+    let _g = lock_boot();
+    let mut img = vec![0u8; 0x200];
+    fn w32(img: &mut Vec<u8>, off: usize, v: u32) {
+        img[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    fn w16(img: &mut Vec<u8>, off: usize, v: u16) {
+        img[off..off + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    w32(&mut img, 0x00, 0x20002000); // SP
+    w32(&mut img, 0x04, 0x08000101); // reset -> main
+    for v in 2..16u32 {
+        w32(&mut img, (v * 4) as usize, 0x08000101);
+    }
+    // main @0x100:
+    //   ldr r2, [pc, #8]    (4A02 -> (0x104&!3)+8 = 0x10C. NOT 4B02 —
+    //                          that loads r3; the decoder reads rt from
+    //                          (o>>8)&7 = 3 for 0x4B. An earlier revision
+    //                          used 4B02 and faulted on r2==2 garbage.)
+    //   ldrb.w r0, [r2, #1]! (F812 0F01)
+    //   b .                 (spin; assert r0/r2 below)
+    //   pool @0x10C: 0x20000670
+    for (o, v) in [
+        (0x100, 0x4A02u16),
+        (0x102, 0xF812u16), (0x104, 0x0F01u16),
+        (0x106, 0xE7FE),
+    ] {
+        w16(&mut img, o, v);
+    }
+    w32(&mut img, 0x10C, 0x20000670);
+    let (mut cpu, mut mem) = boot(&img);
+    let sys = crate::sys();
+    mem.write8(0x20000670, 0xAA);
+    mem.write8(0x20000671, 0xBB);
+    cpu.regs.r[15] = 0x08000101;
+    cpu.deliver_irqs = true;
+    for i in 0..4 {
+        cpu.run(sys, &mut mem, 1);
+        if cpu.fault.is_some() {
+            panic!("fault after {} steps: {:?}", i, cpu.fault);
+        }
+    }
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[0], 0xBB, "Rt==Rn pre-indexed: loaded byte wins");
+    assert_eq!(cpu.regs.r[2], 0x20000671, "Rn advanced by 1");
+}

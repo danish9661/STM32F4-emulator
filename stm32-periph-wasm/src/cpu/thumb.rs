@@ -2236,6 +2236,18 @@ pub fn exec32(
                 }
                 return branch(cpu, sys, mem, v, pc, op1, op2, 4);
             }
+            // Writeback BEFORE the register write (silicon order): when
+            // Rt == Rn (pre-indexed `ldrb.w r0, [r2, #1]!` — mcmp's
+            // second load), the loaded value must win. The old order
+            // (load-write first, writeback second) overwrote the loaded
+            // byte with base+off whenever Rt == Rn — every second mcmp
+            // compare read the POINTER, not the byte (observed: IPCO
+            // content-match failing with the frame sitting in RAM).
+            // (Post-indexed with Rt == Rn is equally covered: P=0 also
+            // writes back here, same ordering rule.)
+            if w == 1 || p == 0 {
+                cpu.regs.r[rn] = base.wrapping_add(off);
+            }
             cpu.regs.r[rt] = v;
         } else {
             if rt == 15 {
