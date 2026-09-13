@@ -202,6 +202,29 @@ pub(crate) fn eth_set_wire_tx_busy_until(v: u64) { ETH_TX_BUSY_UNTIL.store(v, Or
 pub(crate) fn eth_set_wire_rx_busy_until(v: u64) { ETH_RX_BUSY_UNTIL.store(v, Ordering::Release); }
 pub(crate) fn eth_set_wire_col_until(v: u64) { ETH_COL_UNTIL.store(v, Ordering::Release); }
 
+// DMASR MMCS/PMTS/TSTS mirrors (bits 27/28/29): the DMA read arm cannot
+// borrow the MAC/PTP slots (its own slot is already held — the with_*
+// scanners would re-borrow it and panic, same rule as above), so event
+// sites maintain these bits here and the read ORs them in.
+static ETH_DMASR_MIRROR: AtomicU32 = AtomicU32::new(0);
+
+pub fn eth_dmasr_mirror() -> u32 { ETH_DMASR_MIRROR.load(Ordering::Acquire) }
+pub(crate) fn eth_mirror_or(bits: u32) { ETH_DMASR_MIRROR.fetch_or(bits, Ordering::Release); }
+pub(crate) fn eth_mirror_clear(bits: u32) { ETH_DMASR_MIRROR.fetch_and(!bits, Ordering::Release); }
+
+// Cross-block ETH state (the MAC/MMC/PTP/DMA blocks are separate
+// peripheral instances sharing one struct type — fields set in one
+// block are invisible to the others, so genuinely shared state lives
+// here next to the wire mirrors, with the same reset coverage).
+static ETH_TSTS: AtomicBool = AtomicBool::new(false);
+static ETH_TX_PAUSE_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn eth_tsts() -> bool { ETH_TSTS.load(Ordering::Acquire) }
+pub(crate) fn eth_set_tsts() { ETH_TSTS.store(true, Ordering::Release); }
+pub(crate) fn eth_clear_tsts() { ETH_TSTS.store(false, Ordering::Release); }
+pub(crate) fn eth_tx_pause_until() -> u64 { ETH_TX_PAUSE_UNTIL.load(Ordering::Acquire) }
+pub(crate) fn eth_set_tx_pause_until(v: u64) { ETH_TX_PAUSE_UNTIL.store(v, Ordering::Release); }
+
 // FLASH programming/erase state shared with the JS driver (which applies the
 // actual memory mutations to guest memory).
 static FLASH_PROGRAMMING: AtomicBool = AtomicBool::new(false);
@@ -846,6 +869,9 @@ pub fn reset_globals() {
     ETH_TX_BUSY_UNTIL.store(0, Relaxed);
     ETH_RX_BUSY_UNTIL.store(0, Relaxed);
     ETH_COL_UNTIL.store(0, Relaxed);
+    ETH_DMASR_MIRROR.store(0, Relaxed);
+    ETH_TSTS.store(false, Relaxed);
+    ETH_TX_PAUSE_UNTIL.store(0, Relaxed);
     ETH_DONE.store(0, Relaxed);
     ETH_TX_DESC_ADDR.store(0, Relaxed);
     ETH_RX_DESC_ADDR.store(0, Relaxed);

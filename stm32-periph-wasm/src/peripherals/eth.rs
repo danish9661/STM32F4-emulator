@@ -95,6 +95,12 @@ pub struct EthernetMac {
     // silicon COL pulses mid-frame, too fast for firmware to sample).
     col_until: u64,
     col_pending: bool,
+    // One-shot pause-frame emission (MACFCR FCB/BPA with TFCE): consumed
+    // by the driver, which builds the 64 B pause frame itself. (The RX
+    // stall hold-time and the target-reached latch are cross-block state
+    // and live in system.rs globals, next to the wire mirrors — fields
+    // here are per-block-instance and invisible across blocks.)
+    pending_pause_tx: bool,
     // RX wire pacing (same clock): set by eth_rx_wire_busy(len) at frame
     // delivery; RS completion waits for it.
     rx_busy_until: u64,
@@ -167,6 +173,7 @@ impl EthernetMac {
             tx_busy_until: 0,
             col_until: 0,
             col_pending: false,
+            pending_pause_tx: false,
             rx_busy_until: 0,
             tx_collide_armed: false,
             ptp_sec: 0, ptp_sub: 0,
@@ -313,8 +320,10 @@ impl EthernetMac {
         let now = system::instruction_count();
         // TX wire pacing: TS completion waits until the frame has
         // left the wire (set by eth_tx_wire_busy from the frame length
-        // and MACCR FES). Pending stays latched until then.
-        if self.pending_tx_done && (self.dmasr & DMA_TS) == 0 && now >= self.tx_busy_until {
+        // and MACCR FES). A received pause frame extends the silence
+        // the same way (flow control, cross-block global).
+        let tx_hold = self.tx_busy_until.max(system::eth_tx_pause_until());
+        if self.pending_tx_done && (self.dmasr & DMA_TS) == 0 && now >= tx_hold {
             self.dmasr |= DMA_TS;
             self.pending_tx_done = false;
         }
@@ -368,6 +377,8 @@ impl EthernetMac {
 
     /// Advance the PTP clock to `now` (binary 2^31 subsecond rollover)
     /// and fire the target interrupt. TSE gates everything, like silicon.
+    /// The target latches TSTS (MACSR + DMASR mirror) whether or not the
+    /// interrupt is enabled; the IRQ itself needs TSITE and TSTIM.
     fn ptp_advance(&mut self, sys: &System, now: u64) {
         self.ptp_now_advance(now);
         if self.ptp_target_armed
@@ -375,9 +386,13 @@ impl EthernetMac {
                 || (self.ptp_sec == self.ptp_tsec && self.ptp_sub >= self.ptp_tsub))
         {
             self.ptp_target_armed = false;
-            // Target-time interrupt (TSITE). Like silicon it asserts the
-            // ETH line; the driver routes it to the guest handler.
-            if self.ptptscr & (1 << 4) != 0 {
+            system::eth_set_tsts();
+            system::eth_mirror_or(1 << 29);
+            // Target-time interrupt (TSITE + TSTIM). TSTIM (MACIMR[9])
+            // lives on the MAC block, invisible here — route through the
+            // MAC instance (a direct field read would use the WRONG
+            // block's macimr, which is always 0).
+            if self.ptptscr & (1 << 4) != 0 && with_mac(sys, |m| (m.macimr >> 9) & 1) != 0 {
                 sys.p.nvic.borrow_mut().set_intr_pending(ETH_IRQ);
             }
         }
@@ -418,10 +433,37 @@ impl Peripheral for EthernetMac {
                 0x2C => {
                     let v = self.macpmtcsr;
                     self.macpmtcsr &= !0x60;
+                    if self.macpmtcsr & 0x60 == 0 {
+                        system::eth_mirror_clear(1 << 28);
+                    }
                     v
                 }
                 0x34 => 0,
-                0x38 => self.macsr, 0x3C => self.macimr,
+                // MACSR is live composition, not storage: PMTS follows
+                // the PMT status bits (read-to-clear cascade), MMCS/
+                // MMCRS/MMCTS follow the MMC interrupt registers, TSTS
+                // is the target-reached latch. Stale stored bits outside
+                // the live mask are kept for readback compat.
+                0x38 => {
+                    let mut v = self.macsr & !0x278;
+                    if self.macpmtcsr & 0x60 != 0 {
+                        v |= 1 << 3;
+                    }
+                    if self.mmcrir != 0 || self.mmctir != 0 {
+                        v |= 1 << 4;
+                    }
+                    if self.mmcrir != 0 {
+                        v |= 1 << 5;
+                    }
+                    if self.mmctir != 0 {
+                        v |= 1 << 6;
+                    }
+                    if system::eth_tsts() {
+                        v |= 1 << 9;
+                    }
+                    v
+                }
+                0x3C => self.macimr,
                 0x40 => self.maca0hr | (1 << 31), 0x44 => self.maca0lr,
                 0x48 => self.maca1hr, 0x4C => self.maca1lr,
                 0x50 => self.maca2hr, 0x54 => self.maca2lr,
@@ -429,13 +471,14 @@ impl Peripheral for EthernetMac {
                 _ => 0,
             },
             BlockType::Mmc => match offset {
-                0x00 => self.mmccr, 0x04 => self.mmcrir,
-                0x08 => self.mmctir, 0x0C => self.mmcrimr,
+                0x00 => self.mmccr, 0x04 => self.mmcrir_rd(),
+                0x08 => self.mmctir_rd(),
+                0x0C => self.mmcrimr,
                 0x10 => self.mmctimr,
-                0x4C => self.mmctgfsccr, 0x50 => self.mmctgfmsccr,
-                0x68 => self.mmctgfcr,
-                0x94 => self.mmcrfcecr, 0x98 => self.mmcrfaecr,
-                0xC4 => self.mmcrgufcr,
+                0x4C => self.mmc_counter_rd(0), 0x50 => self.mmc_counter_rd(1),
+                0x68 => self.mmc_counter_rd(2),
+                0x94 => self.mmc_counter_rd(3), 0x98 => self.mmc_counter_rd(4),
+                0xC4 => self.mmc_counter_rd(5),
                 _ => 0,
             },
             BlockType::Ptp => match offset {
@@ -453,7 +496,26 @@ impl Peripheral for EthernetMac {
             BlockType::Dma => match offset {
                 0x00 => self.dmabmr, 0x04 => self.dmatpdr,
                 0x08 => self.dmarpdr, 0x0C => self.dmardlar,
-                0x10 => self.dmatdlar, 0x14 => self.dmasr,
+                0x10 => self.dmatdlar,
+                // RPS/TPS process state composes from ST/SR (running vs
+                // stopped — the instant model never suspends mid-list);
+                // MMCS/PMTS/TSTS mirror the MAC block (kept in a process
+                // atomic since the read can't borrow across slots); PWTS
+                // is live while a flow-control pause holds TX.
+                0x14 => {
+                    let mut v = self.dmasr;
+                    v |= system::eth_dmasr_mirror();
+                    if system::instruction_count() < system::eth_tx_pause_until() {
+                        v |= DMA_PWTS;
+                    }
+                    if self.rx_enabled {
+                        v |= 0b011 << 17;
+                    }
+                    if self.tx_enabled {
+                        v |= 0b011 << 20;
+                    }
+                    v
+                }
                 0x18 => self.dmaomr, 0x1C => self.dmaier,
                 0x20 => self.dmamfbocr, 0x24 => self.dmarswtr,
                 0x48 => self.dmachtdr, 0x4C => self.dmachrdr,
@@ -466,7 +528,15 @@ impl Peripheral for EthernetMac {
     fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match self.block {
             BlockType::Mac => match offset {
-                0x00 => self.maccr = value & 0x1FF7F,
+                // Mask keeps every SVD field (RE/TE/DC/BL/APCS/RD/IPCO/
+                // DM/LM/ROD/FES/CSD/IFG/JD/WD/CSTF) plus SARC[29:28]
+                // (source-address insert/replace on TX, honored by the
+                // driver on capture). IFG/APCS/CSTF have no observable
+                // effect at frame level (no FCS on our frames; pacing
+                // covers the rate) and are stored.
+                0x00 => {
+                    self.maccr = value & 0x32CF7EFC;
+                }
                 0x04 => self.macffr = value & 0x800007FF,
                 0x08 => self.machthr = value,
                 0x0C => self.machtlr = value,
@@ -483,7 +553,20 @@ impl Peripheral for EthernetMac {
                     self.macmiiar = value & 0xFFFF;
                 }
                 0x14 => self.macmiidr = value & 0xFFFF,
-                0x18 => self.macfcr = value & 0x1FF0F,
+                // Full field mask (FCB/TFCE/RFCE/UPFD/PLT/ZQPD/PT).
+                // FCB/BPA with TFCE initiates one pause frame (PT quanta,
+                // or zero-quanta when ZQPD is set — otherwise a no-op);
+                // the bit self-clears and the driver emits the frame.
+                0x18 => {
+                    self.macfcr = value & 0xFFFF00BF;
+                    if value & 1 != 0 {
+                        let fcr = value & 0xFFFF00BF;
+                        if fcr & (1 << 1) != 0 && (fcr >> 16 != 0 || fcr & (1 << 7) != 0) {
+                            self.pending_pause_tx = true;
+                        }
+                        self.macfcr &= !1;
+                    }
+                }
                 // VLANTI is 16 bits (15:0); bit 16 selects 12/16-bit
                 // compare, bit 17 inverts the match. The old mask kept
                 // only the low 8 VID bits.
@@ -501,7 +584,15 @@ impl Peripheral for EthernetMac {
                     }
                     self.macpmtcsr = (self.macpmtcsr & 0x60) | (value & 0x687);
                 }
-                0x38 => self.macsr &= !(value & 0x4F8),
+                0x38 => {
+                    self.macsr &= !(value & 0x4F8);
+                    // The TSTS latch is cleared by an explicit write of
+                    // its bit (re-arming the target clears it too).
+                    if value & (1 << 9) != 0 {
+                        system::eth_clear_tsts();
+                        system::eth_mirror_clear(1 << 29);
+                    }
+                }
                 0x3C => self.macimr = value & 0x208,
                 0x40 => self.maca0hr = value & 0xFFFF,
                 0x44 => self.maca0lr = value,
@@ -514,8 +605,26 @@ impl Peripheral for EthernetMac {
                 _ => {}
             },
             BlockType::Mmc => match offset {
-                0x00 => self.mmccr = value & 0x3F,
-                0x04 => self.mmcrir = value,
+                0x00 => {
+                    // CR resets the counters; MCP presets them (to
+                    // half-full with MCFHP, all-ones otherwise) on the
+                    // write edge. ROR/MCF/CSR gate counting (see bumps).
+                    if value & 1 != 0 {
+                        self.mmctgfsccr = 0; self.mmctgfmsccr = 0; self.mmctgfcr = 0;
+                        self.mmcrfcecr = 0; self.mmcrfaecr = 0; self.mmcrgufcr = 0;
+                    }
+                    if value & (1 << 4) != 0 {
+                        let p = if value & (1 << 5) != 0 { 0x80000000 } else { 0xFFFFFFFF };
+                        self.mmctgfsccr = p; self.mmctgfmsccr = p; self.mmctgfcr = p;
+                        self.mmcrfcecr = p; self.mmcrfaecr = p; self.mmcrgufcr = p;
+                        self.mmc_half_check();
+                    }
+                    self.mmccr = value & 0x3F;
+                }
+                // Interrupt status is cleared by reads (return-then-clear)
+                // and by write-1-clear stores.
+                0x04 => self.mmcrir &= !value,
+                0x08 => self.mmctir &= !value,
                 0x0C => self.mmcrimr = value,
                 0x10 => self.mmctimr = value,
                 _ => {}
@@ -544,6 +653,8 @@ impl Peripheral for EthernetMac {
                         self.ptp_tsec = self.ptptthr;
                         self.ptp_tsub = self.ptpttlr;
                         self.ptp_target_armed = true;
+                        system::eth_clear_tsts();
+                        system::eth_mirror_clear(1 << 29);
                     }
                     if value & (1 << 1) != 0 {
                         // TSFCU: latch the programmed addend/SSINC.
@@ -562,11 +673,15 @@ impl Peripheral for EthernetMac {
                     self.ptptthr = value;
                     self.ptp_tsec = value;
                     self.ptp_target_armed = true;
+                    system::eth_clear_tsts();
+                    system::eth_mirror_clear(1 << 29);
                 }
                 0x20 => {
                     self.ptpttlr = value;
                     self.ptp_tsub = value;
                     self.ptp_target_armed = true;
+                    system::eth_clear_tsts();
+                    system::eth_mirror_clear(1 << 29);
                 }
                 0x2C => {
                     // Frequency change preserves divider phase (rescales
@@ -595,7 +710,7 @@ impl Peripheral for EthernetMac {
                         *self = Self::new_default(block);
                         return;
                     }
-                    self.dmabmr = value & 0x7FC7FF7;
+                    self.dmabmr = value & 0x7FE7FFF;
                 }
                 0x04 => {
                     self.dmatpdr = value;
@@ -608,6 +723,10 @@ impl Peripheral for EthernetMac {
                     if self.rx_enabled {
                         system::eth_signal_rx_poll(self.dmardlar);
                     }
+                    // Re-arm retries delivery: a latched head-busy stall
+                    // clears (it re-arms only if the head freed meanwhile;
+                    // a still-busy head re-latches on the next attempt).
+                    self.dmasr &= !DMA_RBUS;
                 }
                 0x0C => self.dmardlar = value & !3,
                 0x10 => self.dmatdlar = value & !3,
@@ -616,7 +735,13 @@ impl Peripheral for EthernetMac {
                     self.deliver_pending_done(sys);
                 }
                 0x18 => {
-                    self.dmaomr = value & 0x1FFFF;
+                    // RSF/TSF/DFRF/DTCEFD stored (bit 20 FTF is a
+                    // write-1-to-flush: no FIFO exists to flush, so it
+                    // just self-clears). FEF/DTCEFD gate error-frame
+                    // delivery in the driver.
+                    let mut v = value & 0x731E0DE;
+                    v &= !(1 << 20);
+                    self.dmaomr = v;
                     self.rx_enabled = (value >> 1) & 1 != 0;
                     self.tx_enabled = (value >> 13) & 1 != 0;
                     if self.rx_enabled {
@@ -630,7 +755,9 @@ impl Peripheral for EthernetMac {
                     self.dmaier = value & 0x1FFFF;
                     self.deliver_pending_done(sys);
                 }
-                0x20 => self.dmamfbocr = value & 0xFF00FF,
+                0x20 => {} // MFBOCR counters are read-only (missed-frame
+                // events count in the driver; OFOC saturates, never set
+                // by stores),
                 0x24 => self.dmarswtr = value & 0x3FF,
                 _ => {}
             },
@@ -736,6 +863,18 @@ fn with_mac(sys: &System, f: impl FnOnce(&EthernetMac) -> u32) -> u32 {
     0
 }
 
+fn with_mac_u64(sys: &System, f: impl FnOnce(&EthernetMac) -> u64) -> u64 {
+    for slot in &sys.p.peripherals {
+        let mut b = slot.peripheral.borrow_mut();
+        if let Some(mac) = b.as_any_mut().downcast_mut::<EthernetMac>() {
+            if mac.block_id() == 0 {
+                return f(mac);
+            }
+        }
+    }
+    0
+}
+
 fn with_mac_mut(sys: &System, f: impl FnOnce(&mut EthernetMac)) {
     for slot in &sys.p.peripherals {
         let mut b = slot.peripheral.borrow_mut();
@@ -753,6 +892,33 @@ fn with_dma_mut(sys: &System, f: impl FnOnce(&mut EthernetMac)) {
         let mut b = slot.peripheral.borrow_mut();
         if let Some(mac) = b.as_any_mut().downcast_mut::<EthernetMac>() {
             if mac.block_id() == 3 {
+                f(mac);
+                return;
+            }
+        }
+    }
+}
+
+fn with_dma_mut_ret<T>(sys: &System, f: impl FnOnce(&mut EthernetMac) -> T, dflt: T) -> T {
+    for slot in &sys.p.peripherals {
+        let mut b = slot.peripheral.borrow_mut();
+        if let Some(mac) = b.as_any_mut().downcast_mut::<EthernetMac>() {
+            if mac.block_id() == 3 {
+                return f(mac);
+            }
+        }
+    }
+    dflt
+}
+
+/// MMC-block accessor: the counters live here (firmware MMIO hits this
+/// block), while TX/RX completions surface on the DMA block — the note
+/// entries route here so counting and reads share one instance.
+fn with_mmc_mut(sys: &System, f: impl FnOnce(&mut EthernetMac)) {
+    for slot in &sys.p.peripherals {
+        let mut b = slot.peripheral.borrow_mut();
+        if let Some(mac) = b.as_any_mut().downcast_mut::<EthernetMac>() {
+            if mac.block_id() == 1 {
                 f(mac);
                 return;
             }
@@ -803,13 +969,39 @@ impl EthernetMac {
             }
         }
         let ff = self.macffr;
-        if ff & 1 != 0 {
-            return true; // PR: promiscuous
+        // RA (receive-all) accepts everything past the VLAN gate (like
+        // PR, but a separate silicon path — CRC-error frames would also
+        // pass, and our frames carry no FCS to be bad).
+        if ff & 1 != 0 || ff & (1 << 31) != 0 {
+            return true; // PR or RA: promiscuous
         }
         let dst = &frame[0..6];
         let src = &frame[6..12];
         let bcast = dst == &[0xFF; 6];
         let mcast = dst[0] & 1 != 0;
+        // Pause/control frames (etype 0x8808) with the receiver NOT in
+        // flow-control: PCF selects 00 drop-all-control, 01 forward all
+        // except pause, 10 forward all, 11 normal DA filtering. (With
+        // RFCE set, pause frames terminate in eth_pause_rx and never
+        // reach here; other control frames still take this path.)
+        if frame.len() >= 14 {
+            let et = ((frame[12] as u16) << 8) | frame[13] as u16;
+            if et == 0x8808 {
+                let is_pause = frame.len() >= 16
+                    && frame[14] == 0 && frame[15] == 1;
+                match (ff >> 6) & 3 {
+                    0 => return false,
+                    1 => {
+                        if is_pause {
+                            return false;
+                        }
+                        return true;
+                    }
+                    2 => return true,
+                    _ => {}
+                }
+            }
+        }
         // ROD (receive-own disable): drop our own frames (loopback path).
         if self.maccr & (1 << 13) != 0 && src == &self.mac_addr() {
             return false;
@@ -855,16 +1047,81 @@ impl EthernetMac {
             bit != 0
         };
         if bcast {
-            return ff & (1 << 5) == 0; // DBF disables broadcast
+            return self.sa_check(src, ff & (1 << 5) == 0); // BFD disables broadcast
         }
+        // HPF (hash-or-perfect): with HMC/HUC set and HPF clear the
+        // frame passes on the hash result alone (perfect ignored); with
+        // HPF set either match passes; with neither enable bit the
+        // perfect slots decide alone.
+        let hpf = ff & (1 << 9) != 0;
         if mcast {
-            return perfect
-                || ff & (1 << 4) != 0 // PM: pass all multicast
-                || (ff & (1 << 2) != 0 && hash_hit()); // HM
+            let da = if ff & (1 << 4) != 0 {
+                true // PAM: pass all multicast
+            } else if ff & (1 << 2) == 0 {
+                perfect
+            } else {
+                hash_hit() || (hpf && perfect)
+            };
+            return self.sa_check(src, da);
         }
-        let hit = perfect || (ff & (1 << 1) != 0 && hash_hit()); // HU
+        if ff & (1 << 1) == 0 {
+            return self.sa_check(src, perfect);
+        }
+        let hit = hash_hit() || (hpf && perfect);
         // DAIF inverts unicast destination filtering.
-        if ff & (1 << 3) != 0 { !hit } else { hit }
+        let da = if ff & (1 << 3) != 0 { !hit } else { hit };
+        self.sa_check(src, da)
+    }
+
+    /// Source-address filter (SAF/SAIF): with SAF set, frames are
+    /// dropped unless the SA check passes; SAIF inverts the check
+    /// (matching SAs are dropped). Compares against the station
+    /// address (MACA0).
+    fn sa_check(&self, src: &[u8], da_pass: bool) -> bool {
+        if !da_pass {
+            return false;
+        }
+        if self.macffr & (1 << 8) == 0 {
+            return true; // SAF clear: no source filtering
+        }
+        let sa_ok = src == &self.mac_addr();
+        let pass = sa_ok ^ (self.macffr & (1 << 7) != 0);
+        pass
+    }
+
+    /// Arm (or cancel, on zero quanta) a flow-control TX stall. Pure
+    /// model math, no sys needed — shared by the driver entry and tests.
+    /// Cross-block state (set here on the MAC block, gated in the DMA
+    /// block's completion path) lives in a process global.
+    fn arm_pause(&mut self, q: u16) {
+        let mhz: u64 = if (self.maccr >> 14) & 1 != 0 { 100 } else { 10 };
+        let now = system::instruction_count();
+        if q == 0 {
+            system::eth_set_tx_pause_until(0); // cancel outstanding pause
+        } else {
+            system::eth_set_tx_pause_until(now + q as u64 * 512 * 168 / mhz);
+        }
+    }
+
+    /// Pause-frame parse for flow control: (quanta) when this is a
+    /// pause frame addressed for us — the multicast pause DA, or our
+    /// own DA with UPFD set — ethertype 0x8808, opcode 1.
+    fn pause_quanta(&self, frame: &[u8]) -> Option<u16> {
+        if frame.len() < 18 {
+            return None;
+        }
+        let pause_da = frame[0..6] == [0x01, 0x80, 0xC2, 0x00, 0x00, 0x01];
+        let own_da = frame[0..6] == self.mac_addr();
+        if !pause_da && !(own_da && self.macfcr & (1 << 3) != 0) {
+            return None;
+        }
+        if ((frame[12] as u16) << 8) | frame[13] as u16 != 0x8808 {
+            return None;
+        }
+        if frame[14] != 0 || frame[15] != 1 {
+            return None;
+        }
+        Some(((frame[16] as u16) << 8) | frame[17] as u16)
     }
 
     /// Wakeup frame filter match: any programmed filter whose CRC-16 over
@@ -909,6 +1166,111 @@ impl EthernetMac {
             }
         }
         false
+    }
+
+    /// MMC counter increment with CSR (stop-rollover saturate) semantics.
+    /// MCF (freeze) is checked by the callers via mmc_running().
+    fn mmc_bump(&mut self, idx: usize) {
+        let c = match idx {
+            0 => &mut self.mmctgfsccr, 1 => &mut self.mmctgfmsccr,
+            2 => &mut self.mmctgfcr, 3 => &mut self.mmcrfcecr,
+            4 => &mut self.mmcrfaecr, _ => &mut self.mmcrgufcr,
+        };
+        if self.mmccr & (1 << 1) != 0 {
+            *c = (*c).saturating_add(1); // CSR: stop at all-ones
+        } else {
+            *c = (*c).wrapping_add(1);
+        }
+        self.mmc_half_check();
+    }
+
+    fn mmc_running(&self) -> bool {
+        self.mmccr & (1 << 3) == 0 // MCF freezes the counters
+    }
+
+    /// Half-full interrupt status: any modeled counter at/above
+    /// 0x80000000 raises its IR bit (cleared by reads/W1C). Normal
+    /// traffic never reaches it; MCP+MCFHP presets do.
+    fn mmc_half_check(&mut self) {
+        if self.mmcrgufcr >= 0x80000000 {
+            self.mmcrir |= 1 << 17; // RGUFS
+        }
+        if self.mmctgfsccr >= 0x80000000 {
+            self.mmctir |= 1 << 14; // TGFSCS
+        }
+        if self.mmctgfmsccr >= 0x80000000 {
+            self.mmctir |= 1 << 15; // TGFMSCS
+        }
+        if self.mmctgfcr >= 0x80000000 {
+            self.mmctir |= 1 << 21; // TGFS
+        }
+        if self.mmcrir != 0 || self.mmctir != 0 {
+            system::eth_mirror_or(1 << 27);
+        }
+    }
+
+    /// Good-TX completion: TGFC always; armed-collision completions
+    /// (reported CC=15) also count more-than-single. Single-collision
+    /// TGFSCC has no source in the single-node model (retries always
+    /// succeed instantly) and stays 0.
+    fn mmc_note_tx(&mut self, collided: bool) {
+        if !self.mmc_running() {
+            return;
+        }
+        self.mmc_bump(2);
+        if collided {
+            self.mmc_bump(1);
+        }
+    }
+
+    /// Accepted RX frame: good-unicast counter only (the F4 exposes no
+    /// good-multicast/broadcast RX counter; error counters have no
+    /// source — our frames carry no FCS to be bad).
+    fn mmc_note_rx(&mut self, frame: &[u8]) {
+        if !self.mmc_running() || frame.len() < 6 {
+            return;
+        }
+        if frame[0] & 1 == 0 {
+            self.mmc_bump(5);
+        }
+    }
+
+    /// Counter read with ROR (reset-on-read): returns the value, then
+    /// zeroes it when ROR is set.
+    fn mmc_counter_rd(&mut self, idx: usize) -> u32 {
+        let v = match idx {
+            0 => self.mmctgfsccr, 1 => self.mmctgfmsccr,
+            2 => self.mmctgfcr, 3 => self.mmcrfcecr,
+            4 => self.mmcrfaecr, _ => self.mmcrgufcr,
+        };
+        if self.mmccr & (1 << 2) != 0 {
+            match idx {
+                0 => self.mmctgfsccr = 0, 1 => self.mmctgfmsccr = 0,
+                2 => self.mmctgfcr = 0, 3 => self.mmcrfcecr = 0,
+                4 => self.mmcrfaecr = 0, _ => self.mmcrgufcr = 0,
+            }
+        }
+        v
+    }
+
+    /// Interrupt-status reads clear (return-then-clear); the DMASR
+    /// mirror follows (MACSR composes the same bits live).
+    fn mmcrir_rd(&mut self) -> u32 {
+        let v = self.mmcrir;
+        self.mmcrir = 0;
+        if self.mmctir == 0 {
+            system::eth_mirror_clear(1 << 27);
+        }
+        v
+    }
+
+    fn mmctir_rd(&mut self) -> u32 {
+        let v = self.mmctir;
+        self.mmctir = 0;
+        if self.mmcrir == 0 {
+            system::eth_mirror_clear(1 << 27);
+        }
+        v
     }
 }
 
@@ -1017,6 +1379,7 @@ pub fn eth_check_wol(sys: &System, frame: &[u8]) -> u32 {
         with_mac_mut(sys, |m| {
             if m.macpmtcsr & 0x2 != 0 {
                 m.macpmtcsr |= 0x20; // MPR
+                system::eth_mirror_or(1 << 28); // DMASR PMTS mirror
                 if m.macimr & 0x8 != 0 {
                     sys.p.nvic.borrow_mut().set_intr_pending(62);
                 }
@@ -1028,6 +1391,7 @@ pub fn eth_check_wol(sys: &System, frame: &[u8]) -> u32 {
         with_mac_mut(sys, |m| {
             if m.macpmtcsr & 0x4 != 0 {
                 m.macpmtcsr |= 0x40; // RWKPR
+                system::eth_mirror_or(1 << 28); // DMASR PMTS mirror
                 if m.macimr & 0x8 != 0 {
                     sys.p.nvic.borrow_mut().set_intr_pending(62);
                 }
@@ -1119,6 +1483,130 @@ pub fn eth_tx_deferred(sys: &System) -> bool {
 /// Driver entry: current MACCR (FES/DM/LM/ROD checks).
 pub fn eth_get_maccr(sys: &System) -> u32 {
     with_mac(sys, |m| m.maccr)
+}
+
+/// Driver entry: station address (MACA0) packed as u64 (48 bits used).
+pub fn eth_station_addr(sys: &System) -> u64 {
+    with_mac_u64(sys, |m| {
+        let a = m.mac_addr();
+        ((a[0] as u64) << 40) | ((a[1] as u64) << 32) | ((a[2] as u64) << 24)
+            | ((a[3] as u64) << 16) | ((a[4] as u64) << 8) | a[5] as u64
+    })
+}
+
+/// Driver entry: SARC mode (MACCR[29:28]): 0/1 off, 2 insert-if-present,
+/// 3 replace. Our frames always carry a full SA field, so insert and
+/// replace collapse to the same byte swap on the captured frame.
+pub fn eth_tx_sarc(sys: &System) -> u32 {
+    with_mac(sys, |m| (m.maccr >> 28) & 3)
+}
+
+/// Driver entry: IPCO (MACCR[10]) gates the RX checksum status — with it
+/// clear the engine is off and IPHCE/PCE read 0, like silicon.
+pub fn eth_ipco_on(sys: &System) -> bool {
+    with_mac(sys, |m| (m.maccr >> 10) & 1) != 0
+}
+
+/// Driver entry: forward checksum-bad frames (FEF) or drop-disable
+/// (DTCEFD). Otherwise frames that would raise IPHCE/PCE are dropped
+/// before delivery, like silicon (defaults drop).
+pub fn eth_fwd_csum_bad(sys: &System) -> bool {
+    with_dma_mut_ret(sys, |d| (d.dmaomr >> 7) & 1 != 0 || (d.dmaomr >> 26) & 1 != 0, false)
+}
+
+/// Driver entry: TX jabber limit from MACCR WD — 2048 with the watchdog
+/// on, 16383 with it disabled. Longer frames complete with JT status
+/// and never reach the wire.
+pub fn eth_tx_jabber_limit(sys: &System) -> u32 {
+    if with_mac(sys, |m| (m.maccr >> 23) & 1) != 0 {
+        16383
+    } else {
+        2048
+    }
+}
+
+/// Driver entry: RX flow-control step. Returns true when the frame is a
+/// pause frame for us (RFCE set, full-duplex): the pause is armed
+/// (quanta*512 bit-times stall TX, PWTS raised; zero quanta cancels)
+/// and the frame terminates here — never delivered, never counted.
+/// Anything else returns false and takes the normal accept path.
+pub fn eth_pause_rx(sys: &System, frame: &[u8]) -> bool {
+    let mut out = false;
+    with_mac_mut(sys, |m| {
+        if m.macfcr & (1 << 2) == 0 {
+            return; // RFCE clear: pause ignored (PCF path in accept)
+        }
+        if ((m.maccr >> 11) & 1) == 0 {
+            return; // pause is a full-duplex feature: ignore in half-duplex
+        }
+        let Some(q) = m.pause_quanta(frame) else { return };
+        m.arm_pause(q);
+        out = true;
+    });
+    out
+}
+
+/// Driver entry: take a pending pause-frame emission (MACFCR FCB/BPA
+/// with TFCE). Returns (1<<31)|quanta, or 0 when none is pending. The
+/// driver builds the 64 B pause frame (multicast pause DA, station SA,
+/// 0x8808/0001, quanta) onto the wire/loopback itself.
+pub fn eth_take_pause_tx(sys: &System) -> u32 {
+    let mut out = 0;
+    with_mac_mut(sys, |m| {
+        if m.pending_pause_tx {
+            m.pending_pause_tx = false;
+            out = (1 << 31) | ((m.macfcr >> 16) & 0xFFFF);
+        }
+    });
+    out
+}
+
+/// Driver entry: good-TX completion for the MMC counters (TGFC always;
+/// armed-collision completions also count more-than-single).
+pub fn eth_note_tx(sys: &System, collided: bool) {
+    with_mmc_mut(sys, |d| d.mmc_note_tx(collided));
+}
+
+/// Driver entry: accepted-RX delivery for the MMC counters (good
+/// unicast only — the F4 exposes no other RX frame counter).
+pub fn eth_note_rx(sys: &System, frame: &[u8]) {
+    with_mmc_mut(sys, |d| d.mmc_note_rx(frame));
+}
+
+/// Driver entry: RX queue-full drop — missed-frame counter (+OFOC on
+/// saturate) and ROS, the RX-FIFO-overflow analog.
+pub fn eth_note_missed(sys: &System) {
+    with_dma_mut(sys, |d| {
+        let v = d.dmamfbocr & 0xFFFF;
+        if v == 0xFFFF {
+            d.dmamfbocr |= 1 << 28; // OFOC
+        } else {
+            d.dmamfbocr = (d.dmamfbocr & !0xFFFF) | (v + 1);
+        }
+        d.dmasr |= DMA_ROS;
+    });
+}
+
+/// Driver entry: delivery deferred — the polled head is still
+/// CPU-owned (silicon RBUS). Cleared on the next delivery or re-arm.
+pub fn eth_note_rx_stall(sys: &System) {
+    with_dma_mut(sys, |d| {
+        d.dmasr |= DMA_RBUS;
+    });
+}
+
+/// Driver entry: clear a latched RX stall (delivery succeeded).
+pub fn eth_rx_stall_clear(sys: &System) {
+    with_dma_mut(sys, |d| {
+        d.dmasr &= !DMA_RBUS;
+    });
+}
+
+/// Driver entry: TX jabber completion (over the WD limit) — TJTS.
+pub fn eth_note_jabber(sys: &System) {
+    with_dma_mut(sys, |d| {
+        d.dmasr |= DMA_TJTS;
+    });
 }
 
 /// MII/RMII pin-mirror levels for the GPIO IDR hook: (tx_en, crs_dv,
@@ -1297,6 +1785,152 @@ mod tests {
         assert!(m.accept(&tagged));
         tagged[15] = 0x08;
         assert!(!m.accept(&tagged));
+    }
+
+    /// Pause frame builder: multicast pause DA, our SA, 0x8808/0001.
+    fn pause_frame(quanta: u16) -> Vec<u8> {
+        let mut f = vec![0u8; 64];
+        f[0..6].copy_from_slice(&[0x01, 0x80, 0xC2, 0x00, 0x00, 0x01]);
+        f[6..12].copy_from_slice(&MAC);
+        f[12] = 0x88; f[13] = 0x08;
+        f[14] = 0; f[15] = 1;
+        f[16] = (quanta >> 8) as u8; f[17] = (quanta & 0xFF) as u8;
+        f
+    }
+
+    #[test]
+    fn accept_receive_all() {
+        let mut m = mac_with_addr();
+        m.macffr = 1 << 31; // RA
+        assert!(m.accept(&frame_to(&[0x02, 0, 0, 0, 0, 0x09], 20)));
+    }
+
+    #[test]
+    fn accept_hpf_strict_vs_or() {
+        // Slot 1 matches g2 exactly; hash table holds g1's bit only.
+        let g1 = [0x01, 0x00, 0x5E, 0x00, 0x00, 0x07];
+        let g2 = [0x01, 0x00, 0x5E, 0x00, 0x00, 0x08];
+        let h1 = (eth_crc32(&g1) >> 26) as u32;
+        let h2 = (eth_crc32(&g2) >> 26) as u32;
+        let mut m = mac_with_addr();
+        m.maca1hr = (1 << 31) | 0x0100;
+        m.maca1lr = 0x5E000008;
+        if h1 < 32 { m.machtlr |= 1 << h1; } else { m.machthr |= 1 << (h1 - 32); }
+        m.macffr = 1 << 2; // HM, HPF clear: hash-only — g2's perfect hit is ignored
+        if h1 != h2 {
+            assert!(!m.accept(&frame_to(&g2, 20)));
+        }
+        m.macffr |= 1 << 9; // HPF: either match passes
+        assert!(m.accept(&frame_to(&g2, 20)));
+    }
+
+    #[test]
+    fn accept_source_filter() {
+        let mut m = mac_with_addr();
+        m.macffr = 1 << 8; // SAF
+        assert!(m.accept(&frame_to(&MAC, 20))); // SA == station
+        let mut forged = frame_to(&MAC, 20);
+        forged[6..12].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0, 1]);
+        assert!(!m.accept(&forged));
+        m.macffr |= 1 << 7; // SAIF inverts: matching SA now drops
+        assert!(!m.accept(&frame_to(&MAC, 20)));
+        assert!(m.accept(&forged));
+    }
+
+    #[test]
+    fn accept_pcf_control_frames() {
+        let p = pause_frame(10);
+        let mut m = mac_with_addr();
+        // PCF=00 drops all control frames (RFCE clear so no termination).
+        m.macffr = 0;
+        assert!(!m.accept(&p));
+        // PCF=01 forwards everything except pause.
+        m.macffr = 1 << 6;
+        assert!(!m.accept(&p));
+        // PCF=10 forwards all control frames.
+        m.macffr = 2 << 6;
+        assert!(m.accept(&p));
+        // PCF=11 falls back to the DA path (multicast pause DA: dropped).
+        m.macffr = 3 << 6;
+        assert!(!m.accept(&p));
+    }
+
+    #[test]
+    fn pause_parse_and_arm() {
+        let mut m = mac_with_addr();
+        m.maccr |= 1 << 11; // DM: pause is full-duplex only
+        m.macfcr |= 1 << 2; // RFCE
+        assert_eq!(m.pause_quanta(&pause_frame(100)), Some(100));
+        // Unicast pause to someone else: not ours (no UPFD).
+        let mut other = pause_frame(100);
+        other[0..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 0x09]);
+        assert_eq!(m.pause_quanta(&other), None);
+        // ...unless UPFD accepts our own DA.
+        let mut own = pause_frame(100);
+        own[0..6].copy_from_slice(&MAC);
+        assert_eq!(m.pause_quanta(&own), None);
+        m.macfcr |= 1 << 3; // UPFD
+        assert_eq!(m.pause_quanta(&own), Some(100));
+        // Arming sets a future hold (FES clear = 10M clock).
+        let now = system::instruction_count();
+        m.arm_pause(100);
+        assert!(system::eth_tx_pause_until() > now);
+        m.arm_pause(0); // zero quanta cancels (no global leaks into other tests)
+        assert_eq!(system::eth_tx_pause_until(), 0);
+    }
+
+    #[test]
+    fn mmc_counts_resets_and_freeze() {
+        let sys = test_dummy_system();
+        let mut d = EthernetMac::new_default(BlockType::Mmc);
+        // Drive counting, then CR, through the real MMCCR write arm.
+        d.mmc_note_tx(false);
+        d.mmc_note_tx(true);
+        assert_eq!(d.mmctgfcr, 2); // every good TX
+        assert_eq!(d.mmctgfmsccr, 1); // collided one counts more-than-single
+        assert_eq!(d.mmctgfsccr, 0); // no single-collision source
+        d.mmc_note_rx(&frame_to(&MAC, 20)); // unicast to us
+        assert_eq!(d.mmcrgufcr, 1);
+        d.mmc_note_rx(&frame_to(&[0xFF; 6], 20)); // broadcast: no counter
+        assert_eq!(d.mmcrgufcr, 1);
+        d.write(&sys, 0x00, 1); // CR zeroes everything
+        assert_eq!(d.mmctgfcr, 0);
+        assert_eq!(d.mmcrgufcr, 0);
+        assert_eq!(d.mmctgfmsccr, 0);
+        // MCF freezes counting.
+        d.write(&sys, 0x00, 1 << 3);
+        d.mmc_note_tx(false);
+        assert_eq!(d.mmctgfcr, 0);
+        d.write(&sys, 0x00, 0);
+        d.mmc_note_tx(false);
+        assert_eq!(d.mmctgfcr, 1);
+    }
+
+    #[test]
+    fn mmc_ror_resets_on_read() {
+        // Drive ROR through the real MMCCR + counter read arms.
+        let sys = test_dummy_system();
+        let mut d = EthernetMac::new_default(BlockType::Mmc);
+        d.mmc_note_tx(false);
+        d.write(&sys, 0x00, 1 << 2); // ROR
+        assert_eq!(d.read(&sys, 0x68), 1); // returns, then clears
+        assert_eq!(d.read(&sys, 0x68), 0);
+    }
+
+    #[test]
+    fn macsr_live_bits() {
+        let sys = test_dummy_system();
+        let mut m = mac_with_addr();
+        assert_eq!(m.read(&sys, 0x38) & 0x278, 0); // nothing latched
+        m.macpmtcsr = 0x20; // MPR latched
+        assert_eq!(m.read(&sys, 0x38) & (1 << 3), 1 << 3); // PMTS live
+        m.macpmtcsr = 0;
+        system::eth_set_tsts(); // target fired
+        assert_eq!(m.read(&sys, 0x38) & (1 << 9), 1 << 9); // TSTS latched
+        m.write(&sys, 0x38, 1 << 9); // explicit clear
+        assert_eq!(m.read(&sys, 0x38) & (1 << 9), 0);
+        m.mmcrir = 1 << 17; // RGUFS
+        assert_eq!(m.read(&sys, 0x38) & 0x30, 0x30); // MMCS + MMCRS
     }
 
     #[test]

@@ -511,6 +511,86 @@ pub fn eth_tx_deferred() -> bool {
     crate::peripherals::eth::eth_tx_deferred(sys())
 }
 
+/// Station address (MACA0) packed as u64 (48 bits used) for SARC insert.
+#[wasm_bindgen]
+pub fn eth_station_addr() -> u64 {
+    crate::peripherals::eth::eth_station_addr(sys())
+}
+
+/// SARC mode (MACCR[29:28]): 0/1 off, 2 insert-if-present, 3 replace.
+#[wasm_bindgen]
+pub fn eth_tx_sarc() -> u32 {
+    crate::peripherals::eth::eth_tx_sarc(sys())
+}
+
+/// IPCO (MACCR[10]) gates the RX checksum status.
+#[wasm_bindgen]
+pub fn eth_ipco_on() -> bool {
+    crate::peripherals::eth::eth_ipco_on(sys())
+}
+
+/// Forward checksum-bad frames (FEF) or drop-disable (DTCEFD); else drop.
+#[wasm_bindgen]
+pub fn eth_fwd_csum_bad() -> bool {
+    crate::peripherals::eth::eth_fwd_csum_bad(sys())
+}
+
+/// TX jabber limit from MACCR WD (2048, or 16383 with WD set).
+#[wasm_bindgen]
+pub fn eth_tx_jabber_limit() -> u32 {
+    crate::peripherals::eth::eth_tx_jabber_limit(sys())
+}
+
+/// RX flow-control step: true when the frame is a pause frame for us
+/// (arms the stall, terminates the frame — never delivered/counted).
+#[wasm_bindgen]
+pub fn eth_pause_rx(frame: &[u8]) -> bool {
+    crate::peripherals::eth::eth_pause_rx(sys(), frame)
+}
+
+/// Take a pending pause-frame emission ((1<<31)|quanta, 0 when none).
+#[wasm_bindgen]
+pub fn eth_take_pause_tx() -> u32 {
+    crate::peripherals::eth::eth_take_pause_tx(sys())
+}
+
+/// MMC counting hooks for TX completions / accepted RX / queue-full
+/// drops, plus RX-stall (RBUS) and jabber (TJTS) status.
+#[wasm_bindgen]
+pub fn eth_note_tx(collided: bool) {
+    crate::peripherals::eth::eth_note_tx(sys(), collided)
+}
+
+/// Accepted-RX delivery for the MMC good-unicast counter.
+#[wasm_bindgen]
+pub fn eth_note_rx(frame: &[u8]) {
+    crate::peripherals::eth::eth_note_rx(sys(), frame)
+}
+
+/// RX queue-full drop: missed-frame counter + ROS.
+#[wasm_bindgen]
+pub fn eth_note_missed() {
+    crate::peripherals::eth::eth_note_missed(sys())
+}
+
+/// Delivery deferred on a CPU-owned head (silicon RBUS).
+#[wasm_bindgen]
+pub fn eth_note_rx_stall() {
+    crate::peripherals::eth::eth_note_rx_stall(sys())
+}
+
+/// Clear a latched RX stall (delivery succeeded).
+#[wasm_bindgen]
+pub fn eth_rx_stall_clear() {
+    crate::peripherals::eth::eth_rx_stall_clear(sys())
+}
+
+/// TX jabber completion (over the WD limit): TJTS.
+#[wasm_bindgen]
+pub fn eth_note_jabber() {
+    crate::peripherals::eth::eth_note_jabber(sys())
+}
+
 /// USB OTG FS host-side test API (the harness plays USB host; see
 /// peripherals/usb.rs). Drive reset -> enum-done -> SETUP/OUT inject,
 /// and drain device-to-host IN blobs with usb_take_in.

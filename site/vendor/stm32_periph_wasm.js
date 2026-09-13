@@ -663,6 +663,15 @@ export function eth_clear_tx_poll() {
 }
 
 /**
+ * Forward checksum-bad frames (FEF) or drop-disable (DTCEFD); else drop.
+ * @returns {boolean}
+ */
+export function eth_fwd_csum_bad() {
+    const ret = wasm.eth_fwd_csum_bad();
+    return ret !== 0;
+}
+
+/**
  * Current MACCR (FES/DM/LM/ROD checks for pacing + loopback).
  * @returns {number}
  */
@@ -687,6 +696,15 @@ export function eth_get_rx_desc_addr() {
 export function eth_get_tx_desc_addr() {
     const ret = wasm.eth_get_tx_desc_addr();
     return ret >>> 0;
+}
+
+/**
+ * IPCO (MACCR[10]) gates the RX checksum status.
+ * @returns {boolean}
+ */
+export function eth_ipco_on() {
+    const ret = wasm.eth_ipco_on();
+    return ret !== 0;
 }
 
 /**
@@ -736,6 +754,59 @@ export function eth_mac_accept(frame) {
     const ptr0 = passArray8ToWasm0(frame, wasm.__wbindgen_export2);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.eth_mac_accept(ptr0, len0);
+    return ret !== 0;
+}
+
+/**
+ * TX jabber completion (over the WD limit): TJTS.
+ */
+export function eth_note_jabber() {
+    wasm.eth_note_jabber();
+}
+
+/**
+ * RX queue-full drop: missed-frame counter + ROS.
+ */
+export function eth_note_missed() {
+    wasm.eth_note_missed();
+}
+
+/**
+ * Accepted-RX delivery for the MMC good-unicast counter.
+ * @param {Uint8Array} frame
+ */
+export function eth_note_rx(frame) {
+    const ptr0 = passArray8ToWasm0(frame, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.eth_note_rx(ptr0, len0);
+}
+
+/**
+ * Delivery deferred on a CPU-owned head (silicon RBUS).
+ */
+export function eth_note_rx_stall() {
+    wasm.eth_note_rx_stall();
+}
+
+/**
+ * MMC counting hooks for TX completions / accepted RX / queue-full
+ * drops, plus RX-stall (RBUS) and jabber (TJTS) status.
+ * @param {boolean} collided
+ */
+export function eth_note_tx(collided) {
+    wasm.eth_note_tx(collided);
+}
+
+/**
+ * RX flow-control step: true when the frame is a pause frame for us
+ * (arms the stall, terminates the frame — never delivered/counted).
+ * @param {Uint8Array} frame
+ * @returns {boolean}
+ */
+export function eth_pause_rx(frame) {
+    const ptr0 = passArray8ToWasm0(frame, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.eth_pause_rx(ptr0, len0);
     return ret !== 0;
 }
 
@@ -809,6 +880,13 @@ export function eth_rx_done() {
 }
 
 /**
+ * Clear a latched RX stall (delivery succeeded).
+ */
+export function eth_rx_stall_clear() {
+    wasm.eth_rx_stall_clear();
+}
+
+/**
  * Arm RX wire pacing for a delivered frame (RS waits the wire time).
  * @param {number} len
  */
@@ -841,12 +919,30 @@ export function eth_signal_tx_poll(desc_addr) {
 }
 
 /**
+ * Station address (MACA0) packed as u64 (48 bits used) for SARC insert.
+ * @returns {bigint}
+ */
+export function eth_station_addr() {
+    const ret = wasm.eth_station_addr();
+    return BigInt.asUintN(64, ret);
+}
+
+/**
  * Take a pending armed collision (one-shot, false when none armed).
  * @returns {boolean}
  */
 export function eth_take_collision() {
     const ret = wasm.eth_take_collision();
     return ret !== 0;
+}
+
+/**
+ * Take a pending pause-frame emission ((1<<31)|quanta, 0 when none).
+ * @returns {number}
+ */
+export function eth_take_pause_tx() {
+    const ret = wasm.eth_take_pause_tx();
+    return ret >>> 0;
 }
 
 /**
@@ -865,6 +961,24 @@ export function eth_tx_deferred() {
  */
 export function eth_tx_done() {
     wasm.eth_tx_done();
+}
+
+/**
+ * TX jabber limit from MACCR WD (2048, or 16383 with WD set).
+ * @returns {number}
+ */
+export function eth_tx_jabber_limit() {
+    const ret = wasm.eth_tx_jabber_limit();
+    return ret >>> 0;
+}
+
+/**
+ * SARC mode (MACCR[29:28]): 0/1 off, 2 insert-if-present, 3 replace.
+ * @returns {number}
+ */
+export function eth_tx_sarc() {
+    const ret = wasm.eth_tx_sarc();
+    return ret >>> 0;
 }
 
 /**

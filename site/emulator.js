@@ -72,6 +72,10 @@ export async function createEmulator(opts) {
         eth_rx_wire_busy, eth_arm_collision, eth_take_collision,
         eth_set_link, eth_link_up, eth_tx_deferred,
         eth_get_maccr, eth_loopback_tx, eth_ptp_tse, eth_ptp_sec, eth_ptp_sub,
+        eth_station_addr, eth_tx_sarc, eth_ipco_on, eth_fwd_csum_bad,
+        eth_tx_jabber_limit, eth_pause_rx, eth_take_pause_tx,
+        eth_note_tx, eth_note_rx, eth_note_missed,
+        eth_note_rx_stall, eth_rx_stall_clear, eth_note_jabber,
         get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
         dma2d_take_job, dma2d_job_done, dma2d_convert, dma2d_blend,
@@ -113,7 +117,12 @@ export async function createEmulator(opts) {
                 rdes0 = memRead32(listBase) >>> 0;
                 rdes1 = memRead32(listBase + 4) >>> 0;
             } catch { return false; }
-            if (!((rdes0 & 0x80000000) && rdes1 !== 0)) return false;
+            if (!((rdes0 & 0x80000000) && rdes1 !== 0)) {
+                // Head still CPU-owned: hold the frame AND the poll
+                // (silicon RBUS) for the next poll, like the driver loop.
+                try { eth_note_rx_stall(); } catch {}
+                return false;
+            }
             try {
                 memWrite(BigInt(rdes1), frame.subarray(0, len));
                 const wb = new Uint8Array(4);
@@ -623,6 +632,14 @@ export async function createEmulator(opts) {
         const rxQueue = [];
         let instCount = 0;
         let lastTxLen = 0; // bytes of the last TX frame (wire pacing)
+        // Bound the queue against a hung guest (real NICs tail-drop
+        // too): newest frames past 32 are dropped, each counted as a
+        // missed frame (MFC + ROS in the model).
+        const trimRxQueue = () => {
+            try {
+                while (rxQueue.length > 32) { rxQueue.pop(); eth_note_missed(); }
+            } catch {}
+        };
         // Compact mirrors of processEth/processDma for the wasm memory.
         // Shared RX delivery: WOL inspect, accept gate, checksum
         // status, snapshot, descriptor write. `force` bypasses the
@@ -639,6 +656,24 @@ export async function createEmulator(opts) {
             // in powerdown too); then the MAC accept filter drops
             // rejected frames with no RS/flag (like silicon).
             try { eth_check_wol(frame); } catch {}
+            // Dead receiver (RE clear) drops everything past WOL
+            // inspection (powerdown WOL still sees); no RS, no count.
+            try {
+                if ((eth_get_maccr() & 0x4) === 0) {
+                    rxQueue.shift();
+                    eth_clear_rx_poll();
+                    return true;
+                }
+            } catch {}
+            // Flow-control pause: terminates here (never delivered or
+            // counted) after arming the TX stall in the model.
+            try {
+                if (eth_pause_rx(frame)) {
+                    rxQueue.shift();
+                    eth_clear_rx_poll();
+                    return true;
+                }
+            } catch {}
             let accepted = true;
             try { accepted = eth_mac_accept(frame); } catch {}
             if (!accepted) {
@@ -647,13 +682,26 @@ export async function createEmulator(opts) {
                 if (ENV.WASM_DBG) console.log('[wasm-rx] dropped by accept filter');
                 return true;
             }
-            // RX checksum status -> RDES0 IPHCE(7)/PCE(0).
-            let rdesExtra = 0;
+            // RX checksum status -> RDES0 IPHCE(7)/PCE(0)/ES(15), gated
+            // by IPCO (engine off reports nothing, like silicon).
+            let rdesExtra = 0, csumBad = false;
             try {
-                const st = eth_rx_csum_status(frame) >>> 0;
-                if ((st & 1) && !(st & 2)) rdesExtra |= 0x80;
-                if ((st & 4) && !(st & 8)) rdesExtra |= 0x01;
+                const st = eth_ipco_on() ? (eth_rx_csum_status(frame) >>> 0) : 0;
+                if ((st & 1) && !(st & 2)) { rdesExtra |= 0x80; csumBad = true; }
+                if ((st & 4) && !(st & 8)) { rdesExtra |= 0x01; csumBad = true; }
+                if (csumBad) rdesExtra |= 0x8000; // ES error summary
             } catch {}
+            // Forward-error-frames gate: checksum-bad frames are dropped
+            // unless FEF forwards them or DTCEFD disables the drop.
+            if (csumBad) {
+                try {
+                    if (!eth_fwd_csum_bad()) {
+                        rxQueue.shift();
+                        eth_clear_rx_poll();
+                        return true;
+                    }
+                } catch {}
+            }
             let delivered = false;
             if (!irq_eth) {
                 const idx = E.rxInjectIdx;
@@ -679,9 +727,10 @@ export async function createEmulator(opts) {
             }
             if (!delivered) return false; // hold frame AND poll for retry
             rxQueue.shift();
-            // Bound the queue against a hung guest (real NICs drop too).
-            while (rxQueue.length > 32) rxQueue.shift();
+            trimRxQueue();
             eth_clear_rx_poll();
+            try { eth_rx_stall_clear(); } catch {}
+            try { eth_note_rx(frame); } catch {}
             // Delivered frames pace RS by their wire time.
             try { eth_rx_wire_busy(len); } catch {}
             eth_rx_done();
@@ -689,6 +738,33 @@ export async function createEmulator(opts) {
         };
 
         const wProcessEth = () => {
+            // Emitted pause frame (MACFCR FCB/BPA with TFCE): a 64 B
+            // pause frame (multicast pause DA, station SA, 0x8808/0001,
+            // PT quanta) goes on the wire — or loopback, like any TX.
+            // Dead wire drops it silently (no carrier, like silicon).
+            try {
+                const pq = eth_take_pause_tx() >>> 0;
+                if (pq & 0x80000000) {
+                    let linkUp = true;
+                    try { linkUp = eth_link_up(); } catch {}
+                    if (linkUp) {
+                        const quanta = pq & 0xFFFF;
+                        const sa = eth_station_addr();
+                        const pf = new Uint8Array(64);
+                        pf.set([0x01, 0x80, 0xC2, 0x00, 0x00, 0x01], 0);
+                        for (let i = 0; i < 6; i++) pf[6 + i] = Number((sa >> BigInt(8 * (5 - i))) & 0xFFn);
+                        pf[12] = 0x88; pf[13] = 0x08;
+                        pf[14] = 0x00; pf[15] = 0x01;
+                        pf[16] = (quanta >> 8) & 0xFF; pf[17] = quanta & 0xFF;
+                        if (eth_loopback_tx()) {
+                            rxQueue.push(pf);
+                            trimRxQueue();
+                        } else if (onTx) {
+                            onTx(pf, { bufAddr: 0, len: 64 });
+                        }
+                    }
+                }
+            } catch {}
             if (eth_is_tx_poll()) {
                 const descAddr = eth_get_tx_desc_addr();
                 if (ENV.WASM_DBG) console.log(`[wasm-tx] poll desc=0x${descAddr.toString(16)}`);
@@ -701,7 +777,7 @@ export async function createEmulator(opts) {
                         const bufAddr = tdes1 & 0xFFFFFFFC;
                         const bufSize = tdes0 & 0x3FFF;
                         if (ENV.WASM_DBG) console.log(`[wasm-tx] tdes0=0x${tdes0.toString(16)} buf=0x${bufAddr.toString(16)} len=${bufSize}`);
-                        let linkUp = true;
+                        let linkUp = true, captured = false;
                         try { linkUp = eth_link_up(); } catch {}
                         if (!linkUp) {
                             // Dead wire: NC status, nothing on the wire.
@@ -712,7 +788,17 @@ export async function createEmulator(opts) {
                             wuc.mem_write(BigInt(descAddr), wb);
                         } else {
                         let ttss = 0;
-                        if (bufAddr !== 0 && bufSize > 0 && bufSize <= 2000) {
+                        let jlim = 2048;
+                        try { jlim = eth_tx_jabber_limit() >>> 0; } catch {}
+                        if (bufAddr !== 0 && bufSize > jlim) {
+                            // Jabber (over the WD limit): JT status, TS
+                            // error completion, nothing on the wire.
+                            const wb = new Uint8Array(4);
+                            new DataView(wb.buffer).setUint32(0, (tdes0 & ~0x80000000) | 0x4000, true);
+                            wuc.mem_write(BigInt(descAddr), wb);
+                            try { eth_note_jabber(); } catch {}
+                        } else if (bufAddr !== 0 && bufSize > 0 && bufSize <= jlim) {
+                            captured = true;
                             lastTxLen = bufSize;
                             const pkt = new Uint8Array(wuc.mem_read(BigInt(bufAddr), bufSize));
                             // Checksum offload: TDES0 CIC[23:22] inserts IP
@@ -729,10 +815,25 @@ export async function createEmulator(opts) {
                                 wuc.mem_write(BigInt(descAddr + 24), sb);
                                 ttss = 0x20000; // TTSS status
                             }
+                            // SARC (MACCR[29:28] insert/replace): the MAC stamps
+                            // the station address into the on-wire frame
+                            // (guest buffer keeps the original bytes).
+                            try {
+                                const sarc = eth_tx_sarc() >>> 0;
+                                if (process.env.ETHDBG) console.log('[sarc] mode=' + sarc + ' len=' + pkt.length + ' sa-before=' + Array.from(pkt.subarray(6, 12)).map((b) => b.toString(16).padStart(2, '0')).join(':'));
+                                if ((sarc === 2 || sarc === 3) && pkt.length >= 12) {
+                                    const sa = eth_station_addr();
+                                    if (process.env.ETHDBG) console.log('[sarc] station=' + sa.toString(16));
+                                    for (let i = 0; i < 6; i++) {
+                                        pkt[6 + i] = Number((sa >> BigInt(8 * (5 - i))) & 0xFFn);
+                                    }
+                                }
+                            } catch {}
                             // MAC loopback (LM): internal only, never on
                             // the wire; ROD filtering happens at accept().
                             if (eth_loopback_tx()) {
                                 rxQueue.push(pkt.slice());
+                                trimRxQueue();
                             } else if (onTx) {
                                 onTx(pkt, { bufAddr, len: bufSize });
                             }
@@ -759,12 +860,17 @@ export async function createEmulator(opts) {
                         new DataView(wb.buffer).setUint32(0, (tdes0 & ~0x80000000) | 0x20000000 | ttss | ec, true);
                         wuc.mem_write(BigInt(descAddr), wb);
                         }
+                        if (captured) {
+                            try { eth_note_tx((ec & 0x100) !== 0); } catch {}
+                        }
                     }
                 }
                 eth_clear_tx_poll();
                 // Wire pacing: TS completion waits for the frame's wire
-                // time at the FES speed (168 MHz virtual clock).
-                try { eth_tx_wire_busy(lastTxLen); } catch {}
+                // time at the FES speed (168 MHz virtual clock) — only
+                // when a frame actually left (not dead-wire NC, jabber,
+                // or empty).
+                try { if (captured) eth_tx_wire_busy(lastTxLen); } catch {}
                 eth_tx_done();
                 if (!irq_eth) wwrite32(E.irqFlag, wread32(E.irqFlag) | 1);
             }
@@ -773,7 +879,9 @@ export async function createEmulator(opts) {
             // requires a poll armed after the frame queued. All firmware
             // re-arms periodically while waiting, so nothing is lost — and
             // a synchronously-queued reply (e.g. a WOL trigger's magic)
-            // can no longer be delivered before the guest sleeps on it.
+            // can no longer be delivered before the guest sleeps on it
+            // (pre-sleep delivery lets the guest consume the IRQ62 wake
+            // before WFI, then it sleeps forever — observed STOP hang).
             else if (eth_is_rx_poll()) { try { eth_clear_rx_poll(); } catch {} }
         };
         const wIsPeriph = (a) => (a >= 0x40000000 && a < 0xB0000000) || (a >= 0xE0000000 && a < 0xE1000000);
@@ -879,6 +987,10 @@ export async function createEmulator(opts) {
                 if (typeof cpu.sleeping === 'function' && cpu.sleeping()) {
                     try { tick_n(120000); } catch {}
                     try { periph_read(0x40002800, 4); } catch {}
+                    // Sleep drain: force-deliver (no poll needed — the
+                    // guest can't re-arm while asleep). The stale-poll
+                    // drop above guarantees nothing was delivered early,
+                    // so the queued magic is still here for IRQ62.
                     try { wDeliverRx(true); } catch {}
                     if (has_pending_interrupt()) {
                         try {
@@ -906,7 +1018,7 @@ export async function createEmulator(opts) {
                 return { instCount, stopped: faulted, pc: cpu.get_pc() };
             },
             drainUart: () => { try { return get_uart_output(); } catch { return ''; } },
-            injectFrame: (frame) => { rxQueue.push(frame instanceof Uint8Array ? frame : new Uint8Array(frame)); },
+            injectFrame: (frame) => { rxQueue.push(frame instanceof Uint8Array ? frame : new Uint8Array(frame)); trimRxQueue(); },
             // Inject a CAN frame from an external transmitter onto the shared bus.
             canInject: (id, dlc, data) => { can_inject(id & 0x7FF, dlc & 0xF, new Uint8Array(data)); },
             timInjectCapture: (name, ch) => { tim_inject_capture(name, ch & 0x3); },

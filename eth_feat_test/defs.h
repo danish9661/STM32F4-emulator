@@ -9,9 +9,11 @@
 #define MACHTLR (*(volatile unsigned int *)(ETH_MAC_BASE + 0x0C))
 #define MACMIIAR (*(volatile unsigned int *)(ETH_MAC_BASE + 0x10))
 #define MACMIIDR (*(volatile unsigned int *)(ETH_MAC_BASE + 0x14))
+#define MACFCR  (*(volatile unsigned int *)(ETH_MAC_BASE + 0x18))
 #define MACVLANTR (*(volatile unsigned int *)(ETH_MAC_BASE + 0x1C))
 #define MACRWUFFR (*(volatile unsigned int *)(ETH_MAC_BASE + 0x28))
 #define MACPMTCTL (*(volatile unsigned int *)(ETH_MAC_BASE + 0x2C))
+#define MACSR   (*(volatile unsigned int *)(ETH_MAC_BASE + 0x38))
 #define MACIMR  (*(volatile unsigned int *)(ETH_MAC_BASE + 0x3C))
 #define MACA0HR (*(volatile unsigned int *)(ETH_MAC_BASE + 0x40))
 #define MACA0LR (*(volatile unsigned int *)(ETH_MAC_BASE + 0x44))
@@ -35,6 +37,12 @@
 #define DMASR   (*(volatile unsigned int *)(ETH_DMA_BASE + 0x14))
 #define DMAOMR  (*(volatile unsigned int *)(ETH_DMA_BASE + 0x18))
 #define DMAIER   (*(volatile unsigned int *)(ETH_DMA_BASE + 0x1C))
+#define DMAMFBOCR (*(volatile unsigned int *)(ETH_DMA_BASE + 0x20))
+
+#define ETH_MMC_BASE    0x40028100
+#define MMCCR   (*(volatile unsigned int *)(ETH_MMC_BASE + 0x00))
+#define MMCTGFCR (*(volatile unsigned int *)(ETH_MMC_BASE + 0x68))
+#define MMCRGUFCR (*(volatile unsigned int *)(ETH_MMC_BASE + 0xC4))
 
 #define RCC_BASE    0x40023800
 #define RCC_AHB1ENR (*(volatile unsigned int *)(RCC_BASE + 0x30))

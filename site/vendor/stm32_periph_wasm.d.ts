@@ -220,6 +220,11 @@ export function eth_clear_rx_poll(): void;
 export function eth_clear_tx_poll(): void;
 
 /**
+ * Forward checksum-bad frames (FEF) or drop-disable (DTCEFD); else drop.
+ */
+export function eth_fwd_csum_bad(): boolean;
+
+/**
  * Current MACCR (FES/DM/LM/ROD checks for pacing + loopback).
  */
 export function eth_get_maccr(): number;
@@ -233,6 +238,11 @@ export function eth_get_rx_desc_addr(): number;
  * Get the TX descriptor list address for the current poll.
  */
 export function eth_get_tx_desc_addr(): number;
+
+/**
+ * IPCO (MACCR[10]) gates the RX checksum status.
+ */
+export function eth_ipco_on(): boolean;
 
 /**
  * Check if an Ethernet RX poll is pending (firmware wants to receive a packet).
@@ -260,6 +270,38 @@ export function eth_loopback_tx(): boolean;
  * frames before writing any descriptor.
  */
 export function eth_mac_accept(frame: Uint8Array): boolean;
+
+/**
+ * TX jabber completion (over the WD limit): TJTS.
+ */
+export function eth_note_jabber(): void;
+
+/**
+ * RX queue-full drop: missed-frame counter + ROS.
+ */
+export function eth_note_missed(): void;
+
+/**
+ * Accepted-RX delivery for the MMC good-unicast counter.
+ */
+export function eth_note_rx(frame: Uint8Array): void;
+
+/**
+ * Delivery deferred on a CPU-owned head (silicon RBUS).
+ */
+export function eth_note_rx_stall(): void;
+
+/**
+ * MMC counting hooks for TX completions / accepted RX / queue-full
+ * drops, plus RX-stall (RBUS) and jabber (TJTS) status.
+ */
+export function eth_note_tx(collided: boolean): void;
+
+/**
+ * RX flow-control step: true when the frame is a pause frame for us
+ * (arms the stall, terminates the frame — never delivered/counted).
+ */
+export function eth_pause_rx(frame: Uint8Array): boolean;
 
 /**
  * PPS edge count: the observable sink for the PPS output pin (frequency
@@ -300,6 +342,11 @@ export function eth_rx_csum_status(frame: Uint8Array): number;
 export function eth_rx_done(): void;
 
 /**
+ * Clear a latched RX stall (delivery succeeded).
+ */
+export function eth_rx_stall_clear(): void;
+
+/**
  * Arm RX wire pacing for a delivered frame (RS waits the wire time).
  */
 export function eth_rx_wire_busy(len: number): void;
@@ -320,9 +367,19 @@ export function eth_signal_rx_poll(desc_addr: number): void;
 export function eth_signal_tx_poll(desc_addr: number): void;
 
 /**
+ * Station address (MACA0) packed as u64 (48 bits used) for SARC insert.
+ */
+export function eth_station_addr(): bigint;
+
+/**
  * Take a pending armed collision (one-shot, false when none armed).
  */
 export function eth_take_collision(): boolean;
+
+/**
+ * Take a pending pause-frame emission ((1<<31)|quanta, 0 when none).
+ */
+export function eth_take_pause_tx(): number;
 
 /**
  * True when a TX completing now must report deferral (half-duplex while
@@ -335,6 +392,16 @@ export function eth_tx_deferred(): boolean;
  * Call this after walking TX descriptors and sending the packet.
  */
 export function eth_tx_done(): void;
+
+/**
+ * TX jabber limit from MACCR WD (2048, or 16383 with WD set).
+ */
+export function eth_tx_jabber_limit(): number;
+
+/**
+ * SARC mode (MACCR[29:28]): 0/1 off, 2 insert-if-present, 3 replace.
+ */
+export function eth_tx_sarc(): number;
 
 /**
  * Arm TX wire pacing for a `len`-byte frame: TS completion waits until the
@@ -625,14 +692,22 @@ export interface InitOutput {
     readonly eth_check_wol: (a: number, b: number) => number;
     readonly eth_clear_rx_poll: () => void;
     readonly eth_clear_tx_poll: () => void;
+    readonly eth_fwd_csum_bad: () => number;
     readonly eth_get_maccr: () => number;
     readonly eth_get_rx_desc_addr: () => number;
     readonly eth_get_tx_desc_addr: () => number;
+    readonly eth_ipco_on: () => number;
     readonly eth_is_rx_poll: () => number;
     readonly eth_is_tx_poll: () => number;
     readonly eth_link_up: () => number;
     readonly eth_loopback_tx: () => number;
     readonly eth_mac_accept: (a: number, b: number) => number;
+    readonly eth_note_jabber: () => void;
+    readonly eth_note_missed: () => void;
+    readonly eth_note_rx: (a: number, b: number) => void;
+    readonly eth_note_rx_stall: () => void;
+    readonly eth_note_tx: (a: number) => void;
+    readonly eth_pause_rx: (a: number, b: number) => number;
     readonly eth_pps_count: () => number;
     readonly eth_pps_level: () => number;
     readonly eth_ptp_sec: () => number;
@@ -640,13 +715,18 @@ export interface InitOutput {
     readonly eth_ptp_tse: () => number;
     readonly eth_rx_csum_status: (a: number, b: number) => number;
     readonly eth_rx_done: () => void;
+    readonly eth_rx_stall_clear: () => void;
     readonly eth_rx_wire_busy: (a: number) => void;
     readonly eth_set_link: (a: number) => void;
     readonly eth_signal_rx_poll: (a: number) => void;
     readonly eth_signal_tx_poll: (a: number) => void;
+    readonly eth_station_addr: () => bigint;
     readonly eth_take_collision: () => number;
+    readonly eth_take_pause_tx: () => number;
     readonly eth_tx_deferred: () => number;
     readonly eth_tx_done: () => void;
+    readonly eth_tx_jabber_limit: () => number;
+    readonly eth_tx_sarc: () => number;
     readonly eth_tx_wire_busy: (a: number) => void;
     readonly flash_erase_applied: () => void;
     readonly flash_is_programming: () => number;
