@@ -2908,3 +2908,138 @@ fn nested_push_outer_returns_clean() {
     assert_eq!(mem.read32(0x20001000), 0xA5, "outer handler must resume after nesting");
     assert_eq!(cpu.ipsr, 0, "back in thread mode");
 }
+
+#[test]
+fn ldrh_t1_zero_offset_reads_ram() {
+    // IPCO root-cause probe: the firmware's content-match does
+    //   ldrh r2, [r2]        (8812)
+    //   ldrh r1, [r1]        (8809)
+    //   uxth r3, r2 ; cmp r3, r1
+    // i.e. 16-bit LDRH T1 with imm5=0 against SRAM. If the core's T1
+    // path mis-decoded imm5 (or the class), equal halfwords would
+    // compare unequal — exactly the observed symptom (dump equal,
+    // chain false). Synthetic image, no firmware needed.
+    let _g = lock_boot();
+    let mut img = vec![0u8; 0x200];
+    fn w32(img: &mut Vec<u8>, off: usize, v: u32) {
+        img[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    fn w16(img: &mut Vec<u8>, off: usize, v: u16) {
+        img[off..off + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    w32(&mut img, 0x00, 0x20002000); // SP
+    w32(&mut img, 0x04, 0x08000101); // reset -> main
+    for v in 2..16u32 {
+        w32(&mut img, (v * 4) as usize, 0x08000101);
+    }
+    // Layout @0x100 (all Thumb, pc-relative pools):
+    //   0x100: ldr r2, [pc, #16]  (4A04 -> (0x104&!3)+16 = 0x114)
+    //   0x102: ldr r1, [pc, #16]  (4904 -> 0x118)
+    //   0x104: ldrh r2, [r2]      (8812)
+    //   0x106: ldrh r1, [r1]      (8809)
+    //   0x108: uxth r3, r2        (B292)
+    //   0x10A: cmp r3, r1         (429B)
+    //   0x10C: beq good           (D000 -> 0x110: Bcond target is
+    //                              (pc+4)+imm8*2 = 0x110+0)
+    //   0x10E: movs r0, #1        (bad marker)
+    //   0x110: movs r0, #2        (good marker — beq skips exactly the
+    //                              1-insn bad marker, so good FOLLOWS it)
+    //   0x112: b .                (spin)
+    //   pools @0x114: 0x20000670 / @0x118: 0x20000656
+    //   (LDR pools: 0x100 uses #16 -> (0x104&!3)+16 = 0x114;
+    //   0x102 uses #16 -> 0x118. Two earlier layouts were wrong: #20
+    //   loaded CODE as the address (both ldrhs read one pool word);
+    //   then D002-aimed-at-0x112 landed on the spin (D002 from 0x10C
+    //   lands at 0x114 — Bcond is (pc+4)+imm8*2, and the markers were
+    //   swapped on top of it). D000 is the correct skip-one encoding.)
+    for (o, v) in [
+        (0x100, 0x4A04u16), (0x102, 0x4904),
+        (0x104, 0x8812), (0x106, 0x8809),
+        (0x108, 0xB292), (0x10A, 0x429B),
+        (0x10C, 0xD000), (0x10E, 0x2001),
+        (0x110, 0x2002), (0x112, 0xE7FE),
+    ] {
+        w16(&mut img, o, v);
+    }
+    w32(&mut img, 0x114, 0x20000670);
+    w32(&mut img, 0x118, 0x20000656);
+    let (mut cpu, mut mem) = boot(&img);
+    let sys = crate::sys();
+    // Seed the two halfwords EQUAL (like rx_buf SA == my_mac SA).
+    mem.write16(0x20000670, 0x0002);
+    mem.write16(0x20000656, 0x0002);
+    cpu.regs.r[15] = 0x08000101;
+    cpu.deliver_irqs = true; // mem cmds raise loudly otherwise (0xDEAD)
+    // Run to settlement: 9 insns to the good marker + margin (the
+    // spin loops execute b . forever — run() just keeps stepping).
+    for i in 0..11 {
+        cpu.run(sys, &mut mem, 1);
+        if cpu.fault.is_some() {
+            panic!("fault after {} steps: {:?}", i, cpu.fault);
+        }
+    }
+    no_fault(&cpu, &mem);
+    // r0 == 2 proves beq taken (equal halfwords compared equal).
+    assert_eq!(cpu.regs.r[0], 2, "ldrh T1 imm0 + uxth + cmp must see equal halfwords as equal");
+}
+
+#[test]
+fn ldrb_postindexed_imm8_writes_back() {
+    // Post-indexed LDRB-imm8 `ldrb.w Rt, [Rn], #imm8` (GAS: F813 1B01,
+    // o2[11:8]==0xB, P=0/U=1/W=1) loads [Rn] then advances Rn by imm8.
+    // (Provenance: the IPCO mcmp loop does exactly this shape
+    // `ldrb.w r1, [r3], #1` per byte; a routing slip here would walk
+    // every SA/ports compare off the buffer. Verified the routing was
+    // always correct ([11:10]==10 hits the PUW arm, never reg-offset);
+    // this test pins the behavior.)
+    let _g = lock_boot();
+    let mut img = vec![0u8; 0x200];
+    fn w32(img: &mut Vec<u8>, off: usize, v: u32) {
+        img[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    fn w16(img: &mut Vec<u8>, off: usize, v: u16) {
+        img[off..off + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    w32(&mut img, 0x00, 0x20002000); // SP
+    w32(&mut img, 0x04, 0x08000101); // reset -> main
+    for v in 2..16u32 {
+        w32(&mut img, (v * 4) as usize, 0x08000101);
+    }
+    // main @0x100:
+    //   ldr r3, [pc, #8]    (4B02 -> (0x104&!3)+8 = 0x10C)
+    //   ldrb.w r1, [r3], #1 (F813 1B01)
+    //   ldrb.w r0, [r3], #1 (F813 0B01 — LDRB needs o1 c=1; F803 is
+    //                          STRB (c=0), not a load. An earlier
+    //                          revision used F803 here and "proved" a
+    //                          core bug that was a bad test encoding.)
+    //   b .                 (spin; assert r0/r1/r3 below)
+    //   pool @0x10C: 0x20000670
+    for (o, v) in [
+        (0x100, 0x4B02u16),
+        (0x102, 0xF813u16), (0x104, 0x1B01u16),
+        (0x106, 0xF813u16), (0x108, 0x0B01u16),
+        (0x10A, 0xE7FE),
+    ] {
+        w16(&mut img, o, v);
+    }
+    w32(&mut img, 0x10C, 0x20000670);
+    // NOTE: pool math: 0x100 uses imm8 -> (pc+4)&!3 + imm8*4.
+    // (0x104&!3)+8 = 0x10C. An earlier #12 aimed at 0x110 and loaded
+    // CODE as the pointer (fault at the ldrb, pc=0x8000106).
+    let (mut cpu, mut mem) = boot(&img);
+    let sys = crate::sys();
+    mem.write8(0x20000670, 0xAA);
+    mem.write8(0x20000671, 0xBB);
+    cpu.regs.r[15] = 0x08000101;
+    cpu.deliver_irqs = true;
+    for i in 0..5 {
+        cpu.run(sys, &mut mem, 1);
+        if cpu.fault.is_some() {
+            panic!("fault after {} steps: {:?}", i, cpu.fault);
+        }
+    }
+    no_fault(&cpu, &mem);
+    assert_eq!(cpu.regs.r[1], 0xAA, "first post-indexed byte");
+    assert_eq!(cpu.regs.r[0], 0xBB, "second post-indexed byte");
+    assert_eq!(cpu.regs.r[3], 0x20000672, "Rn advanced by 2 total");
+}

@@ -105,14 +105,25 @@ export async function createEmulator(opts) {
     // for the next poll. NEVER scan forward: past a single-entry ring
     // lies ordinary guest RAM, and an OWN-looking garbage word would
     // divert the frame into the wild (observed: DHCP Offer-shaped bytes
-    // misdelivered, ping lost). Falls back to the static E layout when
-    // no poll address was ever armed. Returns true on delivery.
+    // misdelivered, ping lost).
+    // NO static-layout fallback: when no poll was ever armed
+    // (listBase==0) there is nowhere silicon could deliver either —
+    // hold the frame AND the (absent) poll for the next poll. (An older
+    // revision delivered to a hardcoded eth_http SRAM layout here; that
+    // wrote frames into unrelated guest RAM for every other firmware —
+    // observed as a netsim-shaped "SARC" frame with len 0x74.)
+    // Returns true on delivery.
     // rdesExtra carries RDES0 status bits (IPHCE/PCE); with PTP TSE the
     // snapshot goes to RDES6/7 (guest needs 32-byte descriptors).
     const injectRxIrq = (memWrite, memRead32, frame, len, rdesExtra) => {
         let listBase = 0;
         try { listBase = eth_get_rx_desc_addr() >>> 0; } catch {}
-        if (listBase !== 0) {
+        if (listBase === 0) {
+            // No poll ever armed: hold (do NOT latch RBUS — nothing is
+            // "busy", the guest simply hasn't armed yet).
+            return false;
+        }
+        {
             let rdes0 = 0, rdes1 = 0;
             try {
                 rdes0 = memRead32(listBase) >>> 0;
@@ -125,18 +136,16 @@ export async function createEmulator(opts) {
                 return false;
             }
             try {
-                // Report the TRUE frame length (what the MAC received),
-                // NOT the padded wire length: RDES0[29:16] is the frame
-                // length field and silicon reports the actual frame (a
-                // 50 B IP frame reads 50, not 60 — the padding is wire
-                // filler the MAC strips). The BUFFER still gets the full
-                // 60 B slot (zero-filled tail) so short reads never see
-                // stale bytes.
-                const out = new Uint8Array(len < 60 ? 60 : len);
+                // LEN RULE (silicon): RDES0[29:16] is the FRAME length
+                // but the DMA never reports a runt — frames shorter than
+                // 64 B (60 B payload + 4 B FCS the MAC strips) pad to 60.
+                // A 50 B loopback frame therefore reports 60 (0x3C).
+                const wire = len < 60 ? 60 : len;
+                const out = new Uint8Array(wire);
                 out.set(frame.subarray(0, len));
                 memWrite(BigInt(rdes1), out);
                 const wb = new Uint8Array(4);
-                new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
+                new DataView(wb.buffer).setUint32(0, (wire << 16) | rdesExtra, true);
                 memWrite(BigInt(listBase), wb);
                 if (eth_ptp_tse()) {
                     const sb = new Uint8Array(8);
@@ -150,13 +159,13 @@ export async function createEmulator(opts) {
         }
         const idx = E.rxInjectIdx;
         E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
-        // True length in RDES0, zero-filled 60 B slot in the buffer
-        // (same rule as the IRQ path above).
-        const out = new Uint8Array(len < 60 ? 60 : len);
+        // Same runt-pad LEN rule as the IRQ path above.
+        const wire = len < 60 ? 60 : len;
+        const out = new Uint8Array(wire);
         out.set(frame.subarray(0, len));
         memWrite(BigInt(E.rxBuf + idx * E.rxStride), out);
         const wb = new Uint8Array(4);
-        new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
+        new DataView(wb.buffer).setUint32(0, (wire << 16) | rdesExtra, true);
         memWrite(BigInt(E.rxDesc + idx * 8), wb);
         return true;
     };
@@ -728,13 +737,13 @@ export async function createEmulator(opts) {
                 const descAddr = E.rxDesc + idx * 8;
                 const bufAddr = E.rxBuf + idx * E.rxStride;
                 try {
-                    // True length in RDES0, zero-filled 60 B slot (same
-                    // rule as injectRxIrq above).
-                    const out = new Uint8Array(len < 60 ? 60 : len);
+                    // Same runt-pad LEN rule as injectRxIrq above.
+                    const wire = len < 60 ? 60 : len;
+                    const out = new Uint8Array(wire);
                     out.set(frame.subarray(0, len));
                     wuc.mem_write(BigInt(bufAddr), out);
                     const wb = new Uint8Array(4);
-                    new DataView(wb.buffer).setUint32(0, (len << 16) | rdesExtra, true);
+                    new DataView(wb.buffer).setUint32(0, (wire << 16) | rdesExtra, true);
                     wuc.mem_write(BigInt(descAddr), wb);
                     wwrite32(E.rxFrameIdx, idx);
                     wwrite32(E.rxFrameLen, len);

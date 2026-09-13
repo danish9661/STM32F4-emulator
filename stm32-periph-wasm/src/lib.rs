@@ -44,6 +44,11 @@ fn set_sys(s: WasmSystem) {
 
 #[cfg(test)]
 pub(crate) fn init_svd_for_test(s: WasmSystem) {
+    // Fresh fault channels per instance: a pended-but-unconsumed fault
+    // (e.g. a test that faults deliberately) must not leak into the next
+    // test's run loop and halt it at pc=entry with op=0xDEAD (observed:
+    // every test after a faulting one died at its first instruction).
+    crate::system::clear_fault_channels();
     set_sys(s);
 }
 
@@ -51,6 +56,7 @@ pub(crate) fn init_svd_for_test(s: WasmSystem) {
 /// model-level tests that must not depend on test-data files). Test-only.
 #[cfg(test)]
 pub(crate) fn init_for_test(s: WasmSystem) {
+    crate::system::clear_fault_channels();
     set_sys(s);
 }
 

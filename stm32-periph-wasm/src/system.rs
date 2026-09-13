@@ -823,6 +823,18 @@ mod audio_tests {
     }
 }
 
+/// Clear the deferred fault channels without touching anything else.
+/// The run loop consumes these, so a pended-but-unconsumed fault (a test
+/// that faults deliberately, or a test killed mid-run) leaks into the next
+/// test/instance and halts it at entry with op=0xDEAD. init_svd_for_test /
+/// init_for_test call this; reset_globals covers the rest.
+pub fn clear_fault_channels() {
+    use std::sync::atomic::Ordering::Relaxed;
+    MPU_FAULT_VALID.store(false, Relaxed);
+    ALIGN_FAULT_VALID.store(false, Relaxed);
+    BUS_FAULT_VALID.store(false, Relaxed);
+}
+
 // ── process-wide state reset ────────────────────────────────────────────────
 /// Clear every process-lifetime global so a fresh emulator instance starts
 /// clean.  Without this, creating a second instance in the same process is

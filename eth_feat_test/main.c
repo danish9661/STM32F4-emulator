@@ -50,10 +50,19 @@ void ETH_WKUP_IRQHandler(void) {
 }
 
 static unsigned char tx_frame[1536];
-static const unsigned char my_ip[4] = {10, 0, 2, 15};
+static const unsigned char *my_ip_alias = 0; // (removed: use my_ip_ram)
 static const unsigned char gw_ip[4] = {10, 0, 2, 2};
 static const unsigned char gw_mac[6] = {0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd};
-static const unsigned char my_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+// NOTE: my_mac MUST be RAM (not const): the startup does NOT copy
+// .data (no _sdata/_edata loop — same as blinky/), so const tables
+// addressed via my_mac[] would read the FLASH image... (see below).
+// It is plain static so it lives in .bss... but .bss is NOT zeroed
+// either! So main() copies the MAC/IP tables into RAM at boot
+// (rom_mac -> my_mac). NEVER read my_mac[] before that copy.
+static unsigned char my_mac[6];
+static unsigned char my_ip_ram[4];
+static const unsigned char rom_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+static const unsigned char rom_ip[4] = {10, 0, 2, 15};
 static const unsigned char bcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // Build eth+IPv4 header; returns L4 payload offset (34).
@@ -68,7 +77,7 @@ static unsigned int ip_header(unsigned char *dst_mac, unsigned char *dst_ip,
     tx_frame[20] = 0; tx_frame[21] = 0;
     tx_frame[22] = 64; tx_frame[23] = proto;
     tx_frame[24] = 0; tx_frame[25] = 0;
-    for (int i = 0; i < 4; i++) { tx_frame[26 + i] = my_ip[i]; tx_frame[30 + i] = dst_ip[i]; }
+    for (int i = 0; i < 4; i++) { tx_frame[26 + i] = my_ip_ram[i]; tx_frame[30 + i] = dst_ip[i]; }
     unsigned int ck = cksum(&tx_frame[14], 20);
     tx_frame[24] = ck >> 8; tx_frame[25] = ck & 0xFF;
     return 34;
@@ -116,6 +125,14 @@ static int eth_send_frame(unsigned int len, unsigned int tdes_flags) {
     eth_done = 0;
     DMATPDR = 1;
     for (int i = 0; i < 2000000; i++) if (eth_done_gen != gen) return 1;
+    return 0;
+}
+
+// ---- memcmp (freestanding: no libc — the Makefile links -nostdlib,
+// so __builtin_memcmp would emit a call to a missing symbol) ----
+static int mcmp(const void *a, const void *b, unsigned int n) {
+    const unsigned char *p = (const unsigned char *)a, *q = (const unsigned char *)b;
+    for (unsigned int i = 0; i < n; i++) if (p[i] != q[i]) return (int)p[i] - (int)q[i];
     return 0;
 }
 
@@ -177,6 +194,12 @@ static unsigned int drain_rx(void) {
 int main(void) {
     uart_init();
     uart_puts("FEAT Test: starting\r\n");
+    // RAM tables: the startup copies neither .data nor zeroes .bss, so
+    // const-initialized tables are NOT valid in RAM — copy them here
+    // before ANY use (my_mac[] reads garbage otherwise; the SARC/SAF
+    // content-matches compare against it).
+    for (int i = 0; i < 6; i++) my_mac[i] = rom_mac[i];
+    for (int i = 0; i < 4; i++) my_ip_ram[i] = rom_ip[i];
     RCC_AHB1ENR |= (1 << 25);
     DMABMR |= 1;
     wait_ms(10);
@@ -237,7 +260,7 @@ int main(void) {
     MACCR |= (1 << 10); // IPCO
     DMAOMR |= (1 << 7); // FEF
     {
-        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 8);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 8);
         tx_frame[off] = 49153 >> 8; tx_frame[off + 1] = 49153 & 0xFF;
         tx_frame[off + 2] = 0; tx_frame[off + 3] = 7;
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 16;
@@ -283,7 +306,7 @@ int main(void) {
         unsigned int h2 = crc32((unsigned char *)g2, 6) >> 26;
         if (h1 < 32) MACHTLR = 1 << h1; else MACHTHR = 1 << (h1 - 32);
         MACFFR = 1 << 2; // HM
-        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
         tx_frame[off] = 5001 >> 8; tx_frame[off + 1] = 5001 & 0xFF;
         tx_frame[off + 2] = 5001 >> 8; tx_frame[off + 3] = 5001 & 0xFF;
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
@@ -321,7 +344,7 @@ int main(void) {
     // ---- 5. VLAN ----
     {
         MACVLANTR = 7; // accept only VID 7
-        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
         tx_frame[off] = 5002 >> 8; tx_frame[off + 1] = 5002 & 0xFF;
         tx_frame[off + 2] = 5002 >> 8; tx_frame[off + 3] = 5002 & 0xFF;
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
@@ -410,7 +433,7 @@ int main(void) {
         tx_desc[6] = 0; tx_desc[7] = 0;
         rx_desc[6] = 0; rx_desc[7] = 0;
         {
-            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
             tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
             if (eth_send_frame(14 + 20 + 12, 1 << 25)) { // TTSE
@@ -429,7 +452,7 @@ int main(void) {
         wkp_flag = 0;
         MACPMTCTL = 0x2; // MPE
         MACIMR |= (1 << 3); // PMTIM
-        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
         tx_frame[off] = 5003 >> 8; tx_frame[off + 1] = 5003 & 0xFF;
         tx_frame[off + 2] = 5003 >> 8; tx_frame[off + 3] = 5003 & 0xFF;
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
@@ -459,7 +482,7 @@ int main(void) {
             MACRWUFFR = 0x00; // word 7
             MACCR |= (1 << 12); // LM loopback
             wkp_flag = 0;
-            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off] = 0; tx_frame[off + 1] = 8;
             tx_frame[off + 2] = 0; tx_frame[off + 3] = 9;
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
@@ -500,7 +523,7 @@ int main(void) {
             }
             // ...but the same payload to broadcast matches.
             {
-                unsigned int bo = ip_header((unsigned char *)bcast_mac, my_ip, 17, 8 + 4);
+                unsigned int bo = ip_header((unsigned char *)bcast_mac, my_ip_ram, 17, 8 + 4);
                 tx_frame[bo + 4] = 0; tx_frame[bo + 5] = 12;
                 tx_frame[bo + 6] = 0; tx_frame[bo + 7] = 0;
                 tx_frame[bo + 8] = 'W'; tx_frame[bo + 9] = 'A';
@@ -519,7 +542,7 @@ int main(void) {
             wkp_flag = 0;
             {
                 // Normal frame under PD: must never arrive.
-                unsigned int po = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+                unsigned int po = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
                 tx_frame[po + 4] = 0; tx_frame[po + 5] = 12;
                 tx_frame[po + 6] = 0; tx_frame[po + 7] = 0;
                 if (eth_send_frame(14 + 20 + 12, 0)) {
@@ -569,7 +592,7 @@ int main(void) {
     // is meaningless (at 1k steps d reads ~1 step either way).
     {
         dwt_on();
-        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 1200);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 1200);
         tx_frame[off] = 0; tx_frame[off + 1] = 7;
         tx_frame[off + 2] = 0; tx_frame[off + 3] = 7;
         tx_frame[off + 4] = (1200 + 8) >> 8; tx_frame[off + 5] = (1200 + 8) & 0xFF;
@@ -596,7 +619,7 @@ int main(void) {
         uart_puts("COLLIDE ARM\r\n");
         for (volatile int i = 0; i < 20000; i++);
         {
-            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
             tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
             if (eth_send_frame(14 + 20 + 12, 0)) {
@@ -613,7 +636,7 @@ int main(void) {
         uart_puts("COLLIDE ARM\r\n");
         for (volatile int i = 0; i < 20000; i++);
         {
-            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
             tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
             if (eth_send_frame(14 + 20 + 12, 0)) {
@@ -631,7 +654,7 @@ int main(void) {
     // which stops at TS). Expect ~35k.
     {
         MACCR |= (1 << 12); // LM loopback
-        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 1200);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 1200);
         tx_frame[off] = 0; tx_frame[off + 1] = 8;
         tx_frame[off + 2] = 0; tx_frame[off + 3] = 9;
         tx_frame[off + 4] = (1200 + 8) >> 8; tx_frame[off + 5] = (1200 + 8) & 0xFF;
@@ -658,7 +681,7 @@ int main(void) {
         MACCR &= ~(1 << 11); // DM=0 half-duplex
         MACCR &= ~(1 << 14); // 10M
         {
-            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 1200);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 1200);
             tx_frame[off + 4] = (1200 + 8) >> 8; tx_frame[off + 5] = (1200 + 8) & 0xFF;
             tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
             for (int i = 0; i < 1200; i++) tx_frame[off + 8 + i] = i & 0xFF;
@@ -670,7 +693,7 @@ int main(void) {
             unsigned int l1 = eth_recv_frame(200000);
             int db = 0, ok2 = 0, consumed = 0;
             if (l1) {
-                unsigned int off2 = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+                unsigned int off2 = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
                 tx_frame[off2 + 4] = 0; tx_frame[off2 + 5] = 12;
                 tx_frame[off2 + 6] = 0; tx_frame[off2 + 7] = 0;
                 tx_desc[0] = 0x80000000 | ((14 + 20 + 12) & 0x3FFF);
@@ -695,14 +718,14 @@ int main(void) {
         MACCR |= (1 << 11); // DM=1 full-duplex
         {
             // Same race full-duplex: DB must stay clear.
-            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 1200);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 1200);
             tx_frame[off + 4] = (1200 + 8) >> 8; tx_frame[off + 5] = (1200 + 8) & 0xFF;
             tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
             for (int i = 0; i < 1200; i++) tx_frame[off + 8 + i] = i & 0xFF;
             int db = 0;
             if (eth_send_frame(14 + 20 + 8 + 1200, 0)) {
                 if (eth_recv_frame(200000)) {
-                    unsigned int off2 = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+                    unsigned int off2 = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
                     tx_frame[off2 + 4] = 0; tx_frame[off2 + 5] = 12;
                     tx_frame[off2 + 6] = 0; tx_frame[off2 + 7] = 0;
                     if (eth_send_frame(14 + 20 + 12, 0)) {
@@ -728,7 +751,7 @@ int main(void) {
         {
             unsigned int bmsr = mii_read(0, 1);
             int blink = !(bmsr & 0x04);
-            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
             tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
             // Dead wire completes with NC status (TS still raises: error
@@ -743,7 +766,7 @@ int main(void) {
         {
             unsigned int bmsr = mii_read(0, 1);
             int blink = (bmsr & 0x04) != 0;
-            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
             tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
             int ok = eth_send_frame(14 + 20 + 12, 0);
@@ -774,7 +797,7 @@ int main(void) {
     {
         wkp_flag = 0;
         MACPMTCTL = 0x20 | 0x2; // W1C stale MPR away, arm MPE (PMTIM set)
-        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
         tx_frame[off] = 5003 >> 8; tx_frame[off + 1] = 5003 & 0xFF;
         tx_frame[off + 2] = 5003 >> 8; tx_frame[off + 3] = 5003 & 0xFF;
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
@@ -822,7 +845,7 @@ int main(void) {
         // NOTE: ip_header addresses the frame at my_mac — but the SARC
         // asserts below need DA=my_mac too (loopback frames must pass
         // our own accept filter). SARC replaces only the SA bytes.
-        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
         tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
         for (int i = 0; i < 6; i++) tx_frame[6 + i] = 0; // zero SA
@@ -846,7 +869,7 @@ int main(void) {
         MACCR &= ~(3u << 28); // SARC off: SA preserved
         for (int i = 0; i < 6; i++) tx_frame[6 + i] = 0;
         // Rebuild (ip_header rewrote SA): zero again, resend.
-        off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+        off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
         tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
         for (int i = 0; i < 6; i++) tx_frame[6 + i] = 0;
@@ -868,19 +891,21 @@ int main(void) {
     // FEF is still set from the checksum block: clear it and a bad-IP
     // frame must NOT arrive; with FEF set but IPCO clear it arrives
     // with NO status bits. Defaults restored after.
-    // (UDP port: use 5009+ — the loopback-silence range netsim never
-    // answers. Ports 5001-5008 get canned peer replies which would
-    // land in rx_buf and poison the SA/len asserts.)
     // (assert style: compare against the EXPECTED frame — a stray peer
     // reply has a different SA/len, so a bare `len != 0` check would
     // pass vacuously on garbage. All checks below key on content.)
     // (LEN fmt: RDES0 reports the TRUE frame length — 50 here, since
     // the driver reports what the MAC received, not the padded wire
     // length. The buffer slot is still a full 60 B.)
+    // (HEAD HYGIENE: eth_recv_frame re-arms the head on every frame it
+    // collects AND heartbeats the poll while waiting, so no manual
+    // rx_desc[0]/DMARPDR writes are needed around these probes. An
+    // earlier revision added manual re-arms "per-probe"; they raced the
+    // heartbeat/re-arm and are gone — do NOT add them back.)
     {
         MACCR |= (1 << 12); // LM
         DMAOMR &= ~(1 << 7); // FEF=0: error frames drop
-        unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 8);
+        unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 8);
         tx_frame[off] = 5009 >> 8; tx_frame[off + 1] = 5009 & 0xFF;
         tx_frame[off + 2] = 5009 >> 8; tx_frame[off + 3] = 5009 & 0xFF;
         tx_frame[off + 4] = 0; tx_frame[off + 5] = 16;
@@ -889,15 +914,6 @@ int main(void) {
         // DROP probe: the bad frame (FEF=0) must never arrive. Match
         // content (our SA/ports) so a stray peer reply can't satisfy
         // or poison this.
-        // HEAD HYGIENE (single-desc rule): this probe's terminal recvs
-        // all run EMPTY (the drop consumes nothing), so the head state
-        // is whatever the previous phase left. Re-arm explicitly BEFORE
-        // the send so the (dropped-or-not) outcome can't strand a stale
-        // poll/head pair into the OFF probe below. Same after: the OFF
-        // probe re-arms before ITS send. Ownership is per-probe
-        // explicit, never inherited.
-        rx_desc[0] = 0x80000000 | 1536;
-        DMARPDR = 1;
         if (eth_send_frame(14 + 20 + 16, 0)) {
             int got = 0;
             for (int r = 0; r < 10 && !got; r++) {
@@ -914,24 +930,26 @@ int main(void) {
         // runts, so a 50 B loopback delivery reads len 60 (0x3C) with
         // NO error bits, which is exactly what this check asserts (the
         // mask covers only the IPHCE/PCE/ES status bits, never the
-        // length; the content match proves it is OUR frame).
-        // Per-probe head hygiene (see above): re-arm explicitly.
-        rx_desc[0] = 0x80000000 | 1536;
-        DMARPDR = 1;
+        // length).
         if (eth_send_frame(14 + 20 + 16, 0)) {
             // Our frame: SA==station (SARC off here), our ports.
             // Match content, not bare presence (stray peer replies have
-            // a different SA and must not satisfy this). The barrier
-            // above already proved the queue empty, so the first match
-            // IS this frame.
+            // a different SA and must not satisfy this). The DROP probe
+            // above already proved its silence, so the first match IS
+            // this frame.
             // LEN fmt: the DMA pads runts — expect 60 (see note above).
-            // (Single exit value: `len` carries the match OUT of the
-            // loop — earlier revisions shadowed it with a loop-local
-            // `l`, which is why a matching frame still read len=0.)
+            // (Comparison form: mcmp (local memcmp — freestanding, no
+            // libc), NOT hand chains. Three hand-rolled revisions
+            // (chained-&&, halfwords, CLZ-loop) all mis-evaluated under
+            // -O2 despite the dump showing equal bytes — each folded
+            // into a bit-test the core gets wrong. mcmp is a real
+            // function call the compiler cannot fold into those shapes;
+            // if THIS still fails, the suspect is definitively the
+            // core's LDRB path, not GCC.)
             unsigned int len = 0;
             for (int r = 0; r < 10 && !len; r++) {
                 unsigned int l = eth_recv_frame(20000);
-                if (l == 60 && rx_buf[6] == my_mac[0] && rx_buf[11] == my_mac[5] &&
+                if (l == 60 && mcmp((const void *)&rx_buf[6], (const void *)my_mac, 6) == 0 &&
                     rx_buf[34] == (5009 >> 8) && rx_buf[35] == (5009 & 0xFF)) len = l;
             }
             if (!len) {
@@ -941,7 +959,18 @@ int main(void) {
                 DMARPDR = 1;
                 for (int r = 0; r < 10 && !len; r++) {
                     unsigned int l = eth_recv_frame(20000);
-                    if (l == 60 && rx_buf[6] == my_mac[0] && rx_buf[11] == my_mac[5] &&
+                    if (l == 60 && mcmp((const void *)&rx_buf[6], (const void *)my_mac, 6) == 0 &&
+                        rx_buf[34] == (5009 >> 8) && rx_buf[35] == (5009 & 0xFF)) len = l;
+                }
+            }
+            if (!len) {
+                // Held-frame retry (RBUS): just re-arm the poll and
+                // collect (the head + queued frame are untouched — only
+                // the poll was consumed by the held attempt).
+                DMARPDR = 1;
+                for (int r = 0; r < 10 && !len; r++) {
+                    unsigned int l = eth_recv_frame(20000);
+                    if (l == 60 && mcmp((const void *)&rx_buf[6], (const void *)my_mac, 6) == 0 &&
                         rx_buf[34] == (5009 >> 8) && rx_buf[35] == (5009 & 0xFF)) len = l;
                 }
             }
@@ -984,7 +1013,7 @@ int main(void) {
             if (DMASR & (1 << 9)) uart_puts("PAUSE PWTS OK\r\n");
             else uart_puts("PAUSE PWTS FAIL\r\n");
             // Stall band: 100 quanta @100M ~= 86k inst + own wire time.
-            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
             tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
             dwt_zero();
@@ -1093,7 +1122,7 @@ int main(void) {
         // delivered regardless of checksums.)
         MMCCR = 1 << 2;
         {
-            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
             tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
             if (eth_send_frame(14 + 20 + 12, 0)) {
@@ -1126,7 +1155,7 @@ int main(void) {
         // with a pre-armed poll.)
         DMARPDR = 1;
         {
-            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off] = 6001 >> 8; tx_frame[off + 1] = 6001 & 0xFF;
             tx_frame[off + 2] = 6001 >> 8; tx_frame[off + 3] = 6001 & 0xFF;
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
@@ -1139,7 +1168,7 @@ int main(void) {
                 }
                 rx_flag = 0; // consume the flag, HOLD the descriptor
                 if (f1) {
-                    unsigned int off2 = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+                    unsigned int off2 = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
                     tx_frame[off2] = 6002 >> 8; tx_frame[off2 + 1] = 6002 & 0xFF;
                     tx_frame[off2 + 2] = 6002 >> 8; tx_frame[off2 + 3] = 6002 & 0xFF;
                     tx_frame[off2 + 4] = 0; tx_frame[off2 + 5] = 12;
@@ -1177,7 +1206,7 @@ int main(void) {
         for (volatile int i = 0; i < 6000; i++);
         {
             for (int k = 0; k < 36; k++) {
-                unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+                unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
                 tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
                 tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
                 tx_desc[0] = 0x80000000 | ((14 + 20 + 12) & 0x3FFF);
@@ -1218,7 +1247,7 @@ int main(void) {
         jab_buf[16] = (20 + 8 + 2058) >> 8; jab_buf[17] = (20 + 8 + 2058) & 0xFF;
         jab_buf[22] = 64; jab_buf[23] = 17;
         jab_buf[24] = 0; jab_buf[25] = 0;
-        for (int i = 0; i < 4; i++) { jab_buf[26 + i] = my_ip[i]; jab_buf[30 + i] = my_ip[i]; }
+        for (int i = 0; i < 4; i++) { jab_buf[26 + i] = my_ip_ram[i]; jab_buf[30 + i] = my_ip_ram[i]; }
         for (int i = 0; i < 2058; i++) jab_buf[42 + i] = i & 0xFF;
         tx_desc[0] = 0x80000000 | 2100;
         tx_desc[1] = (unsigned int)&jab_buf[0];
@@ -1235,9 +1264,6 @@ int main(void) {
             else { uart_puts("JABBER FAIL ok="); uart_hex32(ok); uart_puts(" t0="); uart_hex32(tx_desc[0]); uart_puts(" rx="); uart_hex32(rx_flag); uart_puts("\r\n"); }
         }
         // WD=1 (limit 16383): a 1500 B frame transmits normally, no JT.
-        // (No pre-send re-arm: the JABBER probe never delivers, so no
-        // head was consumed and the last live re-arm still stands —
-        // same reasoning as the IPCO probe above.)
         MACCR |= (1 << 23);
         tx_desc[0] = 0x80000000 | 1500;
         tx_desc[1] = (unsigned int)&jab_buf[0];
@@ -1313,7 +1339,7 @@ int main(void) {
         // SAF: self-SA passes, forged SA drops; SAIF inverts both.
         MACFFR = 1 << 8;
         {
-            unsigned int off = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
             tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
             tx_frame[off + 8] = 'S';
@@ -1345,7 +1371,7 @@ int main(void) {
                 }
             }
             // Self SA again: must drop under SAIF.
-            unsigned int off2 = ip_header((unsigned char *)my_mac, my_ip, 17, 8 + 4);
+            unsigned int off2 = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off2 + 4] = 0; tx_frame[off2 + 5] = 12;
             tx_frame[off2 + 6] = 0; tx_frame[off2 + 7] = 0;
             tx_frame[off2 + 8] = 'S';

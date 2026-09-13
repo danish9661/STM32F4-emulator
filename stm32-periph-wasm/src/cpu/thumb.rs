@@ -2066,6 +2066,13 @@ pub fn exec32(
         // F8 T3 (c 0..5): 0 STRB,1 LDRB,2 STRH,3 LDRH,4 STR,5 LDR (imm8-PUW or reg)
         // F8 T2 (c 8..13): 8 STRB,9 LDRB,10 STRH,11 LDRH,12 STR,13 LDR (imm12)
         // F9 T1 (c 9,11): 9 LDRSB,11 LDRSH (imm12); F9 T2 (c 1,3): PUW forms
+        // NOTE: the class nibble c INCLUDES bit 4 of the F8xx opcode word
+        // (o1 = F8xy, c = y>>... precisely (o1>>4)&0xF). Bit 0 of the Rn
+        // field is NOT part of the class: F803 (Rn=3) is c=0 STRB and
+        // F813 (Rn=3) is c=1 LDRB — the load/store bit is o1[4], which is
+        // c[0]. (An earlier note here claimed F803 decodes as LDRB; it
+        // does not — F803 is STRB. The mcmp loop's second load is F812,
+        // c=1, LDRB. Corrected 2026-09-13.)
         let f9 = o1 >= 0xF900;
         let (is_load, size, signed) = if !f9 {
             match c {
