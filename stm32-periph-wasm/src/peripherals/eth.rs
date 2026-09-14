@@ -8,43 +8,47 @@ extern "C" {
     fn error(s: &str);
 }
 
-// Interrupt bits for DMASR
+// Interrupt bits for DMASR (CMSIS stm32f407xx.h: ETH_DMASR_*_Pos)
 const DMA_TS:  u32 = 1 << 0;  // Transmit status
 const DMA_TPSS: u32 = 1 << 1; // Transmit process stopped
 const DMA_TBUS: u32 = 1 << 2; // Transmit buffer unavailable
 const DMA_TJTS: u32 = 1 << 3; // Transmit jabber timeout
 const DMA_ROS:  u32 = 1 << 4;  // Receive overflow
 const DMA_TUS:  u32 = 1 << 5;  // Transmit underflow
-const DMA_RS:   u32 = 1 << 6;  // Receive status
+const DMA_RS:  u32 = 1 << 6;  // Receive status
 const DMA_RBUS: u32 = 1 << 7;  // Receive buffer unavailable
 const DMA_RPSS: u32 = 1 << 8;  // Receive process stopped
-const DMA_PWTS: u32 = 1 << 9;  // Pause time status
+const DMA_RWTS: u32 = 1 << 9;  // Receive watchdog timeout status (NOT pause:
+                               // silicon has no PWTS bit; the TX-stall hold
+                               // time is reported via a process atomic and
+                               // ORed into DMASR reads, never latched here)
 const DMA_ETS:  u32 = 1 << 10; // Early transmit status
-const DMA_FBE:  u32 = 1 << 11; // Fatal bus error
-const DMA_ERS:  u32 = 1 << 12; // Early receive status
-const DMA_AIS:  u32 = 1 << 14; // Abnormal interrupt summary
+const DMA_FBES: u32 = 1 << 13; // Fatal bus error status
+const DMA_ERS:  u32 = 1 << 14; // Early receive status
+const DMA_AIS:  u32 = 1 << 15; // Abnormal interrupt summary
 const DMA_NIS:  u32 = 1 << 16; // Normal interrupt summary
 
-// Interrupt enable bits for DMAIER (same positions as DMASR)
-const DMAIER_NIE: u32 = 1 << 16;
-const DMAIER_AIE: u32 = 1 << 14;
-const DMAIER_ERE: u32 = 1 << 12;
-const DMAIER_FBE: u32 = 1 << 11;
-const DMAIER_ETE: u32 = 1 << 10;
-const DMAIER_RSE: u32 = 1 << 8;
-const DMAIER_RBE: u32 = 1 << 7;
-const DMAIER_RTE: u32 = 1 << 6;
-const DMAIER_TUE: u32 = 1 << 5;
-const DMAIER_ROE: u32 = 1 << 4;
-const DMAIER_TJE: u32 = 1 << 3;
-const DMAIER_TBU: u32 = 1 << 2;
-const DMAIER_TPSE: u32 = 1 << 1;
-const DMAIER_TSE: u32 = 1 << 0;
+// Interrupt enable bits for DMAIER (CMSIS: ETH_DMAIER_*_Pos; same positions)
+const DMAIER_NISE: u32 = 1 << 16;
+const DMAIER_AISE: u32 = 1 << 15;
+const DMAIER_ERIE: u32 = 1 << 14;
+const DMAIER_FBEIE: u32 = 1 << 13;
+const DMAIER_ETIE: u32 = 1 << 10;
+const DMAIER_RWTIE: u32 = 1 << 9;
+const DMAIER_RPSIE: u32 = 1 << 8;
+const DMAIER_RBUIE: u32 = 1 << 7;
+const DMAIER_RIE: u32 = 1 << 6;
+const DMAIER_TUIE: u32 = 1 << 5;
+const DMAIER_ROIE: u32 = 1 << 4;
+const DMAIER_TJTIE: u32 = 1 << 3;
+const DMAIER_TBUIE: u32 = 1 << 2;
+const DMAIER_TPSIE: u32 = 1 << 1;
+const DMAIER_TIE: u32 = 1 << 0;
 
 const ETH_IRQ: i32 = 61;
 
 const WRITE1CLEAR: u32 = DMA_TS | DMA_TPSS | DMA_TBUS | DMA_TJTS | DMA_ROS | DMA_TUS
-    | DMA_RS | DMA_RBUS | DMA_RPSS | DMA_PWTS | DMA_ETS | DMA_FBE | DMA_ERS;
+    | DMA_RS | DMA_RBUS | DMA_RPSS | DMA_RWTS | DMA_ETS | DMA_FBES | DMA_ERS;
 
 enum BlockType { Mac, Mmc, Ptp, Dma }
 
@@ -139,6 +143,12 @@ pub struct EthernetMac {
     // broadcast always eligible; unicast only when GLOBU (PMTCTL bit 9)
     // is set (and never when the filter is multicast-only).
     wff: [u32; 8], wff_ptr: usize,
+    // Deferred IRQ62 flag (WOL path): set inside the with_mac_mut closure
+    // in eth_check_wol, drained after the scan. The NVIC borrow would
+    // panic ("already borrowed") if taken inside the peripheral borrow
+    // held by with_mac_mut — and eth_check_wol itself runs inside the
+    // driver's wDeliverRx, which may already hold OTHER borrows.
+    pmt_irq62: bool,
 }
 
 impl EthernetMac {
@@ -180,7 +190,7 @@ impl EthernetMac {
             ptp_tsec: 0, ptp_tsub: 0, ptp_target_armed: false, ptp_last: 0,
             ptp_acc: 0, ptp_addend: 0, ptp_ssinc: 0,
             pps_count: 0, pps_acc: 0,
-            wff: [0; 8], wff_ptr: 0,
+            wff: [0; 8], wff_ptr: 0, pmt_irq62: false,
         }
     }
 
@@ -400,7 +410,7 @@ impl EthernetMac {
 
     fn update_interrupt(&mut self, sys: &System) {
         let pending = self.dmasr & self.dmaier;
-        let has_abnormal = pending & (DMA_TPSS | DMA_TBUS | DMA_TJTS | DMA_ROS | DMA_TUS | DMA_RBUS | DMA_RPSS | DMA_FBE) != 0;
+        let has_abnormal = pending & (DMA_TPSS | DMA_TBUS | DMA_TJTS | DMA_ROS | DMA_TUS | DMA_RBUS | DMA_RPSS | DMA_FBES) != 0;
         let has_normal = pending & (DMA_TS | DMA_RS) != 0;
         let ais = has_abnormal;
         let nis = has_normal || has_abnormal;
@@ -500,13 +510,15 @@ impl Peripheral for EthernetMac {
                 // RPS/TPS process state composes from ST/SR (running vs
                 // stopped — the instant model never suspends mid-list);
                 // MMCS/PMTS/TSTS mirror the MAC block (kept in a process
-                // atomic since the read can't borrow across slots); PWTS
-                // is live while a flow-control pause holds TX.
+                // atomic since the read can't borrow across slots); the
+                // pause-hold stall is ORed live from the TX-pause atomic
+                // (bit 9 RWTS slot — silicon's own watchdog bit, reused
+                // as the observable stall flag; never latched in dmasr).
                 0x14 => {
                     let mut v = self.dmasr;
                     v |= system::eth_dmasr_mirror();
                     if system::instruction_count() < system::eth_tx_pause_until() {
-                        v |= DMA_PWTS;
+                        v |= DMA_RWTS;
                     }
                     if self.rx_enabled {
                         v |= 0b011 << 17;
@@ -538,6 +550,11 @@ impl Peripheral for EthernetMac {
                     self.maccr = value & 0x32CF7EFC;
                 }
                 0x04 => self.macffr = value & 0x800007FF,
+                // NOTE (CMSIS stm32f407xx.h ETH_MACFFR_*_Pos): SAF=9,
+                // SAIF=8, HPF=10, PCF=7:6 (NOT 8/7/9/6 as older drafts of
+                // this file had it — the SVD field names are right, the
+                // old bit numbers were each off by one). Mask 0x800007FF
+                // keeps PM/HU/HM/DAIF/PAM/BFD/PCF/SAIF/SAF/HPF/RA.
                 0x08 => self.machthr = value,
                 0x0C => self.machtlr = value,
                 0x10 => {
@@ -571,18 +588,25 @@ impl Peripheral for EthernetMac {
                 // compare, bit 17 inverts the match. The old mask kept
                 // only the low 8 VID bits.
                 0x1C => self.macvlantr = value & 0x3FFFF,
-                // PMT: control bits stored (status is read-to-clear, so
-                // writes never touch MPR/RWKPR); WFFRPR(31) resets the
-                // wakeup-filter write pointer and reads back 0.
+                // Wakeup-frame-filter data register (sequential words,
+                // pointer reset by PMTCTL WFFRPR).
                 0x28 => {
                     self.wff[self.wff_ptr] = value;
                     self.wff_ptr = (self.wff_ptr + 1) % 8;
                 }
+                // PMT (CMSIS stm32f407xx.h ETH_MACPMTCSR_*: PD=0, MPE=1,
+                // WFE=2, MPR=5, WFR=6, GU=9, WFFRPR=31). Control bits
+                // stored (status MPR/WFR is read-to-clear, so writes never
+                // touch them); WFFRPR(31) resets the wakeup-filter write
+                // pointer and reads back 0. NOTE: bits 7+10 are NOT strobes
+                // (the old mask 0x687 stored them as if W1C) — the only
+                // W1C-ish behavior in this block is the READ-side clear of
+                // MPR/WFR. Unknown control writes are stored, not dropped.
                 0x2C => {
                     if value & (1 << 31) != 0 {
                         self.wff_ptr = 0;
                     }
-                    self.macpmtcsr = (self.macpmtcsr & 0x60) | (value & 0x687);
+                    self.macpmtcsr = (self.macpmtcsr & 0x60) | (value & 0x207);
                 }
                 0x38 => {
                     self.macsr &= !(value & 0x4F8);
@@ -999,13 +1023,31 @@ impl EthernetMac {
         // RA (receive-all) accepts everything past the VLAN gate (like
         // PR, but a separate silicon path — CRC-error frames would also
         // pass, and our frames carry no FCS to be bad).
-        if ff & 1 != 0 || ff & (1 << 31) != 0 {
-            return true; // PR or RA: promiscuous
+        // PM (pass-all-multicast) accepts multicast DAs (dst[0]&1) past
+        // the VLAN gate — including broadcast FF:..:FF, which carries
+        // the multicast bit; BFD then re-gates broadcast below (silicon:
+        // the broadcast disable applies after the multicast pass).
+        if ff & (1 << 31) != 0 {
+            return true; // RA: promiscuous
         }
         let dst = &frame[0..6];
         let src = &frame[6..12];
         let bcast = dst == &[0xFF; 6];
         let mcast = dst[0] & 1 != 0;
+        if bcast {
+            // Broadcast: BFD drops unconditionally (even under PM/RA —
+            // RA returned above, so reaching here means RA clear; PM
+            // passes it to this arm, BFD kills it). Otherwise the DA
+            // path below (perfect/hash would both miss a non-station
+            // broadcast, so accept = !BFD).
+            return self.sa_check(src, ff & (1 << 5) == 0);
+        }
+        if ff & 1 != 0 {
+            return true; // PR: promiscuous
+        }
+        if mcast && ff & (1 << 0) != 0 {
+            return self.sa_check(src, true); // PM: all multicast pass
+        }
         // Pause/control frames (etype 0x8808) with the receiver NOT in
         // flow-control: PCF selects 00 drop-all-control, 01 forward all
         // except pause, 10 forward all, 11 normal DA filtering. (With
@@ -1073,14 +1115,14 @@ impl EthernetMac {
             };
             bit != 0
         };
-        if bcast {
-            return self.sa_check(src, ff & (1 << 5) == 0); // BFD disables broadcast
-        }
-        // HPF (hash-or-perfect): with HMC/HUC set and HPF clear the
-        // frame passes on the hash result alone (perfect ignored); with
-        // HPF set either match passes; with neither enable bit the
-        // perfect slots decide alone.
-        let hpf = ff & (1 << 9) != 0;
+        // (Broadcast already returned above; bcast arm removed — the
+        // early return covers it with the PM/BFD ordering documented
+        // there.)
+        // HPF (hash-or-perfect, CMSIS bit 10): with HMC/HUC set and HPF
+        // clear the frame passes on the hash result alone (perfect
+        // ignored); with HPF set either match passes; with neither
+        // enable bit the perfect slots decide alone.
+        let hpf = ff & (1 << 10) != 0;
         if mcast {
             let da = if ff & (1 << 4) != 0 {
                 true // PAM: pass all multicast
@@ -1100,19 +1142,19 @@ impl EthernetMac {
         self.sa_check(src, da)
     }
 
-    /// Source-address filter (SAF/SAIF): with SAF set, frames are
-    /// dropped unless the SA check passes; SAIF inverts the check
-    /// (matching SAs are dropped). Compares against the station
+    /// Source-address filter (SAF/SAIF, CMSIS bits 9/8): with SAF set,
+    /// frames are dropped unless the SA check passes; SAIF inverts the
+    /// check (matching SAs are dropped). Compares against the station
     /// address (MACA0).
     fn sa_check(&self, src: &[u8], da_pass: bool) -> bool {
         if !da_pass {
             return false;
         }
-        if self.macffr & (1 << 8) == 0 {
+        if self.macffr & (1 << 9) == 0 {
             return true; // SAF clear: no source filtering
         }
         let sa_ok = src == &self.mac_addr();
-        let pass = sa_ok ^ (self.macffr & (1 << 7) != 0);
+        let pass = sa_ok ^ (self.macffr & (1 << 8) != 0);
         pass
     }
 
@@ -1400,26 +1442,39 @@ pub fn eth_rx_csum_status(frame: &[u8]) -> u32 {
 /// (latches MPR when MPE is set) and bit 1 on a wakeup-filter match
 /// (latches RWKPR when WFE is set); either pends the PMT interrupt
 /// (IRQ 62) when PMTIM is unmasked.
+/// NOTE: no with_* slot scan may run while a slot is already borrowed
+/// (Peripheral::read/write/tick hold the borrow — re-scanning panics
+/// "already borrowed"). All model state here is therefore threaded
+/// through ONE with_mac_mut closure per arm (read + latch atomically).
 pub fn eth_check_wol(sys: &System, frame: &[u8]) -> u32 {
+    // Magic scan is pure frame math (needs only the station address):
+    // hoist the MAC bytes out first so no slot is held during the scan.
+    // (with_mac returns u32: pack high/low halves in two calls.)
+    let mac_hi = with_mac(sys, |m| {
+        let a = m.mac_addr();
+        ((a[0] as u32) << 16) | ((a[1] as u32) << 8) | a[2] as u32
+    });
+    let mac_lo = with_mac(sys, |m| {
+        let a = m.mac_addr();
+        ((a[3] as u32) << 16) | ((a[4] as u32) << 8) | a[5] as u32
+    });
+    let mac = [(mac_hi >> 16) as u8, (mac_hi >> 8) as u8, mac_hi as u8,
+               (mac_lo >> 16) as u8, (mac_lo >> 8) as u8, mac_lo as u8];
     let mut magic = false;
-    with_mac(sys, |m| {
-        let mac = m.mac_addr();
-        if frame.len() >= 102 {
-            'scan: for off in 0..=(frame.len() - 102) {
-                if frame[off..off + 6] != [0xFF; 6] {
-                    continue;
-                }
+    if frame.len() >= 102 {
+        'scan: for off in 0..=(frame.len() - 102) {
+            if frame[off..off + 6] != [0xFF; 6] {
+                continue;
+            }
                 for r in 0..16 {
                     if frame[off + 6 + r * 6..off + 12 + r * 6] != mac {
                         continue 'scan;
                     }
                 }
-                magic = true;
-                break;
-            }
+            magic = true;
+            break;
         }
-        0
-    });
+    }
     let filtered = with_mac(sys, |m| m.wol_filter_match(frame) as u32) != 0;
     let mut out = 0;
     if magic {
@@ -1428,7 +1483,11 @@ pub fn eth_check_wol(sys: &System, frame: &[u8]) -> u32 {
                 m.macpmtcsr |= 0x20; // MPR
                 system::eth_mirror_or(1 << 28); // DMASR PMTS mirror
                 if m.macimr & 0x8 != 0 {
-                    sys.p.nvic.borrow_mut().set_intr_pending(62);
+                    // NVIC borrow: safe here — with_mac_mut DROPPED the
+                    // peripheral borrow on return... except this closure
+                    // still runs INSIDE it. Use try_borrow_mut and defer:
+                    // set a flag the caller drains after the scan.
+                    m.pmt_irq62 = true;
                 }
             }
         });
@@ -1440,11 +1499,17 @@ pub fn eth_check_wol(sys: &System, frame: &[u8]) -> u32 {
                 m.macpmtcsr |= 0x40; // RWKPR
                 system::eth_mirror_or(1 << 28); // DMASR PMTS mirror
                 if m.macimr & 0x8 != 0 {
-                    sys.p.nvic.borrow_mut().set_intr_pending(62);
+                    m.pmt_irq62 = true;
                 }
             }
         });
         out |= 2;
+    }
+    // Drain deferred IRQ62 outside any peripheral borrow.
+    let fire = with_mac(sys, |m| m.pmt_irq62 as u32) != 0;
+    if fire {
+        with_mac_mut(sys, |m| m.pmt_irq62 = false);
+        sys.p.nvic.borrow_mut().set_intr_pending(62);
     }
     out
 }
@@ -1867,21 +1932,58 @@ mod tests {
         if h1 != h2 {
             assert!(!m.accept(&frame_to(&g2, 20)));
         }
-        m.macffr |= 1 << 9; // HPF: either match passes
+        m.macffr |= 1 << 10; // HPF (CMSIS bit 10): either match passes
         assert!(m.accept(&frame_to(&g2, 20)));
     }
 
     #[test]
     fn accept_source_filter() {
         let mut m = mac_with_addr();
-        m.macffr = 1 << 8; // SAF
+        m.macffr = 1 << 9; // SAF (CMSIS bit 9)
         assert!(m.accept(&frame_to(&MAC, 20))); // SA == station
         let mut forged = frame_to(&MAC, 20);
         forged[6..12].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0, 1]);
         assert!(!m.accept(&forged));
-        m.macffr |= 1 << 7; // SAIF inverts: matching SA now drops
+        m.macffr |= 1 << 8; // SAIF (CMSIS bit 8) inverts: matching SA now drops
         assert!(!m.accept(&frame_to(&MAC, 20)));
         assert!(m.accept(&forged));
+    }
+
+    #[test]
+    fn accept_pm_bfd_paths() {
+        // PM (bit 0) passes all multicast regardless of the hash table;
+        // BFD (bit 5) drops broadcast even with a matching hash/unfiltered
+        // path. Both were previously write-stored but never asserted.
+        let g = [0x01, 0x00, 0x5E, 0x00, 0x00, 0x07];
+        let mut m = mac_with_addr();
+        m.macffr = 1 << 0; // PM
+        assert!(m.accept(&frame_to(&g, 20)));
+        m.macffr = 0;
+        assert!(!m.accept(&frame_to(&g, 20))); // no HM, no perfect: dropped
+        let mut b = mac_with_addr();
+        b.macffr = (1 << 0) | (1 << 5); // PM + BFD
+        assert!(b.accept(&frame_to(&g, 20))); // multicast still passes
+        // Broadcast under PM+BFD: BFD (broadcast-frame-disable) drops it.
+        // (Broadcast is NOT multicast: PM covers dst[0]&1 frames, and
+        // FF:..:FF takes the bcast arm gated on BFD clear — so with BFD
+        // set it drops even though PM is set.)
+        assert!(!b.accept(&frame_to(&[0xFF; 6], 20))); // broadcast dropped
+        let mut nb = mac_with_addr();
+        nb.macffr = 1 << 0; // PM, no BFD
+        assert!(nb.accept(&frame_to(&[0xFF; 6], 20))); // broadcast passes
+    }
+
+    #[test]
+    fn accept_pcf11_da_path() {
+        // PCF=11 is NOT "drop": control frames take the normal DA path
+        // (multicast pause DA needs PAM/HM to pass). The old test only
+        // asserted the drop half (no PAM set).
+        let p = pause_frame(10);
+        let mut m = mac_with_addr();
+        m.macffr = (3 << 6) | (1 << 4); // PCF=11 + PAM
+        assert!(m.accept(&p));
+        m.macffr = 3 << 6; // PCF=11, no PAM
+        assert!(!m.accept(&p));
     }
 
     #[test]

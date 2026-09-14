@@ -303,9 +303,64 @@ int main(void) {
     MACCR &= ~(1 << 12); // loopback off
 
     // ---- 4. Multicast hash ----
+    // (PM/BFD/PCF-11 sub-probes: PM passes all multicast even with an
+    // empty hash table; BFD drops broadcast; PCF=11 takes the normal DA
+    // path (pause DA needs PAM to pass). These paths were write-stored
+    // but never asserted before.)
     {
         static const unsigned char g1[6] = {0x01, 0x00, 0x5E, 0x00, 0x00, 0x07};
         static const unsigned char g2[6] = {0x01, 0x00, 0x5E, 0x00, 0x00, 0x08};
+        // PM sub-probe FIRST (empty hash table): member must pass on PM
+        // alone; then BFD: broadcast must drop with PM+BFD.
+        MACHTLR = 0; MACHTHR = 0;
+        MACFFR = 1 << 0; // PM
+        {
+            // NOTE: LM loopback is OFF here (phase 3 cleared it) so the
+            // frame goes to netsim, which answers member+non-member on
+            // UDP 5001 (see netsim.js dport-5001 branch). Under loopback
+            // the member frame would address g1 (not ourselves) and the
+            // accept filter would drop it before any PM logic runs.
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
+            tx_frame[off] = 5001 >> 8; tx_frame[off + 1] = 5001 & 0xFF;
+            tx_frame[off + 2] = 5001 >> 8; tx_frame[off + 3] = 5001 & 0xFF;
+            tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
+            tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
+            int got = 0;
+            if (eth_send_frame(14 + 20 + 12, 0)) {
+                for (int r = 0; r < 200 && !got; r++) {
+                    unsigned int len = eth_recv_frame(20000);
+                    if (!len) continue;
+                    unsigned int uo = 14 + ((rx_buf[14] & 0xF) * 4);
+                    if (rx_buf[uo + 8] == 'M' && rx_buf[uo + 13] == '1') got = 1;
+                }
+            }
+            if (got) uart_puts("MCAST PM OK\r\n");
+            else uart_puts("MCAST PM FAIL\r\n");
+        }
+        {
+            // Broadcast DA under PM+BFD: must drop (BFD disables bcast).
+            // Loopback ON (own frame, no peer involved): dst=FF:..:FF
+            // hits the bcast arm, BFD kills it before any PM pass.
+            // DRAIN first: the PM probe above leaves the netsim MCAST2
+            // reply queued (only MCAST1 was consumed), and that stale
+            // frame would satisfy the silence check vacuously-wrong.
+            for (int r = 0; r < 10; r++) (void)eth_recv_frame(20000);
+            MACCR |= (1 << 12); // LM for this self-addressed probe only
+            for (int i = 0; i < 6; i++) tx_frame[i] = 0xFF;
+            for (int i = 0; i < 6; i++) tx_frame[6 + i] = my_mac[i];
+            tx_frame[12] = 0x08; tx_frame[13] = 0x00;
+            MACFFR = (1 << 0) | (1 << 5); // PM + BFD
+            int got = 0;
+            if (eth_send_frame(14 + 20 + 12, 0)) {
+                for (int r = 0; r < 40 && !got; r++) {
+                    if (eth_recv_frame(5000)) got = 1;
+                }
+            }
+            if (!got) uart_puts("MCAST BFD OK\r\n");
+            else uart_puts("MCAST BFD FAIL\r\n");
+            MACFFR = 0;
+            MACCR &= ~(1 << 12); // LM off again for the HM phase below
+        }
         unsigned int h1 = crc32((unsigned char *)g1, 6) >> 26;
         unsigned int h2 = crc32((unsigned char *)g2, 6) >> 26;
         if (h1 < 32) MACHTLR = 1 << h1; else MACHTHR = 1 << (h1 - 32);
@@ -433,14 +488,36 @@ int main(void) {
             else { uart_puts("PTP DRIFT FAIL "); uart_hex32(pct); uart_puts("\r\n"); }
         }
         // TX snapshot via loopback RX too (driver writes both).
+        // Event-message gate: a PTP Sync frame (ethertype 0x88F7) with
+        // TTSE snapshots; the UDP data frame below must NOT (silicon
+        // snapshots event messages only — the old driver stamped any
+        // TTSE frame, and this probe pins the gate).
         MACCR |= (1 << 12);
         tx_desc[6] = 0; tx_desc[7] = 0;
         rx_desc[6] = 0; rx_desc[7] = 0;
         {
+            // Negative first: UDP data + TTSE must NOT snapshot.
             unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
             tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
+            tx_desc[6] = 0; tx_desc[7] = 0;
             if (eth_send_frame(14 + 20 + 12, 1 << 25)) { // TTSE
+                (void)eth_recv_frame(20000);
+                if (!(tx_desc[6] || tx_desc[7])) uart_puts("PTP snap gate OK\r\n");
+                else uart_puts("PTP SNAP GATE FAIL\r\n");
+            } else uart_puts("PTP GATE TX TIMEOUT\r\n");
+        }
+        {
+            // Positive: raw 0x88F7 Sync frame + TTSE snapshots TX (and RX
+            // via loopback). Raw frame: dst=self, no IP/UDP at all.
+            for (int i = 0; i < 6; i++) tx_frame[i] = my_mac[i];
+            for (int i = 0; i < 6; i++) tx_frame[6 + i] = my_mac[i];
+            tx_frame[12] = 0x88; tx_frame[13] = 0xF7;
+            for (int i = 14; i < 60; i++) tx_frame[i] = 0;
+            tx_frame[14] = 0x00; // Sync message type nibble
+            tx_desc[6] = 0; tx_desc[7] = 0;
+            rx_desc[6] = 0; rx_desc[7] = 0;
+            if (eth_send_frame(60, 1 << 25)) { // TTSE
                 unsigned int len = eth_recv_frame(20000);
                 if (len && (tx_desc[6] || tx_desc[7])) uart_puts("PTP TX snap OK\r\n");
                 else uart_puts("PTP TX SNAP FAIL\r\n");
@@ -1108,6 +1185,21 @@ int main(void) {
             DMARPDR = 1;
             for (volatile int i = 0; i < 2000; i++);
         }
+        // PCF=11 falls back to the DA path (multicast pause DA: needs
+        // PAM to pass — without it, dropped like any unaccepted mcast).
+        MACFFR = (3 << 6); // PCF=11
+        if (eth_send_frame(60, 0)) {
+            unsigned int len = eth_recv_frame(20000);
+            if (len) uart_puts("PAUSE PCF11 LEAK\r\n");
+            else uart_puts("PAUSE PCF11 OK\r\n");
+        }
+        MACFFR = (3 << 6) | (1 << 4); // PCF=11 + PAM: pause DA now passes
+        if (eth_send_frame(60, 0)) {
+            unsigned int len = eth_recv_frame(20000);
+            if (len && rx_buf[12] == 0x88 && rx_buf[13] == 0x08)
+                uart_puts("PAUSE PCF11 PAM OK\r\n");
+            else uart_puts("PAUSE PCF11 PAM FAIL\r\n");
+        }
         MACFFR = (2 << 6); // PCF=10 forward all control
         if (eth_send_frame(60, 0)) {
             unsigned int len = eth_recv_frame(20000);
@@ -1410,7 +1502,7 @@ int main(void) {
             else uart_puts("HPF STRICT FAIL\r\n");
         }
         // HPF=1: either match passes — g2 arrives via the slot.
-        MACFFR = (1 << 2) | (1 << 9);
+        MACFFR = (1 << 2) | (1 << 10); // HM + HPF (CMSIS bit 10)
         {
             unsigned int off = ip_header((unsigned char *)g2, gw_ip, 17, 8 + 4);
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
@@ -1429,7 +1521,7 @@ int main(void) {
         MACFFR = 0;
         MACHTLR = 0; MACHTHR = 0;
         // SAF: self-SA passes, forged SA drops; SAIF inverts both.
-        MACFFR = 1 << 8;
+        MACFFR = 1 << 9; // SAF (CMSIS bit 9)
         {
             unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
             tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
@@ -1454,7 +1546,7 @@ int main(void) {
             if (got && !got2) { uart_puts("SAF SELF OK\r\n"); uart_puts("SAF DROP OK\r\n"); }
             else { uart_puts("SAF FAIL "); uart_puts(got ? "self " : "noself "); uart_puts(got2 ? "leak\r\n" : "nodrop\r\n"); }
             // SAIF: forged now passes, self drops.
-            MACFFR = (1 << 8) | (1 << 7);
+            MACFFR = (1 << 9) | (1 << 8); // SAF + SAIF (CMSIS bits 9/8)
             int got3 = 0;
             if (eth_send_frame(14 + 20 + 12, 0)) {
                 for (int r = 0; r < 200 && !got3; r++) {
@@ -1479,6 +1571,10 @@ int main(void) {
         }
         MACFFR = 0;
         // RA: random unicast dropped with the filter on, passes with RA.
+        // DRAIN first: the SAIF probe above leaves its self-SA loopback
+        // twin queued (dropped by the filter but still occupying the
+        // queue), which would satisfy the RA-OFF silence check wrongly.
+        for (int r = 0; r < 10; r++) (void)eth_recv_frame(20000);
         {
             static const unsigned char rnd[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x09};
             unsigned int off = ip_header((unsigned char *)rnd, gw_ip, 17, 8 + 4);
@@ -1495,6 +1591,17 @@ int main(void) {
             if (!got) uart_puts("RA OFF OK\r\n");
             else uart_puts("RA OFF FAIL\r\n");
             MACFFR = 1 << 31; // RA
+            // DRAIN the RA-OFF probe's own loopback twin (rejected by the
+            // filter but still queued) before re-arming: otherwise the
+            // RA-ON wait consumes the STALE twin first, and the heartbeat
+            // re-arm inside that consume races the fresh probe.
+            for (int r = 0; r < 10; r++) (void)eth_recv_frame(20000);
+            // Re-arm before the RA-ON probe: the RA-OFF probe above ends
+            // with the head CPU-owned (its loopback twin was consumed),
+            // and without a fresh OWN the RA frame RBUS-holds instead of
+            // delivering (same ownership contract as every other probe).
+            rx_desc[0] = 0x80000000 | 1536;
+            DMARPDR = 1;
             int got2 = 0;
             if (eth_send_frame(14 + 20 + 12, 0)) {
                 for (int r = 0; r < 200 && !got2; r++) {

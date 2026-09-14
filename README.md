@@ -15,7 +15,12 @@ browser tab**, with no SDL, no native deps, no hardware.
 
 It ships three real networking firmwares (`eth_http`, `eth_dhcp`, `eth_test`)
 that do DHCP + TCP + HTTP against a simulated (or a real gVisor-backed)
-network, a browser demo, and a publishable npm package.
+network, a 65-marker Ethernet feature matrix (`eth_feat_test`: PHY/MDIO,
+checksum offload, hash/perfect/SA/DA filtering, VLAN, PTP, WOL, wire
+pacing, deferral/collisions, pause frames, MMC, RBUS — see
+[NETWORKING.md](NETWORKING.md)) plus real LwIP 2.2.1 (`lwip_demo`) and
+MII/RMII pin mirrors (`eth_pins_test`), a browser demo, and a publishable
+npm package.
 
 ## Live demo
 
@@ -164,6 +169,9 @@ See AGENTS.md §20 for the full binary protocol reference.
 | `eth_http/` | DHCP + TCP client + HTTP GET + prints the response | `TCP connected`, `=== HTTP <len>b ===` |
 | `eth_dhcp/` | Loops DHCP Discover/Offer/Request/Ack | `DHCP SUCCESS` |
 | `eth_test/` | Raw ETH TX/RX self-test | `ETH Test: done` |
+| `eth_feat_test/` | 65-marker Ethernet feature matrix (netsim, F407 + F429) | `FEAT Test: done` (all 65 markers, `FAIL`/`TIMEOUT` anti-markers) |
+| `lwip_demo/` | Real LwIP 2.2.1 (DHCP→DNS→TCP echo→TCP server→UDP echo) | `LWIP DEMO DONE` |
+| `eth_pins_test/` | MII/RMII pin-level mirrors (TX_EN/CRS_DV/RXD/COL/MDIO/MDC) | `PINS ALL PASS` |
 | `blinky/` | **No ethernet** — LED blinker on GPIOA PA5 + UART tick counter | `tick N LED=ON/OFF` |
 | `doom/` | **DOOM 1 shareware** (doomgeneric F407 port, browser page `site/doom.html`) | `node site/test_doom.mjs` (boot + menu + gameplay + save/load) |
 
@@ -199,9 +207,12 @@ firmware .bin ──► Rust WASM CPU (Thumb-2 + NVIC/exceptions)
   exception stacking — no native deps, no JIT, no hooks.
 - **Peripherals**: a `wasm-bindgen` crate (`stm32-periph-wasm/`); registers
   and bit fields come from the vendor SVD (`monox/stm32f407.svd`).
-- **Ethernet**: TX is captured from the DMA descriptors; RX frames are
-  injected into the RX ring and the firmware's `eth_irq_flag` (SRAM) drives
-  polling — no interrupts required. Optionally, a Go gateway
+- **Ethernet**: TX is captured from the DMA descriptors (OWN/FS/LS poll
+  demand); RX frames are delivered head-only with FS+LS status, IPHCE/PCE
+  checksum status, and PTP snapshots for event messages. The full MAC
+  register map is cross-checked against CMSIS `stm32f407xx.h` (DMASR/
+  DMAIER/MACFFR/MACPMTCTL positions — see [NETWORKING.md](NETWORKING.md)
+  §6 for the audit). Optionally, a Go gateway
   (`openhw-local-gateway/`) with a gVisor network stack makes the firmware
   talk to a real network: `node cli.mjs <fw.bin> <inst> --gateway`.
 - **Browser build** (`site/`): same modules as ESM; `site/emulator.js` is an

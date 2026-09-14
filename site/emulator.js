@@ -147,12 +147,20 @@ export async function createEmulator(opts) {
                 // buffer — observed as RBUS CLEAR FAIL with rx0 stuck at
                 // 0x003C0000 on the single-desc feat layout. Gate on the
                 // configured stride.)
+                // RDES0 status (HAL stm32f4xx_hal_eth.h ETH_DMARXDESC_*):
+                // FS=bit9 + LS=bit8 ALWAYS set on a delivered frame (the
+                // DMA owns single-buffer delivery end-to-end here; ES=bit15
+                // rides along inside rdesExtra when the csum gate raised
+                // it). Previously neither was set — firmware reading
+                // FS/LS (any HAL-based RX path) saw a "middle fragment"
+                // forever and never consumed the frame.
+                const RDESC_FS = 0x200, RDESC_LS = 0x100;
                 const wire = len < 60 ? 60 : len;
                 const out = new Uint8Array(wire);
                 out.set(frame.subarray(0, len));
                 memWrite(BigInt(rdes1), out);
                 const wb = new Uint8Array(4);
-                new DataView(wb.buffer).setUint32(0, (wire << 16) | rdesExtra, true);
+                new DataView(wb.buffer).setUint32(0, (wire << 16) | rdesExtra | RDESC_FS | RDESC_LS, true);
                 memWrite(BigInt(listBase), wb);
                 if (eth_ptp_tse() && (E.rxStride || 0) >= 32) {
                     const sb = new Uint8Array(8);
@@ -166,13 +174,15 @@ export async function createEmulator(opts) {
         }
         const idx = E.rxInjectIdx;
         E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
-        // Same runt-pad LEN rule as the IRQ path above.
+        // Same runt-pad LEN rule as the IRQ path above, same FS+LS status
+        // (single-buffer delivery: first AND last segment always).
+        const RDESC_FS_LS = 0x300;
         const wire = len < 60 ? 60 : len;
         const out = new Uint8Array(wire);
         out.set(frame.subarray(0, len));
         memWrite(BigInt(E.rxBuf + idx * E.rxStride), out);
         const wb = new Uint8Array(4);
-        new DataView(wb.buffer).setUint32(0, (wire << 16) | rdesExtra, true);
+        new DataView(wb.buffer).setUint32(0, (wire << 16) | rdesExtra | RDESC_FS_LS, true);
         memWrite(BigInt(E.rxDesc + idx * 8), wb);
         return true;
     };
@@ -184,6 +194,30 @@ export async function createEmulator(opts) {
         if (len & 1) s += pkt[off + len - 1] << 8;
         while (s >>> 16) s = (s & 0xFFFF) + (s >>> 16);
         return (~s) & 0xFFFF;
+    };
+
+    // PTP event-message test (silicon snapshots ONLY these): ethertype
+    // 0x88F7 (any payload), or IPv4/IPv6 UDP to port 319/320. VLAN-tagged
+    // forms count (one 802.1Q tag skipped). Everything else — the feat
+    // UDP probe, TCP, ICMP, ARP — is NOT an event message.
+    const ptpIsEvent = (pkt) => {
+        if (!pkt || pkt.length < 14) return false;
+        let off = 12;
+        let et = (pkt[off] << 8) | pkt[off + 1];
+        if (et === 0x8100) {
+            if (pkt.length < 18) return false;
+            et = (pkt[16] << 8) | pkt[17];
+            off = 16;
+        }
+        if (et === 0x88F7) return true;
+        if (et !== 0x0800 && et !== 0x86DD) return false;
+        const ihl = et === 0x0800 ? (pkt[off + 2] & 0x0F) * 4 : 40;
+        const l4 = off + 2 + ihl;
+        if (pkt.length < l4 + 4) return false;
+        const proto = et === 0x0800 ? pkt[off + 2 + 9] : pkt[off + 2 + 6];
+        if (proto !== 17) return false;
+        const dport = (pkt[l4 + 2] << 8) | pkt[l4 + 3];
+        return dport === 319 || dport === 320;
     };
 
     // TX checksum offload (TDES0 CIC): insert IP header + TCP/UDP/ICMP
@@ -876,8 +910,14 @@ export async function createEmulator(opts) {
                             txInsertCsum(pkt, (at, v) => {
                                 wuc.mem_write(BigInt(bufAddr + at), new Uint8Array([(v >> 8) & 0xFF, v & 0xFF]));
                             }, (tdes0 >>> 22) & 3);
-                            // TX timestamp snapshot (TTSE + PTP TSE).
-                            if ((tdes0 & 0x02000000) && eth_ptp_tse()) {
+                            // TX timestamp snapshot (TTSE + PTP TSE + event
+                            // message filter): silicon snapshots only PTP
+                            // event messages (Sync/Delay_Req/Pdelay_Req/
+                            // Pdelay_Resp — ethertype 0x88F7, or UDP dport
+                            // 319/320). A TTSE data frame (like the feat
+                            // UDP probe) gets TTSS=0 and no TDES6/7 write —
+                            // the old code stamped every TTSE frame.
+                            if ((tdes0 & 0x02000000) && eth_ptp_tse() && ptpIsEvent(pkt)) {
                                 const sb = new Uint8Array(8);
                                 const sdv = new DataView(sb.buffer);
                                 sdv.setUint32(0, eth_ptp_sec(), true);
