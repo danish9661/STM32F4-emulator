@@ -318,6 +318,15 @@ pub fn adc_clear_channel_value(peripheral: &str, channel: u32) {
     system::adc_clear_override(peripheral, channel);
 }
 
+/// Drain ADC samples staged by EOC-triggered DMA requests (CR2 DMA bit).
+/// Each entry is one 12-bit conversion result, oldest first; empty when no
+/// conversion with DMA enabled has completed since the last drain. The JS
+/// DMA driver calls this after servicing a DMA stream aimed at an ADC DR.
+#[wasm_bindgen]
+pub fn adc_take_dma() -> Vec<u16> {
+    system::adc_take_dma()
+}
+
 #[wasm_bindgen]
 pub fn is_watchdog_reset_requested() -> bool {
     system::is_watchdog_reset_requested()

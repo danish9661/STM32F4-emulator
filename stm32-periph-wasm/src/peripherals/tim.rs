@@ -76,6 +76,122 @@ impl Timer {
         (self.psc as u64).max(1)
     }
 
+    /// Master-mode trigger output level (CR2 MMS[6:4]): the TRGO signal this
+    /// timer broadcasts on the internal trigger bus. Only the level-sensitive
+    /// selections are modeled: 0 = reset (UG bit / counter reset — pulsed on
+    /// update events), 1 = enable (CNT running), 2 = update (pulsed on every
+    /// update event: overflow/underflow + UG). Compare-pulse / OCxREF
+    /// selections (3-7) need edge-precise waveform timing the
+    /// instruction-count clock cannot provide honestly — they read back via
+    /// CR2 but never assert TRGO (documented, not silent).
+    fn trgo_level(&self) -> bool {
+        match (self.cr2 >> 4) & 0x7 {
+            1 => self.cr1 & 1 != 0, // enable: level while running
+            _ => false,             // reset/update are pulsed in advance()
+        }
+    }
+
+    /// Pulse TRGO on an update event (overflow/underflow/UG) when MMS
+    /// selects reset (0) or update (2). Routes to every slave timer whose
+    /// SMCR TS points at this master (ITR mapping below), which then applies
+    /// its own SMS mode (reset / gated / trigger). Deferred through the
+    /// system queue: advance() runs with the master's slot borrow held
+    /// (tick() borrows each slot in turn), so routing directly would
+    /// double-borrow. The queue drains at the END of the system tick, after
+    /// all slots are released (see WasmSystem::tick).
+    fn pulse_trgo(&mut self, sys: &System) {
+        match (self.cr2 >> 4) & 0x7 {
+            0 | 2 => {}
+            _ => return,
+        }
+        sys.queue_trigger(self.name.clone());
+    }
+
+    /// ITR mapping: which master drives ITRx of `slave` (RM0090 tables
+    /// 40/41/43/45 — TIM1/8 row shown; TIM2-5/6-7 share the same shape).
+    /// Returns the master name for TS value 0-3, None for external/ETRF.
+    fn itr_master(slave: &str, ts: u32) -> Option<&'static str> {
+        match slave {
+            "TIM1" => match ts { 0 => Some("TIM5"), 1 => Some("TIM2"), 2 => Some("TIM3"), 3 => Some("TIM4"), _ => None },
+            "TIM8" => match ts { 0 => Some("TIM1"), 1 => Some("TIM2"), 2 => Some("TIM4"), 3 => Some("TIM5"), _ => None },
+            "TIM2" => match ts { 0 => Some("TIM1"), 1 => Some("TIM2"), 2 => Some("TIM3"), 3 => Some("TIM4"), _ => None },
+            "TIM3" => match ts { 0 => Some("TIM1"), 1 => Some("TIM2"), 2 => Some("TIM5"), 3 => Some("TIM4"), _ => None },
+            "TIM4" => match ts { 0 => Some("TIM1"), 1 => Some("TIM2"), 2 => Some("TIM3"), 3 => Some("TIM4"), _ => None },
+            "TIM5" => match ts { 0 => Some("TIM2"), 1 => Some("TIM3"), 2 => Some("TIM4"), 3 => Some("TIM1"), _ => None },
+            _ => None,
+        }
+    }
+
+    /// Apply one master's TRGO pulse to one slave per the slave's SMS mode:
+    /// 0 (disabled) = ignore; 4 (reset) = CNT=0 + UIF; 5 (gated) = enable
+    /// counting while TRGO level holds; 6 (trigger) = start counting
+    /// (CEN=1). Modes 1-3/7 (encoder/OC/reset-variants) are not modeled.
+    /// pub(crate): called by the free route_trgo fan-out (same module).
+    pub(crate) fn route_trigger_pub(sys: &System, master: &str, slave: &str) {
+        Self::route_trigger(sys, master, slave);
+    }
+
+    fn route_trigger(sys: &System, master: &str, slave: &str) {
+        for slot in &sys.p.peripherals {
+            let mut b = slot.peripheral.borrow_mut();
+            let Some(t) = b.as_any_mut().downcast_mut::<Timer>() else { continue };
+            if t.name != slave {
+                continue;
+            }
+            let sms = t.smcr & 0x7;
+            let ts = (t.smcr >> 4) & 0x7;
+            if sms == 0 || ts > 3 {
+                return;
+            }
+            if Self::itr_master(slave, ts) != Some(master) {
+                return;
+            }
+            match sms {
+                4 => {
+                    // Reset mode: counter reset + update flag (no IRQ unless
+                    // UIE set — same path as generate_update).
+                    t.cnt = 0;
+                    t.sr |= 1;
+                    if t.dier & 1 != 0 {
+                        sys.p.nvic.borrow_mut().set_intr_pending(t.irq_num);
+                    }
+                }
+                5 => {
+                    // Gated mode: run while the master's TRGO level holds.
+                    // The pulse call itself proves the level was asserted at
+                    // least now; enable counting (CEN=1) so subsequent
+                    // advance() ticks count, matching the "run while high"
+                    // observable for a pulsed master.
+                    t.cr1 |= 1;
+                }
+                6 => {
+                    // Trigger mode: start the counter.
+                    if t.cr1 & 1 == 0 {
+                        t.cr1 |= 1;
+                        t.cnt = 0;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+    }
+}
+
+/// Fan one master's queued TRGO pulse out to every slaved timer.
+/// Called from WasmSystem::tick via drain_triggers, with no slot
+/// borrows held. Free function (not a method): the routing helpers live
+/// in `impl Timer` taking &mut self borrows, which is exactly what the
+/// deferred drain avoids holding.
+pub(crate) fn route_trgo(sys: &System, master: &str) {
+    for slave in ["TIM1", "TIM2", "TIM3", "TIM4", "TIM5", "TIM6", "TIM7", "TIM8"] {
+        if slave != master {
+            Timer::route_trigger_pub(sys, master, slave);
+        }
+    }
+}
+
+impl Timer {
     fn elapsed_ticks(&self) -> u64 {
         let now = instruction_count();
         let delta = now.wrapping_sub(self.last_tick);
@@ -120,6 +236,10 @@ impl Timer {
                         if self.dier & (1 << 8) != 0 { //UDE - DMA request
                             // would trigger DMA
                         }
+                        // Update event: pulse TRGO to slave timers (MMS
+                        // reset/update selections) BEFORE the comment below
+                        // so chained slaves observe the same event.
+                        self.pulse_trgo(sys);
                         // Update interrupt on overflow
                     }
                 }
@@ -131,6 +251,7 @@ impl Timer {
                         if self.dier & 1 != 0 {
                             sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
                         }
+                        self.pulse_trgo(sys);
                     }
                 }
                 _ => { // Center-aligned modes
@@ -142,6 +263,7 @@ impl Timer {
                         if self.dier & 1 != 0 {
                             sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
                         }
+                        self.pulse_trgo(sys);
                     }
                 }
             }
@@ -181,6 +303,8 @@ impl Timer {
         if self.dier & 1 != 0 {
             sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
         }
+        // UG is an update event too: slaves in reset mode observe it.
+        self.pulse_trgo(sys);
     }
 
     /// CCxS field (input/output selection) for a capture/compare channel.
@@ -394,5 +518,87 @@ mod tests {
         t.capture_trigger(0, &sys);
         assert_eq!(t.ccr[0], 0, "output channel is not captured");
         assert!(t.sr & (1 << 1) == 0, "no CC1IF for output channel");
+    }
+
+    // Master/slave trigger routing: TIM2 update (MMS=010) resets TIM3
+    // (SMS=100, TS=001 -> ITR1 = TIM2). Uses the shared dummy system so
+    // routing crosses real peripheral slots, not one detached Timer.
+    #[test]
+    fn trgo_update_resets_slaved_timer() {
+        use std::sync::atomic::Ordering;
+        let sys = crate::system::test_dummy_system();
+        // TIM2: master, MMS=010 (update), ARR small, enabled.
+        // TIM3: slave, SMS=100 (reset), TS=001 (ITR1 -> TIM2).
+        for slot in &sys.p.peripherals {
+            let mut b = slot.peripheral.borrow_mut();
+            if let Some(t) = b.as_any_mut().downcast_mut::<Timer>() {
+                if t.name == "TIM2" {
+                    t.write(&sys, 0x04, 2 << 4); // CR2 MMS=010
+                    t.write(&sys, 0x2C, 9);      // ARR=9 (period 10)
+                    t.write(&sys, 0x00, 1);      // CEN
+                } else if t.name == "TIM3" {
+                    t.write(&sys, 0x08, (1 << 4) | 4); // SMCR TS=001,SMS=100
+                    t.write(&sys, 0x2C, 0xFFFF);
+                    t.write(&sys, 0x24, 0x1234); // CNT seeded nonzero
+                }
+            }
+        }
+        // Run TIM2 past one full period via the shared system tick (which
+        // drains the deferred TRGO queue): its update must reset TIM3 CNT.
+        crate::system::INSTRUCTION_COUNT.fetch_add(50, Ordering::Relaxed);
+        sys.tick();
+        let mut cnt3 = 0xFFFF;
+        let mut uif3 = 0;
+        for slot in &sys.p.peripherals {
+            let mut b = slot.peripheral.borrow_mut();
+            if let Some(t) = b.as_any_mut().downcast_mut::<Timer>() {
+                if t.name == "TIM3" {
+                    cnt3 = t.read(&sys, 0x24);
+                    uif3 = t.read(&sys, 0x10) & 1;
+                }
+            }
+        }
+        assert_eq!(cnt3, 0, "slave CNT reset by master update, got {cnt3:#X}");
+        assert_ne!(uif3, 0, "slave UIF set on reset-mode trigger");
+    }
+
+    // Trigger mode (SMS=110): master's update starts a stopped slave.
+    #[test]
+    fn trgo_trigger_starts_slaved_timer() {
+        let sys = crate::system::test_dummy_system();
+        for slot in &sys.p.peripherals {
+            let mut b = slot.peripheral.borrow_mut();
+            if let Some(t) = b.as_any_mut().downcast_mut::<Timer>() {
+                if t.name == "TIM2" {
+                    t.write(&sys, 0x04, 2 << 4);
+                    t.write(&sys, 0x2C, 9);
+                    t.write(&sys, 0x00, 1);
+                } else if t.name == "TIM4" {
+                    // TS=011 -> ITR2 -> TIM3 is NOT TIM2: must NOT start.
+                    t.write(&sys, 0x08, (3 << 4) | 6); // SMS=110 trigger
+                } else if t.name == "TIM3" {
+                    // TS=001 -> ITR1 -> TIM2: must start.
+                    t.write(&sys, 0x08, (1 << 4) | 6);
+                }
+            }
+        }
+        use std::sync::atomic::Ordering;
+        crate::system::INSTRUCTION_COUNT.fetch_add(50, Ordering::Relaxed);
+        // Shared system tick: TIM2's update queues TRGO, the end-of-tick
+        // drain routes it to TIM3 (TIM4's TS points elsewhere: stays put).
+        sys.tick();
+        let (mut c3, mut c4) = (0, 0);
+        for slot in &sys.p.peripherals {
+            let mut b = slot.peripheral.borrow_mut();
+            if let Some(t) = b.as_any_mut().downcast_mut::<Timer>() {
+                if t.name == "TIM3" {
+                    c3 = t.read(&sys, 0x00) & 1;
+                } else if t.name == "TIM4" {
+                    c4 = t.read(&sys, 0x00) & 1;
+                }
+            }
+        }
+        assert_ne!(c3, 0, "routed slave starts on master update");
+        assert_eq!(c4, 0, "unrouted timer stays stopped");
     }
 }

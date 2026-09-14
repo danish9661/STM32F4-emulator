@@ -86,14 +86,52 @@ impl Adc {
     fn fire_interrupts(&mut self, sys: &System) {
         let irq = adc_irq(&self.name);
         if (self.sr & (1 << 1) != 0 && self.eoc_enabled()) ||
-           (self.sr & (1 << 5) != 0 && self.ovr_enabled()) {
+           (self.sr & (1 << 5) != 0 && self.ovr_enabled()) ||
+           (self.sr & 1 != 0 && self.awd_enabled()) {
             sys.p.nvic.borrow_mut().set_intr_pending(irq);
+        }
+    }
+
+    /// Analog watchdog: enabled via CR1 AWDEN (all regular channels) or
+    /// JAWDEN (injected only — not modeled, no injected conversions exist),
+    /// optionally single-channel via AWDSGL+AWDCH. Fires when the converted
+    /// value leaves [LTR, HTR]: sets SR bit 0 (AWD) and pends IRQ 18/47 when
+    /// AWDIE (CR1 bit 6) is set. Checked on every completed conversion.
+    fn awd_enabled(&self) -> bool { self.cr1 & (1 << 6) != 0 }
+
+    fn check_awd(&mut self, sys: &System, channel: u32, val: u32) {
+        // JAWDEN-only (AWDEN clear) watches injected channels — nothing to
+        // do here since the model never produces injected conversions.
+        if self.cr1 & (1 << 23) == 0 && self.cr1 & (1 << 22) != 0 {
+            return;
+        }
+        if self.cr1 & (1 << 23) == 0 {
+            return;
+        }
+        // AWDSGL (bit 9): watch only AWDCH (bits 4:0); otherwise all.
+        if self.cr1 & (1 << 9) != 0 && channel != (self.cr1 & 0x1F) {
+            return;
+        }
+        if val < (self.ltr & 0xFFF) || val > (self.htr & 0xFFF) {
+            self.sr |= 1; // AWD
+            self.fire_interrupts(sys);
         }
     }
 
     fn set_eoc(&mut self, sys: &System) {
         self.sr |= 1 << 1; // EOC
         self.fire_interrupts(sys);
+        // DMA request on EOC when CR2 DMA (bit 8) is set: stage one
+        // half-word from this ADC's DR for the DMA driver. The driver
+        // (emulator.js wProcessDma / native tests) drains staged ADC
+        // samples via `adc_take_dma()`. DDS (bit 9) = continuous: keep
+        // staging every conversion; without it, silicon issues requests
+        // only until the stream disables — here: stage once per
+        // conversion while DMA stays set (the guest clears DMA to stop,
+        // same observable behavior).
+        if self.cr2 & (1 << 8) != 0 {
+            crate::system::adc_stage_dma(self.dr & 0xFFFF);
+        }
     }
 
     fn start_conversion(&mut self, sys: &System) {
@@ -120,6 +158,7 @@ impl Adc {
                 });
                 self.dr = val;
                 self.set_eoc(sys);
+                self.check_awd(sys, channel, val);
             }
         }
     }
@@ -151,6 +190,70 @@ mod tests {
         INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
         adc.read(&sys, 0x08);
         assert!(adc.read(&sys, 0x4C) < 4096);
+    }
+
+    #[test]
+    fn awd_fires_irq_only_outside_thresholds() {
+        use crate::system::test_dummy_system;
+        let sys = test_dummy_system();
+        let mut boxed = Adc::new("ADC1").unwrap();
+        let adc = boxed.as_any_mut().downcast_mut::<Adc>().unwrap();
+        // Watch channel 5 alone, window [100, 2000], AWDIE on.
+        adc.write(&sys, 0x24, 2000); // HTR
+        adc.write(&sys, 0x28, 100);  // LTR
+        adc.write(&sys, 0x04, (1 << 23) | (1 << 9) | (1 << 6) | 5); // AWDEN+AWDSGL+AWDIE+CH5
+        adc.write(&sys, 0x34, 5);
+        // In-window value: no AWD, no IRQ.
+        adc_set_override("ADC1", 5, 500);
+        adc.write(&sys, 0x08, (1 << 30) | 1);
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        assert_eq!(adc.read(&sys, 0x00) & 1, 0, "in-window value must not set AWD");
+        assert!(!sys.p.nvic.borrow().irq_pending(18), "no IRQ while in window");
+        // Out-of-window high: AWD + IRQ 18.
+        adc_set_override("ADC1", 5, 3000);
+        adc.write(&sys, 0x08, (1 << 30) | 1);
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        assert_ne!(adc.read(&sys, 0x00) & 1, 0, "out-of-window value must set AWD");
+        assert!(sys.p.nvic.borrow().irq_pending(18), "AWDIE must pend IRQ 18");
+        // Other channel ignored under AWDSGL.
+        sys.p.nvic.borrow_mut().clear_pending(18);
+        adc.write(&sys, 0x04, (1 << 23) | (1 << 9) | (1 << 6) | 7); // watch CH7
+        adc.write(&sys, 0x34, 5); // but convert CH5 (out of window)
+        adc.write(&sys, 0x08, (1 << 30) | 1);
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        assert_eq!(adc.read(&sys, 0x00) & 1, 0, "unwatched channel must not set AWD");
+        adc_clear_override("ADC1", 5);
+    }
+
+    #[test]
+    fn dma_bit_stages_one_sample_per_conversion() {
+        use crate::system::{test_dummy_system, adc_take_dma};
+        // Drain first: the queue is process-global and an earlier test in
+        // this binary may have staged samples (parallel cargo runs share
+        // it; reset_globals only runs on emulator init, not per test).
+        adc_take_dma();
+        let sys = test_dummy_system();
+        let mut boxed = Adc::new("ADC1").unwrap();
+        let adc = boxed.as_any_mut().downcast_mut::<Adc>().unwrap();
+        adc_set_override("ADC1", 5, 0x0ABC);
+        adc.write(&sys, 0x34, 5);
+        // DMA clear: conversions complete (EOC sets) but stage nothing.
+        adc.write(&sys, 0x08, (1 << 30) | 1);
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        assert!(adc_take_dma().is_empty(), "no staging while CR2 DMA=0");
+        // DMA set: one sample per conversion, in order.
+        adc.write(&sys, 0x08, (1 << 30) | 1 | (1 << 8)); // SWSTART+ADON+DMA
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        adc.write(&sys, 0x08, (1 << 30) | 1 | (1 << 8));
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        assert_eq!(adc_take_dma(), vec![0x0ABC, 0x0ABC], "one staged sample per EOC");
+        adc_clear_override("ADC1", 5);
     }
 
     #[test]
@@ -283,7 +386,10 @@ impl Peripheral for Adc {
             }
             0x08 => {
                 let was_swstart = self.cr2 & (1 << 30);
-                self.cr2 = value & 0x7FF0_0EFF;
+                // CR2 mask keeps DMA (bit 8) + DDS (bit 9): 0x7FF0_0EFF has
+                // bit 8 = 0 (DMA was silently dropped on every write — no
+                // DMA request could ever arm). Correct mask: 0x7FF0_0FFF.
+                self.cr2 = value & 0x7FF0_0FFF;
                 if value & (1 << 30) != 0 && was_swstart == 0 {
                     self.last_conv_start = instruction_count();
                 }

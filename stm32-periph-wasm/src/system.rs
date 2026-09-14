@@ -474,6 +474,29 @@ pub fn adc_get_override(peripheral: &str, channel: u32) -> Option<u32> {
     adc_overrides().lock().unwrap().get(&(peripheral.to_string(), channel)).copied()
 }
 
+// ── ADC DMA staging (EOC-triggered half-words) ───────────────────────────
+// When an ADC's CR2 DMA bit is set, each completed conversion stages one
+// 12-bit sample here for the DMA driver (emulator.js wProcessDma drains it
+// into the guest buffer the armed DMA stream points at; native tests drain
+// it directly). Bounded like a real DMA FIFO: past 64 samples the oldest
+// is dropped and counted as overrun-adjacent (no fake IRQ — OVR semantics
+// stay on the ADC's own SR bit 5 path).
+static ADC_DMA_QUEUE: OnceLock<Mutex<std::collections::VecDeque<u16>>> = OnceLock::new();
+
+fn adc_dma_queue() -> &'static Mutex<std::collections::VecDeque<u16>> {
+    ADC_DMA_QUEUE.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
+}
+pub fn adc_stage_dma(sample: u32) {
+    let mut q = adc_dma_queue().lock().unwrap();
+    if q.len() >= 64 {
+        q.pop_front();
+    }
+    q.push_back((sample & 0xFFF) as u16);
+}
+pub fn adc_take_dma() -> Vec<u16> {
+    adc_dma_queue().lock().unwrap().drain(..).collect()
+}
+
 // ── SPI bus taps (JS hardware layer plumbing) ──────────────────────────────
 // Event word layout: bit 31 = CS edge event, bit 30 = asserted (1) when CS
 // is a CS event, bit 29 = DC level (1 = data) when the tap has a DC pin,
@@ -601,6 +624,11 @@ pub fn dcmi_clear() {
 pub struct WasmSystem {
     pub p: Rc<Peripherals>,
     pending_dma: RefCell<Vec<DmaTransfer>>,
+    /// Deferred master->slave timer trigger pulses (master names). TIM
+    /// advance() runs with its slot borrow held, so TRGO routing cannot
+    /// touch other slots inline — pulses queue here and drain at the end
+    /// of the system tick, after all slot borrows are released.
+    pending_triggers: RefCell<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -613,7 +641,7 @@ pub fn test_dummy_system() -> ::std::rc::Rc<crate::system::System> {
     // tests run in parallel (see bug fix 2026-08-10).
     let empty = ExtDevices::default();
     let p = Rc::new(Peripherals::new_wasm(gpio, &empty));
-    ::std::rc::Rc::new(WasmSystem { p, pending_dma: RefCell::new(Vec::new()) })
+    ::std::rc::Rc::new(WasmSystem { p, pending_dma: RefCell::new(Vec::new()), pending_triggers: RefCell::new(Vec::new()) })
 }
 
 /// Like `test_dummy_system` but with a caller-supplied device list, for
@@ -623,7 +651,7 @@ pub fn test_dummy_system() -> ::std::rc::Rc<crate::system::System> {
 pub fn test_system_with(ext: &crate::ext_devices::ExtDevices) -> ::std::rc::Rc<crate::system::System> {
     use crate::peripherals::Peripherals;
     let p = Rc::new(Peripherals::new_wasm(GpioPorts::default(), ext));
-    ::std::rc::Rc::new(WasmSystem { p, pending_dma: RefCell::new(Vec::new()) })
+    ::std::rc::Rc::new(WasmSystem { p, pending_dma: RefCell::new(Vec::new()), pending_triggers: RefCell::new(Vec::new()) })
 }
 
 #[cfg(test)]
@@ -638,7 +666,7 @@ impl WasmSystem {
         let p = Rc::new(Peripherals::new_wasm(gpio, &*ext));
         drop(ext);
         Self::register_software_spis(&p);
-        WasmSystem { p, pending_dma: RefCell::new(Vec::new()) }
+        WasmSystem { p, pending_dma: RefCell::new(Vec::new()), pending_triggers: RefCell::new(Vec::new()) }
     }
 
     pub fn new_svd(svd_xml: &str) -> Self {
@@ -647,7 +675,7 @@ impl WasmSystem {
         let p = Rc::new(Peripherals::from_svd(svd_xml, gpio, &*ext));
         drop(ext);
         Self::register_software_spis(&p);
-        WasmSystem { p, pending_dma: RefCell::new(Vec::new()) }
+        WasmSystem { p, pending_dma: RefCell::new(Vec::new()), pending_triggers: RefCell::new(Vec::new()) }
     }
 
     fn register_software_spis(p: &Peripherals) {
@@ -668,6 +696,20 @@ impl WasmSystem {
 
     pub fn queue_dma_transfer(&self, t: DmaTransfer) {
         self.pending_dma.borrow_mut().push(t);
+    }
+
+    /// Queue one master timer's TRGO pulse for end-of-tick routing.
+    pub fn queue_trigger(&self, master: String) {
+        self.pending_triggers.borrow_mut().push(master);
+    }
+
+    /// Drain queued TRGO pulses, routing each to slaved timers. Runs at the
+    /// end of the system tick with no slot borrows held.
+    pub fn drain_triggers(&self) {
+        let masters: Vec<String> = self.pending_triggers.borrow_mut().drain(..).collect();
+        for m in masters {
+            crate::peripherals::tim::route_trgo(self, &m);
+        }
     }
 
     pub fn pending_dma_count(&self) -> usize {
@@ -729,6 +771,7 @@ impl WasmSystem {
         for slot in &p.peripherals {
             slot.peripheral.borrow_mut().tick(self);
         }
+        self.drain_triggers();
         crate::peripherals::can::arbitrate_bus(self);
         p.nvic.borrow_mut().maybe_set_systick_intr_pending();
     }
@@ -871,6 +914,7 @@ pub fn reset_globals() {
     if let Some(m) = I2C_TAP_TX.get() { m.lock().unwrap().clear(); }
     if let Some(m) = I2C_TAP_RX.get() { m.lock().unwrap().clear(); }
     if let Some(m) = ADC_OVERRIDES.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = ADC_DMA_QUEUE.get() { m.lock().unwrap().clear(); }
     if let Some(m) = CAN_STAGED.get() { m.lock().unwrap().clear(); }
     if let Some(m) = AUDIO_SOURCE.get() { *m.lock().unwrap() = None; }
     if let Some(m) = AUDIO_CAPTURE.get() { m.lock().unwrap().clear(); }

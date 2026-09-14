@@ -96,6 +96,14 @@ export function adc_clear_channel_value(peripheral: string, channel: number): vo
  */
 export function adc_set_channel_value(peripheral: string, channel: number, value: number): void;
 
+/**
+ * Drain ADC samples staged by EOC-triggered DMA requests (CR2 DMA bit).
+ * Each entry is one 12-bit conversion result, oldest first; empty when no
+ * conversion with DMA enabled has completed since the last drain. The JS
+ * DMA driver calls this after servicing a DMA stream aimed at an ADC DR.
+ */
+export function adc_take_dma(): Uint16Array;
+
 export function add_i2c_eeprom(peripheral: string, address: number, data: Uint8Array): void;
 
 /**
@@ -694,6 +702,7 @@ export interface InitOutput {
     readonly __wbg_wasmcpu_free: (a: number, b: number) => void;
     readonly adc_clear_channel_value: (a: number, b: number, c: number) => void;
     readonly adc_set_channel_value: (a: number, b: number, c: number, d: number) => void;
+    readonly adc_take_dma: (a: number) => void;
     readonly add_i2c_eeprom: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly add_software_spi: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
     readonly add_spi_flash: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;

@@ -73,11 +73,11 @@ silicon. Depth details: [PERIPHERALS](../peripherals.md); Ethernet depth:
 | SPI1, SPI2, SPI3 + I2S1–3 | Yes | Full | master 8/16-bit, CS callbacks, flash/tap slaves, WAV-backed audio + TX capture | SPI slave mode; HW CRC regs stored, not computed |
 | I2C1, I2C2, I2C3 | Yes | Full | master state machine, EEPROM/regfile/tap slaves, IRQs | multi-master arbitration; SMBus/PEC |
 | SDIO | Yes | Full | card state machine, CMD0/2/3/5/7/8/9/10/13/16/17/18/41/55, block reads, IRQ49 | bus-width switching; ACMDs; SDIO-card interrupts |
-| TIM1, TIM8 (advanced) | Yes | Full | up/down/center, OC/PWM, input capture + host injection, UIF/CC IRQs | encoder-mode counting; timer-to-timer trigger routing |
-| TIM2–TIM5 (general-purpose) | Yes | Full | same model (32-bit TIM2/5) | same gaps |
-| TIM6, TIM7 (basic) | Yes | Full | time-base + UIF IRQ | — |
+| TIM1, TIM8 (advanced) | Yes | Full | up/down/center, OC/PWM, input capture + host injection, DBGMCU freeze, TRGO trigger routing (MMS reset/update → ITR slaves), UIF/CC IRQs | encoder-mode counting |
+| TIM2–TIM5 (general-purpose) | Yes | Full | same model (32-bit TIM2/5) + TRGO routing | same gaps minus trigger routing |
+| TIM6, TIM7 (basic) | Yes | Full | time-base + UIF IRQ, DBGMCU freeze, TRGO routing | — |
 | TIM9–TIM14 | Yes | Full | time-base + capture/compare + IRQs | — |
-| ADC1, ADC2, ADC3 | Yes | Full | SWSTART conversion, SMPR timing, EOC/OVR IRQs, temp/Vref/Vbat canned | sample values are deterministic LCG pseudo-random; AWD thresholds stored without IRQ; no DMA requests |
+| ADC1, ADC2, ADC3 | Yes | Full | SWSTART conversion, SMPR timing, EOC/OVR/AWD IRQs, ADC_Common CSR/CDR mirror, EOC-triggered DMA staging (`adc_take_dma`), temp/Vref/Vbat canned | sample values are deterministic LCG pseudo-random; dual-mode never interleaved |
 | DAC | Yes | Full | triggers, LFSR noise + triangle waveforms, DOR readback | output has no physical sink (register model) |
 | DCMI | Yes | Partial | JS-fed frames, 4-deep FIFO, VSYNC/LINE/FRAME/OVR + IRQ78 | pin-sync sampling; JPEG mode; crop-window regs stored |
 | FSMC | Yes | Partial | 4 banks, BCR/BTR/PCR, JS bank taps (address + value) | access timings / wait states; NAND ECC not computed; untapped banks read 0 |

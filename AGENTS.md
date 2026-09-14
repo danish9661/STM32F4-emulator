@@ -1438,9 +1438,17 @@ Deterministic: `node site/test_doom.mjs` PASSes 3/3 with identical numbers.
   OR `saveMap` bit, clear flag; flag=2 → `atob` → mem_write, set
   saveSize or 0, `saveReady=1`. boot() restores saveMap from
   localStorage. (Node harness has no processSaves — it asserts the ABI.)
-- **Node harness flow** (site/test_doom.mjs): F6 (0xC0) at i≥200 →
+- **Node harness flow** (site/test_doom_wasm.mjs): F6 (0xC0) at i≥200 →
   Enter when menuactive → 'a' (0x61) + Enter → asserts `SAVE ok slot=0`
-  in uart + flag=1. Pass condition: `SAVE ok slot=0` present.
+  in uart + flag=1; then F9 (0xC3) + 'y' (0x79) → asserts `LOAD ok slot=0`
+  + `loadDone` live flag. The harness mirrors doom-worker's processSaves/
+  completeLoad inline (SAVEMAP mirror, EXTRAM blob restore, SAVEREADY=1
+  between steps — the guest busy-waits, so the answer must land between
+  steps, never mid-step). Gotcha: the quick-load confirm prompt prints via
+  the menu drawer (framebuffer), NOT UART — gating 'y' on UART text waits
+  forever; the harness sends F9+'y' together once SAVEMAP bit 0 is set and
+  re-asserts 'y' every 10 iters until LOAD ok (menu tick drains ~1 pair per
+  frame). Pass condition: `SAVE ok slot=0` AND `LOAD ok slot=0` present.
 - **Key-ring overflow (harness bug)**: the guest consumes ~1 (D,U) pair
   per game frame; spamming W(D) every 200k-inst iteration (plus arrow/
   fire taps) wraps the 256-byte ring mod 256 and clobbers unconsumed
@@ -2615,7 +2623,8 @@ deliberate, all documented, none reachable by compiler-emitted code.
   16-bit ADD/SUB-reg DO set flags unpredicated (GAS `adds`/`subs`; reverting
   broke strcasecmp/title), preserve only when predicated.
 - `site/test_doom_wasm.mjs` (port of test_doom.mjs): PASS (menu, 72 frames,
-  SAVE ok slot 0, peak 0.5, 0% clip) in `test:wasm`. Speaker shim converts
+  SAVE ok slot 0, LOAD ok slot 0 via the F9+'y' reverse handshake, peak 0.5,
+  0% clip) in `test:wasm`. Speaker shim converts
   signed (was unsigned: 57% clipped, peak 2.0).
 - Native units: tbb/sdiv(+IT taken+skipped)/usat-ssat-Q/addw-subw/t3-reg/
   ldrsh-reg/cmp13/strcasecmp-pairs/it_pred/bare-flag counterparts;

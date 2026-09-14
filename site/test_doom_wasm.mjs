@@ -26,6 +26,16 @@ const KEYRD = ABASE + 0x04n;         // u32 read index (guest side)
 const RING = ABASE + 0x08n;          // 256-byte ring, 2 bytes/event
 const DGSB = ABASE + 0x510n;         // u32 DG_ScreenBuffer value
 const PALETTE = ABASE + 0x110n;      // 1024 B (b,g,r,a per entry)
+// Savegame ABI: guest stages blobs in EXTRAM, driver mirrors them.
+// SAVEFLAG 1 = guest wrote a slot (driver stores + sets SAVEMAP bit);
+// SAVEFLAG 2 = guest wants to load a slot (driver restores + SAVEREADY).
+const SAVEFLAG = ABASE + 0x51Cn;
+const SAVESIZE = ABASE + 0x520n;
+const SAVEREADY = ABASE + 0x524n;
+const SAVESLOT = ABASE + 0x528n;
+const SAVEMAP = ABASE + 0x52Cn;
+const SAVEADDR = 0xC0080000n;
+const SAVESLOTSIZE = 0x40000n;
 
 const emu = await createEmulator({
     firmware, bindings, svdXml, wasmInit: wasmBytes,
@@ -50,6 +60,35 @@ function sendKey(code, pressed) {
     emu.write32(KEYWR, keyWr);
 }
 
+// Savegame mirror (doom-worker.js processSaves/completeLoad parity, inline:
+// the guest busy-waits on SAVEREADY, so the answer must land between steps
+// — never mid-step). Returns true when a load completed this call.
+const savedSlots = new Map(); // slot -> Uint8Array blob
+function processSaves() {
+    const flag = read32(SAVEFLAG);
+    if (flag === 1) {
+        const slot = read32(SAVESLOT), size = read32(SAVESIZE);
+        if (slot >= 0 && slot < 2 && size > 0) {
+            savedSlots.set(slot, memRead(SAVEADDR + BigInt(slot) * SAVESLOTSIZE, size));
+            emu.write32(SAVEMAP, read32(SAVEMAP) | (1 << slot));
+        }
+        emu.write32(SAVEFLAG, 0);
+    } else if (flag === 2) {
+        const slot = read32(SAVESLOT);
+        const blob = savedSlots.get(slot);
+        if (blob && blob.length) {
+            uc.mem_write(SAVEADDR + BigInt(slot) * SAVESLOTSIZE, blob);
+            emu.write32(SAVESIZE, blob.length);
+        } else {
+            emu.write32(SAVESIZE, 0);
+        }
+        emu.write32(SAVEREADY, 1);
+        emu.write32(SAVEFLAG, 0);
+        return true;
+    }
+    return false;
+}
+
 const uart = [];
 let uartText = '';
 let fbAddr = 0n;
@@ -57,6 +96,9 @@ let prevHash = -1, changes = 0;
 let phase = 'boot';      // boot -> title -> wait1/2/3 (change-gated keys) -> play
 let saveTapped = false;  // F6 quick-save menu opened once mid-game
 let saveSlotKey = false, saveNameKey = false;
+let loadTapped = false;  // F9 quick-load after the save committed
+let loadConfirmKey = false;
+let loadDone = false;    // LOAD ok observed (the reverse handshake)
 let gate = 0;            // change-count snapshot between key sends
 let maxSteps = 0;
 let crashed = false;
@@ -79,11 +121,17 @@ const tallyAudio = (a) => {
 try {
     for (let i = 0; i < 400; i++) {
         emu.step(200000);
+        // Save/load handshake first (mirrors doom-worker.js: the guest
+        // busy-waits on SAVEREADY, so the answer lands between steps).
+        // Check BEFORE draining UART so the LOAD ok line is attributed to
+        // the right iteration.
+        if (processSaves()) console.log('[save] load handshake completed');
         const chunk = emu.drainUart();
         uart.push(chunk);
         uartText += chunk;
         maxSteps += 200000;
-        if (maxSteps > 80000000) break;
+        if (maxSteps > 80000000 && !loadTapped) break;
+        if (loadDone && maxSteps > 80000000) break;
 
         const a = emu.takeSpeakerSamples();
         audioSamples += a.length;
@@ -154,6 +202,32 @@ try {
                 sendKey(0x0D, true); sendKey(0x0D, false);   // Enter -> M_DoSave(0)
                 console.log('[keys] name+enter');
             }
+            // LOAD handshake (reverse direction): after the save committed
+            // (SAVEMAP bit 0 set by processSaves), press F9 quick-load.
+            // NOTE: no 'y' confirm gate here — the confirm prompt prints
+            // via the menu drawer (framebuffer), NOT UART, so gating on
+            // UART text waits forever (observed: F9 sent, prompt up, 'y'
+            // never sent). Instead hold 'y' down from the start: the
+            // M_QuickLoadResponse consumes it when the prompt runs. The
+            // key ring is drained pair-per-frame, so re-assert sparingly.
+            if (saveNameKey && !loadTapped && (read32(SAVEMAP) & 1) !== 0) {
+                loadTapped = true;
+                sendKey(0xC3, true); sendKey(0xC3, false);   // F9 quick-load
+                sendKey(0x79, true); sendKey(0x79, false);   // 'y' confirm (held via re-assert below)
+                loadConfirmKey = true;
+                console.log('[keys] F9 quick-load + y');
+            }
+            if (loadConfirmKey && !loadDone) {
+                if (uartText.includes('LOAD ok slot=0')) {
+                    loadDone = true;
+                    console.log('[save] LOAD ok observed');
+                } else if (i % 10 === 0) {
+                    // Re-assert 'y' until the guest drains it (menu tick
+                    // consumes one pair per frame; a single tap can land
+                    // in a drain the prompt hasn't run yet).
+                    sendKey(0x79, true); sendKey(0x79, false);
+                }
+            }
         }
 
         if (i % 50 === 0 && phase !== 'boot') {
@@ -184,7 +258,9 @@ const pass =
     all.includes('Z_Init') &&
     all.includes('adding doom1.wad') &&
     all.includes('I_InitGraphics') &&
-    all.includes('SAVE ok slot=0') &&   // F2 quick-save committed via the ABI
+    all.includes('SAVE ok slot=0') &&   // F6 quick-save committed via the ABI
+    all.includes('LOAD ok slot=0') &&   // F9 quick-load restored via the ABI
+    loadDone &&                          // handshake observed live, not just in UART
     fbAddr !== 0n &&
     changes >= 20 &&
     keyRd > 0 &&          // guest consumed at least one injected event

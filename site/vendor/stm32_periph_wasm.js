@@ -324,6 +324,27 @@ export function adc_set_channel_value(peripheral, channel, value) {
 }
 
 /**
+ * Drain ADC samples staged by EOC-triggered DMA requests (CR2 DMA bit).
+ * Each entry is one 12-bit conversion result, oldest first; empty when no
+ * conversion with DMA enabled has completed since the last drain. The JS
+ * DMA driver calls this after servicing a DMA stream aimed at an ADC DR.
+ * @returns {Uint16Array}
+ */
+export function adc_take_dma() {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.adc_take_dma(retptr);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU16FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 2, 2);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * @param {string} peripheral
  * @param {number} address
  * @param {Uint8Array} data
