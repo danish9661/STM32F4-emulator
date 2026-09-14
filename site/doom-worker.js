@@ -13,7 +13,7 @@
 // Bump the ?v= on the Worker() URL in doom.js whenever this file changes:
 // worker scripts are cached exactly as hard as module scripts, and a stale
 // copy looks precisely like the bug you thought you just fixed.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=28';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=29';
 import { createEmulator } from './emulator.js?v=2';
 
 // ── pacing (unchanged from the pre-worker main-thread loop) ──
@@ -22,9 +22,17 @@ import { createEmulator } from './emulator.js?v=2';
 // the driver paces by wall clock: run steps until the guest's frame count
 // catches up to realtime 35 fps.
 //
-// Measured cost: ~918k guest instructions per frame (low detail) to ~1M
-// at high detail, so a full 35 fps needs ~32 MIPS, which the Rust core
-// delivers in the page — full speed at high detail with headroom to spare.
+// Measured cost (page probe 2026-09-14, gametic vs instTotal per scene):
+// title 722k/frame, E1M1 idle 1192k, E1M1 W-hold 1310k — so 35 fps needs
+// ~46 MIPS in gameplay while the page sustains ~35-37 (Node sweep 25k..400k
+// steps flat at ~38-39 MIPS: the ceiling is core-bound, not per-step
+// overhead — bigger batches do NOT help). The 16ms wall budget was therefore
+// the binding constraint in E1M1 (pace wall-exits dominated, budget=0):
+// it capped each burst at ~0.56M inst (~16ms x 35 MIPS) while a gameplay
+// frame costs ~1.2-1.3M. RAF_MS_BUDGET=24 buys fps nearly 1:1 until the core
+// ceiling (~28-30 fps at 24ms) — at the cost of main-thread responsiveness
+// (input latency, paint). STEP_BUDGET=32 is never hit (kept as the TCI-gap
+// safety rail, not a throughput knob).
 //
 // Audio consequence: the guest mixer emits exactly one frame's worth of
 // samples (11025/35 = 315) per RENDERED frame, so production scales with fps.
@@ -56,7 +64,7 @@ const STEP_BUDGET = 32;          // max steps per burst
 // which Chrome throttles to nothing). It runs a bigger burst because its
 // gap is the clamped 4ms and there is no frame to pace to.
 const YIELD_MS = 4;
-const RAF_MS_BUDGET = 16;       // page-driven: one animation frame of work
+const RAF_MS_BUDGET = 24;       // page-driven: one animation frame of work
 const SELF_MS_BUDGET = 44;      // self-driven: amortize the 4ms clamp
 const TICK_STALE_MS = 200;      // no tick for this long => rAF is dead
 let timer = null;
@@ -207,7 +215,16 @@ function fnv1a(data) {
 //
 // Hash-only gating: the guest frame counter can stall (the level-start melt
 // wipe spins on I_GetTime), so it must never gate the repaint.
+// Measured 2026-09-14: this whole function costs ~3.5ms when the fb changed
+// (64KB mem_read + fnv1a + 1KB palette read + 64k palette-expand loop), so
+// it runs ONLY on change (hash first, expand after) and the palette is
+// cached (the guest writes it once at boot — re-reading 1KB + rebuilding
+// the 256-entry lookup every frame was pure waste). The expand itself uses
+// a prebuilt Uint32 LUT + u32 blit (~4x fewer stores than per-channel
+// byte writes). postMessage transfer is zero-copy (buffer neutered).
 let lastHash = -1;
+let palLut = null;   // Uint32Array(256), rebuilt when the palette bytes change
+let palRaw = null;   // last-seen palette bytes (change detect)
 function renderFb() {
     if (!emu) return false;
     const dgsb = emu.read32(DGSB);
@@ -222,16 +239,31 @@ function renderFb() {
     const h = fnv1a(fb);
     if (h === lastHash) return false;
     lastHash = h;
-    const pal = new Uint8Array(uc.mem_read(PALETTE, 256 * 4));
-    const rgba = new Uint8ClampedArray(320 * 200 * 4);
-    for (let i = 0; i < 64000; i++) {
-        const p = fb[i] * 4;
-        rgba[i * 4] = pal[p + 2];      // BGRA -> RGBA
-        rgba[i * 4 + 1] = pal[p + 1];
-        rgba[i * 4 + 2] = pal[p];
-        rgba[i * 4 + 3] = 255;
+    let pal;
+    try {
+        pal = new Uint8Array(uc.mem_read(PALETTE, 256 * 4));
+    } catch (e) {
+        return false;
     }
-    post({ t: 'frame', rgba }, [rgba.buffer]);
+    // Palette change-detect: guest writes it once at boot; skip the LUT
+    // rebuild on all later frames (memcmp 1KB is ~50x cheaper than rebuild).
+    let same = palRaw !== null;
+    if (same) {
+        for (let i = 0; i < 1024; i++) {
+            if (pal[i] !== palRaw[i]) { same = false; break; }
+        }
+    }
+    if (!same) {
+        palRaw = pal;
+        palLut = new Uint32Array(256);
+        for (let i = 0; i < 256; i++) {
+            // BGRA bytes -> RGBA u32 (little-endian store order)
+            palLut[i] = (255 << 24) | (pal[i * 4] << 16) | (pal[i * 4 + 1] << 8) | pal[i * 4 + 2];
+        }
+    }
+    const out = new Uint32Array(320 * 200);
+    for (let i = 0; i < 64000; i++) out[i] = palLut[fb[i]];
+    post({ t: 'frame', rgba: new Uint8ClampedArray(out.buffer) }, [out.buffer]);
     return true;
 }
 
@@ -367,7 +399,7 @@ async function boot(msg) {
             firmware: msg.firmware,
             bindings,
             svdXml: msg.svdXml,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=28', // VENDOR_V: bump with app.js
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=29', // VENDOR_V: bump with app.js
             extra_ram: [
                 { addr: 0xC0000000, size: 16 * 1024 * 1024 },   // .data/.bss + zone + heap
                 { addr: 0xB8000000, size: 8 * 1024 * 1024 },    // WAD image

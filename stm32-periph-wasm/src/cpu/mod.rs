@@ -957,6 +957,9 @@ impl Cpu {
             // Deferred MPU data fault from the previous instruction (see
             // mem.rs): raise before fetching the next one. Takes precedence
             // over new interrupt delivery (the fault is older).
+            // Single take(): the channel is first-wins latched, so one swap
+            // both tests and consumes (a separate is-set peek would cost a
+            // second atomic per instruction on the hot path).
             if let Some((addr, exec)) = crate::system::take_mpu_fault() {
                 self.raise_memmanage(sys, mem, addr, exec);
                 // raise_memmanage either takes an exception (continues
@@ -1056,7 +1059,13 @@ impl Cpu {
             // is exact, so the mid-`str` PENDSVSET hazard of AGENTS.md §9
             // cannot occur — the store completes, PC advances, then we
             // stack the next PC.)
-            if self.deliver_irqs {
+            // Hot-path shape: deliver_irqs is false for polling firmware
+            // (DOOM, eth_http) so this is one predictable branch; when on,
+            // any_pending() (one u128 compare, no borrow) skips the full
+            // priority scan in the common nothing-pending case. Both are
+            // required: skipping the scan on deliver_off alone still pays
+            // select_pending's borrow+walk for every IRQ-driven firmware.
+            if self.deliver_irqs && sys.p.nvic.borrow().any_pending() {
                 if let Some(irq) = self.select_pending(sys) {
                     // Bind first: `if let` would extend the borrow_mut guard
                     // through the body and take_exception would re-borrow.

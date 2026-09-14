@@ -75,8 +75,24 @@ impl Nvic {
 
     /// Raw pending bitmap for the CPU's priority-ordered selection
     /// (mod.rs): bit (16+irq) per exception, system exceptions included.
+    /// Hot path (called once per executed instruction): plain field read,
+    /// no atomics — the NVIC lives behind one RefCell borrow already held
+    /// by the caller sequence.
     pub fn pending_bits(&self) -> u128 {
         self.pending
+    }
+
+    /// Hot-path early-out: any pending bit at all (enabled or not, system
+    /// or external). The run loop checks this BEFORE select_pending so the
+    /// common case (no pending anything — DOOM runs with delivery off and
+    /// no device pends) costs one u128 compare, not a borrow + scan.
+    /// Correctness: only a true negative skips selection, and selection on
+    /// a nonzero bitmap can only return None (nothing deliverable) — the
+    /// same state the next instruction would see, since nothing can pend
+    /// between two instructions except the just-executed one, which would
+    /// have set a bit.
+    pub fn any_pending(&self) -> bool {
+        self.pending != 0
     }
 
     /// Deliverability gate for one exception: system exceptions are always

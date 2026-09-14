@@ -604,16 +604,20 @@ export async function createEmulator(opts) {
     };
 
     const processDevices = () => {
-        processOled();
-        processTft();
-        processBuzzer();
-        processSpeaker();
-        processRtc();
-        processGpioWatchers();
-        processSpiDevices();
-        processI2cDevices();
-        processFsmcDevices();
-        processCamera();
+        if (oled) processOled();
+        if (tft) processTft();
+        if (buzzer) processBuzzer();
+        // Speaker drain is the only device DOOM enables: keep its per-step
+        // cost as one guarded wasm call (the FIFO is usually empty; the
+        // take path copies only when samples exist). Everything else above
+        // is a null check when the firmware didn't request the device.
+        if (speaker) processSpeaker();
+        if (rtc) processRtc();
+        if (gpioWatchers.length) processGpioWatchers();
+        if (spiDevices.length) processSpiDevices();
+        if (i2cDevices.length) processI2cDevices();
+        if (fsmcDevices.length) processFsmcDevices();
+        if (camera) processCamera();
     };
     // Sole CPU backend: the WASM-native Thumb-2 interpreter.
     if (typeof bindings.WasmCpu !== 'function') {
