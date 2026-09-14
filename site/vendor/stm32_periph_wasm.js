@@ -1318,12 +1318,29 @@ export function periph_write(addr, width, value) {
 }
 
 /**
+ * Record STANDBY entry (PDDS=1 + SLEEPDEEP WFI): sets SBF (CSR bit 1).
+ * The driver calls this when it observes the guest enter WFI sleep with
+ * PDDS set, before advancing virtual time.
+ */
+export function pwr_enter_standby() {
+    wasm.pwr_enter_standby();
+}
+
+/**
  * Mark the PWR peripheral as having woken from a low-power (WFI/WFE) state.
  * The emulator calls this when the core resumes after a sleep halt so firmware
  * can read PWR->CSR WUF to confirm the wakeup source.
  */
 export function pwr_wakeup() {
     wasm.pwr_wakeup();
+}
+
+/**
+ * Wakeup from STANDBY: set WUF (CSR bit 0), keep SBF until the guest
+ * clears it via CR CSBF.
+ */
+export function pwr_wakeup_standby() {
+    wasm.pwr_wakeup_standby();
 }
 
 /**

@@ -316,7 +316,25 @@ async function t_gap5_accept_routing() {
     st.rxPoll = true;
     emu.step(10);
     ok(r32(RXD) >>> 31 === 0, 'gap5: accepted frame clears OWN (delivered)');
-    // now reject: flip the model answer by replacing the binding
+    emu.close();
+}
+
+// Gap 5b — driver RX in dead-receiver state (TE set, RE clear): the frame
+// must be dropped AFTER WOL inspection (wolSeen grows) with the poll
+// cleared and no descriptor write (OWN stays set). This is the exact
+// emulator.js branch the gap audit flagged as comment-only.
+async function t_gap5b_dead_rx() {
+    const { emu, st } = await mkwire();
+    st.maccr = (1 << 2) | (1 << 3); // RE+TE (receiver live baseline not needed)
+    st.maccr &= ~(1 << 2); // RE clear, TE set: dead receiver
+    w32(RXD, 0x80000000 | 1536); w32(RXD + 4, RXB);
+    st.rxDesc = RXD;
+    emu.injectFrame(ethIpUdp());
+    st.rxPoll = true;
+    emu.step(10);
+    ok(st.wolSeen.length === 1, 'gap5b: WOL ran before the dead-RX drop');
+    ok((r32(RXD) >>> 31) === 1, 'gap5b: descriptor untouched (no RS write)');
+    ok(st.rxPoll === false, 'gap5b: poll cleared on dead-RX drop');
     emu.close();
 }
 
@@ -367,6 +385,7 @@ const tests = [
     ['gap3 WOL before accept gate', t_gap3_wol_before_accept],
     ['gap4 RX FS+LS both paths', t_gap4_fs_ls],
     ['gap5 accept routing', t_gap5_accept_routing],
+    ['gap5b dead-RX (TE set, RE clear) drop', t_gap5b_dead_rx],
     ['gap6 PTP TX event gate', t_gap6_ptp_gate],
     ['gap6b RX snapshot stride gate', t_gap6b_rx_snapshot_stride],
 ];

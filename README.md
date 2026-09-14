@@ -15,7 +15,7 @@ browser tab**, with no SDL, no native deps, no hardware.
 
 It ships three real networking firmwares (`eth_http`, `eth_dhcp`, `eth_test`)
 that do DHCP + TCP + HTTP against a simulated (or a real gVisor-backed)
-network, a 65-marker Ethernet feature matrix (`eth_feat_test`: PHY/MDIO,
+network, a 66-marker Ethernet feature matrix (`eth_feat_test`: PHY/MDIO,
 checksum offload, hash/perfect/SA/DA filtering, VLAN, PTP, WOL, wire
 pacing, deferral/collisions, pause frames, MMC, RBUS — see
 [NETWORKING.md](NETWORKING.md)) plus real LwIP 2.2.1 (`lwip_demo`) and
@@ -169,7 +169,7 @@ See AGENTS.md §20 for the full binary protocol reference.
 | `eth_http/` | DHCP + TCP client + HTTP GET + prints the response | `TCP connected`, `=== HTTP <len>b ===` |
 | `eth_dhcp/` | Loops DHCP Discover/Offer/Request/Ack | `DHCP SUCCESS` |
 | `eth_test/` | Raw ETH TX/RX self-test | `ETH Test: done` |
-| `eth_feat_test/` | 65-marker Ethernet feature matrix (netsim, F407 + F429) | `FEAT Test: done` (all 65 markers, `FAIL`/`TIMEOUT` anti-markers) |
+| `eth_feat_test/` | 66-marker Ethernet feature matrix (netsim, F407 + F429) | `FEAT Test: done` (all 66 markers, `FAIL`/`TIMEOUT` anti-markers) |
 | `lwip_demo/` | Real LwIP 2.2.1 (DHCP→DNS→TCP echo→TCP server→UDP echo) | `LWIP DEMO DONE` |
 | `eth_pins_test/` | MII/RMII pin-level mirrors (TX_EN/CRS_DV/RXD/COL/MDIO/MDC) | `PINS ALL PASS` |
 | `blinky/` | **No ethernet** — LED blinker on GPIOA PA5 + UART tick counter | `tick N LED=ON/OFF` |
@@ -271,8 +271,8 @@ rebuild — delete it so the vendor assets stay tracked/committed.
 ## Testing
 
 - `npm test` — flow test (`site/test_flow.mjs`) + Ethernet mock harnesses
-  (`site/test_eth_mock_model.mjs`: 15 checks, fake bindings + real driver;
-  `site/test_eth_mock_consumer.mjs`: 36 checks, fake firmware + real model)
+  (`site/test_eth_mock_model.mjs`: 18 checks, fake bindings + real driver;
+  `site/test_eth_mock_consumer.mjs`: 44 checks, fake firmware + real model)
   + blinky test
   (`site/test_blinky.mjs`) + interrupt-UART test (`site/test_rx_interrupt.mjs`)
   + component-API tests (`site/test_component_{led,button,pwm,i2cregfile}.mjs`,

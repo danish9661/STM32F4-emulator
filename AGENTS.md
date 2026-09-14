@@ -1985,10 +1985,17 @@ Things that bite here:
 
 ## 18. Low-power model + demo firmwares (2026-08-22)
 
-### WFI/STOP low-power path (emulator-level)
-- **Model**: `stm32-periph-wasm/src/peripherals/pwr.rs` gained `wakeup()`
-  (sets `CSR` bit 2 = WUF); `Peripherals::pwr_wakeup()` (mod.rs) downcasts the
+### WFI/STOP/STANDBY low-power path (emulator-level)
+- **Model**: `stm32-periph-wasm/src/peripherals/pwr.rs` `wakeup()`
+  (sets `CSR` bit 0 = WUF — silicon/SVD position `PWR_CSR.WUF @0`,
+  `SBF @1`); `Peripherals::pwr_wakeup()` (mod.rs) downcasts the
   `0x4000_7000` slot and calls it; `lib.rs` exports `pwr_wakeup()` (wasm).
+  STANDBY entry (`PDDS=1` + SLEEPDEEP WFI) latches SBF via
+  `pwr_enter_standby()` (CSR bit 1) and wakes via `pwr_wakeup_standby()`
+  (WUF set, SBF kept until the guest clears it via CR CSBF bit 3);
+  CR CWUF (bit 2) clears WUF, CR CSBF (bit 3) clears SBF — the old CR
+  write path that set SBF on magic values is gone, and direct CSR
+  writes can no longer set WUF/SBF (silicon: read-only, cleared via CR).
 - **RTC wakeup**: `rtc.rs` RTC alarm sets NVIC pending IRQ **41** (F407
   `RTC_Alarm`; the model previously hardcoded 43 — wrong). The demo clears
   RTC `ISR` bit 0 to "start" the counter (model gate in `advance_time`).
@@ -1999,19 +2006,33 @@ Things that bite here:
     `cpu.sleeping()` true (STOP vs SLEEP from SCR bit 2).
   - `step()` top: if `sleeping`, `tick_n(WAKE_STEP=120000)`,
     `periph_read(RTC_BASE=0x40002800,4)` (advances the virtual RTC → fires
-    alarm → NVIC pending), then if `has_pending_interrupt()` → on STOP call
-    `pwr_wakeup()` (sets WUF), clear `sleeping`, and fall through to run the
+    alarm → NVIC pending), then if `has_pending_interrupt()` → STOP: call
+    `pwr_wakeup()` (sets WUF); STANDBY (PDDS=1 sampled from PWR_CR on
+    sleep entry, SBF latched at entry via `pwr_enter_standby()`): call
+    `pwr_wakeup_standby()` (sets WUF, keeps SBF); clear `sleeping`, and
+    fall through to run the
     guest (the WFI becomes a no-op); else `instCount += WAKE_STEP; return`
     (stay asleep). `has_pending_interrupt()` is the **non-consuming** check
     from `lib.rs`:89 (use it for wakeup; `get_next_pending_interrupt()`
     consumes and must NOT be used here).
-- **Browser**: `app.js` `LOWPOWER_FIRMWARES = new Set(['deep_sleep_demo'])`
+- **Browser**: `app.js` `LOWPOWER_FIRMWARES = new Set(['deep_sleep_demo', 'standby_demo'])`
   passes `lowpower: true` to `createEmulator`.
 
-### Demo firmwares (added 2026-08-22)
+### Demo firmwares (added 2026-08-22, STANDBY added later — see below)
 - `deep_sleep_demo/` — arms RTC alarm ~3s ahead, enters STOP via WFI, the
   emulator halts and advances the virtual RTC until the alarm wakes it; prints
-  `WOKE FROM STOP` + `Wakeup flag (WUF) set`. Node test: `site/test_lowpower.mjs`.
+  `WOKE FROM STOP` + `Wakeup flag (WUF) set`. Node test: `site/test_lowpower.mjs`
+  (`npm run test:lowpower`).
+- `standby_demo/` — same RTC-alarm shape but enters STANDBY (`PDDS=1` +
+  SLEEPDEEP WFI); the emulator takes the standby path (SBF latched on
+  entry) and wakes with WUF set + SBF still set; prints
+  `WOKE FROM STANDBY` + `Wakeup flag (WUF) set` + `Standby flag (SBF) set`.
+  Node test: `site/test_standby.mjs` (`npm run test:standby`). Both demos
+  are built for f401/f411/f429 via `tools/build_family.mjs`
+  (`bare('standby_demo'/'deep_sleep_demo', ALL3, …, { lowpower: true })`
+  matrix entries) and wired into `tools/make_firmware.mjs` →
+  `site/firmware.js`, `site/boards.js`, and `site/app.js`
+  `LOWPOWER_FIRMWARES`.
 - `can_demo/` — friendly two-phase CAN showcase (single-node loopback +
   two-node arbitration, lower ID wins, broadcast to both). Node test:
   `site/test_candemo.mjs` (complements `can_test`/`test_can.mjs` which check
@@ -3404,7 +3425,13 @@ above frames is firmware. What the model + drivers + firmware now cover:
   regs to its wire MAC or all RX is dropped.
 - **VLAN**: MACVLANTR mask widened to 0x3FFFF (was 0x300FF, ate VID bits
   8-15); gate requires matching tagged VID (12/16-bit per VLANTC, bit 17
-  inverts), applies even in promiscuous mode.
+  inverts), applies even in promiscuous mode. Untagged under a NORMAL gate
+  drops (no match); under an INVERTED gate it passes (absent tag never
+  matches; invert turns that into accept). Firmware proof: `eth_feat_test`
+  "VLAN OK" (tagged-7 in, untagged dropped) + "VLAN INV OK" (12-bit
+  inverted: tagged-7 drops, untagged passes — netsim replies carry its OWN
+  'V'/'N' payloads, so the probe matches on content like VLAN-OK, never on
+  the sent byte; matrix runs it at 6000x20000).
 - **PTP**: binary-2^31 timebase on the virtual clock (SSINC override),
   TSSTI/TSSTU init/update (self-clearing edge bits), target + TSITE →
   IRQ61, live SHR/SLR reads, TX snapshot to TDES6/7 (TTSE) + RX snapshot

@@ -44,7 +44,7 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 | Source-address filter + inverse (SAF/SAIF) | yes | ✅ | `eth_feat_test` "SAF SELF/DROP OK" + "SAIF INV OK"; 1 native test | — | CMSIS bits 9/8 (were off-by-one at 8/7 — every SAF/SAIF verdict passed vacuously until fixed). |
 | Hash-or-perfect (HPF) | yes | ✅ | `eth_feat_test` "HPF STRICT/OR OK"; 1 native test | — | CMSIS bit 10 (was bit 9 — STRICT passed vacuously). |
 | Control-frame pass (PCF) | yes | ✅ | `eth_feat_test` "PAUSE PCF00/PCF10 OK" + "PCF11 OK" (DA path) + "PCF11 PAM OK"; 1 native test | — | PCF=11 takes the normal DA path (pause DA needs PAM) — previously unasserted. |
-| VLAN tag filter (VLANTI, 12/16-bit, invert) | yes | ✅ | `eth_feat_test` "VLAN OK" (tagged in, untagged dropped); 1 native test | TX tag insertion | F4 silicon has RX filtering only; same here. |
+| VLAN tag filter (VLANTI, 12/16-bit, invert) | yes | ✅ | `eth_feat_test` "VLAN OK" (tagged in, untagged dropped) + "VLAN INV OK" (12-bit inverted: tagged-7 drops, untagged passes); 1 native test | TX tag insertion | F4 silicon has RX filtering only; same here. Untagged under a NORMAL gate drops (no match); under an INVERTED gate it passes (absent tag never matches; invert turns that into accept). |
 | MAC loopback (LM) | yes | ✅ | all `eth_feat_test` loopback phases | — | Accept filter applies in loopback, like silicon — self-tests must address frames to themselves. |
 | PTP timebase (binary 2³¹, TSE, TSSTI/TSSTU) | yes | ✅ | `eth_feat_test` "PTP time OK" | — | — |
 | PTP drift correction (addend accumulator, TSFCU latch) | yes | ✅ | `eth_feat_test` "PTP drift OK" (1:2 ratio over identical CYCCNT windows); 1 native test | addend as pure rate control | Real drift needs a drifting clock; ours is exact, so correction = rate scaling. |
@@ -84,10 +84,10 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 
 ```bash
 # Mock harnesses (both sides of the driver/model seam, no firmware build):
-npm run test:eth:mock   # mock-model (15 checks, fake bindings + real driver)
-                        # + mock-consumer (36 checks, fake firmware + real model)
+npm run test:eth:mock   # mock-model (18 checks, fake bindings + real driver)
+                        # + mock-consumer (44 checks, fake firmware + real model)
 # Matrix (netsim, includes feat + lwip on F429):
-node site/test_board_matrix.mjs eth_feat_test   # 65 markers + PPS scope assert
+node site/test_board_matrix.mjs eth_feat_test   # 66 markers + PPS scope assert
 node site/test_board_matrix.mjs lwip_demo
 # Real gateway (needs openhw-gw on :5070 + HTTP server on :8092):
 bash scripts/verify_ethernet.sh                 # both trios, 0 TCP fail
@@ -103,7 +103,7 @@ Mock coverage map (each CMSIS-audit gap pinned on BOTH sides):
 | 2. MACFFR SAF/SAIF/HPF | TX capture FFR-agnostic | SAF/SAIF/HPF accept + old-bit negatives |
 | 3. PMTCTL mask + RWUFFR arm | WOL inspected before accept gate (RE clear) | RWUFFR arm present, sham bits dropped, controls kept |
 | 4. RX FS/LS | FS+LS on both irq + polling writebacks | HAL constants + no DMASR alias |
-| 5. PM/BFD/PCF-11 | accept routing (OWN clear on deliver) | PM/BFD/PCF-11 accept decisions |
+| 5. PM/BFD/PCF-11 | accept routing (OWN clear on deliver) + dead-RX drop (TE set, RE clear: WOL first, no RS write) | PM/BFD/PCF-11 accept decisions + VLAN 12-bit/invert tagged paths |
 | 6. PTP event gate | TTSS/TDES6-7 only on 0x88F7, RDES6 stride gate | csum status bits, WOL latch, pacing/collision/deferral/link/IPCO |
 
 ## 6. Register audit (2026-09-14): CMSIS cross-check + what it caught
@@ -133,7 +133,12 @@ covered by firmware markers and/or native tests:
 5. **PM/BFD/PCF-11 unasserted** — stored but never proven. New markers:
    "MCAST PM/BFD OK", "PAUSE PCF11/PCF11 PAM OK" (+ native tests).
    Found live along the way: PM+BFD ordering (BFD re-gates broadcast
-   after the PM pass) and the PCF=11 DA-path rule.
+   after the PM pass) and the PCF=11 DA-path rule. Follow-up pins on both
+   sides of the seam: mock-model gap5b (dead-receiver drop — TE set, RE
+   clear: WOL inspection runs first, poll cleared, no RS write — the exact
+   emulator.js branch the audit had flagged as comment-only) and
+   mock-consumer gap5b (VLAN 12-bit/invert tagged paths, netsim can't emit
+   tagged frames on demand).
 6. **PTP snapshot on any frame** — TTSE stamped even UDP data. Silicon
    snapshots event messages only (0x88F7 or UDP :319/:320). New
    "PTP snap gate OK" negative + raw-Sync positive.

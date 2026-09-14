@@ -77,7 +77,7 @@ export async function createEmulator(opts) {
         eth_tx_jabber_limit, eth_pause_rx, eth_take_pause_tx,
         eth_note_tx, eth_note_rx, eth_note_missed,
         eth_note_rx_stall, eth_rx_stall_clear, eth_note_jabber,
-        get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, uart_rx_byte,
+        get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, pwr_enter_standby, pwr_wakeup_standby, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
         dma2d_take_job, dma2d_job_done, dma2d_convert, dma2d_blend,
         spi_tap, spi_take_events, spi_push_miso,
@@ -726,6 +726,9 @@ export async function createEmulator(opts) {
             try { eth_check_wol(frame); } catch {}
             // Dead receiver (RE clear) drops everything past WOL
             // inspection (powerdown WOL still sees); no RS, no count.
+            // TE check included: silicon needs RE for receive and TE
+            // for transmit, but a TE-clear MAC never completes TX so no
+            // frame can be in flight anyway — RE alone decides RX.
             try {
                 if ((eth_get_maccr() & 0x4) === 0) {
                     rxQueue.shift();
@@ -1124,6 +1127,18 @@ export async function createEmulator(opts) {
                 // what lets a WOL magic packet wake STOP), then wake
                 // when an interrupt is pending.
                 if (typeof cpu.sleeping === 'function' && cpu.sleeping()) {
+                    // STANDBY vs STOP: sample PWR_CR PDDS (bit 1) on sleep
+                    // entry. PDDS=1 -> STANDBY: latch SBF now (it must be
+                    // visible even before wake), wake via pwr_wakeup_standby
+                    // (WUF set, SBF kept). PDDS=0 -> STOP: legacy pwr_wakeup.
+                    // Both are guarded (older wasm bundles lack the standby
+                    // exports; PDDS sampling must not throw).
+                    let standby = false;
+                    try {
+                        const cr = wread32(0x40007000) >>> 0;
+                        standby = (cr & 0x2) !== 0;
+                        if (standby && typeof pwr_enter_standby === 'function') pwr_enter_standby();
+                    } catch {}
                     try { tick_n(120000); } catch {}
                     try { periph_read(0x40002800, 4); } catch {}
                     // Sleep drain: force-deliver (no poll needed — the
@@ -1133,7 +1148,10 @@ export async function createEmulator(opts) {
                     try { wDeliverRx(true); } catch {}
                     if (has_pending_interrupt()) {
                         try {
-                            if (((wread32(0xE000ED10) >>> 0) >> 2) & 1) pwr_wakeup();
+                            if (((wread32(0xE000ED10) >>> 0) >> 2) & 1) {
+                                if (standby && typeof pwr_wakeup_standby === 'function') pwr_wakeup_standby();
+                                else pwr_wakeup();
+                            }
                         } catch {}
                         try { cpu.wake(); } catch {}
                     } else {

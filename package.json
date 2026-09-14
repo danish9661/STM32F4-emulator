@@ -82,6 +82,7 @@
     "test:wwdgwin": "node site/test_wwdg_window.mjs",
     "test:timcap": "node site/test_tim_capture.mjs",
     "test:lowpower": "node site/test_lowpower.mjs",
+    "test:standby": "node site/test_standby.mjs",
     "test:qspi": "node site/test_qspi.mjs",
     "test:eth:mock": "node site/test_eth_mock_model.mjs && node site/test_eth_mock_consumer.mjs",
     "test:fpu": "node site/test_fpu.mjs",

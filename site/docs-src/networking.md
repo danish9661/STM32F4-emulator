@@ -1,9 +1,12 @@
 # Ethernet / Networking — board support matrix
 
-Status (2026-09-12): the Ethernet **MAC level is fully modeled** on every
-board that has the silicon (F407 family + F429). F401/F411 have no Ethernet
-silicon at all. What is "left" is only the physical/pin layer and a few
-documented simplifications — see §4. Details live in `AGENTS.md` §29.
+Status (2026-09-14): the Ethernet **MAC level is fully modeled** on every
+board that has the silicon (F407 family + F429), including the register
+positions cross-checked against CMSIS `stm32f407xx.h` (DMASR/DMAIER
+AIS=15/ERS=14/FBES=13/RWTS=9, MACFFR SAF=9/SAIF=8/HPF=10 — all verified,
+see §6). F401/F411 have no Ethernet silicon at all. What is "left" is
+only the physical/pin layer and a few documented simplifications — see
+§4. Details live in `AGENTS.md` §29.
 
 ## 1. Board silicon summary
 
@@ -24,23 +27,26 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 
 | Feature | Silicon (F407 = F429) | Status | Proof (test) | Left / gap | Remark |
 |---|---|---|---|---|---|
-| TX/RX DMA, descriptor rings, OWN/FS/LS, poll demand, ST/SR | yes | ✅ | `eth_http`/`eth_test` netsim + gateway trio, `verify_ethernet.sh` | — | — |
-| TX/RX completion IRQ 61 (TS/RS/NIS/AIS, W1C) | yes | ✅ | `eth_irq_test` (+`_f429`), `eth_dhcp`, `eth_test` | — | — |
+| TX/RX DMA, descriptor rings, OWN/FS/LS, poll demand, ST/SR | yes | ✅ | `eth_http`/`eth_test` netsim + gateway trio, `verify_ethernet.sh` | — | Single-buffer delivery: FS+LS always set together (HAL `ETH_DMARXDESC_FS/LS`); RER/RCH/TER/TCH ring modes not modeled — one chained desc per frame. |
+| TX/RX completion IRQ 61 (TS/RS/NIS/AIS, W1C) | yes | ✅ | `eth_irq_test` (+`_f429`), `eth_dhcp`, `eth_test` | — | Bit positions per CMSIS (AIS=15, ERS=14, FBES=13, RWTS=9); summaries recomputed inline on W1C clear. |
 | MDIO read/write (MIIAR/MIIDR, MB poll) | yes | ✅ | `eth_feat_test` "PHY …" (`mii_read`/`mii_write`) | wire-level MII timing | Register-level only; firmware only ever sees registers. |
 | PHY BCR/BMSR/ANAR/ANLPAR/PHYSTS, AN restart + resolution, forced speed/duplex | external PHY (LAN8720/DP83848-style) | ✅ | `eth_feat_test` PHY phase; 2 native tests | — | Outcome is reported, never forced into MACCR — like silicon, the driver programs FES/DM itself. Harness drives link (`eth_set_link`); BMSR/PHYSTS follow. |
 | TX checksum offload (CIC: IP / +TCP-UDP-ICMP) | yes | ✅ | `eth_feat_test` "CSUM TX insert OK" (loopback) | — | Inserted by the driver into guest buffer + capture before onTx. |
 | RX checksum status (IPHCE/PCE in RDES0) | yes | ✅ | `eth_feat_test` IPHCE/PCE phases; 1 native test | extended-status RDES4 (needs enhanced descriptors) | Normal-descriptor bits cover what our firmware reads. |
 | Perfect filter slots 0–3 (AE, MBC masks, SA/DA) | yes | ✅ | `eth_irq_test` uses slot 1 (`:02` identity); 1 native test | — | Slot 0 always on. **Byte order is MSB-first (IEEE)**: wire `02:00:…:01` = HR `0x0200` / LR `0x00000001`. |
-| Hash filter (HU/HM, CRC32, upper 6 bits) | yes | ✅ | `eth_feat_test` "MCAST OK" (member in, non-member out); 1 native test | — | — |
-| Broadcast (DBF), all-multicast (PM), promiscuous (PR), DAIF, ROD | yes | ✅ | native tests (PR, DBF); ROD on the loopback path | — | — |
-| VLAN tag filter (VLANTI, 12/16-bit, invert) | yes | ✅ | `eth_feat_test` "VLAN OK" (tagged in, untagged dropped); 1 native test | TX tag insertion | F4 silicon has RX filtering only; same here. |
+| Hash filter (HU/HM, CRC32, upper 6 bits) | yes | ✅ | `eth_feat_test` "MCAST OK" (member in, non-member out) + "MCAST PM OK" (PM passes with empty table); 2 native tests | — | PM (bit 0) passes all multicast incl. broadcast; BFD (bit 5) re-gates broadcast ("MCAST BFD OK"). |
+| Broadcast (DBF), all-multicast (PM), promiscuous (PR), DAIF, ROD | yes | ✅ | native tests (PR, DBF, PM+BFD); ROD on the loopback path | — | MACFFR bit positions per CMSIS (SAF=9/SAIF=8/HPF=10, PCF=7:6). |
+| Source-address filter + inverse (SAF/SAIF) | yes | ✅ | `eth_feat_test` "SAF SELF/DROP OK" + "SAIF INV OK"; 1 native test | — | CMSIS bits 9/8 (were off-by-one at 8/7 — every SAF/SAIF verdict passed vacuously until fixed). |
+| Hash-or-perfect (HPF) | yes | ✅ | `eth_feat_test` "HPF STRICT/OR OK"; 1 native test | — | CMSIS bit 10 (was bit 9 — STRICT passed vacuously). |
+| Control-frame pass (PCF) | yes | ✅ | `eth_feat_test` "PAUSE PCF00/PCF10 OK" + "PCF11 OK" (DA path) + "PCF11 PAM OK"; 1 native test | — | PCF=11 takes the normal DA path (pause DA needs PAM) — previously unasserted. |
+| VLAN tag filter (VLANTI, 12/16-bit, invert) | yes | ✅ | `eth_feat_test` "VLAN OK" (tagged in, untagged dropped) + "VLAN INV OK" (12-bit inverted: tagged-7 drops, untagged passes); 1 native test | TX tag insertion | F4 silicon has RX filtering only; same here. Untagged under a NORMAL gate drops (no match); under an INVERTED gate it passes (absent tag never matches; invert turns that into accept). |
 | MAC loopback (LM) | yes | ✅ | all `eth_feat_test` loopback phases | — | Accept filter applies in loopback, like silicon — self-tests must address frames to themselves. |
 | PTP timebase (binary 2³¹, TSE, TSSTI/TSSTU) | yes | ✅ | `eth_feat_test` "PTP time OK" | — | — |
 | PTP drift correction (addend accumulator, TSFCU latch) | yes | ✅ | `eth_feat_test` "PTP drift OK" (1:2 ratio over identical CYCCNT windows); 1 native test | addend as pure rate control | Real drift needs a drifting clock; ours is exact, so correction = rate scaling. |
 | PTP target + interrupt (TSITE → IRQ61) | yes | ✅ | `eth_feat_test` "PTP target OK" | — | — |
-| PTP TX/RX snapshots (TDES6/7, RDES6/7) | yes (enhanced descs) | ✅ | `eth_feat_test` both snap phases | RX snapshot needs 32-byte descs (polling E-layout has 8) | Driver-side write; irq path only. |
+| PTP TX/RX snapshots (TDES6/7, RDES6/7) | yes (enhanced descs) | ✅ | `eth_feat_test` "PTP snap gate OK" (UDP+TTSE does NOT stamp) + both snap phases on a raw 0x88F7 Sync frame | RX snapshot needs 32-byte descs (polling E-layout has 8) | Driver-side write, event messages only (0x88F7 or UDP :319/:320); irq path only. |
 | PPS output pin | yes (pin) | 🔶 | `eth_pps_count()` scope-probe export + matrix `post` band assert (~39 edges) | the pin itself | No pin layer exists; the counter IS the sink. Guest can't see it, like silicon. |
-| Wake-on-LAN magic packet (MPR + IRQ62) | yes | ✅ | `eth_feat_test` "WOL OK"; 1 native test | — | PMT status is read-to-clear (DWC_gmac, not W1C); PWRDWN drops all RX but WOL still sees; GLOBU gates unicast filter eligibility. |
+| Wake-on-LAN magic packet (MPR + IRQ62) | yes | ✅ | `eth_feat_test` "WOL OK"; 1 native test | — | PMT status is read-to-clear (DWC_gmac, not W1C); PWRDWN drops all RX but WOL still sees; GLOBU gates unicast filter eligibility. PMTCTL mask keeps PD/MPE/WFE/MPR/WFR/GU/WFFRPR only (CMSIS — old mask stored sham bits 7+10). |
 | Wakeup-frame filter CRC match (RWKPR + IRQ62) | yes | ✅ | `eth_feat_test` "WOL filter OK" (+ mismatch, multicast-only, GLOBU, powerdown-drop + magic-during-PD sub-cases); 4 native tests | — | Sourced layout (Synopsys DWC_gmac via the ESP32 EMAC header): masks ptr 0–3 (bits 30:0), commands ptr 4 (bit 3/11/19/27 = multicast-only), offsets ptr 5, CRCs ptr 6–7. |
 | TX wire pacing (line-rate TS delay at FES speed) | physical wire | ✅ | `eth_feat_test` "WIRE RATE OK" (1200 B, d within 10k..40k cycles) | — | Delay lands on step boundaries; rate tests use small steps. RX completions are NOT paced (RS fires at delivery — pacing it hides the wire from deferral); the RX busy window feeds deferral only ("RX RATE OK" measures the round trip). |
 | Link/carrier (dead wire → NC, TS error completion) | wire + peer | ✅ | `eth_feat_test` "LINK DOWN OK" (BMSR + NC) / "LINK UP OK" | — | Harness is the peer; dead-wire TX still raises TS (error completion, like silicon). |
@@ -72,11 +78,71 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 ## 5. Verify it
 
 ```bash
+# Mock harnesses (both sides of the driver/model seam, no firmware build):
+npm run test:eth:mock   # mock-model (18 checks, fake bindings + real driver)
+                        # + mock-consumer (44 checks, fake firmware + real model)
 # Matrix (netsim, includes feat + lwip on F429):
-node site/test_board_matrix.mjs eth_feat_test   # 9 phases + PPS scope assert
+node site/test_board_matrix.mjs eth_feat_test   # 66 markers + PPS scope assert
 node site/test_board_matrix.mjs lwip_demo
 # Real gateway (needs openhw-gw on :5070 + HTTP server on :8092):
 bash scripts/verify_ethernet.sh                 # both trios, 0 TCP fail
 # Unit level:
-cargo test --release peripherals::eth           # 13 tests (filter/CRC/PHY/PTP/PPS/WOL)
+cargo test --release peripherals::eth           # filter/CRC/PHY/PTP/PPS/WOL/MACFFR/PMTCTL
 ```
+
+Mock coverage map (each CMSIS-audit gap pinned on BOTH sides):
+
+| Gap | Mock-model (fake bindings + real driver) | Mock-consumer (fake firmware + real model) |
+|---|---|---|
+| 1. DMASR/DMAIER positions | NC/JT error completion words + jabber note | summaries clear, DMAIER keeps RWTIE/ERIE/FBEIE/AISE |
+| 2. MACFFR SAF/SAIF/HPF | TX capture FFR-agnostic | SAF/SAIF/HPF accept + old-bit negatives |
+| 3. PMTCTL mask + RWUFFR arm | WOL inspected before accept gate (RE clear) | RWUFFR arm present, sham bits dropped, controls kept |
+| 4. RX FS/LS | FS+LS on both irq + polling writebacks | HAL constants + no DMASR alias |
+| 5. PM/BFD/PCF-11 | accept routing (OWN clear on deliver) + dead-RX drop (TE set, RE clear: WOL first, no RS write) | PM/BFD/PCF-11 accept decisions + VLAN 12-bit/invert tagged paths |
+| 6. PTP event gate | TTSS/TDES6-7 only on 0x88F7, RDES6 stride gate | csum status bits, WOL latch, pacing/collision/deferral/link/IPCO |
+
+## 6. Register audit (2026-09-14): CMSIS cross-check + what it caught
+
+All 56 SVD registers (20 MAC + 11 MMC + 11 PTP + 14 DMA) were checked
+field-by-field against CMSIS `stm32f407xx.h` (`ETH_DMASR_*_Pos`,
+`ETH_DMAIER_*_Pos`, `ETH_MACFFR_*_Pos`, `ETH_MACPMTCSR_*`,
+`ETH_MACVLANTR_*`, `ETH_DMATXDESC_*`). Six real gaps, all fixed +
+covered by firmware markers and/or native tests:
+
+1. **DMASR/DMAIER bit positions** — AIS was 14 (silicon 15), ERS 12
+   (silicon 14), FBE 11 (silicon 13); DMAIER had no RWTIE and wrong
+   AISE/ERIE/FBEIE positions. "Pause-time status" bit 9 does not exist
+   on silicon (it is RWTS, receive-watchdog); the TX-stall hold time is
+   ORed live into DMASR reads from the pause atomic, never latched.
+2. **MACFFR SAF/SAIF/HPF off-by-one** — SAF was bit 8 (silicon 9), SAIF
+   bit 7 (silicon 8), HPF bit 9 (silicon 10). Every SAF/SAIF/HPF verdict
+   passed vacuously (wrong bit read back its own write); the firmware
+   now programs CMSIS positions.
+3. **MACPMTCTL sham mask** — mask `0x687` stored bits 7+10 as if
+   meaningful; CMSIS has no fields there (PD=0/MPE=1/WFE=2/MPR=5/WFR=6/
+   GU=9/WFFRPR=31). Mask is now `0x207`.
+4. **RX FS/LS never set** — delivered frames carried no First/Last
+   Segment bits, so any HAL-based RX path saw a "middle fragment"
+   forever. Both RX paths now set FS+LS (bit 9+8) on every delivered
+   frame (single-buffer delivery).
+5. **PM/BFD/PCF-11 unasserted** — stored but never proven. New markers:
+   "MCAST PM/BFD OK", "PAUSE PCF11/PCF11 PAM OK" (+ native tests).
+   Found live along the way: PM+BFD ordering (BFD re-gates broadcast
+   after the PM pass) and the PCF=11 DA-path rule. Follow-up pins on both
+   sides of the seam: mock-model gap5b (dead-receiver drop — TE set, RE
+   clear: WOL inspection runs first, poll cleared, no RS write — the exact
+   emulator.js branch the audit had flagged as comment-only) and
+   mock-consumer gap5b (VLAN 12-bit/invert tagged paths, netsim can't emit
+   tagged frames on demand).
+6. **PTP snapshot on any frame** — TTSE stamped even UDP data. Silicon
+   snapshots event messages only (0x88F7 or UDP :319/:320). New
+   "PTP snap gate OK" negative + raw-Sync positive.
+
+Two deeper model bugs surfaced by the same runs (fixed, with tests):
+a duplicated `0x2C` PMTCTL write arm that shadowed the MACRWUFFR `0x28`
+write arm (all wakeup-filter writes vanished — the WOL native test
+failed), and a nested `RefCell` borrow panic in `eth_check_wol` (NVIC
+borrow inside the MAC-slot borrow — deferred via a `pmt_irq62` latch
+drained after the scan). Probe hygiene that kept biting: stale queued
+frames satisfying silence checks (drain before negative probes) and
+CPU-owned heads starving the next probe (re-arm after consuming).

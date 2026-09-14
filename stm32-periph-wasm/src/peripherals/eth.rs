@@ -1006,17 +1006,26 @@ impl EthernetMac {
         // after the VLAN phase and expects open reception again).
         if vlanti != 0 {
             let tagged = frame.len() >= 18 && frame[12] == 0x81 && frame[13] == 0x00;
+            // Untagged under an INVERTED gate passes (absent tag never
+            // matches; invert turns that into accept). Untagged under a
+            // normal gate drops (no match). Either way the frame never
+            // reaches the tag parse below.
             if !tagged {
-                return false;
-            }
-            let vid12 = (((frame[14] & 0x0F) as u32) << 8) | frame[15] as u32;
-            let full16 = ((frame[14] as u32) << 8) | frame[15] as u32;
-            let want = if self.macvlantr & (1 << 16) != 0 { vid12 } else { full16 & 0xFFFF };
-            let hit = want == vlanti;
-            // Bit 17 inverts the match.
-            let reject = if self.macvlantr & (1 << 17) != 0 { hit } else { !hit };
-            if reject {
-                return false;
+                if self.macvlantr & (1 << 17) != 0 {
+                    // inverted: fall through to the DA path (accept so far)
+                } else {
+                    return false;
+                }
+            } else {
+                let vid12 = (((frame[14] & 0x0F) as u32) << 8) | frame[15] as u32;
+                let full16 = ((frame[14] as u32) << 8) | frame[15] as u32;
+                let want = if self.macvlantr & (1 << 16) != 0 { vid12 } else { full16 & 0xFFFF };
+                let hit = want == vlanti;
+                // Bit 17 inverts the match.
+                let reject = if self.macvlantr & (1 << 17) != 0 { hit } else { !hit };
+                if reject {
+                    return false;
+                }
             }
         }
         let ff = self.macffr;
@@ -1897,6 +1906,21 @@ mod tests {
         assert!(m.accept(&tagged));
         tagged[15] = 0x08;
         assert!(!m.accept(&tagged));
+        // 12-bit compare (VLANTC bit 16): VID in low 12 bits only.
+        m.macvlantr = 7 | (1 << 16);
+        tagged[14] = 0x10; tagged[15] = 0x07; // TCI 0x1007: low-12 = 7
+        assert!(m.accept(&tagged));
+        tagged[14] = 0x20; // TCI 0x2007: low-12 = 0x007? no: 0x007&0xFFF=7 — still hit
+        assert!(m.accept(&tagged));
+        tagged[15] = 0x08; // TCI 0x2008: low-12 = 8 — miss
+        assert!(!m.accept(&tagged));
+        // Invert (bit 17): match drops, mismatch passes, untagged passes.
+        m.macvlantr = 7 | (1 << 16) | (1 << 17);
+        tagged[14] = 0x00; tagged[15] = 0x07;
+        assert!(!m.accept(&tagged)); // hit -> reject
+        tagged[15] = 0x08;
+        assert!(m.accept(&tagged)); // miss -> accept
+        assert!(m.accept(&frame_to(&MAC, 20))); // untagged -> accept
     }
 
     /// Pause frame builder: multicast pause DA, our SA, 0x8808/0001.

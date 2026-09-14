@@ -434,6 +434,55 @@ int main(void) {
         }
         if (got_tag && !got_plain) uart_puts("VLAN OK\r\n");
         else { uart_puts("VLAN FAIL "); uart_hex32(got_tag * 2 + got_plain); uart_puts("\r\n"); }
+        // VLANTC=1 (12-bit compare) + invert (bit 17): the TX re-queues
+        // netsim's fixed pair (tagged 'VLAN7' VID 7 + untagged 'NOVLAN').
+        // Under invert: tagged-7 DROPS (hit->reject), untagged PASSES
+        // (absent tag never matches; invert turns that into accept).
+        // NOTE: netsim replies carry its OWN payloads ('V'/'N'), never
+        // the TX payload — so match on content like the VLAN-OK phase
+        // above, not on the sent byte. TCI high-bit 12-bit paths are
+        // covered by the native accept_vlan_gate unit test + mock gap5b
+        // (netsim cannot emit TCI 0x1007 on demand).
+        MACVLANTR = 7 | (1 << 16) | (1 << 17); // VID 7, 12-bit, inverted
+        {
+            unsigned int off = ip_header((unsigned char *)my_mac, my_ip_ram, 17, 8 + 4);
+            tx_frame[off] = 5002 >> 8; tx_frame[off + 1] = 5002 & 0xFF;
+            tx_frame[off + 2] = 5002 >> 8; tx_frame[off + 3] = 5002 & 0xFF;
+            tx_frame[off + 4] = 0; tx_frame[off + 5] = 12;
+            tx_frame[off + 6] = 0; tx_frame[off + 7] = 0;
+            tx_frame[off + 8] = '8';
+            int gotN = 0, leakV = 0;
+            if (eth_send_frame(14 + 20 + 12, 0)) {
+                for (int r = 0; r < 200 && !gotN; r++) {
+                    unsigned int len = eth_recv_frame(20000);
+                    if (!len) continue;
+                    unsigned int l3 = 14;
+                    if (rx_buf[12] == 0x81 && rx_buf[13] == 0x00) {
+                        l3 = 18;
+                        // A tagged frame arriving here is the VID-7 twin
+                        // leaking through the inverted gate -> FAIL.
+                        unsigned int uo = l3 + ((rx_buf[l3] & 0xF) * 4);
+                        if (rx_buf[uo + 8] == 'V') leakV = 1;
+                        continue;
+                    } else if (!(rx_buf[12] == 0x08 && rx_buf[13] == 0x00)) continue;
+                    if (rx_buf[l3 + 9] != 17) continue;
+                    unsigned int uo = l3 + ((rx_buf[l3] & 0xF) * 4);
+                    if (rx_buf[uo + 8] == 'N') gotN = 1;
+                }
+                // Silence check: the tagged twin must NOT show up late.
+                for (int r = 0; r < 40 && !leakV; r++) {
+                    unsigned int len = eth_recv_frame(20000);
+                    if (!len) continue;
+                    if (rx_buf[12] == 0x81 && rx_buf[13] == 0x00) {
+                        unsigned int l3 = 18;
+                        unsigned int uo = l3 + ((rx_buf[l3] & 0xF) * 4);
+                        if (rx_buf[uo + 8] == 'V') leakV = 1;
+                    }
+                }
+            }
+            if (gotN && !leakV) uart_puts("VLAN INV OK\r\n");
+            else { uart_puts("VLAN INV FAIL "); uart_hex32(gotN * 2 + leakV); uart_puts("\r\n"); }
+        }
         MACVLANTR = 0;
     }
 

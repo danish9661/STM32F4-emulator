@@ -30,7 +30,7 @@ const DEMOS = {
     gpio_k_test: { fams: ['f429'] },
     eth_pins_test: { fams: ['f429'] },
     fsmc_test: { fams: ['f429'] }, dcmi_test: { fams: ['f429'] },
-    qspi_test: { fams: ['f429'] }, deep_sleep_demo: {}, ltdc_test: { fams: ['f429'] },
+    qspi_test: { fams: ['f429'] }, deep_sleep_demo: {}, standby_demo: {}, ltdc_test: { fams: ['f429'] },
     eth_http: { fams: ['f429'], srcs: ['startup.c', 'eth_http.ino'] },
     eth_dhcp: { fams: ['f429'], srcs: ['startup.c', 'eth_dhcp.ino'] },
     eth_test: { fams: ['f429'] },

@@ -547,11 +547,24 @@ export function periph_read(addr: number, width: number): number;
 export function periph_write(addr: number, width: number, value: number): void;
 
 /**
+ * Record STANDBY entry (PDDS=1 + SLEEPDEEP WFI): sets SBF (CSR bit 1).
+ * The driver calls this when it observes the guest enter WFI sleep with
+ * PDDS set, before advancing virtual time.
+ */
+export function pwr_enter_standby(): void;
+
+/**
  * Mark the PWR peripheral as having woken from a low-power (WFI/WFE) state.
  * The emulator calls this when the core resumes after a sleep halt so firmware
  * can read PWR->CSR WUF to confirm the wakeup source.
  */
 export function pwr_wakeup(): void;
+
+/**
+ * Wakeup from STANDBY: set WUF (CSR bit 0), keep SBF until the guest
+ * clears it via CR CSBF.
+ */
+export function pwr_wakeup_standby(): void;
 
 /**
  * Register an external QSPI flash image for the named QUADSPI peripheral.
@@ -762,7 +775,9 @@ export interface InitOutput {
     readonly ltdc_get_scanline: () => number;
     readonly periph_read: (a: number, b: number) => number;
     readonly periph_write: (a: number, b: number, c: number) => void;
+    readonly pwr_enter_standby: () => void;
     readonly pwr_wakeup: () => void;
+    readonly pwr_wakeup_standby: () => void;
     readonly qspi_register_flash: (a: number, b: number, c: number, d: number) => void;
     readonly reset_state: () => void;
     readonly set_intr_pending: (a: number) => void;

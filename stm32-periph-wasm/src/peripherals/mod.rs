@@ -194,6 +194,34 @@ impl Peripherals {
         }
     }
 
+    /// Record STANDBY entry (PDDS=1 + SLEEPDEEP WFI path): sets SBF
+    /// (PWR CSR bit 1) so later wakeup firmware can tell STANDBY from STOP.
+    pub fn pwr_enter_standby(&self) {
+        for slot in &self.peripherals {
+            if slot.start == 0x4000_7000 {
+                use crate::peripherals::pwr::Pwr;
+                if let Some(pwr) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Pwr>() {
+                    pwr.enter_standby();
+                }
+                break;
+            }
+        }
+    }
+
+    /// Wakeup from STANDBY: set WUF (CSR bit 0), keep SBF until the guest
+    /// clears it via CR CSBF.
+    pub fn pwr_wakeup_standby(&self) {
+        for slot in &self.peripherals {
+            if slot.start == 0x4000_7000 {
+                use crate::peripherals::pwr::Pwr;
+                if let Some(pwr) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Pwr>() {
+                    pwr.wakeup_standby();
+                }
+                break;
+            }
+        }
+    }
+
     /// Complete the staged DMA2D transfer (called by the JS driver after it
     /// moved the pixels): TCIF + IRQ56 when TCIE is set.
     pub fn dma2d_job_done(&self, sys: &System) {

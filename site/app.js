@@ -65,7 +65,7 @@ const FREERTOS_FIRMWARES = new Set(['freertos_test', 'freertos_test_f411', 'free
 
 // Firmwares that exercise the WFI/STOP low-power path: the emulator halts the
 // core on WFI and advances the virtual RTC until an alarm/interrupt wakes it.
-const LOWPOWER_FIRMWARES = new Set(['deep_sleep_demo']);
+const LOWPOWER_FIRMWARES = new Set(['deep_sleep_demo', 'standby_demo']);
 
 // Virtual hardware attached to the emulator per firmware: the JS device
 // layer parses the peripheral traffic and renders it (OLED fb, TFT fb,

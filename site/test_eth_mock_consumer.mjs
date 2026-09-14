@@ -197,6 +197,35 @@ function t_gap5() {
     W(MAC + 0x04, 0);
 }
 
+// ── Gap 5b: VLAN 12-bit compare + invert (model accept gate) ────────────
+// Firmware covers VID-7 match/mismatch + untagged-drop + inverted-untagged
+// pass; the tagged 12-bit and invert paths are unit-only (netsim cannot
+// emit tagged frames on demand).
+function t_gap5b() {
+    stationMac();
+    const tag = (tci) => {
+        const inner = new Uint8Array(50);
+        const f = new Uint8Array(18 + 20 + 8 + 8);
+        f.set(SMAC, 0); f.set(SMAC, 6);
+        f[12] = 0x81; f[13] = 0x00;
+        f[14] = (tci >> 8) & 0xFF; f[15] = tci & 0xFF;
+        f[16] = 0x08; f[17] = 0x00;
+        return f;
+    };
+    W(MAC + 0x1C, 7); // VLANTI=7, 16-bit compare
+    ok(eth_mac_accept(frameTo(SMAC)) === false, 'gap5b: untagged drops, gate on');
+    ok(eth_mac_accept(tag(0x0007)) === true, 'gap5b: VID 7 tagged passes');
+    ok(eth_mac_accept(tag(0x0008)) === false, 'gap5b: VID 8 tagged drops');
+    W(MAC + 0x1C, 7 | (1 << 16)); // 12-bit compare
+    ok(eth_mac_accept(tag(0x1007)) === true, 'gap5b: 12-bit TCI 0x1007 passes (low-12 = 7)');
+    ok(eth_mac_accept(tag(0x2008)) === false, 'gap5b: 12-bit TCI 0x2008 drops');
+    W(MAC + 0x1C, 7 | (1 << 16) | (1 << 17)); // + invert
+    ok(eth_mac_accept(tag(0x0007)) === false, 'gap5b: inverted VID 7 drops');
+    ok(eth_mac_accept(tag(0x0008)) === true, 'gap5b: inverted VID 8 passes');
+    ok(eth_mac_accept(frameTo(SMAC)) === true, 'gap5b: inverted untagged passes');
+    W(MAC + 0x1C, 0);
+}
+
 // ── Gap 6: checksum status + PTP event gate are pure model fns ─────────────
 // (Driver calls eth_rx_csum_status per frame; the event gate lives in the
 // driver, but the csum status feeding its rdesExtra is model-side.)
@@ -256,6 +285,7 @@ const tests = [
     ['gap3 PMTCTL mask + RWUFFR arm', t_gap3],
     ['gap4 FS/LS contract', t_gap4],
     ['gap5 PM/BFD/PCF-11', t_gap5],
+    ['gap5b VLAN 12-bit + invert', t_gap5b],
     ['gap6 csum/WOL/pacing/collision/deferral/link/IPCO', t_gap6],
 ];
 for (const [name, fn] of tests) {

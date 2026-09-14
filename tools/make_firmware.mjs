@@ -88,6 +88,7 @@ const firmwares = [
     ['wwdg_window_demo', 'wwdg_window_demo/wwdg_window_demo.bin', 'wwdg_window_demo.bin'],
     ['tim_capture_demo', 'tim_capture_demo/tim_capture_demo.bin', 'tim_capture_demo.bin'],
     ['deep_sleep_demo', 'deep_sleep_demo/deep_sleep_demo.bin', 'deep_sleep_demo.bin'],
+    ['standby_demo', 'standby_demo/standby_demo.bin', 'standby_demo.bin'],
     // QSPI indirect read/write round-trip
     ['qspi_test', 'qspi_test/qspi_test.bin', 'qspi_test.bin'],
     // VFPv4-SP: real GCC hard-float (vfma/vcmpe/vcvt/vsqrt/D=1 regs)
@@ -148,6 +149,9 @@ const firmwares = [
     ['deep_sleep_demo_f401', 'deep_sleep_demo/deep_sleep_demo_f401.bin', 'deep_sleep_demo_f401.bin'],
     ['deep_sleep_demo_f411', 'deep_sleep_demo/deep_sleep_demo_f411.bin', 'deep_sleep_demo_f411.bin'],
     ['deep_sleep_demo_f429', 'deep_sleep_demo/deep_sleep_demo_f429.bin', 'deep_sleep_demo_f429.bin'],
+    ['standby_demo_f401', 'standby_demo/standby_demo_f401.bin', 'standby_demo_f401.bin'],
+    ['standby_demo_f411', 'standby_demo/standby_demo_f411.bin', 'standby_demo_f411.bin'],
+    ['standby_demo_f429', 'standby_demo/standby_demo_f429.bin', 'standby_demo_f429.bin'],
     ['rtc_test_f401', 'rtc_test/rtc_test_f401.bin', 'rtc_test_f401.bin'],
     ['rtc_test_f411', 'rtc_test/rtc_test_f411.bin', 'rtc_test_f411.bin'],
     ['rtc_test_f429', 'rtc_test/rtc_test_f429.bin', 'rtc_test_f429.bin'],

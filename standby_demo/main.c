@@ -1,7 +1,8 @@
-// Deep-sleep demo: exercises the emulator's low-power (WFI/STOP) model.
-// Arms the RTC alarm ~3s ahead, enters STOP (SLEEPDEEP) via WFI, and the
-// emulator halts the core until the RTC alarm wakes it. After wakeup the
-// firmware confirms via PWR->CSR WUF and blinks to show it is alive.
+// Standby demo: exercises the emulator's low-power STANDBY (PDDS=1) model.
+// Unlike STOP (PDDS=0, deep_sleep_demo), STANDBY is entered with PDDS=1 and
+// the emulator must distinguish the two paths: same RTC-alarm wakeup, but
+// the firmware observes PDDS still set + WUF set on wake, proving the
+// standby path (not the stop path) was taken.
 
 #define RCC_BASE    0x40023800
 #define RCC_AHB1ENR (*(volatile unsigned int *)(RCC_BASE + 0x30))
@@ -93,8 +94,8 @@ void RTC_Alarm_IRQHandler(void) {
 
 int main(void) {
     uart_init();
-    uart_puts("=== Deep Sleep Demo ===\r\n");
-    uart_puts("STM32F407 low-power (WFI/STOP) + RTC alarm wakeup\r\n");
+    uart_puts("=== Standby Demo ===\r\n");
+    uart_puts("STM32F407 low-power (WFI/STANDBY) + RTC alarm wakeup\r\n");
 
     led_init();
 
@@ -120,24 +121,30 @@ int main(void) {
     // 4) Enable the RTC_Alarm interrupt as the wakeup source (IRQ 41 -> ISER1.9).
     NVIC_ISER1 |= (1u << 9);
 
-    // 5) Enter STOP: PDDS=0, SLEEPDEEP=1 in SCB_SCR.
-    PWR_CR &= ~(1u << 1);                // PDDS=0 -> STOP (not STANDBY)
+    // 5) Enter STANDBY: PDDS=1, SLEEPDEEP=1 in SCB_SCR.
+    PWR_CR |= (1u << 1);                 // PDDS=1 -> STANDBY (not STOP)
     SCB_SCR |= (1u << 2);                // SLEEPDEEP
 
     uart_puts("arming RTC alarm ~3s ahead\r\n");
-    uart_puts("entering STOP (deep sleep)...\r\n");
+    uart_puts("entering STANDBY (deep sleep)...\r\n");
 
     // 6) Wait For Interrupt. The emulator halts the core here until the RTC
     //    alarm fires, then resumes.
     asm volatile (".short 0xBF30" : : : "memory"); // WFI
 
-    // 7) Woke up. Confirm via the PWR wakeup flag (CSR bit 0 on silicon:
-    //    SVD PWR_CSR.WUF @0, SBF @1).
-    uart_puts("WOKE FROM STOP\r\n");
+    // 7) Woke up. Confirm via the PWR wakeup flag (CSR bit 0 on
+    //    silicon: SVD PWR_CSR.WUF @0, SBF @1) AND that SBF is set (proves
+    //    the standby path, not the stop path, was taken).
+    uart_puts("WOKE FROM STANDBY\r\n");
     if (PWR_CSR & (1u << 0)) {
         uart_puts("Wakeup flag (WUF) set\r\n");
     }
+    if (PWR_CSR & (1u << 1)) {
+        uart_puts("Standby flag (SBF) set\r\n");
+    }
     // Tidy up so we don't immediately re-wake if we ever WFI again.
+    // (Clear WUF via CR CWUF bit 2; leave SBF set — silicon keeps it
+    // until the guest clears it via CR CSBF bit 3.)
     PWR_CR |= (1u << 2);                 // CWUF: clear WUF
     RTC_ISR &= ~(1u << 8);               // clear ALRAF
     RTC_CR &= ~(1u << 8);                // disable ALRAE

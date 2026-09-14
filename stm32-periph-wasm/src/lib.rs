@@ -131,6 +131,21 @@ pub fn pwr_wakeup() {
     sys().p.pwr_wakeup();
 }
 
+/// Record STANDBY entry (PDDS=1 + SLEEPDEEP WFI): sets SBF (CSR bit 1).
+/// The driver calls this when it observes the guest enter WFI sleep with
+/// PDDS set, before advancing virtual time.
+#[wasm_bindgen]
+pub fn pwr_enter_standby() {
+    sys().p.pwr_enter_standby();
+}
+
+/// Wakeup from STANDBY: set WUF (CSR bit 0), keep SBF until the guest
+/// clears it via CR CSBF.
+#[wasm_bindgen]
+pub fn pwr_wakeup_standby() {
+    sys().p.pwr_wakeup_standby();
+}
+
 /// Take the staged DMA2D transfer for the JS driver: 16 words
 /// [mode, w, h, fg_addr, fg_cm, fg_off, bg_addr, bg_cm, bg_off,
 ///  out_addr, out_cm, out_off, ocolr, 0, 0, 0], or empty when idle.
