@@ -25,6 +25,9 @@ impl Iwdg {
         let now = INSTRUCTION_COUNT.load(Ordering::Relaxed);
         if self.sr != 0 && now.saturating_sub(self.sr_tick) >= self.tick_instructions() { self.sr = 0; }
         if !self.enabled { return; }
+        // DBGMCU freeze needs the System handle, which this signature
+        // lacks — see the tick() arm below (freezing is enforced there,
+        // before tick_counter runs, with the same re-anchor rule).
         let elapsed = now.saturating_sub(self.last_tick);
         let ticks = elapsed / self.tick_instructions();
         if ticks == 0 { return; }
@@ -44,7 +47,15 @@ impl Iwdg {
 
 impl Peripheral for Iwdg {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-    fn tick(&mut self, _sys: &System) { self.tick_counter(); }
+    fn tick(&mut self, sys: &System) {
+        // DBGMCU freeze (same rule as TIM.advance/WWDG): no countdown while
+        // halted+frozen; re-anchor so resume doesn't burst.
+        if crate::peripherals::dbgmcu::dbgmcu_frozen(sys, "IWDG") {
+            self.last_tick = INSTRUCTION_COUNT.load(Ordering::Relaxed);
+            return;
+        }
+        self.tick_counter();
+    }
 
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         match offset {

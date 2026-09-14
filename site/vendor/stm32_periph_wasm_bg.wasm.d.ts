@@ -110,6 +110,7 @@ export const usb_enumerated: () => void;
 export const usb_in_status: (a: number) => number;
 export const usb_inject_out: (a: number, b: number, c: number) => void;
 export const usb_inject_setup: (a: number, b: number) => void;
+export const usb_out_status: (a: number) => number;
 export const usb_reset: () => void;
 export const usb_take_in: (a: number, b: number) => void;
 export const wasmcpu_fault_len: (a: number) => number;

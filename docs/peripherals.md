@@ -2,7 +2,7 @@
 
 Every peripheral in the Rust model (`stm32-periph-wasm/src/peripherals/`),
 its register coverage, behavior level, and how it's exercised. Line counts
-from `wc -l` (all files, as of 2026-08-09).
+from `wc -l` (all files).
 
 **Levels**
 
@@ -32,13 +32,13 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 | CRC | 39 | Detailed | Real CRC-32 (poly 0x04C11DB7, MSB-first), accumulated on DR writes; DR/IDR/CR, RESET → 0xFFFFFFFF | N | N | N |
 | CRYP | 628 | Detailed | Full crypto core via real `aes`/`des` crates: AES-128/192/256 ECB/CBC/CTR, DES + 3DES (EDE3), GCM (GHASH + GF(2¹²⁸) + CTR + tag), CCM (CBC-MAC + CTR); 64-byte FIFO with IFEM/IFNF/OFNE/OFFU/BUSY, datatype byte-swap | Y (79: OFNE/IFNF) | N | N |
 | DAC | 135 | Detailed | CR/SWTRIGR/all DHR regs/DOR1-2/SR; DOR update on trigger + writes, LFSR noise, triangle-waveform counter/direction, MAMP masks | N | N | N |
-| DBGMCU | 37 | Partial | IDCODE constant 0x10006411; CR/APB1FZ/APB2FZ stored/masked | N | N | N |
-| DCMI | 81 | Partial | CR/SR/RIS/IER/ICR/ESCR/ESUR/CWSTRT/CWSIZ/DR; consumes a JS-fed camera frame with VSYNC/LINE/FRAME/OVR semantics and a 4-deep FIFO. Source: `ext_devices.camera` (pumped every step) or `emu.camera.feed(w,h,pixels)`; guest-side coverage: `dcmi_test` | Y (78) | N | N |
+| DBGMCU | 108 | Partial | IDCODE constant 0x10006411; CR/APB1FZ/APB2FZ stored/masked; APBx freeze bits HONORED — `dbgmcu_set_halt()` + per-timer freeze stops TIM2-14/WWDG/IWDG advance (no count, no IRQ, no catch-up burst on resume; cargo `dbgmcu_freeze_*` tests) | N | N | N |
+| DCMI | 406 | Partial | CR/SR/RIS/IER/MIS/ICR/ESCR/ESUR/CWSTRT/CWSIZ/DR (SVD offsets: MIS 0x10, ICR 0x14); consumes a JS-fed camera frame with VSYNC/LINE/FRAME/ERR/OVR semantics and a 4-deep FIFO; CROP mode (CR bit 2) gates delivery through the CWSTRT/CWSIZE window (out-of-window pixels consumed, never delivered; LINE only for captured rows). Source: `ext_devices.camera` (pumped every step) or `emu.camera.feed(w,h,pixels)`; guest-side coverage: `dcmi_test` | Y (78) | N | N |
 | DMA | 212 | Detailed | LISR/HISR/IFCR + 8 streams (CR/NDTR/PAR/M0AR/M1AR/FCR); EN queues a `DmaTransfer` (copy done by JS via `dma_get_pending`/`dma_set_completed`), TCIF/HTIF, stream IRQ, double-buffer M1AR, dir/mem2mem | Y (11-18, 56-63) | N | N |
 | ETH | 311 | Detailed | All 4 blocks (MAC/MMC/PTP/DMA) full register maps; PHY emulation (MIIAR read → fixed PHY regs), write-1-clear DMASR, DMAIER masking, AIS/NIS, TX/RX done → TS/RS bits, DMABMR soft-reset, DMAOMR ST/SR → `eth_signal_tx/rx_poll` atomics | Y (61) | Y | N |
 | EXTI | 70 | Detailed | IMR/EMR/RTSR/FTSR/SWIER/PR with correct line→IRQ mapping; **GPIO edge-trigger path**: `scan_lines` per tick compares GPIO line levels vs `last_state`, RTSR/FTSR gating, line→IRQ map (0-4→6-10, 5-9→23, 10-15→40) | Y (6-10/23/40) | N | N |
 | FLASH | 80 | Detailed | ACR, KEYR two-step unlock (0x45670123→0xCDEF89AB), OPTKEYR, SR write-1-clear, CR + LOCK/PSIZE, OPTCR1; program (PG) and sector-erase (SER) dispatch into the emulated flash backing buffer via `flash_erase_applied` (JS driver gated on `syncFlashProtection`) | N | N | N |
-| FSMC | 100 | Partial | 4 banks 0x60000000-0xA0001000; BCR/BTR/PCR stored per bank; data-space accesses forward to a JS device via the bank tap (`fsmc_tap` / `ext_devices.fsmcDevices`), which reports the ACCESS ADDRESS as well as the value so an 8080-mode display can decode its RS/DC line. An untapped bank reads 0; guest-side coverage: `fsmc_test` | N | N | N |
+| FSMC | 291 | Partial | 4 banks 0x60000000-0xA0001000; BCR/BTR/BWTR + NAND PCR/SR/PMEM/PATT/ECCR (SR FEMPT reset value, ECCR/SR read-only — ECC never computed, no NAND array behind the banks); data-space accesses forward to a JS device via the bank tap (`fsmc_tap` / `ext_devices.fsmcDevices`), which reports the ACCESS ADDRESS as well as the value so an 8080-mode display can decode its RS/DC line. An untapped bank reads 0; guest-side coverage: `fsmc_test` | N | N | N |
 | GPIO | 229 | Detailed | MODER/OTYPER/OSPEEDR/PUPDR/IDR/ODR/BSRR/LCKR/AFRL/AFRH; ODR/BSRR drive output_state + write callbacks, MODER→input clears output, IDR = input_state + read callbacks, 11 ports (A-K) | N | N | Y |
 | HASH | 164 | Detailed | Real SHA-1/MD5/SHA-256 (sha1/md5/sha2 crates) with NBLW/length handling; CR/INIT, DIN FIFO, STR, HR + HASH_HR, IMR/SR, 54 CSR words | Y (80) | N | N |
 | I2C | 204 | Detailed | Full master state machine (Idle→Start→Addr→Active read/write), START/STOP, SWRST, address match vs attached EEPROMs (NACK/AF on miss), byte R/W, SR1/SR2 ordering semantics, event/buffer/error IRQ masking | Y (31-34, 72-73) | N | Y |
@@ -46,7 +46,7 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 | IWDG | 70 | Detailed | KR keys (0x5555 write-enable, 0xAAAA reload, 0xCCCC start), PR prescaler, RLR; instruction-count driven; underflow → `request_watchdog_reset()`; SR PVU/RVU | reset (not IRQ) | N (self-timed) | N |
 | LTDC | 260 | Detailed | Global regs + 2 layers (CR/whpcr/wvpcr/ckcr/pfcr/cacr/dccr/bfcr/cfbar/cfblr/cfblnr/clutwr); real scanline/frame advance from SSCR/BPCR/AWCR geometry (`ltdc_get_scanline`/`ltdc_get_frame_count`), LIF at LIPCR + frame-end F flag, IRQ 88; browser console renders layer0 (ARGB8888/RGB565) to a canvas | Y (88) | N | N |
 | NVIC | 226 | Detailed | ISER/ICER/ISPR/ICPR/IABR/priority; u128 pending mask, enable/active arrays; `set_intr_pending` sets pending only (no auto-enable — pending is delivered only when ISER is set, and disabled pending stays set until taken or ICPR); `get_and_clear_next_intr_pending` delivers the highest-priority enabled IRQ, skips disabled ones without clearing; `has_pending` reflects deliverable-only; ICSR VECTPENDING returns the exception vector number; SysTick periodic pending; `in_interrupt` | controller | via System::tick | N |
-| PWR | 47 | Partial | CR/CSR masked storage, WUF on valid wakeup write pattern | N | N | N |
+| PWR | 100 | Partial | CR/CSR masked storage, WUF/SBF via emulator wakeup path (CSR bit 0/1, cleared via CR CWUF/CSBF); PVD live: PVDO follows PVDE against a pinned-healthy rail (0 when watching, 1 when off — RM0090); VOSRDY always 1 (no scaling transients); no voltage-scaling/regulator states | N | N | N |
 | RCC | 221 | Detailed | CR/PLLCFGR/CFGR/CIR/reset-enable/low-power/BDCR/CSR/SSCG/PLLI2SCFGR/PLLSAI/DCKCFGR/CKGATENR/DCKCFGR2; HSE/PLL ready after instruction-count delays, HSIRDY, SWS mirrors SW, real freq math (system/pll/ahb/apb1/apb2), enable-bit gating map, LSE/LSI ready timing | N | N | N |
 | RNG | 85 | Detailed | CR/SR/DR; LCG pseudo-random 32-bit values regenerated every 40 inst, DRDY, error flags + IRQ | Y (80) | N | N |
 | RTC | 198 | Detailed | TR/DR/CR/ISR/PRER/WUTR/CALIBR/ALRMAR/ALRMBR/WPR/SSR/SHIFTR/timestamp/CALR/TAFCR/ALRMASSR/ALRMBSSR + 20 backup regs; BCD time advances via PRER prescaler vs instruction count, alarm A/B matching with don't-care masks | Y (43) | N (advances on access) | N |
@@ -55,11 +55,11 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 | SDIO | 143 | Detailed | Full register set + emulated SD card state machine (Idle→Ident→Stby→Tran), canned responses for CMD0/2/3/5/7/8/9/10/13/16/17/18/41/55, RCA matching, data-transfer simulation (DCOUNT/FIFOCNT, CMD17/18), status flags + ICR/MASK | Y (49) | N | N |
 | SPI | 157 | Detailed | CR1/CR2/SR/DR/RXCRC/TXCRC/I2SCFGR/I2SPR; full-duplex 8/16-bit transfers to attached device with CS selection via GPIO, I2S mode audio generation, TXE/RXNE toggling; **CS edges delivered via GPIO write callbacks** (`register_cs_callbacks`, sw_spi pattern) so attached-device CS deassert is observed immediately | Y (35/36/51) | N | Y |
 | SW_SPI | 105 | Detailed | Bit-banged SPI via GPIO callbacks (CS/CLK/MOSI/MISO): shift register, 8-bit framing, forwards bytes to attached device; CS edge resets | N | N | Y |
-| SYSCFG | 52 | Partial | MEMRM/PMC/EXTICR[4]/CMPCR masked storage; CMPCR read toggles COMP bit | N | N | N |
+| SYSCFG | 63 | Partial | MEMRM/PMC/EXTICR[4]/CMPCR masked storage; CMPCR read toggles COMP bit; PMC MII_RMII_SEL honored by the ETH pin mirrors (`eth_feat_test` "PHY media RMII/MII OK"); verified: MEMRMP has no observable boot-alias effect in this emulator (flat flash map, no remap needed) | N | N | N |
 | SYSTICK | 55 | Detailed | CSR/RVR/CVR/CALIB; enabling programs `nvic.systick_period` → periodic SYSTICK pending from `System::tick`; CVR write resets trigger point | indirect (SYSTICK) | N | N |
-| TIM | 243 | Detailed | CR1/CR2/SMCR/DIER/SR/EGR/CCMR1-3/CCER/CNT/PSC/ARR/CCR1-6/RCR/DCR/DMAR/OR; instruction-count counter with PSC prescaler, up/down/center-aligned, UIF+UIE IRQ on overflow, CC match IRQs, UG update event, PWM duty | Y (per-timer) | **Y** | N |
+| TIM | 398 | Detailed | CR1/CR2/SMCR/DIER/SR/EGR/CCMR1-3/CCER/CNT/PSC/ARR/CCR1-6/RCR/DCR/DMAR/OR; instruction-count counter with PSC prescaler, up/down/center-aligned, UIF+UIE IRQ on overflow, CC match IRQs, UG update event, PWM duty; DBGMCU freeze stops advance while halted+frozen | Y (per-timer) | **Y** | N |
 | USART | 126 | Detailed | SR/DR/BRR/CR1-3/GTPR; TX pushes to global UART output buffer (drained by `get_uart_output`), RX via `rx_byte` (JS `uart_rx_byte`) with 64-byte RX buffer, RXNE/ORE, TXE/TC always set; IRQ on RXNEIE/TCIE/TXEIE | Y (37/38/39/52/53/71/82/83) | N | N |
-| WWDG | 81 | Detailed | CR/CFR/SR; countdown at 256×prescaler instructions, early-wakeup flag + IRQ (EWI), underflow + WDGA → `request_watchdog_reset()` | Y (0) | N (self-timed) | N |
+| WWDG | 158 | Detailed | CR/CFR/SR; countdown at 256×prescaler instructions, early-wakeup flag + IRQ (EWI), underflow + WDGA → `request_watchdog_reset()`; DBGMCU freeze stops countdown while halted+frozen | Y (0) | N (self-timed) | N |
 
 ## External devices (`stm32-periph-wasm/src/ext_devices/`)
 
@@ -109,3 +109,9 @@ prints a banner over UART when it boots.
   two-node bus arbitration are implemented (see rows above).
 - Timers/ADC/RNG/RTC/IWDG/WWDG are instruction-count driven, not
   wall-clock driven (deterministic across machines).
+- USB STALL handshake: IN + OUT endpoints stall on CTL bit 21 (set latches
+  the handshake, clear resumes; stalled transfers move no data and raise no
+  XFRC), observable via `usb_in_status`/`usb_out_status` (2 = STALL) —
+  covered by the native `stall_handshake_set_and_clear_both_directions`
+  test. The shipped `usb_cdc_test` firmware never stalls (it only needs the
+  success path), so the handshake is proven at model level, not end-to-end.

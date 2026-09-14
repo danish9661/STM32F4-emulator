@@ -69,7 +69,8 @@ pub struct UsbFs {
     rx_data: VecDeque<u8>,    // RXFIFO bytes (read via 0x50001000)
     tx_data: [VecDeque<u8>; N_EPS],
     in_ready: [Option<Vec<u8>>; N_EPS], // completed IN blob (empty = ZLP)
-    in_stall: [bool; N_EPS],            // STALL handshake pending
+    in_stall: [bool; N_EPS],            // STALL handshake pending (IN)
+    out_stall: [bool; N_EPS],           // STALL handshake pending (OUT)
 }
 
 impl Default for UsbFs {
@@ -103,6 +104,7 @@ impl Default for UsbFs {
             tx_data: Default::default(),
             in_ready: Default::default(),
             in_stall: [false; N_EPS],
+            out_stall: [false; N_EPS],
         };
         // EP0 is active out of reset (USBACTEP); MPSIZ field 0 reads as 64.
         u.in_ep[0].ctl = 1 << 15;
@@ -275,9 +277,16 @@ impl UsbFs {
     }
 
     /// Inject an OUT data packet (status 2; completes on short packet or
-    /// when the armed XFRSIZ drains, raising XFRC like silicon).
+    /// when the armed XFRSIZ drains, raising XFRC like silicon). A STALLed
+    /// OUT endpoint answers with a STALL handshake instead: nothing is
+    /// queued, no data moves, and the harness observes the stall status.
     pub fn inject_out(&mut self, sys: &System, ep: usize, data: &[u8]) {
         if ep >= N_EPS {
+            return;
+        }
+        if (self.out_ep[ep].ctl >> 21) & 1 != 0 {
+            self.out_stall[ep] = true;
+            self.update_irq(sys);
             return;
         }
         for b in data {
@@ -302,17 +311,28 @@ impl UsbFs {
     }
 
     /// IN transfer status for the harness: 0 none, 1 data ready, 2 stall.
+    /// OUT stall reports on the same code: querying an OUT endpoint (or
+    /// either direction after a stall) surfaces a pending STALL handshake.
     pub fn in_status(&self, ep: usize) -> u32 {
         if ep >= N_EPS {
             return 0;
         }
-        if self.in_stall[ep] {
+        if self.in_stall[ep] || self.out_stall[ep] {
             2
         } else if self.in_ready[ep].is_some() {
             1
         } else {
             0
         }
+    }
+
+    /// OUT transfer status for the harness: 0 none, 2 stalled (OUT has no
+    /// data-ready slot — reception completes via the endpoint interrupt).
+    pub fn out_status(&self, ep: usize) -> u32 {
+        if ep >= N_EPS {
+            return 0;
+        }
+        if self.out_stall[ep] { 2 } else { 0 }
     }
 
     /// Drain a completed IN blob (empty vec = ZLP or nothing pending;
@@ -339,13 +359,30 @@ impl UsbFs {
         match off {
             0x00 => {
                 let was_ena = self.in_ep[ep].ctl & (1 << 31) != 0;
+                let was_stall = self.in_ep[ep].ctl & (1 << 21) != 0;
+                // STALL set + EPENA in one write must stall, not race the
+                // enable edge below: capture the intent before storing, and
+                // report the handshake immediately (in_send would do it, but
+                // the edge is now suppressed — so latch here).
+                let stalling = value & (1 << 21) != 0;
                 self.in_ep[ep].ctl = value;
+                if stalling && value & (1 << 31) != 0 {
+                    self.in_stall[ep] = true;
+                }
+                // STALL handshake set/clear: firmware sets bit 21 to stall
+                // the endpoint, clears it to resume. Clearing drops a
+                // pending STALL report (silicon clears the handshake state
+                // when the application clears STALL); setting it while a
+                // transfer is armed stalls immediately at the next EPENA.
+                if value & (1 << 21) == 0 && was_stall {
+                    self.in_stall[ep] = false;
+                }
                 if value & (1 << 30) != 0 {
                     // EPDIS: halt the endpoint, report disabled.
                     self.in_ep[ep].ctl &= !(1 << 31);
                     self.in_ep[ep].int |= 1 << 1; // EPDISD
                 }
-                if !was_ena && value & (1 << 31) != 0 {
+                if !was_ena && value & (1 << 31) != 0 && !stalling {
                     self.in_send(sys, ep);
                 }
                 self.update_irq(sys);
@@ -374,7 +411,14 @@ impl UsbFs {
     fn write_ep_out(&mut self, sys: &System, ep: usize, off: u32, value: u32) {
         match off {
             0x00 => {
+                let was_stall = self.out_ep[ep].ctl & (1 << 21) != 0;
                 self.out_ep[ep].ctl = value;
+                // STALL set/clear mirrors the IN path (OUT STALL makes the
+                // device answer the next OUT token with a STALL handshake;
+                // clearing resumes normal reception).
+                if value & (1 << 21) == 0 && was_stall {
+                    self.out_stall[ep] = false;
+                }
                 if value & (1 << 30) != 0 {
                     self.out_ep[ep].ctl &= !(1 << 31);
                     self.out_ep[ep].int |= 1 << 1; // EPDISD
@@ -642,6 +686,55 @@ mod tests {
                 assert_eq!(usb.read(sys, 0x010) & 1, 0, "CSRST self-clears");
                 assert_eq!(usb.in_status(0), 0, "queues flushed");
                 assert_eq!(usb.read(sys, 0x014) & (1 << 12), 0, "no USBRST yet");
+                return;
+            }
+        }
+        panic!("USB slot missing");
+    }
+
+    #[test]
+    fn stall_handshake_set_and_clear_both_directions() {
+        let sys = crate::system::WasmSystem::new();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        for slot in &sys.p.peripherals {
+            if slot.start == 0x5000_0000 {
+                let mut u = slot.peripheral.borrow_mut();
+                let usb = u.as_any_mut().downcast_mut::<UsbFs>().unwrap();
+                // IN: STALL bit set + EPENA stalls instead of moving data.
+                usb.write(sys, 0x1000, 0xAABBCCDD); // TX FIFO has bytes
+                usb.write(sys, 0x910, 4 | (1 << 19)); // DIEPTSIZ0: 4B,1pkt
+                let ctl = usb.read(sys, 0x900);
+                usb.write(sys, 0x900, ctl | (1 << 21) | (1 << 31)); // STALL+EPENA
+                assert_eq!(usb.in_status(0), 2, "IN STALL reported");
+                assert_eq!(usb.read(sys, 0x908) & 1, 0, "no XFRC on STALL");
+                // Clearing STALL resumes: next EPENA completes normally.
+                // (The stalled EPENA stayed armed — the STALL write only
+                // reported the handshake, it did not consume the enable —
+                // so plain EPENA (already set in ctl2) with STALL cleared
+                // is a fresh edge only if EPENA toggles: drop it first,
+                // then re-arm explicitly, like firmware re-arming after
+                // the stall clears.)
+                let ctl2 = usb.read(sys, 0x900) & !(1 << 21);
+                usb.write(sys, 0x900, ctl2 & !(1 << 31)); // drop stale EPENA
+                usb.write(sys, 0x910, 4 | (1 << 19)); // re-arm 4B,1pkt
+                usb.write(sys, 0x900, ctl2 | (1 << 31));
+                assert_eq!(usb.in_status(0), 1, "IN data ready after clear");
+                assert_eq!(usb.take_in(0).len(), 4, "stalled bytes not lost");
+                // OUT: STALL bit set makes inject_out report stall, move nothing.
+                let octl = usb.read(sys, 0xB00);
+                usb.write(sys, 0xB00, octl | (1 << 21)); // STALL EP0-OUT
+                usb.write(sys, 0xB10, (1 << 19) | 64); // arm 64B OUT
+                usb.inject_out(sys, 0, &[1, 2, 3, 4]);
+                assert_eq!(usb.out_status(0), 2, "OUT STALL reported");
+                assert_eq!(usb.in_status(0), 2, "STALL visible on IN status too");
+                assert!(usb.rx_status.is_empty(), "stalled OUT queued nothing");
+                // Clearing resumes normal reception.
+                let octl2 = usb.read(sys, 0xB00) & !(1 << 21);
+                usb.write(sys, 0xB00, octl2);
+                usb.inject_out(sys, 0, &[1, 2, 3, 4]);
+                assert_eq!(usb.out_status(0), 0, "OUT clear resumes");
+                assert!(!usb.rx_status.is_empty(), "normal OUT queues again");
                 return;
             }
         }

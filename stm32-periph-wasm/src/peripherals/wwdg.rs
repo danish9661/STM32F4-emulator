@@ -40,6 +40,12 @@ impl Wwdg {
         // default-state SR read stays 0. Starting happens in the CR-write
         // path below, WDGA or not.
         if !self.initialized { self.last_tick = now; return; }
+        // DBGMCU freeze (same rule as TIM.advance): no countdown while
+        // halted+frozen; re-anchor so resume doesn't burst.
+        if crate::peripherals::dbgmcu::dbgmcu_frozen(sys, "WWDG") {
+            self.last_tick = now;
+            return;
+        }
         let elapsed = now.saturating_sub(self.last_tick);
         let ticks = elapsed / self.tick_instructions();
         if ticks == 0 { return; }

@@ -896,4 +896,7 @@ pub fn reset_globals() {
     // capture last_tick at construction; zeroing the global afterwards makes
     // elapsed = now.wrapping_sub(last_tick) enormous and breaks tick logic.
     // INSTRUCTION_COUNT.store(0, Relaxed);
+    // Debug-halt is emulator session state, not peripheral state: a fresh
+    // instance must not inherit a frozen clock from a previous test.
+    crate::peripherals::dbgmcu::dbgmcu_set_halt(false);
 }

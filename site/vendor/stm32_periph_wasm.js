@@ -1544,6 +1544,17 @@ export function usb_inject_setup(data) {
 }
 
 /**
+ * OUT transfer status: 0 none, 2 STALL handshake (OUT has no data-ready
+ * slot — reception completes via the endpoint interrupt).
+ * @param {number} ep
+ * @returns {number}
+ */
+export function usb_out_status(ep) {
+    const ret = wasm.usb_out_status(ep);
+    return ret >>> 0;
+}
+
+/**
  * USB OTG FS host-side test API (the harness plays USB host; see
  * peripherals/usb.rs). Drive reset -> enum-done -> SETUP/OUT inject,
  * and drain device-to-host IN blobs with usb_take_in.

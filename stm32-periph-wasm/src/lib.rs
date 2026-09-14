@@ -49,6 +49,7 @@ pub(crate) fn init_svd_for_test(s: WasmSystem) {
     // test's run loop and halt it at pc=entry with op=0xDEAD (observed:
     // every test after a faulting one died at its first instruction).
     crate::system::clear_fault_channels();
+    crate::peripherals::dbgmcu::dbgmcu_set_halt(false);
     set_sys(s);
 }
 
@@ -57,6 +58,7 @@ pub(crate) fn init_svd_for_test(s: WasmSystem) {
 #[cfg(test)]
 pub(crate) fn init_for_test(s: WasmSystem) {
     crate::system::clear_fault_channels();
+    crate::peripherals::dbgmcu::dbgmcu_set_halt(false);
     set_sys(s);
 }
 
@@ -663,6 +665,14 @@ pub fn usb_take_in(ep: u32) -> Vec<u8> {
 pub fn usb_in_status(ep: u32) -> u32 {
     let sys = crate::sys();
     sys.p.usb_in_status(ep)
+}
+
+/// OUT transfer status: 0 none, 2 STALL handshake (OUT has no data-ready
+/// slot — reception completes via the endpoint interrupt).
+#[wasm_bindgen]
+pub fn usb_out_status(ep: u32) -> u32 {
+    let sys = crate::sys();
+    sys.p.usb_out_status(ep)
 }
 
 /// True when the FLASH peripheral is unlocked with PG set and !BSY — the

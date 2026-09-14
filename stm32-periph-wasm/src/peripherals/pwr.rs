@@ -5,6 +5,13 @@ pub struct Pwr {
     cr: u32,
     csr: u32,
 }
+// PVD/VOSRDY model note: PLS[7:5] is observable — PVDO (CSR bit 2) follows
+// it against a fixed emulated supply. The emulator has no analog rail, so
+// the supply is pinned above every threshold: with PVDE set, PVDO reads 0
+// (supply above threshold — the normal powered-board case); with PVDE
+// clear, PVDO reads 1 (detection off, output forced high — exactly what
+// RM0090 documents for PVDE=0). VOSRDY (CSR bit 14) reads 1: the regulator
+// is always settled here (no voltage-scaling transients are modeled).
 
 impl Default for Pwr {
     fn default() -> Self {
@@ -59,7 +66,16 @@ impl Peripheral for Pwr {
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => self.cr,
-            0x04 => self.csr,
+            // CSR: live PVD/VOSRDY bits ORed over the latched WUF/SBF/EWUP
+            // state. PVDO (bit 2): 0 while PVDE watches a healthy rail,
+            // 1 when detection is off. VOSRDY (bit 14): always 1 (regulator
+            // settled — voltage scaling itself is still not modeled).
+            0x04 => {
+                let mut v = self.csr;
+                if self.cr & (1 << 4) != 0 { v &= !(1 << 2); } else { v |= 1 << 2; }
+                v |= 1 << 14;
+                v
+            }
             _ => 0,
         }
     }

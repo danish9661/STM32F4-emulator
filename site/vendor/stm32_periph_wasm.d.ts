@@ -666,6 +666,12 @@ export function usb_inject_out(ep: number, data: Uint8Array): void;
 export function usb_inject_setup(data: Uint8Array): void;
 
 /**
+ * OUT transfer status: 0 none, 2 STALL handshake (OUT has no data-ready
+ * slot — reception completes via the endpoint interrupt).
+ */
+export function usb_out_status(ep: number): number;
+
+/**
  * USB OTG FS host-side test API (the harness plays USB host; see
  * peripherals/usb.rs). Drive reset -> enum-done -> SETUP/OUT inject,
  * and drain device-to-host IN blobs with usb_take_in.
@@ -794,6 +800,7 @@ export interface InitOutput {
     readonly usb_in_status: (a: number) => number;
     readonly usb_inject_out: (a: number, b: number, c: number) => void;
     readonly usb_inject_setup: (a: number, b: number) => void;
+    readonly usb_out_status: (a: number) => number;
     readonly usb_reset: () => void;
     readonly usb_take_in: (a: number, b: number) => void;
     readonly wasmcpu_fault_len: (a: number) => number;

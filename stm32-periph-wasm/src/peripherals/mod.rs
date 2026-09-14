@@ -148,6 +148,10 @@ impl Peripherals {
         self.with_usb(|u| u.in_status(ep as usize)).unwrap_or(0)
     }
 
+    pub fn usb_out_status(&self, ep: u32) -> u32 {
+        self.with_usb(|u| u.out_status(ep as usize)).unwrap_or(0)
+    }
+
     /// DWT EXCCNT tick: one exception entry (called from every take path
     /// in the CPU). Gated on DEMCR.TRCENA like the rest of the unit.
     pub fn dwt_count_exc(&self, sys: &System) {

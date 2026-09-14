@@ -89,6 +89,13 @@ impl Timer {
 
         let enabled = self.cr1 & 1;
         if enabled == 0 { return; }
+        // DBGMCU freeze: while a debugger holds the core and this timer's
+        // APBx freeze bit is set, the counter neither advances nor fires
+        // (RM0090 §38.16). Wall time still passes (last_tick re-anchored
+        // above), so no catch-up burst fires on resume.
+        if crate::peripherals::dbgmcu::dbgmcu_frozen(sys, &self.name) {
+            return;
+        }
 
         let dir = (self.cr1 >> 4) & 1;
         let cms = (self.cr1 >> 5) & 0x3;

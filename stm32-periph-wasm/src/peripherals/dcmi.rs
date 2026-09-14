@@ -56,29 +56,55 @@ impl Dcmi {
     /// Pull the next pixel off the sensor and advance the frame cursor,
     /// raising LINE/FRAME as their boundaries are crossed. Returns None once
     /// the frame is exhausted. Shared by both consumers: the FIFO path (CPU
-    /// polling) and the DMA path.
+    /// polling) and the DMA path. With CROP set (CR bit 2), pixels outside
+    /// the CWSTRT/CWSIZE window are skipped silently (never delivered; LINE
+    /// only fires for captured rows — silicon counts captured rows only).
     fn advance_pixel(&mut self) -> Option<u8> {
-        let Some((w, h, data)) = &self.frame else { return None };
-        let (w, h) = (*w, *h);
-        if self.frame_y >= h { return None; }
-        let idx = (self.frame_y * w + self.frame_x) as usize;
-        let px = data.get(idx).copied();
-        self.frame_x += 1;
-        if self.frame_x >= w {
-            self.frame_x = 0;
-            self.frame_y += 1;
-            // LINE complete.
-            self.ris |= 1 << 1;
-            self.sr |= 1 << 1;
-            if self.frame_y >= h {
-                // FRAME complete: FRS flag, VSYNC deassert, capture done.
-                self.ris |= 1 << 2;
-                self.sr |= 1 << 2;
-                self.vsync = false;
-                self.cr &= !1; // CAPTURE auto-clears, like the real part
+        loop {
+            let Some((w, h, data)) = &self.frame else { return None };
+            let (w, h) = (*w, *h);
+            if self.frame_y >= h { return None; }
+            let cropped = self.cr & (1 << 2) != 0;
+            let (x0, y0, nx, ny) = if cropped {
+                // Window from CWSTRT (VST[28:16] first line, HOFFCNT[13:0]
+                // first column) of CWSIZE (VLINE[29:16] lines,
+                // CAPCNT[13:0] columns).
+                (
+                    (self.cwstrt & 0x3FFF) as u32,
+                    ((self.cwstrt >> 16) & 0x1FFF) as u32,
+                    (self.cwsiz & 0x3FFF) as u32,
+                    ((self.cwsiz >> 16) & 0x3FFF) as u32,
+                )
+            } else { (0, 0, w, h) };
+            let in_win = self.frame_x >= x0
+                && self.frame_x < x0.saturating_add(nx)
+                && self.frame_y >= y0
+                && self.frame_y < y0.saturating_add(ny);
+            let idx = (self.frame_y * w + self.frame_x) as usize;
+            let px = data.get(idx).copied();
+            let row_end = self.frame_x + 1 >= w;
+            self.frame_x += 1;
+            if row_end {
+                self.frame_x = 0;
+                self.frame_y += 1;
+                if in_win {
+                    // A captured row completed: LINE flag (skipped rows
+                    // never raise it; uncropped, every row is captured).
+                    self.ris |= 1 << 1;
+                    self.sr |= 1 << 1;
+                }
+                if self.frame_y >= h {
+                    self.ris |= 1 << 2;
+                    self.sr |= 1 << 2;
+                    self.vsync = false;
+                    self.cr &= !1;
+                }
             }
+            if in_win {
+                return px;
+            }
+            // Out-of-window pixel: consumed, never delivered; keep scanning.
         }
-        px
     }
 
     /// Capture running with sensor data still to stream (frame loaded and
@@ -126,11 +152,29 @@ impl Peripheral for Dcmi {
             0x04 => self.sr | (if !self.fifo.is_empty() || self.streaming() { 0x04 } else { 0 }),
             0x08 => self.ris,
             0x0C => self.ier,
-            0x10 => { let v = self.ris; self.ris = 0; v }
-            0x14 => self.escr,
-            0x18 => self.esur,
-            0x1C => self.cwstrt,
-            0x20 => self.cwsiz,
+            // MIS: masked status (RIS & IER), exactly like silicon's
+            // DCMI_MIS. The SVD lists it at 0x10 and ICR at 0x14; the old
+            // map put ICR at 0x10 (guests using the SVD MIS address read
+            // back the ICR write stub instead — comprehensive_test uses
+            // 0x50050010 as ICR, which now aliases both).
+            0x10 => self.ris & self.ier,
+            0x14 => {
+                let v = self.ris;
+                self.ris = 0;
+                // ICR clears the latched event bits; SR's VSYNC/LINE/FRAME
+                // shadows fall with them, but FNE is live-recomputed on
+                // every SR read, so leave that path untouched.
+                self.sr &= !0x07;
+                v
+            }
+            0x18 => self.escr,
+            0x1C => self.esur,
+            // CWSTRT/CWSIZE: real crop-window registers (stored verbatim).
+            // CROP mode (CR bit 2) gates delivery through them: lines and
+            // columns outside the window are skipped in advance_pixel, so a
+            // cropped capture yields exactly the window's pixels.
+            0x20 => self.cwstrt,
+            0x24 => self.cwsiz,
             0x28 => {
                 let v = if crate::system::dma_read_active() {
                     self.dma_pop()
@@ -189,14 +233,17 @@ impl Peripheral for Dcmi {
                 self.ier = value & 0x1F;
                 self.fire_interrupts(sys);
             }
-            0x10 => {
+            // 0x10 is MIS (read-only): ignore writes (old map treated it
+            // as the ICR clear — see the read arm).
+            0x10 => {}
+            0x14 => {
                 self.ris &= !(value & 0x1F);
                 self.sr &= !(value & 0x1F) & 0x1F;
             }
-            0x14 => self.escr = value & 0x3FF,
-            0x18 => self.esur = value & 0xFF_FFFF,
-            0x1C => self.cwstrt = value & 0x3FFF,
-            0x20 => self.cwsiz = value & 0x3FFF,
+            0x18 => self.escr = value & 0x3FF,
+            0x1C => self.esur = value & 0xFF_FFFF,
+            0x20 => self.cwstrt = value & 0x3FFF_FFFF,
+            0x24 => self.cwsiz = value & 0x3FFF_FFFF,
             _ => {}
         }
     }
@@ -308,6 +355,52 @@ mod tests {
         assert!(dcmi.ris & (1 << 3) != 0, "polling still overruns the FIFO");
 
         dcmi.fifo.clear();
+        crate::system::dcmi_clear();
+    }
+
+    #[test]
+    fn mis_reports_masked_status_and_icr_alias_clears() {
+        let _lock = DCMI_TEST_LOCK.lock().unwrap();
+        crate::system::dcmi_clear();
+        let sys = crate::system::test_dummy_system();
+        let slot = sys.p.peripherals.iter().find(|s| {
+            s.peripheral.borrow_mut().as_any_mut().downcast_ref::<Dcmi>().is_some()
+        }).expect("dcmi slot");
+        let mut d = slot.peripheral.borrow_mut();
+        let dcmi = d.as_any_mut().downcast_mut::<Dcmi>().unwrap();
+        let sys2 = sys.clone();
+        // Raise LINE manually: MIS without IER must read 0 (masked out).
+        dcmi.ris |= 1 << 1;
+        assert_eq!(Dcmi::read(dcmi, &sys2, 0x10), 0, "MIS masked with IER=0");
+        Dcmi::write(dcmi, &sys2, 0x0C, 1 << 1); // LINE_IE
+        assert_eq!(Dcmi::read(dcmi, &sys2, 0x10), 1 << 1, "MIS shows enabled LINE");
+        // SVD ICR address clears everything (comprehensive_test writes here).
+        Dcmi::write(dcmi, &sys2, 0x14, 0x1F);
+        assert_eq!(dcmi.ris & 0x1F, 0, "ICR clears RIS");
+        crate::system::dcmi_clear();
+    }
+
+    #[test]
+    fn crop_window_delivers_only_window_pixels() {
+        let _lock = DCMI_TEST_LOCK.lock().unwrap();
+        // 4x4 frame, values 1..=16. Window: x0=1, y0=1, 2x2 -> {6,7,10,11}.
+        crate::system::dcmi_feed_frame(4, 4, &(1u8..=16).collect::<Vec<u8>>());
+        let sys = crate::system::test_dummy_system();
+        let slot = sys.p.peripherals.iter().find(|s| {
+            s.peripheral.borrow_mut().as_any_mut().downcast_ref::<Dcmi>().is_some()
+        }).expect("dcmi slot");
+        let mut d = slot.peripheral.borrow_mut();
+        let dcmi = d.as_any_mut().downcast_mut::<Dcmi>().unwrap();
+        let sys2 = sys.clone();
+        // CWSTRT: VST=1 (bits 28:16), HOFFCNT=1. CWSIZE: VLINE=2, CAPCNT=2.
+        Dcmi::write(dcmi, &sys2, 0x20, (1 << 16) | 1);
+        Dcmi::write(dcmi, &sys2, 0x24, (2 << 16) | 2);
+        // CROP (bit 2) + CAPTURE rising.
+        Dcmi::write(dcmi, &sys2, 0x00, (1 << 2) | 1);
+        crate::system::set_dma_read_active(true);
+        let got: Vec<u8> = (0..4).map(|_| Dcmi::read(dcmi, &sys2, 0x28) as u8).collect();
+        crate::system::set_dma_read_active(false);
+        assert_eq!(got, vec![6, 7, 10, 11], "crop window pixels in order");
         crate::system::dcmi_clear();
     }
 }
