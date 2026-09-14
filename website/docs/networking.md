@@ -83,6 +83,9 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 ## 5. Verify it
 
 ```bash
+# Mock harnesses (both sides of the driver/model seam, no firmware build):
+npm run test:eth:mock   # mock-model (15 checks, fake bindings + real driver)
+                        # + mock-consumer (36 checks, fake firmware + real model)
 # Matrix (netsim, includes feat + lwip on F429):
 node site/test_board_matrix.mjs eth_feat_test   # 65 markers + PPS scope assert
 node site/test_board_matrix.mjs lwip_demo
@@ -91,6 +94,17 @@ bash scripts/verify_ethernet.sh                 # both trios, 0 TCP fail
 # Unit level:
 cargo test --release peripherals::eth           # filter/CRC/PHY/PTP/PPS/WOL/MACFFR/PMTCTL
 ```
+
+Mock coverage map (each CMSIS-audit gap pinned on BOTH sides):
+
+| Gap | Mock-model (fake bindings + real driver) | Mock-consumer (fake firmware + real model) |
+|---|---|---|
+| 1. DMASR/DMAIER positions | NC/JT error completion words + jabber note | summaries clear, DMAIER keeps RWTIE/ERIE/FBEIE/AISE |
+| 2. MACFFR SAF/SAIF/HPF | TX capture FFR-agnostic | SAF/SAIF/HPF accept + old-bit negatives |
+| 3. PMTCTL mask + RWUFFR arm | WOL inspected before accept gate (RE clear) | RWUFFR arm present, sham bits dropped, controls kept |
+| 4. RX FS/LS | FS+LS on both irq + polling writebacks | HAL constants + no DMASR alias |
+| 5. PM/BFD/PCF-11 | accept routing (OWN clear on deliver) | PM/BFD/PCF-11 accept decisions |
+| 6. PTP event gate | TTSS/TDES6-7 only on 0x88F7, RDES6 stride gate | csum status bits, WOL latch, pacing/collision/deferral/link/IPCO |
 
 ## 6. Register audit (2026-09-14): CMSIS cross-check + what it caught
 

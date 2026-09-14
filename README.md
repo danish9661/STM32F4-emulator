@@ -270,7 +270,10 @@ rebuild — delete it so the vendor assets stay tracked/committed.
 
 ## Testing
 
-- `npm test` — flow test (`site/test_flow.mjs`) + blinky test
+- `npm test` — flow test (`site/test_flow.mjs`) + Ethernet mock harnesses
+  (`site/test_eth_mock_model.mjs`: 15 checks, fake bindings + real driver;
+  `site/test_eth_mock_consumer.mjs`: 36 checks, fake firmware + real model)
+  + blinky test
   (`site/test_blinky.mjs`) + interrupt-UART test (`site/test_rx_interrupt.mjs`)
   + component-API tests (`site/test_component_{led,button,pwm,i2cregfile}.mjs`,
   each against real firmware — LED/blinky, Button/exti_test, Pwm/buzzer_test,

@@ -791,13 +791,15 @@ export async function createEmulator(opts) {
                 const descAddr = E.rxDesc + idx * 8;
                 const bufAddr = E.rxBuf + idx * E.rxStride;
                 try {
-                    // Same runt-pad LEN rule as injectRxIrq above.
+                    // Same runt-pad LEN rule as injectRxIrq above, same
+                    // FS+LS status (single-buffer delivery).
+                    const RDESC_FS_LS_POLL = 0x300;
                     const wire = len < 60 ? 60 : len;
                     const out = new Uint8Array(wire);
                     out.set(frame.subarray(0, len));
                     wuc.mem_write(BigInt(bufAddr), out);
                     const wb = new Uint8Array(4);
-                    new DataView(wb.buffer).setUint32(0, (wire << 16) | rdesExtra, true);
+                    new DataView(wb.buffer).setUint32(0, (wire << 16) | rdesExtra | RDESC_FS_LS_POLL, true);
                     wuc.mem_write(BigInt(descAddr), wb);
                     wwrite32(E.rxFrameIdx, idx);
                     wwrite32(E.rxFrameLen, len);
