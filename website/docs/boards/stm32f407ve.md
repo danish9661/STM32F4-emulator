@@ -83,7 +83,7 @@ silicon. Depth details: [PERIPHERALS](../peripherals.md); Ethernet depth:
 | FSMC | Yes | Partial | 4 banks, BCR/BTR/PCR, JS bank taps (address + value) | access timings / wait states; NAND ECC not computed; untapped banks read 0 |
 | ETH MAC/MMC/PTP/DMA + PHY | Yes | Full | PHY/MDIO, TX csum insert, RX csum status, hash + perfect filters, VLAN, PTP timebase/drift/target/snapshots, WOL magic + 4 filters, wire pacing, deferral/collision reports, real LwIP sockets | PPS pin itself (the edge counter is the sink); addend is rate-only |
 | MII/RMII pin mirrors | Pins | Full | TX_EN / CRS_DV / RXD / COL levels readable in IDR | nibble data + 25/50 MHz clocks stay electrical-only |
-| USB OTG FS (device) | Yes | Full | EP0–3 control + bulk, byte-exact echo, IRQ67 | isochronous unproven; SOF/suspend; VBUS sensing; internal DMA; host mode |
+| USB OTG FS (device) | Yes | Full | EP0–3 control + bulk, byte-exact echo, IN+OUT STALL handshake (CTL bit 21, `usb_out_status`), IRQ67 | isochronous unproven; SOF/suspend; VBUS sensing; internal DMA; host mode |
 | USB OTG HS | Yes | Missing | SVD entries dropped (benign 0) | the whole HS controller — use FS |
 | CAN1, CAN2 | Yes | Full | two-node arbitration (lowest ID wins), filters, host injection, IRQs | bus-off / error-passive states simplified; CAN FD n/a |
 | RTC + backup registers | Yes | Full | BCD time, alarms A/B, wakeup exits STOP, temperature pair | tamper pins; smoothing calibration not applied (CALIBR stored) |

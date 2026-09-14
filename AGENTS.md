@@ -3142,12 +3142,18 @@ FSIZ (program first, like silicon); NVIC 67 pends when masked+live
 Host side is harness-driven (netsim pattern): `usb_reset`,
 `usb_enumerated(FS)`, `usb_inject_setup(8B)`, `usb_inject_out(ep,
 bytes)`, `usb_take_in(ep)`, `usb_in_status(ep)` (0 none/1 data/2
-stall), all in `lib.rs` + `site/vendor`. Firmware `usb_cdc_test/`
+stall) + `usb_out_status(ep)` (0/2), all in `lib.rs` + `site/vendor`.
+Firmware `usb_cdc_test/`
 (CDC-ACM 0483:5740, polling): init → USBRST → ENUMDNE → EP0 control
-(descriptors/address/config/CDC line coding) → 2× EP1 bulk echo.
-Test `site/test_usb.mjs` asserts markers + byte-equal echoes; browser
+(descriptors/address/config/CDC line coding) → 2× EP1 bulk echo, plus a
+STALL round-trip on GET_DESCRIPTOR string 9 (missing index): firmware
+stalls EP0 via CTL bit 21 (`USB stall set`), host samples status 2, firmware
+clears (`USB stall clear`), host samples status 0 both dirs.
+Test `site/test_usb.mjs` asserts markers + byte-equal echoes + the STALL
+set/clear sequence; browser
 preset `?fw=usb_cdc_test` runs the same script via `site/usbhost.js`
-(one frame-step per rAF); `test_browser.mjs` asserts `USB echo OK`.
+(one frame-step per rAF, `takeStall`/`waitClear` steps mirror the node
+probe); `test_browser.mjs` asserts `USB echo OK`.
 
 Out of scope: host mode, OTG_HS, SOF/suspend, VBUS sensing, DMA,
 GNPINNAK gating. Gotchas that bit during bring-up (both fixed same

@@ -58,6 +58,18 @@ pub(crate) fn mpu_force_unpriv() -> bool { MPU_FORCE_UNPRIV.load(Ordering::Relax
 // is clear, matching CCR reset.
 static UNALIGN_TRP: AtomicBool = AtomicBool::new(false);
 pub fn set_unalign_trp(v: bool) { UNALIGN_TRP.store(v, Ordering::Relaxed); }
+// Last peripheral access width (1/2/4) seen by Peripherals::read/write.
+// The bus layer widens sub-word guest accesses to full-word model calls,
+// so width-sensitive peripherals (USB RXFIFO pop: consume exactly the
+// bytes the guest asked for) need the original width. Thread-local: the
+// model runs single-threaded per instance.
+thread_local! {
+    static ACCESS_WIDTH: std::cell::Cell<u32> = const { std::cell::Cell::new(4) };
+}
+pub(crate) fn set_access_width(w: u32) { ACCESS_WIDTH.with(|c| c.set(w)); }
+pub fn periph_access_width() -> Option<usize> {
+    Some(ACCESS_WIDTH.with(|c| c.get()) as usize)
+}
 pub(crate) fn unalign_trp() -> bool { UNALIGN_TRP.load(Ordering::Relaxed) }
 // Deferred alignment-fault channel: like the MPU data path, the faulting
 // access completes dropped and the UsageFault raises before the next

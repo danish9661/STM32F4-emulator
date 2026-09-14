@@ -363,10 +363,15 @@ impl UsbFs {
                 // STALL set + EPENA in one write must stall, not race the
                 // enable edge below: capture the intent before storing, and
                 // report the handshake immediately (in_send would do it, but
-                // the edge is now suppressed — so latch here).
+                // the edge is now suppressed — so latch here). A STALL-only
+                // write (no EPENA edge) also latches immediately: on real
+                // silicon the device answers the next IN token with STALL
+                // as soon as the application sets the bit, without waiting
+                // for a transfer to be armed (the usb_cdc_test ep0_stall()
+                // path sets STALL with no EPENA edge at all).
                 let stalling = value & (1 << 21) != 0;
                 self.in_ep[ep].ctl = value;
-                if stalling && value & (1 << 31) != 0 {
+                if stalling && !was_stall {
                     self.in_stall[ep] = true;
                 }
                 // STALL handshake set/clear: firmware sets bit 21 to stall
@@ -415,7 +420,11 @@ impl UsbFs {
                 self.out_ep[ep].ctl = value;
                 // STALL set/clear mirrors the IN path (OUT STALL makes the
                 // device answer the next OUT token with a STALL handshake;
-                // clearing resumes normal reception).
+                // clearing resumes normal reception). Like IN, a STALL-only
+                // write latches immediately — no EPENA edge is required.
+                if value & (1 << 21) != 0 && !was_stall {
+                    self.out_stall[ep] = true;
+                }
                 if value & (1 << 21) == 0 && was_stall {
                     self.out_stall[ep] = false;
                 }
@@ -500,6 +509,13 @@ impl Peripheral for UsbFs {
             }
             0xE00 => self.pcgcctl,
             // ---- FIFO window (offset from slot base 0x50000000) ----
+            // NOTE: the RXFIFO pop is pop-per-ACCESS-WIDTH, not pop-4-words:
+            // the generic bus layer merges sub-word accesses (a guest byte
+            // load arrives here as a full-word read of the aligned word).
+            // Popping 4 bytes per access would eat the next 3 queued bytes
+            // every time firmware reads one byte — observed as SETUP bytes
+            // vanishing (REQ 0680 re-read as zeros) whenever the guest
+            // mixed byte and word accesses to FIFO0.
             o if (0x1000..0x5000).contains(&o) => {
                 let ep = ((o - 0x1000) / 0x1000) as usize;
                 let sub = (o - 0x1000) % 0x1000;
@@ -507,9 +523,15 @@ impl Peripheral for UsbFs {
                     return 0;
                 }
                 if ep == 0 {
-                    // RXFIFO pop (word-wise, LE, zero-padded tail).
+                    // RXFIFO pop (LE, zero-padded tail). Width-aware: the
+                    // bus layer passes the access width through `size`, and
+                    // the FIFO POP MUST consume exactly that many bytes —
+                    // popping a whole word on every access (even a byte
+                    // load, which the bus layer widens to a full-word model
+                    // read) eats queued bytes the guest never asked for.
+                    let n = crate::system::periph_access_width().unwrap_or(4).min(4);
                     let mut v = 0u32;
-                    for i in 0..4 {
+                    for i in 0..n {
                         if let Some(b) = self.rx_data.pop_front() {
                             v |= (b as u32) << (8 * i);
                         } else {
@@ -735,6 +757,37 @@ mod tests {
                 usb.inject_out(sys, 0, &[1, 2, 3, 4]);
                 assert_eq!(usb.out_status(0), 0, "OUT clear resumes");
                 assert!(!usb.rx_status.is_empty(), "normal OUT queues again");
+                return;
+            }
+        }
+        panic!("USB slot missing");
+    }
+
+    #[test]
+    fn rxfifo_pop_consumes_access_width_only() {
+        // Regression: the bus layer widens sub-word guest accesses to
+        // full-word model reads. The RXFIFO pop used to consume 4 bytes per
+        // access regardless, so a guest byte-load of FIFO0 ate the next 3
+        // queued bytes — SETUP packets vanished whenever firmware mixed
+        // byte and word accesses (observed: REQ 0680 handled, reply read
+        // as zeros). Width 1 pops 1 byte, width 4 pops 4.
+        let sys = crate::system::WasmSystem::new();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        for slot in &sys.p.peripherals {
+            if slot.start == 0x5000_0000 {
+                let mut u = slot.peripheral.borrow_mut();
+                let usb = u.as_any_mut().downcast_mut::<UsbFs>().unwrap();
+                usb.inject_setup(sys, &[0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44]);
+                // Byte access pops exactly one byte (low byte of the word).
+                crate::system::set_access_width(1);
+                assert_eq!(usb.read(sys, 0x1000) & 0xFF, 0xAA, "byte pop 1");
+                crate::system::set_access_width(1);
+                assert_eq!(usb.read(sys, 0x1000) & 0xFF, 0xBB, "byte pop 2");
+                // Word access pops the next whole word (CC DD 11 22 LE).
+                crate::system::set_access_width(4);
+                assert_eq!(usb.read(sys, 0x1000), 0x2211_DDCC, "word pop continues queue");
+                crate::system::set_access_width(4);
                 return;
             }
         }

@@ -27,7 +27,7 @@ ext: connects to external devices (SPI flash, EEPROM, display, ...).
 
 | Peripheral | Loc | Level | What's implemented | IRQ | tick | ext |
 |---|---|---|---|---|---|---|
-| ADC | 183 | Detailed | SR/CR1/CR2/SMPR1-2/JOFR/HTR/LTR/SQR1-3/JSQR/JDR/DR; SWSTART-gated conversion, real sampling-time logic (SMPR lookup), channel values (16/17 = temp/Vref, 18 = Vbat, others LCG pseudo-random), EOC/OVR flags | Y (EOC/OVR → 18/47) | N | N |
+| ADC | 368 | Detailed | SR/CR1/CR2/SMPR1-2/JOFR/HTR/LTR/SQR1-3/JSQR/JDR/DR; SWSTART-gated conversion, real sampling-time logic (SMPR lookup), channel values (16/17 = temp/Vref, 18 = Vbat, others LCG pseudo-random), EOC/OVR flags; shared **ADC_Common @ 0x40012300** — CSR mirrors EOC1/2/3+OVR1/2/3 (read-only), CDR = ADC1.DR|ADC2.DR<<16, CCR stored (dual-mode config accepted, never interleaved) | Y (EOC/OVR → 18/47) | N | N |
 | CAN | 494 | Detailed | MCR/MSR/TSR/RF0R/RF1R/IER/ESR/BTR; 3 TX + 2 RX mailboxes, filter banks (FMR/FM1R/FS1R/FFA1R/FA1R + 56 filter words), TX request → TXOK/RQCP, RX FIFO release decrements FMP, INIT/SLEEP transitions; **two-node bus arbitration** (lowest ID wins, ties by node/mailbox), winner broadcasts to every RX passing its filters (including itself), BTR LBKM loopback delivers only to the sender | Y (TX/RX/SCE → 19/63) | N | N |
 | CRC | 39 | Detailed | Real CRC-32 (poly 0x04C11DB7, MSB-first), accumulated on DR writes; DR/IDR/CR, RESET → 0xFFFFFFFF | N | N | N |
 | CRYP | 628 | Detailed | Full crypto core via real `aes`/`des` crates: AES-128/192/256 ECB/CBC/CTR, DES + 3DES (EDE3), GCM (GHASH + GF(2¹²⁸) + CTR + tag), CCM (CBC-MAC + CTR); 64-byte FIFO with IFEM/IFNF/OFNE/OFFU/BUSY, datatype byte-swap | Y (79: OFNE/IFNF) | N | N |
@@ -113,5 +113,7 @@ prints a banner over UART when it boots.
   the handshake, clear resumes; stalled transfers move no data and raise no
   XFRC), observable via `usb_in_status`/`usb_out_status` (2 = STALL) —
   covered by the native `stall_handshake_set_and_clear_both_directions`
-  test. The shipped `usb_cdc_test` firmware never stalls (it only needs the
-  success path), so the handshake is proven at model level, not end-to-end.
+  test AND end-to-end: `usb_cdc_test` stalls EP0 on GET_DESCRIPTOR string 9
+  (`USB stall set` → host samples status 2 → `USB stall clear` → status 0),
+  asserted in `site/test_usb.mjs` and mirrored in the browser `site/usbhost.js`
+  script (`takeStall`/`waitClear` steps).

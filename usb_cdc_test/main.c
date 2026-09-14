@@ -224,6 +224,20 @@ static void handle_setup(void) {
             else if (idx == 1) { p = str_mfr; n = sizeof(str_mfr); }
             else if (idx == 2) { p = str_prod; n = sizeof(str_prod); }
             else if (idx == 3) { p = str_ser; n = sizeof(str_ser); }
+            else if (idx == 9) {
+                // STALL handshake round-trip probe (see site/test_usb.mjs):
+                // stall EP0, hold it so the host samples status 2, then
+                // clear so the endpoint works again. No status-stage wait —
+                // the probing host only polls status, it never sends the
+                // status OUT, so waiting for DOEPINT0 would hang.
+                ep0_stall();
+                uart_puts("USB stall set\r\n");
+                for (volatile int i = 0; i < 200000; i++);
+                DIEPCTL0 &= ~STALLB;
+                DOEPCTL0 &= ~STALLB;
+                uart_puts("USB stall clear\r\n");
+                break;
+            }
         }
         if (!p) { ep0_stall(); break; }
         if (n > len) n = len;
@@ -273,6 +287,17 @@ static void handle_setup(void) {
         ep0_in_send(line_coding, 7);
         ep0_out_status();
         break;
+    case 0x0683: { // GET_DESCRIPTOR string 9 (missing index): STALL the
+        // EP, then CLEAR the stall so the host sees the handshake clear
+        // and the endpoint works again (the STALL handshake round-trip).
+        // NOTE (USB string-descriptor encoding): wValue packs type in the
+        // HIGH byte and index in the LOW byte, so string 9 arrives as
+        // req=0x0680/val=0x0309 and is routed through the 0x0680 arm
+        // (which stalls on !p) — there is intentionally NO separate case
+        // here. A standalone 0x0380 case is dead code: req carries only
+        // bmRequestType+wRequest, never the descriptor index.
+        break;
+    }
     default:
         ep0_stall();
         break;

@@ -7,6 +7,20 @@ fn adc_rand() -> u32 {
     ((n.wrapping_mul(1103515245).wrapping_add(12345)) >> 12) as u32
 }
 
+/// Shared ADC common block (ADC_Common @ 0x40012300: CSR/CCR/CDR).
+/// Silicon shares one multi-mode status/control/data register file across
+/// ADC1-3; the model keeps the independent per-ADC state in `Adc` and
+/// mirrors the small shared surface here:
+/// - CSR (0x00): EOC1/2/3 (bits 1/9/17) + OVR1/2/3 (bits 5/13/21) mirror the
+///   per-ADC SR flags (read-only; cleared by reading the ADC's own SR).
+/// - CCR (0x04): stored mode/clock word (dual-mode config is accepted; the
+///   model never interleaves conversions, documented below).
+/// - CDR (0x08): combined data — low half = ADC1.DR, high half = ADC2.DR
+///   (the dual regular-simultaneous layout; ADC3 has no CDR half).
+pub struct AdcCommon {
+    ccr: u32,
+}
+
 fn adc_irq(name: &str) -> i32 {
     match name {
         "ADC3" => 47,
@@ -58,9 +72,14 @@ impl Default for Adc {
 
 impl Adc {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
-        if name.starts_with("ADC") { Some(Box::new(Self { name: name.to_string(), ..Self::default() })) } else { None }
+        // ADC1/2/3 only — "ADC_Common" is served by AdcCommon below, and a
+        // prefix match here would swallow it (same class of bug as the
+        // DMA1/DMA2 vs DMA2D prefix match).
+        match name {
+            "ADC1" | "ADC2" | "ADC3" => Some(Box::new(Self { name: name.to_string(), ..Self::default() })),
+            _ => None,
+        }
     }
-
     fn eoc_enabled(&self) -> bool { self.cr1 & (1 << 5) != 0 }
     fn ovr_enabled(&self) -> bool { self.cr1 & (1 << 4) != 0 }
 
@@ -132,6 +151,82 @@ mod tests {
         INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
         adc.read(&sys, 0x08);
         assert!(adc.read(&sys, 0x4C) < 4096);
+    }
+
+    #[test]
+    fn common_block_mirrors_flags_and_data() {
+        use std::sync::atomic::Ordering;
+        let sys = crate::system::test_dummy_system();
+        // Drive ADC1 to EOC via a real conversion, ADC2 stays idle.
+        // (last_conv_start anchors at the SWSTART write, so the clock must
+        // advance AFTER the write, like the override test does.)
+        for slot in &sys.p.peripherals {
+            if slot.start == 0x4001_2000 {
+                let mut b = slot.peripheral.borrow_mut();
+                let a = b.as_any_mut().downcast_mut::<Adc>().unwrap();
+                a.write(&sys, 0x34, 5);
+                a.write(&sys, 0x08, (1 << 30) | 1);
+            }
+        }
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        // NOTE: read the CSR mirror BEFORE touching ADC1's own SR/DR —
+        // the SR read clears EOC, which would clear the mirror too.
+        let mut csr = 0u32;
+        let mut cdr = 0u32;
+        for slot in &sys.p.peripherals {
+            if slot.start == 0x4001_2300 {
+                let mut b = slot.peripheral.borrow_mut();
+                let c = b.as_any_mut().downcast_mut::<AdcCommon>().unwrap();
+                // Trigger the conversion through the CR2 read path first
+                // (same path the override test uses), then sample CSR/CDR.
+                for s2 in &sys.p.peripherals {
+                    if s2.start == 0x4001_2000 {
+                        let mut b2 = s2.peripheral.borrow_mut();
+                        let a2 = b2.as_any_mut().downcast_mut::<Adc>().unwrap();
+                        a2.read(&sys, 0x08);
+                        break;
+                    }
+                }
+                csr = c.read(&sys, 0x00);
+                cdr = c.read(&sys, 0x08);
+            }
+        }
+        let mut dr1 = 0u32;
+        for slot in &sys.p.peripherals {
+            if slot.start == 0x4001_2000 {
+                let mut b = slot.peripheral.borrow_mut();
+                let a = b.as_any_mut().downcast_mut::<Adc>().unwrap();
+                dr1 = a.read(&sys, 0x4C);
+            }
+        }
+        assert_ne!(csr & (1 << 1), 0, "CSR EOC1 mirrors ADC1 EOC");
+        assert_eq!(csr & (1 << 9), 0, "CSR EOC2 clear while ADC2 idle");
+        assert_eq!(cdr & 0xFFFF, dr1 & 0xFFFF, "CDR low half = ADC1.DR");
+        // CCR stores; CSR is read-only (but EOC1 was already consumed by
+        // the DR read above, so re-trigger before asserting read-only).
+        for slot in &sys.p.peripherals {
+            if slot.start == 0x4001_2000 {
+                let mut b = slot.peripheral.borrow_mut();
+                let a = b.as_any_mut().downcast_mut::<Adc>().unwrap();
+                a.write(&sys, 0x08, (1 << 30) | 1);
+            }
+        }
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        for slot in &sys.p.peripherals {
+            if slot.start == 0x4001_2000 {
+                let mut b = slot.peripheral.borrow_mut();
+                let a = b.as_any_mut().downcast_mut::<Adc>().unwrap();
+                a.read(&sys, 0x08);
+            }
+            if slot.start == 0x4001_2300 {
+                let mut b = slot.peripheral.borrow_mut();
+                let c = b.as_any_mut().downcast_mut::<AdcCommon>().unwrap();
+                c.write(&sys, 0x04, 0x0003_0001);
+                assert_eq!(c.read(&sys, 0x04), 0x0003_0001, "CCR stores");
+                c.write(&sys, 0x00, 0xFFFF_FFFF);
+                assert_ne!(c.read(&sys, 0x00) & (1 << 1), 0, "CSR write ignored (EOC1 still set)");
+            }
+        }
     }
 }
 
@@ -207,6 +302,80 @@ impl Peripheral for Adc {
             0x38 => self.jsqr = value,
             0x3C..=0x48 => {}
             0x4C => {}
+            _ => {}
+        }
+    }
+}
+
+impl AdcCommon {
+    pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
+        if name == "ADC_Common" || name == "ADCCommon" {
+            Some(Box::new(Self { ccr: 0 }))
+        } else {
+            None
+        }
+    }
+
+    /// CSR bit positions for ADCn (n = 0/1/2): EOC at 1+8n, OVR at 5+8n.
+    fn csr_bits(sys: &System) -> u32 {
+        let mut v = 0u32;
+        for (i, base) in [0x4001_2000u32, 0x4001_2100, 0x4001_2200].iter().enumerate() {
+            for slot in &sys.p.peripherals {
+                if slot.start == *base {
+                    let mut b = slot.peripheral.borrow_mut();
+                    if let Some(a) = b.as_any_mut().downcast_mut::<Adc>() {
+                        if a.sr & (1 << 1) != 0 {
+                            v |= 1 << (1 + 8 * i);
+                        }
+                        if a.sr & (1 << 5) != 0 {
+                            v |= 1 << (5 + 8 * i);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        v
+    }
+
+    /// CDR halves: low = ADC1.DR, high = ADC2.DR.
+    fn cdr_halves(sys: &System) -> u32 {
+        let mut lo = 0u32;
+        let mut hi = 0u32;
+        for slot in &sys.p.peripherals {
+            if slot.start == 0x4001_2000 {
+                let mut b = slot.peripheral.borrow_mut();
+                if let Some(a) = b.as_any_mut().downcast_mut::<Adc>() {
+                    lo = a.dr & 0xFFFF;
+                }
+            } else if slot.start == 0x4001_2100 {
+                let mut b = slot.peripheral.borrow_mut();
+                if let Some(a) = b.as_any_mut().downcast_mut::<Adc>() {
+                    hi = a.dr & 0xFFFF;
+                }
+            }
+        }
+        lo | (hi << 16)
+    }
+}
+
+impl Peripheral for AdcCommon {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn read(&mut self, sys: &System, offset: u32) -> u32 {
+        match offset {
+            // CSR mirrors the per-ADC EOC/OVR flags (read-only; the ADC's
+            // own SR read clears them).
+            0x00 => Self::csr_bits(sys),
+            0x04 => self.ccr,
+            0x08 => Self::cdr_halves(sys),
+            _ => 0,
+        }
+    }
+
+    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
+        match offset {
+            // CSR is read-only (flags clear via the ADC's own SR).
+            0x04 => self.ccr = value & 0x00FF_FFFF,
             _ => {}
         }
     }

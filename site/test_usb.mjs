@@ -83,6 +83,23 @@ const eq = (a, b, what) => {
     eq(blob.slice(0, 4), [4, 3, 9, 4], 'lang string');
     statusOut();
 
+    // STALL handshake round-trip: string 9 does not exist, so the firmware
+    // stalls EP0 (CTL bit 21) and then clears it. The host must observe
+    // status 2 (STALL) first, then status 0 (cleared, no data) — proving
+    // the set/clear handshake end-to-end, not just the success path.
+    bindings.usb_inject_setup(Uint8Array.from([0x80, 0x06, 0x09, 0x03, 0x00, 0x00, 0xFF, 0x00]));
+    let sawStall = false;
+    for (let i = 0; i < 400 && !sawStall; i++) {
+        if (bindings.usb_in_status(0) === 2) sawStall = true;
+        else step();
+    }
+    if (!sawStall) fail('expected STALL status on EP0 for missing string 9');
+    waitFor('USB stall set');
+    waitFor('USB stall clear');
+    for (let i = 0; i < 400; i++) step(); // let the guest finish the clear
+    if (bindings.usb_in_status(0) === 2) fail('STALL status stuck after firmware cleared it');
+    if (bindings.usb_out_status(0) === 2) fail('OUT STALL stuck after firmware cleared it');
+
     // SET_ADDRESS(5): device answers its own status ZLP (already taken).
     blob = setupXfer([0x00, 0x05, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00]);
     if (blob.length !== 0) fail(`SET_ADDRESS should ZLP, got ${blob.length}B`);

@@ -441,6 +441,7 @@ impl Peripherals {
                 .or_else(|| Spi::new(name, ext_devices))
                 .or_else(|| Timer::new(name))
                 .or_else(|| Adc::new(name))
+                .or_else(|| adc::AdcCommon::new(name))
                 .or_else(|| Can::new(name))
                 .or_else(|| Sdio::new(name))
                 .or_else(|| Dcmi::new(name))
@@ -587,6 +588,7 @@ impl Peripherals {
             (0x4000_7C00, "UART8"),
             (0x4001_1000, "USART1"), (0x4001_1400, "USART6"),
             (0x4001_2000, "ADC1"), (0x4001_2100, "ADC2"), (0x4001_2200, "ADC3"),
+            (0x4001_2300, "ADC_Common"),
             (0x4001_2C00, "TIM8"),  (0x4001_3000, "SPI1"),
             (0x4001_3400, "SPI4"),  (0x4001_4000, "TIM9"),  (0x4001_4400, "TIM10"),
             (0x4001_4800, "TIM11"), (0x4001_5000, "SPI5"), (0x4001_5400, "SPI6"),
@@ -645,6 +647,7 @@ impl Peripherals {
                 .or_else(|| Spi::new(name, ext_devices))
                 .or_else(|| Timer::new(name))
                 .or_else(|| Adc::new(name))
+                .or_else(|| adc::AdcCommon::new(name))
                 .or_else(|| Can::new(name))
                 .or_else(|| Sdio::new(name))
                 .or_else(|| Dcmi::new(name))
@@ -776,6 +779,7 @@ impl Peripherals {
         if let Some((addr, bit_number)) = Self::bitbanding(addr) {
             return (self.read(sys, addr, 1) >> bit_number) & 1;
         }
+        crate::system::set_access_width(size as u32);
         let is_reg = Self::is_register(addr);
         let (addr, byte_offset) = if is_reg {
             Self::align_addr_4(addr)

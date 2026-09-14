@@ -14,6 +14,7 @@ const SETUPS = {
     dev: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x40, 0x00],
     cfg: [0x80, 0x06, 0x00, 0x02, 0x00, 0x00, 0xFF, 0x00],
     str: [0x80, 0x06, 0x00, 0x03, 0x00, 0x00, 0xFF, 0x00],
+    str9: [0x80, 0x06, 0x09, 0x03, 0x00, 0x00, 0xFF, 0x00], // missing string -> STALL round-trip
     addr: [0x00, 0x05, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00],
     conf: [0x00, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
     lineState: [0x21, 0x22, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00],
@@ -26,7 +27,10 @@ const ECHO2 = [87, 111, 114, 108, 100, 33, 33, 33]; // World!!!
 export function createUsbHost(bindings) {
     const U8 = (a) => Uint8Array.from(a);
     // Script: each entry runs once, in order. `take` entries poll until
-    // the IN blob arrives (STALl aborts the run loudly).
+    // the IN blob arrives (STALl aborts the run loudly). `takeStall`
+    // waits for status 2 (STALL handshake asserted), `waitClear` waits
+    // for the matching UART marker then for status to leave 2 (handshake
+    // cleared) — the STALL set/clear round-trip mirror of test_usb.mjs.
     const script = [
         { waitUart: 'USB init done' },
         { fire: () => bindings.usb_reset() },
@@ -36,6 +40,8 @@ export function createUsbHost(bindings) {
         { setup: SETUPS.dev }, { take: 0 }, { out: { ep: 0, data: [] } },
         { setup: SETUPS.cfg }, { take: 0 }, { out: { ep: 0, data: [] } },
         { setup: SETUPS.str }, { take: 0 }, { out: { ep: 0, data: [] } },
+        { setup: SETUPS.str9 }, { takeStall: 0 },
+        { waitClear: { marker: 'USB stall clear', ep: 0 } },
         { setup: SETUPS.addr }, { take: 0 },
         { setup: SETUPS.conf }, { take: 0 },
         { waitUart: 'USB enum done' },
@@ -74,6 +80,20 @@ export function createUsbHost(bindings) {
                 try { bindings.usb_take_in(op.take); } catch (e) {}
                 pc++;
             }
+            return;
+        }
+        if (op.takeStall !== undefined) {
+            let st = 0;
+            try { st = bindings.usb_in_status(op.takeStall); } catch (e) {}
+            if (st === 2) pc++; // handshake asserted — advance to waitClear
+            return;
+        }
+        if (op.waitClear) {
+            if (!uartText.includes(op.waitClear.marker)) return;
+            let st = 2, ost = 2;
+            try { st = bindings.usb_in_status(op.waitClear.ep); } catch (e) {}
+            try { ost = bindings.usb_out_status(op.waitClear.ep); } catch (e) {}
+            if (st !== 2 && ost !== 2) pc++; // cleared both dirs — continue enum
             return;
         }
         pc++;
