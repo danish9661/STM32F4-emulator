@@ -994,15 +994,18 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         adv(cpu, pc, 2);
         return true;
     }
-    // LSL/LSR/ASR imm, ADD/SUB reg+imm3 (all flag-setting)
+    // LSL/LSR/ASR imm, ADD/SUB reg+imm3 (all flag-setting outside IT;
+    // inside IT, 16-bit insns other than CMP/CMN/TST preserve flags).
     if o & 0xF800 == 0x0000 {
         let (rd, rs) = ((o & 7) as usize, ((o >> 3) & 7) as usize);
         let im = (o >> 6) & 0x1F;
         let v = rr(cpu, rs, pc);
         let (r, co) = shift_op(v, 0, im, carry(cpu), false);
         cpu.regs.r[rd] = r;
-        nz(cpu, r);
-        cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+        if !cpu.it_pred {
+            nz(cpu, r);
+            cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+        }
         adv(cpu, pc, 2);
         return true;
     }
@@ -1015,8 +1018,10 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         let v = rr(cpu, rs, pc);
         let (r, co) = shift_op(v, 1, im, carry(cpu), false);
         cpu.regs.r[rd] = r;
-        nz(cpu, r);
-        cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+        if !cpu.it_pred {
+            nz(cpu, r);
+            cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+        }
         adv(cpu, pc, 2);
         return true;
     }
@@ -1029,8 +1034,10 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         let v = rr(cpu, rs, pc);
         let (r, co) = shift_op(v, 2, im, carry(cpu), false);
         cpu.regs.r[rd] = r;
-        nz(cpu, r);
-        cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+        if !cpu.it_pred {
+            nz(cpu, r);
+            cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+        }
         adv(cpu, pc, 2);
         return true;
     }
@@ -1061,18 +1068,28 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         return true;
     }
     if o & 0xFE00 == 0x1C00 {
+        // ADD imm3 (flag-setting outside IT; preserves inside, like ADD-reg).
         let (rd, rn) = ((o & 7) as usize, ((o >> 3) & 7) as usize);
         let im = (o >> 6) & 7;
-        let r = add_flags(cpu, rr(cpu, rn, pc), im, 0);
+        let a = rr(cpu, rn, pc);
+        let r = a.wrapping_add(im);
         cpu.regs.r[rd] = r;
+        if !cpu.it_pred {
+            let _ = add_flags(cpu, a, im, 0);
+        }
         adv(cpu, pc, 2);
         return true;
     }
     if o & 0xFE00 == 0x1E00 {
+        // SUB imm3 likewise.
         let (rd, rn) = ((o & 7) as usize, ((o >> 3) & 7) as usize);
         let im = (o >> 6) & 7;
-        let r = sub_flags(cpu, rr(cpu, rn, pc), im, 1);
+        let a = rr(cpu, rn, pc);
+        let r = a.wrapping_sub(im);
         cpu.regs.r[rd] = r;
+        if !cpu.it_pred {
+            let _ = sub_flags(cpu, a, im, 1);
+        }
         adv(cpu, pc, 2);
         return true;
     }
@@ -1092,73 +1109,112 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         return true;
     }
     if o & 0xF800 == 0x2800 {
+        // CMP imm8: one of the three flag-setting exceptions inside IT.
         let rn = ((o >> 8) & 7) as usize;
         sub_flags(cpu, rr(cpu, rn, pc), o & 0xFF, 1);
         adv(cpu, pc, 2);
         return true;
     }
     if o & 0xF800 == 0x3000 {
+        // ADDS imm8 (preserves inside IT — only CMP/CMN/TST set flags there).
         let rd = ((o >> 8) & 7) as usize;
-        let r = add_flags(cpu, rr(cpu, rd, pc), o & 0xFF, 0);
+        let a = rr(cpu, rd, pc);
+        let r = a.wrapping_add(o & 0xFF);
         cpu.regs.r[rd] = r;
+        if !cpu.it_pred {
+            let _ = add_flags(cpu, a, o & 0xFF, 0);
+        }
         adv(cpu, pc, 2);
         return true;
     }
     if o & 0xF800 == 0x3800 {
+        // SUBS imm8 likewise.
         let rd = ((o >> 8) & 7) as usize;
-        let r = sub_flags(cpu, rr(cpu, rd, pc), o & 0xFF, 1);
+        let a = rr(cpu, rd, pc);
+        let r = a.wrapping_sub(o & 0xFF);
         cpu.regs.r[rd] = r;
+        if !cpu.it_pred {
+            let _ = sub_flags(cpu, a, o & 0xFF, 1);
+        }
         adv(cpu, pc, 2);
         return true;
     }
-    // ALU ops
+    // ALU ops (16-bit data-processing: flag-setting outside IT, but
+    // inside an IT block only CMP/CMN/TST set flags — everything else
+    // preserves. ARM ARM: "16-bit instructions in the IT block, other
+    // than CMP, CMN and TST, do not set the condition flags". So each
+    // writeback arm computes + stores unconditionally and only calls
+    // the flag setter when !it_pred.)
     if o & 0xFC00 == 0x4000 {
         let sop = (o >> 6) & 0xF;
         let (rs, rd) = (((o >> 3) & 7) as usize, (o & 7) as usize);
         let a = rr(cpu, rd, pc);
         let b = rr(cpu, rs, pc);
+        let ip = cpu.it_pred;
         match sop {
             0 => {
                 let r = a & b;
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
+                if !ip {
+                    nz(cpu, r);
+                }
             }
             1 => {
                 let r = a ^ b;
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
+                if !ip {
+                    nz(cpu, r);
+                }
             }
             2 => {
                 let (r, co) = shift_op(a, 0, b & 0xFF, carry(cpu), true);
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
-                cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                if !ip {
+                    nz(cpu, r);
+                    cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                }
             }
             3 => {
                 let (r, co) = shift_op(a, 1, b & 0xFF, carry(cpu), true);
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
-                cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                if !ip {
+                    nz(cpu, r);
+                    cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                }
             }
             4 => {
                 let (r, co) = shift_op(a, 2, b & 0xFF, carry(cpu), true);
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
-                cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                if !ip {
+                    nz(cpu, r);
+                    cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                }
             }
             5 => {
-                let r = add_flags(cpu, a, b, carry(cpu));
+                // ADC: a + b + carry. Writeback always; flags only outside IT.
+                let ci = carry(cpu);
+                let r = a.wrapping_add(b).wrapping_add(ci);
                 cpu.regs.r[rd] = r;
+                if !ip {
+                    let _ = add_flags(cpu, a, b, ci);
+                }
             }
             6 => {
-                let r = sub_flags(cpu, a, b, carry(cpu));
+                // SBC: a - b - !carry. Same split.
+                let ci = carry(cpu);
+                let r = a.wrapping_sub(b).wrapping_sub(1 - ci);
                 cpu.regs.r[rd] = r;
+                if !ip {
+                    let _ = sub_flags(cpu, a, b, ci);
+                }
             }
             7 => {
                 let (r, co) = shift_op(a, 3, b & 0xFF, carry(cpu), true);
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
-                cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                if !ip {
+                    nz(cpu, r);
+                    cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                }
             }
             8 => {
                 // TST (test, no writeback): N/Z from Rd&Rs, Rd
@@ -1166,35 +1222,48 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
                 nz(cpu, a & b);
             }
             9 => {
-                // RSB (negate): Rd = 0 - Rs, with flags
-                let r = sub_flags(cpu, 0, b, 1);
+                // RSB (negate): Rd = 0 - Rs. Writeback always; flags only outside IT.
+                let r = (0u32).wrapping_sub(b);
                 cpu.regs.r[rd] = r;
+                if !ip {
+                    let _ = sub_flags(cpu, 0, b, 1);
+                }
             }
             10 => {
+                // CMP: one of the three flag-setting exceptions inside IT.
                 sub_flags(cpu, a, b, 1);
             }
             11 => {
+                // CMN: likewise always sets flags.
                 add_flags(cpu, a, b, 0);
             }
             12 => {
                 let r = a | b;
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
+                if !ip {
+                    nz(cpu, r);
+                }
             }
             13 => {
                 let r = a.wrapping_mul(b);
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
+                if !ip {
+                    nz(cpu, r);
+                }
             }
             14 => {
                 let r = a & !b;
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
+                if !ip {
+                    nz(cpu, r);
+                }
             }
             _ => {
                 let r = !b;
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
+                if !ip {
+                    nz(cpu, r);
+                }
             }
         }
         adv(cpu, pc, 2);

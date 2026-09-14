@@ -106,32 +106,33 @@ snapshot incl. 128 legacy CPU, 21 small-core).
 Status: FIXED in uno-r4 (both cores); F4 core should take the same two
 edits if its take/return still use the bank.
 
-### 12. Predicated T1 ADD/SUB-immediate clobbered flags for the next IT slot — FIXED in uno-r4
+### 12. Predicated 16-bit flag-setting clobbered flags for the next IT slot — FIXED in F4 (uno-r4 report confirmed + generalized)
 Trigger: Arduino `Serial.print(int)` (printNumber's `ite le; addle r3,#48;
 addgt r3,#55`): every digit printed +0x37 ('4' -> 'k').
-Expected (silicon + GCC + Unicorn): predicated T1 ALU preserves APSR, so
-the else-branch sees the pre-block flags (the codebase already did this
-for MOVS/ADD-reg/SUB-reg: D_PageTicker, S_Start).
-Observed (core): the ADD/SUB-imm3/imm8 arms (0x1C00/0x1E00/0x3000/0x3800)
-lacked the `it_pred` guard, so `addle` cleared N and the skipped `addgt`
-ran too (r3 = 4+48+55 = 107). Native repro: hand-assembled
-udiv+mls+cmp+ite+adds gives r3=103, fixed to 48.
-Pointers: uno-r4 `core/*/src/cpu/thumb.rs` ADD/SUB-imm arms now mirror the
-ADD-reg arm (`if !cpu.it_pred` around `add_flags`/`sub_flags`); proof is
-`ra4m1_ite_add_imm_preserves_flags` in both cores' ra4m1.rs.
-Status: FIXED in uno-r4 (both cores); F4 core should extend its own
-it_pred guards the same way if its imm arms lack them.
-Status (F4, 2026-09-11, UNCOMMITTED): VERIFIED shared (return-side half)
-+ FIXED. F4 entry already stacked at live r13 (no stale reload); the
-return unstacked from the MSP bank, which goes stale whenever a handler
-moves SP (handler-mode bank sync is skipped by design), so an outer
-return after a nested preemption popped garbage. Fix (`cpu/mod.rs`):
-unstack base is live r13 for F1/E1/F9/ED, PSP bank only for FD/ED;
-removed the dead `r13 = msp` reload in take. Native test
-`nested_push_outer_returns_clean` (pushing outer + preempting inner,
-marker + thread-resume asserted) FAILS pre-fix (bad access via stale
-unstack) and passes post-fix; cargo 139/139. Existing nesting tests
-used spinning (stackless) handlers — that was the coverage hole.
+Expected (silicon + GCC + Unicorn, ARM ARM: "16-bit instructions in the IT
+block, other than CMP, CMN and TST, do not set the condition flags"):
+predicated T1 ALU preserves APSR, so the else-branch sees the pre-block
+flags (the F4 codebase already did this for MOVS-imm/ADD-reg/SUB-reg:
+D_PageTicker, S_Start).
+Observed (F4 core): only the ADD/SUB-reg + MOVS-imm arms had the `it_pred`
+guard — the uno-r4 imm arms (0x1C00/0x1E00/0x3000/0x3800) lacked it here
+too, AND the same hole covered shifts-imm (0x0000/0x0800/0x1000), the whole
+0x4000 ALU table (AND/EOR/LSL/LSR/ASR/ADC/SBC/ROR/RSB/ORR/MUL/BIC/MVN),
+and the 0x4400 CMP-hi arm (CMP-hi itself is a flag-setting exception, but
+its ADD-hi/MOV-hi neighbours must preserve). Undoing the narrow report
+would have left ~20 arms still clobbering (any `itt` + shift/ALU firmware
+re-fails). Native repro: hand-assembled udiv+mls+cmp+ite+adds gives
+r3=103, fixed to 48 (same shape as uno-r4's ra4m1 proof).
+Pointers: F4 `stm32-periph-wasm/src/cpu/thumb.rs` `exec16` — every 16-bit
+writeback arm now computes + stores unconditionally and only calls the
+flag setter when `!it_pred` (ADC/SBC/RSB/ADD/SUB-imm split into
+wrapping-arith + gated `add/sub_flags`; CMP-imm/CMP-hi/CMN/TST pass
+through ungated as the three exceptions). Proof is
+`cpu/tests.rs::it_block_16bit_preserves_flags` (GAS vectors from
+xpack arm-none-eabi-as, `.pw-scratch/it12_probe.s`: addle/addmi/CMPEQ-
+sets/ADDNE-preserves/shifts/AND-ORR/TST-sets).
+Status: FIXED in F4 (this commit); cargo 181/181 single-threaded,
+feat probe 60/60 f407, matrix eth_feat 2/2.
 
 ## CLOSED log
 

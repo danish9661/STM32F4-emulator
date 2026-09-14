@@ -813,6 +813,118 @@ fn it_pred_add_preserves() {
 }
 
 #[test]
+fn it_block_16bit_preserves_flags() {
+    // cpu_bug #12 (uno-r4 printNumber: ite le; addle r3,#48; addgt r3,#55 —
+    // every digit printed +0x37). ARM ARM: 16-bit insns in an IT block,
+    // other than CMP/CMN/TST, do NOT set flags. GAS vectors assembled with
+    // xpack arm-none-eabi-as (see .pw-scratch/it12_probe.s):
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../blinky/blinky.bin"));
+    let sys = crate::sys();
+    // Vector A: N=1,Z=0,C=0,V=0 entry; ite le/addle r3,#48/addgt r3,#55
+    // (0xBFD4 0x3330 0x3337), r3=4: addle TAKEN (LE: Z==1||N!=V -> 0!=0? no:
+    // N=1,V=0 -> N!=V -> LE true), r3=52, flags UNTOUCHED (N still 1:
+    // a flag-setting addle would clear N since 52's bit31 is 0).
+    for (i, w) in [0xBFD4u16, 0x3330, 0x3337].iter().enumerate() {
+        mem.write16(0x20002000 + i as u32 * 2, *w);
+    }
+    cpu.regs.r[3] = 4;
+    cpu.regs.xpsr = 0x80000000; // N=1 only
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 3);
+    assert_eq!(cpu.regs.r[3], 52, "addle writeback still happens in IT");
+    assert_eq!(cpu.regs.xpsr & 0xF0000000, 0x80000000, "addle must not touch flags in IT");
+    // Vector B: N=0,Z=0,C=0,V=0 (MI false -> both skipped), r0/r2/r6 fixed.
+    // itt mi/addmi r0,r0,r1/addmi r2,#7 (0xBF44 0x1840 0x3207): skipped,
+    // regs AND flags unchanged.
+    for (i, w) in [0xBF44u16, 0x1840, 0x3207].iter().enumerate() {
+        mem.write16(0x20002000 + i as u32 * 2, *w);
+    }
+    cpu.regs.r[0] = 10;
+    cpu.regs.r[1] = 20;
+    cpu.regs.r[2] = 30;
+    cpu.regs.xpsr = 0x00000000;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 3);
+    assert_eq!(cpu.regs.r[0], 10);
+    assert_eq!(cpu.regs.r[2], 30);
+    assert_eq!(cpu.regs.xpsr & 0xF0000000, 0x00000000);
+    // Vector C: CMP inside IT still SETS flags: ite eq/cmpeq r0,#1/addne
+    // r1,#2 (0xBF0C 0x2801 0x3102). Entry Z=1 (EQ true): cmpeq TAKEN,
+    // r0=5: 5-1 != 0 clears Z (a non-setting CMP would leave Z=1).
+    for (i, w) in [0xBF0Cu16, 0x2801, 0x3102].iter().enumerate() {
+        mem.write16(0x20002000 + i as u32 * 2, *w);
+    }
+    cpu.regs.r[0] = 5;
+    cpu.regs.r[1] = 100;
+    cpu.regs.xpsr = 0x40000000; // Z=1
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 3);
+    assert_eq!((cpu.regs.xpsr >> 30) & 1, 0, "cmpeq in IT must set flags (Z cleared)");
+    // Vector C2: same block, entry Z=0 (EQ false): cmpeq skipped, addne
+    // TAKEN; writeback happens (r1=102) but flags are preserved (N=1,Z=0
+    // entry stays — a flag-setting addne would clear N).
+    for (i, w) in [0xBF0Cu16, 0x2801, 0x3102].iter().enumerate() {
+        mem.write16(0x20002000 + i as u32 * 2, *w);
+    }
+    cpu.regs.r[0] = 5;
+    cpu.regs.r[1] = 100;
+    cpu.regs.xpsr = 0x80000000; // N=1,Z=0
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 3);
+    assert_eq!(cpu.regs.r[1], 102, "addne writeback still happens in IT");
+    assert_eq!(cpu.regs.xpsr & 0xF0000000, 0x80000000, "addne in IT must not touch flags");
+    // Vector D: shifts preserve: itt pl/lslpl r0,r0,#1/lsrpl r1,r1,#1
+    // (0xBF5C 0x0040 0x0849). Entry N=0,Z=0 (PL true, both taken):
+    // r0=0x40000000 -> 0x80000000 (would set N), r1=1 -> 0 (would set
+    // Z); flags must stay 0.
+    for (i, w) in [0xBF5Cu16, 0x0040, 0x0849].iter().enumerate() {
+        mem.write16(0x20002000 + i as u32 * 2, *w);
+    }
+    cpu.regs.r[0] = 0x40000000;
+    cpu.regs.r[1] = 1;
+    cpu.regs.xpsr = 0x00000000;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 3);
+    assert_eq!(cpu.regs.r[0], 0x80000000, "lslpl writeback still happens in IT");
+    assert_eq!(cpu.regs.r[1], 0, "lsrpl writeback still happens in IT");
+    assert_eq!(cpu.regs.xpsr & 0xF0000000, 0x00000000, "shifts must not touch flags in IT");
+    // Vector E: ALU-reg preserves: itt pl/andpl r0,r1/orrpl r2,r3
+    // (0xBF5C 0x4008 0x431A). Entry N=0,Z=0 (PL true, both taken):
+    // andpl 0xFF00FF00&0x00FF0000 -> 0 (would set Z), orrpl
+    // 0x80000000|0 -> 0x80000000 (would set N); flags must stay 0.
+    for (i, w) in [0xBF5Cu16, 0x4008, 0x431A].iter().enumerate() {
+        mem.write16(0x20002000 + i as u32 * 2, *w);
+    }
+    cpu.regs.r[0] = 0xFF00FF00;
+    cpu.regs.r[1] = 0x00FF0000;
+    cpu.regs.r[2] = 0x80000000;
+    cpu.regs.r[3] = 0x00000000;
+    cpu.regs.xpsr = 0x00000000;
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 3);
+    assert_eq!(cpu.regs.r[0], 0x00000000, "andpl writeback still happens in IT");
+    assert_eq!(cpu.regs.r[2], 0x80000000, "orrpl writeback still happens in IT");
+    assert_eq!(cpu.regs.xpsr & 0xF0000000, 0x00000000, "ALU-reg must not touch flags in IT");
+    // Vector F: TST in IT still SETS flags: ite eq/tsteq r0,r1/movne r2,#0
+    // (0xBF0C 0x4208 0x2200). Entry Z=1 (EQ true): tsteq TAKEN,
+    // r0=0xFF&r1=0x0F -> 0x0F != 0 clears Z (a non-setting TST would
+    // leave Z=1). Slot 2 then sees live NE (Z=0) and movne executes
+    // (r2=0) without touching flags (stays N=0,Z=0).
+    for (i, w) in [0xBF0Cu16, 0x4208, 0x2200].iter().enumerate() {
+        mem.write16(0x20002000 + i as u32 * 2, *w);
+    }
+    cpu.regs.r[0] = 0xFF;
+    cpu.regs.r[1] = 0x0F;
+    cpu.regs.r[2] = 99;
+    cpu.regs.xpsr = 0x40000000; // Z=1
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 3);
+    assert_eq!(cpu.regs.r[2], 0, "movne on live-NE must still write in IT");
+    assert_eq!(cpu.regs.xpsr & 0xF0000000, 0x00000000, "tsteq in IT must set flags (Z cleared)");
+}
+
+#[test]
 fn bare_subreg_sets_flags() {
     // subs r3,r3,r0 (1A1B) unpredicated with equal inputs -> Z=1.
     // Run EXACTLY 1 step: run_snippet's trailing NOPs (movs r0,r0) would
