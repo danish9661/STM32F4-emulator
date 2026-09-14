@@ -630,7 +630,10 @@ impl Cpu {
         // handler needs the same frame size the returnee reserved; an FP
         // mismatch falls through to the normal unstack and the run loop
         // delivers next iteration (always correct, just one stack cycle).
-        if self.deliver_irqs {
+        // any_pending() first: the return path is cold (one EXC_RETURN per
+        // handler run) but the scan is not free, and DOOM-class polling
+        // firmware still pays it on every SVC-less handler return.
+        if self.deliver_irqs && sys.p.nvic.borrow().any_pending() {
             if let Some(irq) = self.select_pending(sys) {
                 let fpccr = sys.p.read(sys, 0xE000EF34, 4);
                 let need_fp = self.regs.control & 4 != 0 && fpccr & (1 << 31) != 0;

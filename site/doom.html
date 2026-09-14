@@ -78,6 +78,8 @@
     <button id="btnFull" title="Fullscreen (Esc to exit)">Fullscreen</button>
     <button id="btnLog" title="Show/hide the UART log and control guide — hiding them gives the game the space">Hide log</button>
     <button id="btnClear" title="Clear the UART log">Clear</button>
+    <button id="btnReHi" title="Headroom is back — reboot straight into high detail (auto never switches low->high live: the mid-game re-tune can leave the 3D view ~208px wide)" style="display:none">High detail</button>
+    <button id="btnDetail" title="Cycle render detail: Auto -> High -> Low (low saves ~20% inst/frame; high->low applies live, low->high needs a reboot)">Detail: Auto</button>
   </div>
 </div>
 <!-- Backing store MUST be the native framebuffer size (320x200): renderFb
@@ -102,6 +104,6 @@
 <!-- Bump ?v= on every doom.js edit: the module is cached hard, and a stale
      copy looks exactly like the bug you thought you just fixed. The worker
      has its own ?v= inside doom.js. -->
-<script type="module" src="doom.js?v=71"></script>
+<script type="module" src="doom.js?v=72"></script>
 </body>
 </html>

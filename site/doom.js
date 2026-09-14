@@ -78,7 +78,7 @@ window.__doomLog = () => dbgLog.slice();
 window.__pace = () => window.__lastPace || null;
 // Build stamp: type __doomVer in the console — if it doesn't print the
 // number below, the tab runs a cached copy (hard-refresh: Ctrl+Shift+R).
-window.__doomVer = 71;
+window.__doomVer = 72;
 // Keys pressed before the worker boots would be eaten (nothing listens
 // yet) — the old "wait before touching anything" ritual. Instead they queue
 // here and flush on 'booted', so press ahead: the game catches up. The
@@ -296,6 +296,36 @@ $('btnFull').addEventListener('click', () => {
     (document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen()).catch(() => {});
 });
 $('btnClear').addEventListener('click', () => { $('uart').textContent = uartBuf = ''; });
+// Detail control: Auto (default) -> High (manual pin) -> Low (manual pin).
+// High->low applies live at the next frame boundary; low->high mid-game is
+// NOT applied live (the guest's mid-game R_SetViewSize re-tune doesn't fully
+// take — 208px-wide view + black bar, AGENTS §22), so leaving Low reboots.
+let detailMode = localStorage.getItem('doomDetail') || 'auto';
+function applyDetailBtn() {
+    const b = $('btnDetail');
+    if (b) b.textContent = 'Detail: ' + detailMode[0].toUpperCase() + detailMode.slice(1);
+}
+function sendDetail() {
+    if (detailMode === 'auto') send({ t: 'detail', auto: true });
+    else send({ t: 'detail', lowDetail: detailMode === 'low' });
+}
+$('btnDetail').addEventListener('click', () => {
+    detailMode = detailMode === 'auto' ? 'high' : detailMode === 'high' ? 'low' : 'auto';
+    localStorage.setItem('doomDetail', detailMode);
+    applyDetailBtn();
+    if (detailMode === 'low' || detailMode === 'auto') {
+        sendDetail();
+    } else {
+        boot(true);   // leaving Low for High: reboot takes it cleanly
+    }
+});
+$('btnReHi').addEventListener('click', () => {
+    detailMode = 'auto';
+    localStorage.setItem('doomDetail', 'auto');
+    applyDetailBtn();
+    boot(true);   // headroom is back: reboot straight into high detail
+});
+applyDetailBtn();
 
 function appendUart(chunk) {
     if (!chunk || window.__noUart) return;
@@ -391,8 +421,14 @@ function onWorkerMessage(e) {
             // with __pace() when diagnosing speed issues.
             if (m.pace) window.__lastPace = m.pace;
             const tpsTxt = (typeof m.tps === 'number') ? ` · ${m.tps.toFixed(0)}t/s` : '';
+            // Auto-detail indicator: which render mode the guest runs + headroom state.
+            const dTxt = m.detail ? ` · detail:${m.detail}${m.autoDetail ? '(auto)' : '(manual)'}` : '';
             $('stats').textContent =
-                `MIPS: ${m.mips.toFixed(1)} · FPS: ${m.fps.toFixed(0)}/35${tpsTxt} · drawn ${m.drawn.toFixed(0)}${audioTxt} · ${m.instM.toFixed(1)}M inst`;
+                `MIPS: ${m.mips.toFixed(1)} · FPS: ${m.fps.toFixed(0)}/35${tpsTxt} · drawn ${m.drawn.toFixed(0)}${audioTxt}${dTxt} · ${m.instM.toFixed(1)}M inst`;
+            // One-click reboot to high when auto-detail latched sustained headroom
+            // (auto never switches low->high live: the 208px-bar hazard).
+            const rb = $('btnReHi');
+            if (rb) rb.style.display = (m.detail === 'low' && m.detailReadyHigh) ? '' : 'none';
             break;
         case 'save':
             try {
@@ -431,7 +467,7 @@ function onWorkerMessage(e) {
     }
 }
 
-async function boot() {
+async function boot(keepDetail) {
     setStatus('booting…');
     dlog('boot', 'starting');
     prebootQueue.length = 0;   // stale taps from a previous instance die here
@@ -452,7 +488,7 @@ async function boot() {
 
     try {
         const [svdXml, wad] = await Promise.all([
-            fetch('vendor/stm32f407.svd?v=29').then((r) => r.text()),
+            fetch('vendor/stm32f407.svd?v=30').then((r) => r.text()),
             fetch('doom1.wad').then((r) => r.arrayBuffer()),
         ]);
         const firmware = new Uint8Array(atob(FIRMWARES.doom.bytes).split('').map((c) => c.charCodeAt(0)));
@@ -466,13 +502,18 @@ async function boot() {
 
         // Bump ?v= on every doom-worker.js edit — worker scripts cache as hard
         // as module scripts, and a stale copy looks exactly like a bug.
-        worker = new Worker('doom-worker.js?v=44', { type: 'module' });
+        worker = new Worker('doom-worker.js?v=45', { type: 'module' });
         worker.onmessage = onWorkerMessage;
         worker.onerror = (e) => {
             setStatus('worker failed: ' + (e.message || 'load error'), 'error');
             console.error(e);
         };
-        send({ t: 'boot', svdXml, wad, firmware, lowDetail: false, saveMap }, [wad]);
+        // Boot detail: manual Low pins low; High pins high (auto off);
+        // Auto (or a keepDetail reboot from High) boots high and lets the
+        // worker's hysteresis drop to low only if gameplay sags.
+        const bootLow = detailMode === 'low';
+        send({ t: 'boot', svdXml, wad, firmware, lowDetail: bootLow,
+               detailMode: detailMode === 'auto' ? 'auto' : 'manual', saveMap }, [wad]);
         send({ t: 'hidden', hidden: document.hidden });
         startTicking();
     } catch (e) {

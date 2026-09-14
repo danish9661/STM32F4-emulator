@@ -239,6 +239,15 @@ void DG_Init()
 // poking the `detailLevel` global from JS does nothing — measured: it leaves
 // inst/frame bit-identical.
 //
+// Vanilla low detail renders viewwidth=160 logical columns doubled to 320
+// physical pixels (colfunc writes dest AND dest+1, spans step x by 2). On a
+// 320px framebuffer that reads as chunky pixels, NOT a narrow view —
+// verified by screenshot (2026-09-14): full-width scene, correct HUD, only
+// coarser wall/floor texel sampling. (An earlier 208px-wide + black-bar
+// report was a mid-game high->low->high round-trip artifact, not the low
+// mode itself: the low leg is safe to enter live; only the low->high return
+// leg needs a reboot, which the page enforces.)
+//
 // R_SetViewSize() only *requests* the change (setsizeneeded=1); D_Display()
 // is supposed to consume it, but in this build that check never fires
 // (probed: setsizeneeded stays 1 across frames while rendering continues),

@@ -13,7 +13,7 @@
 // Bump the ?v= on the Worker() URL in doom.js whenever this file changes:
 // worker scripts are cached exactly as hard as module scripts, and a stale
 // copy looks precisely like the bug you thought you just fixed.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=29';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=30';
 import { createEmulator } from './emulator.js?v=2';
 
 // ── pacing (unchanged from the pre-worker main-thread loop) ──
@@ -107,6 +107,21 @@ let keyWr = 0;
 let fbAddr = 0n;
 let paused = false, booted = false, hidden = false;
 let lowDetail = false;
+// Auto-detail (default ON): the only path that actually reaches 35 fps in
+// E1M1 gameplay on a ~40 MIPS core (measured: high 1.0-1.3M inst/frame needs
+// ~43 MIPS; low saves ~20% -> ~0.85-1.05M, needs ~34 MIPS, inside the
+// budget). Hysteresis on the smoothed tics/s meter (game LOGIC speed, not
+// the frame meter): drop to low below 30 for 4s, return to high above 33.5
+// for 10s. Manual override via the 'detail' message (sets autoDetail=false;
+// 'auto' re-enables). The 208px-black-bar hazard (AGENTS §22: mid-game
+// low->high re-tune doesn't fully take) is avoided by only ever switching
+// high->low automatically — the return leg needs a boot to take cleanly,
+// so auto never switches low->high by itself; it reports ready instead and
+// the page offers a one-click reboot (see detailState in stats).
+let autoDetail = true;
+let detailState = 'high';       // 'high' | 'low' (what the guest runs now)
+let detailReadyHigh = false;    // latched when sustained headroom returns
+let lowSince = 0, highSince = 0;
 let instTotal = 0, framesShown = 0;
 let statLast = 0, statInst = 0, statFrames = 0, activeMs = 0;
 let fpsFrames = 0, fpsLastT = 0, fpsSmooth = 35;
@@ -376,7 +391,34 @@ function reportStats() {
         guestFrames,
         pace: { clamp: paceClamp, target: paceTarget, budget: paceBudget,
                 wall: paceMs, jump: paceJump, hidden: hidden ? 1 : 0 },
+        detail: detailState,
+        detailReadyHigh,
+        autoDetail,
     });
+    // Auto-detail hysteresis (see declaration): act on the smoothed LOGIC
+    // meter, not instantaneous fps. Switching is one ABI write; the guest
+    // applies it at the next DG_DrawFrame boundary via R_SetViewSize +
+    // R_ExecuteSetViewSize (safe end-of-frame path, platform.c).
+    if (autoDetail && booted && !paused && !loadPending) {
+        if (detailState === 'high' && tpsSmooth < 30) {
+            if (!lowSince) lowSince = now;
+            if (now - lowSince > 4000) {
+                detailState = 'low';
+                if (emu) emu.write32(DETAIL_ADDR, 1);
+                lowSince = 0; highSince = 0; detailReadyHigh = false;
+            }
+        } else if (detailState === 'high') {
+            lowSince = 0;
+        }
+        if (detailState === 'low') {
+            if (tpsSmooth > 33.5) {
+                if (!highSince) highSince = now;
+                if (now - highSince > 10000) detailReadyHigh = true;
+            } else {
+                highSince = 0; detailReadyHigh = false;
+            }
+        }
+    }
     statLast = now; statInst = instTotal; statFrames = guestFrames;
     activeMs = 0; framesShown = 0;
     paceClamp = 0; paceTarget = 0; paceBudget = 0; paceMs = 0; paceJump = 0;
@@ -399,7 +441,7 @@ async function boot(msg) {
             firmware: msg.firmware,
             bindings,
             svdXml: msg.svdXml,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=29', // VENDOR_V: bump with app.js
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=30', // VENDOR_V: bump with app.js
             extra_ram: [
                 { addr: 0xC0000000, size: 16 * 1024 * 1024 },   // .data/.bss + zone + heap
                 { addr: 0xB8000000, size: 8 * 1024 * 1024 },    // WAD image
@@ -408,7 +450,10 @@ async function boot(msg) {
             ext_devices: { speaker: true },   // enable the I2S capture drain
         });
         uc = emu.uc;
-        lowDetail = msg.lowDetail;
+        lowDetail = !!msg.lowDetail;
+        autoDetail = msg.detailMode === 'manual' ? false : true;
+        detailState = lowDetail ? 'low' : 'high';
+        detailReadyHigh = false; lowSince = 0; highSince = 0;
         emu.write32(DETAIL_ADDR, lowDetail ? 1 : 0);
         emu.write32(SAVEMAP, msg.saveMap | 0);
         bootClock = performance.now();
@@ -449,8 +494,19 @@ self.onmessage = (e) => {
             paused = m.paused;
             break;
         case 'detail':
-            lowDetail = m.lowDetail;
-            if (emu) emu.write32(DETAIL_ADDR, lowDetail ? 1 : 0);
+            // Manual override: { lowDetail } pins the mode and disables
+            // auto; { auto: true } re-enables auto (stays where it is until
+            // the hysteresis fires). A manual low->high switch mid-game is
+            // allowed but documented risky (208px-bar hazard, AGENTS §22).
+            if (m.auto) {
+                autoDetail = true;
+            } else {
+                autoDetail = false;
+                lowDetail = !!m.lowDetail;
+                detailState = lowDetail ? 'low' : 'high';
+                detailReadyHigh = false; lowSince = 0; highSince = 0;
+                if (emu) emu.write32(DETAIL_ADDR, lowDetail ? 1 : 0);
+            }
             break;
         case 'tick':
             // One burst per page animation frame. The gap between bursts is
