@@ -538,6 +538,18 @@ export function init_svd(svd_xml: string): void;
 
 export function is_watchdog_reset_requested(): boolean;
 
+/**
+ * Queued backlog (bytes) for one ITM stimulus port.
+ */
+export function itm_port_pending(port: number): number;
+
+/**
+ * Drain one ITM stimulus port's queued trace bytes (oldest first).
+ * Port 0 sinks into the UART console instead and always drains empty here;
+ * ports 1-31 queue per-port streams for the JS driver.
+ */
+export function itm_take_port(port: number): Uint8Array;
+
 export function iwdg_reset_flag(): boolean;
 
 /**
@@ -785,6 +797,8 @@ export interface InitOutput {
     readonly init: () => void;
     readonly init_svd: (a: number, b: number) => void;
     readonly is_watchdog_reset_requested: () => number;
+    readonly itm_port_pending: (a: number) => number;
+    readonly itm_take_port: (a: number, b: number) => void;
     readonly iwdg_reset_flag: () => number;
     readonly ltdc_get_frame_count: () => number;
     readonly ltdc_get_scanline: () => number;

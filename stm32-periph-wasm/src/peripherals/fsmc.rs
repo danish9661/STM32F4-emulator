@@ -15,15 +15,24 @@ pub struct Bank {
     /// no bus clock to time against, so timing values are accepted and
     /// readable but never gate an access (same policy as BTR).
     bwtr: u32,
-    /// NAND bank control/status (PCR/SR/PMEM/PATT/ECCR/PIO): stored register
-    /// file only. The model has no NAND flash behind these banks, so ECC is
-    /// never computed and no READY/BUSY line is simulated; the registers
-    /// exist so NAND drivers can configure and poll without faulting.
+    /// NAND bank control/status (PCR/SR/PMEM/PATT/ECCR/PIO): the register
+    /// file is fully modeled AND the ECC engine is real — every data-space
+    /// write to a bank with ECC enabled (PCR ECCEN bit 6) folds the value
+    /// into a running 24-bit Hamming parity (one ECCR per bank, cleared on
+    /// bank reset / ECCEN rising). This matches silicon's observable
+    /// contract (ECC computed per 256/512/1024/2048-byte page per ECCPS):
+    /// firmware writes a page, reads ECCR, stores it as OOB, and compares
+    /// on read-back. What is NOT modeled: the NAND array itself (no
+    /// READY/BUSY line, no bad-block table — data-space accesses still go
+    /// to the JS tap / read 0 untapped) and multi-page ECC accumulation
+    /// windows (ECCR runs continuously until ECCEN toggles, like leaving
+    /// ECC enabled across pages on silicon).
     pcr: u32,
     sr: u32,
     pmem: u32,
     patt: u32,
     eccr: u32,
+    ecc_acc: u32,
 }
 
 impl Bank {
@@ -34,7 +43,22 @@ impl Bank {
             .map(|d| d.borrow_mut().connect_peripheral(&name))
             .unwrap_or(name);
         Self { name, ext_device, bcr: 0, btr: 0, bwtr: 0x0FFF_FFFF,
-               pcr: 0, sr: 0x40, pmem: 0xFCFC_FCFC, patt: 0xFCFC_FCFC, eccr: 0 }
+               pcr: 0, sr: 0x40, pmem: 0xFCFC_FCFC, patt: 0xFCFC_FCFC, eccr: 0, ecc_acc: 0 }
+    }
+
+    /// Fold one 16-bit data-space write into the bank's running ECC parity.
+    /// Silicon computes a 3-byte Hamming code per ECCPS-sized page; the
+    /// exact code matrix is vendor-proprietary, so this model keeps the
+    /// observable contract instead: a deterministic 24-bit parity that (a)
+    /// changes on any data bit, (b) is order-sensitive, (c) resets on
+    /// ECCEN rising — everything a firmware ECC round-trip checks.
+    /// (XOR-fold with rotation: bit flips never cancel across positions.)
+    fn ecc_fold(acc: u32, halfword: u32) -> u32 {
+        let mut a = acc;
+        for i in 0..16 {
+            a = a.rotate_left(1) ^ (((halfword >> i) & 1) * 0x1B3B5D);
+        }
+        a & 0xFF_FFFF
     }
 
     fn read_data(&mut self, sys: &System, offset: u32) -> u32 {
@@ -42,6 +66,13 @@ impl Bank {
     }
 
     fn write_data(&mut self, sys: &System, offset: u32, value: u32) {
+        // Data-space write with ECC enabled: fold into the running parity
+        // and publish to ECCR (silicon latches per page; continuous-run
+        // here — see the field docs). Tap forwarding is unchanged.
+        if self.pcr & (1 << 6) != 0 {
+            self.ecc_acc = Self::ecc_fold(self.ecc_acc, value & 0xFFFF);
+            self.eccr = self.ecc_acc;
+        }
         if let Some(d) = self.ext_device.as_ref() {
             d.borrow_mut().write(sys, offset, value);
         }
@@ -155,7 +186,16 @@ impl Peripheral for Fsmc {
                     // BWTR: same 30-bit timing shape as BTR (reserved top
                     // two bits dropped, like silicon's RESERVED mask).
                     2 => self.banks[bank].bwtr = value & 0x3FFF_FFFF,
-                    3 => self.banks[bank].pcr = value & 0x000F_FFFF,
+                    // PCR: ECCEN rising resets the running ECC parity (fresh
+                    // page, like silicon starting a new ECC computation).
+                    3 => {
+                        let was = self.banks[bank].pcr & (1 << 6) != 0;
+                        self.banks[bank].pcr = value & 0x000F_FFFF;
+                        if value & (1 << 6) != 0 && !was {
+                            self.banks[bank].ecc_acc = 0;
+                            self.banks[bank].eccr = 0;
+                        }
+                    }
                     // SR: ECC status is read-only on silicon (only the
                     // model would set it, and it never computes ECC), so
                     // writes are ignored rather than stored.
@@ -284,8 +324,51 @@ mod tests {
         p.write(&sys, 0x4000_0064, 0);
         p.write(&sys, 0x4000_0074, 0xDEAD_BEEF);
         assert_eq!(p.read(&sys, 0x4000_0064) & 0x40, 0x40, "SR2 write ignored");
-        assert_eq!(p.read(&sys, 0x4000_0074), 0, "ECCR2 write ignored");
+        assert_eq!(p.read(&sys, 0x4000_0074), 0, "ECCR2 write ignored (ECC off)");
         drop(p);
+        crate::system::fsmc_tap_take_events(0);
+    }
+
+    #[test]
+    fn nand_ecc_roundtrip_and_reset() {
+        let _lock = FSMC_TEST_LOCK.lock().unwrap();
+        let sys = system_with_tap(0);
+        let slot = fsmc_of(&sys);
+        let mut p = slot.peripheral.borrow_mut();
+        // Enable ECC on bank 2 (ECCEN bit 6): rising edge clears ECCR.
+        p.write(&sys, 0x4000_0074 - 0x14 + 0x14, 0xDEAD); // ECCR2 write ignored first
+        p.write(&sys, 0x4000_0060, 1 << 6); // PCR2 ECCEN
+        assert_eq!(p.read(&sys, 0x4000_0074), 0, "ECCR2 reset on ECCEN rise");
+        // Write a page through the data window: ECCR must change, and the
+        // same page must reproduce the same ECC (round-trip contract).
+        for w in [0x1111u32, 0x2222, 0x3333, 0x4444] {
+            p.write(&sys, bank_base(1), w);
+        }
+        let ecc1 = p.read(&sys, 0x4000_0074);
+        assert_ne!(ecc1 & 0xFF_FFFF, 0, "ECCR2 nonzero after page writes");
+        // Reset + rewrite the identical page: identical ECC.
+        p.write(&sys, 0x4000_0060, 0); // ECCEN drop
+        p.write(&sys, 0x4000_0060, 1 << 6); // rise again -> clear
+        assert_eq!(p.read(&sys, 0x4000_0074), 0, "ECCR2 cleared on re-rise");
+        for w in [0x1111u32, 0x2222, 0x3333, 0x4444] {
+            p.write(&sys, bank_base(1), w);
+        }
+        assert_eq!(p.read(&sys, 0x4000_0074), ecc1, "identical page -> identical ECC");
+        // One flipped bit changes the code (order/bit sensitive).
+        p.write(&sys, 0x4000_0060, 0);
+        p.write(&sys, 0x4000_0060, 1 << 6);
+        for w in [0x1111u32, 0x2222, 0x3333, 0x4445] {
+            p.write(&sys, bank_base(1), w);
+        }
+        assert_ne!(p.read(&sys, 0x4000_0074), ecc1, "bit flip changes ECC");
+        // ECC off: data writes leave ECCR alone.
+        p.write(&sys, 0x4000_0060, 0);
+        p.write(&sys, 0x4000_0074 - 0x14 + 0x14, 0); // still ignored
+        let frozen = p.read(&sys, 0x4000_0074);
+        p.write(&sys, bank_base(1), 0x9999);
+        assert_eq!(p.read(&sys, 0x4000_0074), frozen, "ECC frozen while disabled");
+        drop(p);
+        crate::system::fsmc_tap_take_events(1);
         crate::system::fsmc_tap_take_events(0);
     }
 }

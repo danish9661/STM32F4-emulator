@@ -364,8 +364,8 @@ int main(void) {
 
     // ========== 13. PWR ==========
     uart_puts("--- PWR ---\n");
-    PWR_CR = 0x1F;
-    CHECK(PWR_CSR & (1 << 1), "PWR PVDO");
+    PWR_CR = 0x1F; // PVDE + DBP + CWUF + CSBF; PVDE asserts against a healthy rail
+    CHECK((PWR_CSR & (1 << 2)) == 0, "PWR PVDO");
 
     // ========== 14. IWDG ==========
     uart_puts("--- IWDG ---\n");

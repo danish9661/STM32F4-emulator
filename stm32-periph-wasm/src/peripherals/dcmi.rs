@@ -123,6 +123,31 @@ impl Dcmi {
         }
     }
 
+    /// JPEG word packing (CR JPEG bit 3): the sensor byte stream packs
+    /// little-endian into 32-bit DR words (4 pixels per DR read) instead of
+    /// one byte per read. The FIFO still stages bytes (it models the 4-deep
+    /// data register); only the DR assembly changes. ESS (CR bit 4, Embedded
+    /// Synchronization Select) is accepted and stored — with the JS-fed
+    /// frame source there are no HREF/VSYNC codes to strip, so ESS never
+    /// alters the byte stream (documented, not silent).
+    fn jpeg_word(&mut self) -> u32 {
+        let mut v = 0u32;
+        for i in 0..4 {
+            let b = if !self.fifo.is_empty() {
+                self.fifo.remove(0)
+            } else if self.streaming() {
+                // Live PCLK pull, same rule as the byte path: only on an
+                // empty FIFO, so no spurious overruns.
+                self.feed_next_pixel();
+                self.fifo.pop().unwrap_or(0)
+            } else {
+                0
+            };
+            v |= (b as u32) << (8 * i);
+        }
+        v
+    }
+
     /// DR read issued by the DMA engine. Drains anything already in the FIFO
     /// first (ordering), then pulls straight off the sensor.
     ///
@@ -176,7 +201,27 @@ impl Peripheral for Dcmi {
             0x20 => self.cwstrt,
             0x24 => self.cwsiz,
             0x28 => {
-                let v = if crate::system::dma_read_active() {
+                let v = if self.cr & (1 << 3) != 0 {
+                    // JPEG mode: 4 pixels per DR word (little-endian pack).
+                    // DMA and CPU share the packing (the DMA path cannot
+                    // overrun by construction — same guarantee as dma_pop).
+                    if crate::system::dma_read_active() {
+                        // Drain staged FIFO bytes first (ordering), then pull
+                        // the sensor directly, 4 bytes per word.
+                        let mut w = 0u32;
+                        for i in 0..4 {
+                            let b = if !self.fifo.is_empty() {
+                                self.fifo.remove(0)
+                            } else {
+                                self.advance_pixel().unwrap_or(0)
+                            };
+                            w |= (b as u32) << (8 * i);
+                        }
+                        w
+                    } else {
+                        self.jpeg_word()
+                    }
+                } else if crate::system::dma_read_active() {
                     self.dma_pop()
                 } else {
                     if self.fifo.is_empty() && self.streaming() {
@@ -401,6 +446,34 @@ mod tests {
         let got: Vec<u8> = (0..4).map(|_| Dcmi::read(dcmi, &sys2, 0x28) as u8).collect();
         crate::system::set_dma_read_active(false);
         assert_eq!(got, vec![6, 7, 10, 11], "crop window pixels in order");
+        crate::system::dcmi_clear();
+    }
+
+    #[test]
+    fn jpeg_mode_packs_four_pixels_per_dr_word() {
+        let _lock = DCMI_TEST_LOCK.lock().unwrap();
+        // 8-byte stream -> 2 DR words, little-endian pack.
+        crate::system::dcmi_feed_frame(8, 1, &(1u8..=8).collect::<Vec<u8>>());
+        let sys = crate::system::test_dummy_system();
+        let slot = sys.p.peripherals.iter().find(|s| {
+            s.peripheral.borrow_mut().as_any_mut().downcast_ref::<Dcmi>().is_some()
+        }).expect("dcmi slot");
+        let mut d = slot.peripheral.borrow_mut();
+        let dcmi = d.as_any_mut().downcast_mut::<Dcmi>().unwrap();
+        let sys2 = sys.clone();
+        // JPEG (bit 3) + ESS (bit 4, stored, stream-neutral) + CAPTURE.
+        Dcmi::write(dcmi, &sys2, 0x00, (1 << 3) | (1 << 4) | 1);
+        assert_eq!(dcmi.cr & (1 << 4), 1 << 4, "ESS stored");
+        let w0 = Dcmi::read(dcmi, &sys2, 0x28);
+        let w1 = Dcmi::read(dcmi, &sys2, 0x28);
+        assert_eq!(w0, 0x0403_0201, "first JPEG word packs bytes 1-4 LE");
+        assert_eq!(w1, 0x0807_0605, "second JPEG word packs bytes 5-8 LE");
+        // Byte mode on the same stream gives one byte per read (contrast).
+        crate::system::dcmi_feed_frame(4, 1, &(1u8..=4).collect::<Vec<u8>>());
+        Dcmi::write(dcmi, &sys2, 0x00, 0);
+        Dcmi::write(dcmi, &sys2, 0x00, 1);
+        let b0 = Dcmi::read(dcmi, &sys2, 0x28) as u8;
+        assert_eq!(b0, 1, "byte mode still one byte per DR read");
         crate::system::dcmi_clear();
     }
 }

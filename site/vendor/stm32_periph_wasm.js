@@ -1294,6 +1294,37 @@ export function is_watchdog_reset_requested() {
 }
 
 /**
+ * Queued backlog (bytes) for one ITM stimulus port.
+ * @param {number} port
+ * @returns {number}
+ */
+export function itm_port_pending(port) {
+    const ret = wasm.itm_port_pending(port);
+    return ret >>> 0;
+}
+
+/**
+ * Drain one ITM stimulus port's queued trace bytes (oldest first).
+ * Port 0 sinks into the UART console instead and always drains empty here;
+ * ports 1-31 queue per-port streams for the JS driver.
+ * @param {number} port
+ * @returns {Uint8Array}
+ */
+export function itm_take_port(port) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.itm_take_port(retptr, port);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * @returns {boolean}
  */
 export function iwdg_reset_flag() {

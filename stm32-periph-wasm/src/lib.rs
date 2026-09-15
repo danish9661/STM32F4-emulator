@@ -684,6 +684,22 @@ pub fn usb_out_status(ep: u32) -> u32 {
     sys.p.usb_out_status(ep)
 }
 
+/// Drain one ITM stimulus port's queued trace bytes (oldest first).
+/// Port 0 sinks into the UART console instead and always drains empty here;
+/// ports 1-31 queue per-port streams for the JS driver.
+#[wasm_bindgen]
+pub fn itm_take_port(port: u32) -> Vec<u8> {
+    let sys = crate::sys();
+    sys.p.itm_take_port(port)
+}
+
+/// Queued backlog (bytes) for one ITM stimulus port.
+#[wasm_bindgen]
+pub fn itm_port_pending(port: u32) -> usize {
+    let sys = crate::sys();
+    sys.p.itm_port_pending(port)
+}
+
 /// True when the FLASH peripheral is unlocked with PG set and !BSY — the
 /// JS driver applies program writes to guest memory when this is true.
 #[wasm_bindgen]

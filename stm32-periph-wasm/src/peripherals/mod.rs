@@ -108,6 +108,29 @@ impl Peripherals {
 
     /// Mark the PWR peripheral as having woken from low-power (sets CSR WUF).
     /// Called by the emulator when the core resumes after a WFI/WFE halt.
+    /// Run a closure on the ITM stimulus console (multi-port trace drain).
+    fn with_itm<R>(&self, f: impl FnOnce(&mut Itm) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if slot.start == 0xE000_0000 {
+                if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<Itm>() {
+                    return Some(f(u));
+                }
+                break;
+            }
+        }
+        None
+    }
+
+    /// Drain one ITM stimulus port's queued bytes (oldest first).
+    pub fn itm_take_port(&self, port: u32) -> Vec<u8> {
+        self.with_itm(|u| u.take_port(port as usize)).unwrap_or_default()
+    }
+
+    /// Queued backlog for one ITM stimulus port.
+    pub fn itm_port_pending(&self, port: u32) -> usize {
+        self.with_itm(|u| u.port_pending(port as usize)).unwrap_or(0)
+    }
+
     /// Run a closure on the USB OTG FS device model (host-side test API).
     fn with_usb<R>(&self, f: impl FnOnce(&mut UsbFs) -> R) -> Option<R> {
         for slot in &self.peripherals {

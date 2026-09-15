@@ -140,6 +140,15 @@ impl Peripheral for I2c {
                     self.reset();
                     return;
                 }
+                // DBGMCU freeze: while halted with this bus's SMBUS-timeout
+                // freeze bit set, the bus clock is stopped — START/STOP edge
+                // sequencing holds (writes latch CR1 but move no state, raise
+                // no flags, push no tap events). Clears on resume with no
+                // catch-up (same rule as TIM/WWDG/IWDG).
+                if crate::peripherals::dbgmcu::dbgmcu_frozen(sys, &self.name) {
+                    self.cr1 &= !((1 << 8) | (1 << 9));
+                    return;
+                }
 
                 let start = value & (1 << 8);
                 let stop = value & (1 << 9);

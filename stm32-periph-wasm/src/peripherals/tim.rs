@@ -212,6 +212,14 @@ impl Timer {
         if crate::peripherals::dbgmcu::dbgmcu_frozen(sys, &self.name) {
             return;
         }
+        // Encoder modes (SMS=001/010/011): the counter advances ONLY on
+        // TI1/TI2 pin edges, which need the pin layer — with no edges the
+        // counter holds at whatever the guest wrote. (Slave-mode reset /
+        // trigger routing below still applies; only the free-running
+        // time-base is suppressed.)
+        if (self.smcr & 0x7) >= 1 && (self.smcr & 0x7) <= 3 {
+            return;
+        }
 
         let dir = (self.cr1 >> 4) & 1;
         let cms = (self.cr1 >> 5) & 0x3;

@@ -29,12 +29,16 @@ pub fn dbgmcu_halted() -> bool {
 
 // Freeze-bit positions (RM0090 §38.16). APB1_FZ covers TIM2-7/12-14,
 // WWDG, IWDG, I2C1-3 SMBUS timeouts, CAN1/2. APB2_FZ covers TIM1/8-11.
+// I2C entries name the SMBUS-timeout freeze each I2C's clock is subject
+// to (the model also honors these in the I2C state machine: a frozen bus
+// clock holds START/ADDR sequencing while halted).
 fn apb1_freeze_bit(name: &str) -> Option<u32> {
     match name {
         "TIM2" => Some(0), "TIM3" => Some(1), "TIM4" => Some(2),
         "TIM5" => Some(3), "TIM6" => Some(4), "TIM7" => Some(5),
         "TIM12" => Some(6), "TIM13" => Some(7), "TIM14" => Some(8),
         "WWDG" => Some(11), "IWDG" => Some(12),
+        "I2C1" => Some(21), "I2C2" => Some(22), "I2C3" => Some(23),
         "CAN1" => Some(25), "CAN2" => Some(26),
         _ => None,
     }
@@ -135,11 +139,13 @@ mod tests {
         sys.p.peripherals[dbg].peripheral.borrow_mut().write(&sys, 0x08, 1 << 0);
         assert!(!dbgmcu_frozen(&sys, "TIM3"), "TIM2 bit != TIM3");
         assert!(!dbgmcu_frozen(&sys, "IWDG"), "IWDG bit 12 clear so far");
+        assert!(!dbgmcu_frozen(&sys, "I2C1"), "I2C1 bit 21 clear so far");
         // Halt + TIM3 freeze: frozen, counter holds across ticks.
         sys.p.peripherals[dbg].peripheral.borrow_mut().write(&sys, 0x08, 1 << 1);
         assert!(dbgmcu_frozen(&sys, "TIM3"), "halt+bit -> frozen");
-        sys.p.peripherals[dbg].peripheral.borrow_mut().write(&sys, 0x08, (1 << 1) | (1 << 12));
+        sys.p.peripherals[dbg].peripheral.borrow_mut().write(&sys, 0x08, (1 << 1) | (1 << 12) | (1 << 21));
         assert!(dbgmcu_frozen(&sys, "IWDG"), "IWDG freezes on bit 12");
+        assert!(dbgmcu_frozen(&sys, "I2C1"), "I2C1 SMBUS freeze on bit 21");
         // TIM3 enabled, ARR far away: ticks while frozen must not advance.
         sys.p.peripherals[tim].peripheral.borrow_mut().write(&sys, 0x00, 1);
         sys.p.peripherals[tim].peripheral.borrow_mut().write(&sys, 0x2C, 0xFFFF);

@@ -331,6 +331,33 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn f429_c_adc_alias_serves_common_block() {
+        // The F429 Keil SVD names the shared block C_ADC (same base
+        // 0x40012300, same CSR/CCR/CDR layout). from_svd must bind it to
+        // AdcCommon so CSR/CDR work on F429 maps too — previously the
+        // constructor rejected the name and the block read benign-0.
+        assert!(AdcCommon::new("C_ADC").is_some(), "C_ADC alias accepted");
+        assert!(AdcCommon::new("ADC_Common").is_some(), "ADC_Common still accepted");
+        assert!(AdcCommon::new("ADC1").is_none(), "ADC1 is not a common block");
+        let sys = crate::system::test_dummy_system();
+        let p = crate::peripherals::Peripherals::from_svd(
+            include_str!("../../../site/vendor/stm32f429.svd"),
+            crate::system::dummy_gpio(),
+            &crate::ext_devices::ExtDevices::default(),
+        );
+        let slot = p.peripherals.iter().find(|s| s.start == 0x4001_2300);
+        assert!(slot.is_some(), "C_ADC slot claimed at 0x40012300 on F429 map");
+        let mut b = slot.unwrap().peripheral.borrow_mut();
+        assert!(
+            b.as_any_mut().downcast_mut::<AdcCommon>().is_some(),
+            "F429 0x40012300 slot is an AdcCommon"
+        );
+        drop(b);
+        drop(p);
+        drop(sys);
+    }
 }
 
 impl Peripheral for Adc {
@@ -415,7 +442,9 @@ impl Peripheral for Adc {
 
 impl AdcCommon {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
-        if name == "ADC_Common" || name == "ADCCommon" {
+        // F407 SVD names it ADC_Common; the F429 Keil SVD calls the same
+        // block C_ADC (same base 0x40012300, same CSR/CCR/CDR layout).
+        if name == "ADC_Common" || name == "ADCCommon" || name == "C_ADC" {
             Some(Box::new(Self { ccr: 0 }))
         } else {
             None
