@@ -3728,3 +3728,48 @@ above frames is firmware. What the model + drivers + firmware now cover:
   ERR_CONN). Byte-order contract: API u32s are human order
   (0xC0A80401), converted at the lwIP boundary (h2n/n2h) — mixing raw
   pointer casts with shifts silently reverses octets on LE.
+
+---
+
+## 30. Peripheral docs all-Detailed + PWR PVDO firmware fix (2026-09-15)
+
+`docs/peripherals.md` (+ `site/docs-src/` + `website/docs/` copies, website
+with front-matter) is now **41/41 Detailed, 0 Partial** — the last three
+(DCMI/FSMC/PWR) were promoted with real behavior, not reworded:
+
+- **DCMI**: full camera pipeline (VSYNC/LINE/FRAME/ERR/OVR, CROP window,
+  JPEG word-pack, FIFO, IRQ78), fed by `dcmi_feed_frame` (JS camera).
+- **FSMC**: real NAND ECC engine (order-sensitive 24-bit parity over
+  data-space writes while ECCEN set, reset on ECCEN rise; vendor Hamming
+  matrix is proprietary so codes differ bit-for-bit — the round-trip
+  contract is what firmware checks) + FMC alias for the Keil F429 map.
+- **PWR**: family fields (VOS/ODEN/ODSWEN/UDEN) stored, VOS settle window
+  (~1000 inst), F429 overdrive/under-drive handshake
+  (ODEN→ODRDY/ODSWRDY/UDRDY after ~5000-inst windows).
+- **ETH row refreshed**: was stale ("311", PHY-only). Now 2530 lines with
+  WOL wakeup-filter CRC, addend drift, PPS counter/level, VLAN gate+invert,
+  PTP snapshots, TX csum insert, RX csum status, accept filtering, wire
+  pacing, deferral/collision reports, RBUS head-only RX, DP83848-style PHY,
+  MII/RMII pin mirrors, BSD sockets over real LwIP.
+- **Loc counts refreshed via `wc -l`** (ADC 517, CAN 519, EXTI 118, FLASH
+  149, GPIO 272, HASH 165, I2C 216, LTDC 295, NVIC 335, RCC 224, RNG 86,
+  RTC 199, SCB 195, SDIO 144, SPI 319, SW_SPI 110, SYSTICK 56, TIM 612,
+  USART 127); **tick column fixed** (Y for EXTI/DCMI/LTDC/IWDG/WWDG — all
+  five implement `fn tick()`); **ext column fixed** (Y for FSMC/QSPI/USB/
+  ETH/DCMI — FSMC/QSPI bind device images, USB is host-driven via `usb_*`
+  exports, ETH consumes netsim/gateway frames, DCMI consumes the JS camera
+  feed; ADC's only hit is a unit-test default, not a device path).
+- **SYSCFG/DBGMCU unification** (single shared SYSCFG instance for all maps;
+  `DBGMCU`+`DBG` / `ADC_Common`+`C_ADC` / `SAI1`+`SAI` / `FSMC`+`FMC` aliases)
+  is now documented in both rows. Board docs synced: f401/f411 PWR rows and
+  the f429 FMC row no longer say "VOSRDY=1" / "ECC not computed".
+
+Firmware fix in this pass: `comprehensive_test/main.c` PWR probe read
+**CSR bit 1 (SBF)** and called it "PVDO" — PVDO is CSR **bit 2** (RM0090
+§5.4.2; SBF@1, PVDO@2). `PWR_CR=0x1F` sets PVDE with a pinned-healthy rail,
+so the correct assert is `(PWR_CSR & (1<<2)) == 0`. Rebuilt all three
+family bins + `firmware.js?v=24`.
+
+Greenboard (`.pw-scratch/greenboard_all4.sh` → `greenboard_all4.verdict`):
+cargo 200/200, mock-periph 34/34, matrix 156/156, feat f407 1/1, feat f429
+1/1 — all EXIT 0.
