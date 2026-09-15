@@ -3861,3 +3861,35 @@ only, verified by the `chain_all5_final` battery.
 - Battery (`.pw-scratch/chain_all5_final.{log,verdict}`): BUILD 0, mock
   141/141, matrix 156/156, feat 1/1 both maps, browser smoke v34
   (usb/dcmi/blinky) all EXIT 0.
+
+---
+
+## 33. §32 follow-up: stale-ETH-ULPI wording + ?v=/map-hygiene notes (2026-09-15)
+
+Docs-only follow-up to §32 (no model changes — the 5-gap model code from
+§31 stands; this pass only repairs wording the audits below caught).
+
+- **Stale `t_ulpi` wording**: the old ETH-Peripheral row + the 407/407ve/
+  429 board ETH rows still said "no ULPI PHY (viewport benign-0 —
+  mock `t_ulpi`)", but the §31 model reports ULPI rates (480/12) in
+  GUSBCFG + scope probes (`t_ulpi_rate`). Both rows now say "ULPI rate
+  report 480/12 … (mock `t_ulpi_rate`)". The old `t_ulpi` mock section
+  (viewport benign-0) is superseded by `t_ulpi_rate` — flagged for
+  removal/merge on the next mock edit, not deleted here.
+- **Loc audit**: scripted `wc -l` check over
+  `stm32-periph-wasm/src/peripherals/*.rs` vs every `| PERIPH | Loc |`
+  row in `docs/peripherals.md` — all 41 match (no drift).
+- **?v= hygiene**: v34 bump (app.js/doom.js/doom-worker.js + console.html
+  v41 / doom.html v76 / `__doomVer` 76) is committed and matches the
+  rebuilt vendor wasm (19:53 build). Rule restated: bump `?v=` on every
+  edited served file + all `VENDOR_V` assets together after each
+  `wasm-pack` rebuild (AGENTS §0); record `__doomVer`.
+- **Committed `.map` paths**: the tracked `edge_test/build-*/**.map`
+  files embed absolute local toolchain paths
+  (`/home/danish1075/.cache/arduino/...`, `/home/danish1075/.arduino15/...`).
+  Precedent, not a leak introduced here — committed maps already carried
+  local paths before this session. The *current* unstaged `.map` diff is
+  path-churn only (cache-dir rename, zero code change); the `.hex` diff
+  is the real AF-fix payload (3 changed lines). Left uncommitted on
+  purpose — commit only the `.hex`/`.bin`/`.elf` side if a clean
+  map-regeneration is ever needed.
