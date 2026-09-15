@@ -3773,3 +3773,62 @@ family bins + `firmware.js?v=24`.
 Greenboard (`.pw-scratch/greenboard_all4.sh` → `greenboard_all4.verdict`):
 cargo 200/200, mock-periph 34/34, matrix 156/156, feat f407 1/1, feat f429
 1/1 — all EXIT 0.
+
+---
+
+## 31. Five honest gaps closed: HS microframes, ULPI rates, FDCAN timing, SMBus ARP, host entropy (2026-09-15)
+
+The board-doc "NOT modeled" column named five gaps that were real model
+absences (not doc wording). All five are now implemented, natively tested,
+mock-pinned (mock-periph 141 checks), and doc-synced (x3 copies). Commit
+`6a07187`; greenboard: cargo 213/213, mock 141/141, matrix 156/156, feat
+1/1 both maps; browser smoke v33 (usb/dcmi/blinky) all EXIT 0.
+
+- **USB HS microframes + EOPF** (`usb.rs::tick_sof`): the HS instance ticks
+  8 microframes per 1 kHz frame (21000 virt inst each, 125 us). The
+  microframe index lives in DSTS FNSOF low 3 bits (scope probe
+  `usb_hs_uframe`/`usb_uframe`, wasm exports); every 8th microframe rolls
+  the 14-bit frame number and latches EOPF (bit 15). FS has no microframes
+  (uframe always 0, EOPF never sets — asserted in both native + mock).
+  Gotcha: `tick_n(N)` may deliver N±1 microframes when the clock sits
+  mid-microframe at entry — the mock asserts roll-adjacency (±1), with
+  EOPF + FNSOF pinning the actual roll, not exact equality.
+- **ULPI PHY rates** (`ulpi_rate_mbps`): 480 HS / 12 FS, reported in the
+  reserved field of GUSBCFG (bits 31:20 — first cut used 31:28 and could
+  not fit 480; fixed same session) + scope exports `usb_ulpi_rate` /
+  `usb_hs_ulpi_rate`. Contract: firmware sizing DMA/FIFO budgets by rate
+  observes exactly this; packet-rate simulation itself stays out of scope.
+- **FDCAN bit-timing** (`can.rs` NBTP/DBTP @0x3E0/0x3E4): FDCAN layouts
+  stored verbatim; `fd_frame_cost` splits arbitration (nominal) vs payload
+  (data iff BRS) in virtual instructions. Reset costs: nominal 500k
+  (336/bit), data 2M (84/bit). Layout gotcha: the FD window sits at
+  0x320+slot*0x40 / F1 at 0x3E8 (NBTP/DBTP live between F0 end 0x3E0 and
+  F1 base 0x3E8); F1 slot 1-2 shadow F0 slot 0/1, F1 slot 2 reads 0
+  (documented alias — firmware uses FIFO0 for FD). Second gotcha: the bus
+  layer aligns every access to words, so the window returns LE words, not
+  bytes; the native test reads word-aligned (`(i&!3)` + shift).
+- **SMBus GCALL/ALERT/ARP + host-notify** (`i2c.rs::smbus_special_match`):
+  model-level answers with no registered device needed — GCALL 0x00 iff
+  ENGC (GENCALL in SR2, bytes sink), ALERT 0x0C iff ALERT bit (SMBALERT +
+  DR = harness-armed address via `i2c_arm_smbus_alert`), ARP 0x61 iff
+  ENARP. Two firmware-visible model fixes fell out: (1) NACK is AF
+  **bit 10**, not bit 9 (bit 9 is ARLO) — the model set bit 9 and
+  `edge_test.ino` probed bit 9, so both were wrong together; fixed model
+  + 4 firmware sites + rebuilt all 8 edge_test Arduino bins +
+  `firmware.js?v=25` / `app.js?v=40`; (2) CR1 START/STOP writes are
+  action-OR (config bits survive) while plain config writes replace, so
+  firmware CAN clear ENGC/SMBUS/ENPEC (a keep-always-OR made disables
+  impossible — caught by the GCALL-without-ENGC mock case).
+- **RNG host entropy** (`rng.rs` pool + `rng_seed_entropy` /
+  `rng_entropy_avail` exports): FIFO, one word per regen; SECS (SR bit 5)
+  reports LCG-fallback-active. Pool drains to LCG; `reset_globals` clears
+  it (no cross-instance leak). Native test is last_regen-based (parallel
+  cargo threads share INSTRUCTION_COUNT — never assert exact DR values).
+- **RNG base address is 0x50060800** (SVD RNG peripheral), not 0x40023C00
+  — the mock used the wrong base and read zeros until fixed. No doc or
+  firmware referenced the wrong address (checked).
+- **?v= discipline held**: vendor wasm rebuilt 3× this session
+  (RNG-tick/RCC-RDY/HS + AF-fix + all-5); v32→v33 bumped together across
+  app.js/doom.js/doom-worker.js + console.html v39→v40 / doom.html v74→v75
+  (`__doomVer` 74→75) + firmware.js v24→v25. `site/usbhost.js` gained the
+  `{hs:true}` api-switch (zero behavior change for FS callers).
