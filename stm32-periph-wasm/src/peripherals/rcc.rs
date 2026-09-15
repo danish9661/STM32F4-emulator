@@ -67,7 +67,10 @@ impl Rcc {
     }
 
     fn build_cr(&mut self) -> u32 {
-        let mut cr = self.cr;
+        // Live ready bits are computed, not stored: HSERDY/PLLRDY reflect
+        // the ON bit + settle window, so clearing ON drops RDY at once
+        // (silicon behavior — firmware polls RDY to confirm clock loss).
+        let mut cr = self.cr & !((1 << 17) | (1 << 25));
         cr |= 1 << 1; // HSIRDY always ready
         if self.hse_rdy() { cr |= 1 << 17; }
         if self.pll_rdy() { cr |= 1 << 25; }

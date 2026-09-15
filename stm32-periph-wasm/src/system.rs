@@ -329,6 +329,11 @@ pub struct CanFrame {
     pub dlc: u8,
     pub data: [u8; 8],
     pub loopback: bool,  // BTR LBKM: deliver only to the transmitting node
+    /// CAN FD frame (FDF set): up to 64 data bytes in `fd_data` with
+    /// `fd_len` valid. Classic frames leave both zeroed.
+    pub fd: bool,
+    pub fd_len: u8,
+    pub fd_data: [u8; 64],
 }
 
 static CAN_STAGED: OnceLock<Mutex<Vec<CanFrame>>> = OnceLock::new();
@@ -916,6 +921,7 @@ pub fn reset_globals() {
     if let Some(m) = ADC_OVERRIDES.get() { m.lock().unwrap().clear(); }
     if let Some(m) = ADC_DMA_QUEUE.get() { m.lock().unwrap().clear(); }
     if let Some(m) = CAN_STAGED.get() { m.lock().unwrap().clear(); }
+    crate::peripherals::rng::rng_clear_entropy();
     if let Some(m) = AUDIO_SOURCE.get() { *m.lock().unwrap() = None; }
     if let Some(m) = AUDIO_CAPTURE.get() { m.lock().unwrap().clear(); }
     if let Some(m) = DCMI_FRAME.get() { *m.lock().unwrap() = None; }

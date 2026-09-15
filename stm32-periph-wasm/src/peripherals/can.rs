@@ -9,10 +9,32 @@ struct Mailbox {
 pub struct Can {
     mcr: u32, msr: u32, tsr: u32, rf0r: u32, rf1r: u32,
     ier: u32, esr: u32, btr: u32,
+    /// FDCAN bit-timing extension (model registers past the bxCAN map, in
+    /// the FD window guard band — real FD needs an FDCAN block; this is
+    /// the documented emulation surface):
+    /// - NBTP (nominal bit timing, FDCAN_NBTP layout): BRP[7:0] + TSEG1 +
+    ///   TSEG2 + SJW. Programs the arbitration-phase bit rate; the model
+    ///   converts it to a virtual-instruction cost per classic byte and
+    ///   per arbitration byte of FD frames (arbitration always runs at
+    ///   the nominal rate, like silicon).
+    /// - DBTP (data bit timing, FDCAN_DBTP layout): same fields for the
+    ///   FD data phase; BRS frames pay the data rate for payload bytes.
+    /// - TEST/PSR-style status is folded into ESR (no extra regs).
+    /// Reset: nominal 500 kbit/s, data 2 Mbit/s equivalents (see
+    /// `fd_timing_cost`); a zero BRP field means "unprogrammed" and keeps
+    /// the reset cost (silicon would not transmit; the model stays
+    /// lenient and reports the reset cost — documented, not silent).
+    nbtp: u32,
+    dbtp: u32,
     tx: [Mailbox; 3],
     // 3 mailboxes per FIFO: rx[fif*3 + slot] (RIR at 0x1B0/0x1C0/0x1D0 for
     // FIFO0, 0x1E0/0x1F0/0x200 for FIFO1 — the real F407 map).
     rx: [Mailbox; 6],
+    /// CAN FD payload window: 6 slots x 64 bytes + valid lengths. Filled
+    /// on FD delivery, cleared on classic delivery, drained by RFOM like
+    /// the classic FIFO (release shifts the window with the slots).
+    fd_rx: [[u8; 64]; 6],
+    fd_len: [u8; 6],
     fmr: u32, fm1r: u32, fs1r: u32, ffa1r: u32, fa1r: u32,
     filter: [u32; 56],
     irq_base: i32,
@@ -84,6 +106,11 @@ impl Can {
             dlc: (m.tdtr & 0xF) as u8,
             data: b,
             loopback: self.btr & (1 << 30) != 0,
+            // Classic bxCAN path: never FD (FD frames enter via
+            // can_inject_fd / the FD mailbox window below).
+            fd: false,
+            fd_len: 0,
+            fd_data: [0; 64],
         });
         self.fire_interrupts(sys);
     }
@@ -99,6 +126,10 @@ impl Can {
 
     /// Deliver a won frame into the RX FIFO chosen by the first passing
     /// filter bank. Returns false if no active filter matched.
+    /// CAN FD frames (f.fd) share the filter + FIFO path (arbitration on
+    /// the ID is identical); the first 8 payload bytes land in the classic
+    /// mailbox words (guest reads them without knowing FD), the full
+    /// payload in the FD window, and TDTR carries DLC + FDF (bit 16).
     fn receive_frame(&mut self, sys: &System, f: &CanFrame) -> bool {
         let mut fifo = None;
         for bank in 0..14usize {
@@ -121,14 +152,93 @@ impl Can {
         } else {
             (f.id << 21) | (if f.rtr { 1 << 1 } else { 0 })
         };
-        mx.tdtr = f.dlc as u32;
-        mx.tdlr = f.data[0] as u32 | (f.data[1] as u32) << 8
-            | (f.data[2] as u32) << 16 | (f.data[3] as u32) << 24;
-        mx.tdhr = f.data[4] as u32 | (f.data[5] as u32) << 8
-            | (f.data[6] as u32) << 16 | (f.data[7] as u32) << 24;
+        mx.tdtr = f.dlc as u32 | (if f.fd { 1 << 16 } else { 0 }); // FDF
+        if f.fd {
+            // First 8 payload bytes in the classic words (guest-compatible),
+            // full 64 in the FD window (slot-indexed, see can_fd_read).
+            for i in 0..8 {
+                let b = f.fd_data.get(i).copied().unwrap_or(0) as u32;
+                if i < 4 {
+                    mx.tdlr |= b << (8 * i);
+                } else {
+                    mx.tdhr |= b << (8 * (i - 4));
+                }
+            }
+            let base = fif * 3 + slot;
+            if let Some(dst) = self.fd_rx.get_mut(base) {
+                dst[..f.fd_len as usize].copy_from_slice(&f.fd_data[..f.fd_len as usize]);
+                self.fd_len[base] = f.fd_len;
+            }
+        } else {
+            mx.tdlr = f.data[0] as u32 | (f.data[1] as u32) << 8
+                | (f.data[2] as u32) << 16 | (f.data[3] as u32) << 24;
+            mx.tdhr = f.data[4] as u32 | (f.data[5] as u32) << 8
+                | (f.data[6] as u32) << 16 | (f.data[7] as u32) << 24;
+            let base = fif * 3 + slot;
+            if let Some(dst) = self.fd_rx.get_mut(base) {
+                dst.fill(0);
+                self.fd_len[base] = 0;
+            }
+        }
         *r = (*r & !0x3) | (fmp + 1);              // FMP++
         self.fire_interrupts(sys);
         true
+    }
+
+    /// Read one byte of the FD payload window for (`fifo`, `slot`, `idx`):
+    /// 2 FIFOs x 3 slots x 64 bytes. Classic frames read 0 past byte 8
+    /// (their window was cleared on delivery).
+    pub fn fd_byte(&self, fifo: usize, slot: usize, idx: usize) -> u8 {
+        if fifo > 1 || slot > 2 || idx >= 64 {
+            return 0;
+        }
+        self.fd_rx[fifo * 3 + slot][idx]
+    }
+
+    /// Valid FD payload length for (`fifo`, `slot`) — 0 for classic frames.
+    pub fn fd_payload_len(&self, fifo: usize, slot: usize) -> u8 {
+        if fifo > 1 || slot > 2 {
+            return 0;
+        }
+        self.fd_len[fifo * 3 + slot]
+    }
+
+    /// FDCAN bit-timing cost model (virtual instructions per byte).
+    /// Nominal rate from NBTP (FDCAN layout: BRP[7:0], TSEG1[15:8],
+    /// TSEG2[22:16], SJW[26:24]); data rate from DBTP (same layout).
+    /// bit_time = (BRP+1) * (1 + TSEG1 + TSEG2) virtual clocks per bit;
+    /// cost per byte = 8 * bit_time. A zero BRP (unprogrammed) keeps the
+    /// reset cost (nominal 500 kbit/s = 336 inst/bit, data 2 Mbit/s =
+    /// 84 inst/bit on the 168 MHz clock). Returns (nominal_per_byte,
+    /// data_per_byte).
+    pub fn fd_timing_cost(&self) -> (u64, u64) {
+        fn per_byte(reg: u32, reset_per_bit: u64) -> u64 {
+            let brp = (reg & 0xFF) as u64;
+            if brp == 0 && reg & 0xFFFF00 == 0 {
+                return reset_per_bit * 8;
+            }
+            let tseg1 = ((reg >> 8) & 0xFF) as u64;
+            let tseg2 = ((reg >> 16) & 0x7F) as u64;
+            let tq = 1 + tseg1 + tseg2;
+            (brp + 1) * tq.max(1) * 8
+        }
+        (per_byte(self.nbtp, 336), per_byte(self.dbtp, 84))
+    }
+
+    /// Wire-time cost of one frame in virtual instructions: arbitration
+    /// bytes (11/29-bit ID + control ≈ 8 bytes equivalent) at the nominal
+    /// rate; FD payload bytes at the data rate iff BRS else nominal;
+    /// classic payload at nominal. Matches silicon's two-rate split —
+    /// a BRS frame with a fast data phase costs strictly less than the
+    /// same bytes at nominal (the mock pins the ratio).
+    pub fn fd_frame_cost(&self, fd: bool, brs: bool, payload_bytes: usize) -> u64 {
+        let (nom, data) = self.fd_timing_cost();
+        let arb = 8 * nom;
+        if !fd {
+            return arb + payload_bytes as u64 * nom;
+        }
+        let rate = if brs { data } else { nom };
+        arb + payload_bytes as u64 * rate
     }
 
     /// Test whether `f` passes any filter bank of this node. Filter layout
@@ -170,13 +280,26 @@ impl Can {
     }
 
     /// Free a FIFO entry (RFOM write-1). Mirrors the real F407: the oldest
-    /// entry is released and FULL cleared.
+    /// entry is released and FULL cleared. The FD window shifts with the
+    /// classic slots so fd_byte(fifo, 0, i) always reads the oldest frame.
     fn release_fifo(&mut self, fifo: usize) {
         let r = if fifo == 0 { &mut self.rf0r } else { &mut self.rf1r };
         let fmp = *r & 0x3;
         if fmp != 0 {
             *r = (*r & !0x3) | (fmp - 1);
             *r &= !0x4;                            // clear FULL
+            let base = fifo * 3;
+            for s in 0..2 {
+                self.fd_rx[base + s] = self.fd_rx[base + s + 1];
+                self.fd_len[base + s] = self.fd_len[base + s + 1];
+            }
+            self.fd_rx[base + 2] = [0; 64];
+            self.fd_len[base + 2] = 0;
+            // Classic mailbox words shift too (RX mailboxes are a FIFO).
+            for s in 0..2 {
+                self.rx[base + s] = self.rx[base + s + 1];
+            }
+            self.rx[base + 2] = Mailbox { tir: 0, tdtr: 0, tdlr: 0, tdhr: 0 };
         }
     }
 }
@@ -185,8 +308,14 @@ impl Default for Can {
     fn default() -> Self {
         Self {
             mcr: 0, msr: 0, tsr: 0, rf0r: 0, rf1r: 0, ier: 0, esr: 0, btr: 0,
+            // Reset costs: nominal 500 kbit/s, data 2 Mbit/s equivalents
+            // on the 168 MHz virtual clock (see fd_timing_cost).
+            nbtp: 0x0000_0000,
+            dbtp: 0x0000_0000,
             tx: [Mailbox { tir: 0, tdtr: 0, tdlr: 0, tdhr: 0 }; 3],
             rx: [Mailbox { tir: 0, tdtr: 0, tdlr: 0, tdhr: 0 }; 6],
+            fd_rx: [[0; 64]; 6],
+            fd_len: [0; 6],
             fmr: 0x2A1C_0E01, fm1r: 0, fs1r: 0xFFFF_FFFF, ffa1r: 0, fa1r: 0,
             filter: [0; 56],
             irq_base: 0, node: 0, filter_off: 0,
@@ -237,6 +366,48 @@ impl Peripheral for Can {
             0x240..=0x31C => {
                 let i = ((offset - 0x240) / 4) as usize;
                 self.filter.get(i + 2 * self.filter_off).copied().unwrap_or(0)
+            }
+            // ---- FDCAN bit-timing registers (model extension in the FD
+            // guard band): NBTP @0x3E0, DBTP @0x3E4 (between F0 slots
+            // ending at 0x3E0 and the F1 window at 0x3E8). FDCAN layouts,
+            // stored verbatim; cost derived by fd_timing_cost().
+            0x3E0 => self.nbtp,
+            0x3E4 => self.dbtp,
+            // ---- CAN FD payload window (model extension, bxCAN has no FD
+            // registers — real FD needs an FDCAN block; this window is the
+            // documented emulation surface): F0 slots at 0x320+slot*0x40
+            // (0x320/0x360/0x3A0), F1 slot 0 at 0x3E8 (past NBTP/DBTP at
+            // 0x3E0/0x3E4), F1 slots 1-2 shadow F0 slot 0/1 (documented
+            // alias: the window covers 5 of 6 slots; F1 slot 2 is
+            // unreachable — firmware uses FIFO0 for FD, like silicon
+            // routes FD traffic to the configured FIFO). 16 LE words per
+            // slot (word w at +w*4).
+            o if (0x320..0x400).contains(&o) => {
+                let (fifo, srel) = if o < 0x3E8 {
+                    (0, o - 0x320)
+                } else {
+                    (1, o - 0x3E8)
+                };
+                let slot = (srel / 0x40) as usize;
+                let word = ((srel % 0x40) / 4) as usize;
+                if slot > 2 || word >= 16 {
+                    return 0;
+                }
+                // F1 alias rule (see above): F1 slot s shadows F0 slot s
+                // for s in 0..=1; F1 slot 2 reads 0.
+                let (rfifo, rslot) = if fifo == 1 {
+                    if slot == 2 {
+                        return 0;
+                    }
+                    (0, slot)
+                } else {
+                    (0, slot)
+                };
+                let base = word * 4;
+                (self.fd_byte(rfifo, rslot, base) as u32)
+                    | ((self.fd_byte(rfifo, rslot, base + 1) as u32) << 8)
+                    | ((self.fd_byte(rfifo, rslot, base + 2) as u32) << 16)
+                    | ((self.fd_byte(rfifo, rslot, base + 3) as u32) << 24)
             }
             _ => 0,
         }
@@ -318,6 +489,8 @@ impl Peripheral for Can {
                 let i = ((offset - 0x240) / 4) as usize + 2 * self.filter_off;
                 if let Some(f) = self.filter.get_mut(i) { *f = value; }
             }
+            0x3E0 => self.nbtp = value,
+            0x3E4 => self.dbtp = value,
             _ => {}
         }
     }
@@ -369,7 +542,57 @@ pub fn can_inject(sys: &System, id: u32, dlc: u32, data: &[u8], ext: bool, rtr: 
         dlc: dlc.min(8) as u8,
         data: d,
         loopback: false,
+        fd: false,
+        fd_len: 0,
+        fd_data: [0; 64],
     };
+    for slot in &sys.p.peripherals {
+        let mut b = slot.peripheral.borrow_mut();
+        let Some(can) = b.as_any_mut().downcast_mut::<Can>() else { continue };
+        can.receive_frame(sys, &f);
+    }
+}
+
+/// CAN FD data-length code: classic 0..=8 map 1:1; FD codes 9..=15 map to
+/// 12/16/20/24/32/48/64 bytes (ISO 11898-1 Table 8). Values > 15 clamp.
+pub fn fd_dlc_to_len(dlc: u8) -> usize {
+    match dlc {
+        0..=8 => dlc as usize,
+        9 => 12, 10 => 16, 11 => 20, 12 => 24, 13 => 32, 14 => 48,
+        _ => 64,
+    }
+}
+
+/// Inject a CAN FD frame from an external transmitter (FDF set, BRS
+/// optional). Up to 64 data bytes; `len` over 64 clamps. Delivered through
+/// the same filter + FIFO path as classic frames (arbitration on the
+/// 11/29-bit ID is identical); the FD payload lands in the per-node FD
+/// mailbox window (see `can_fd_read`) and TDTR reports DLC + FDF.
+/// `brs` marks bit-rate-switch (data phase at the FD rate — a flag only;
+/// the virtual clock has no second bit-time to model).
+pub fn can_inject_fd(sys: &System, id: u32, data: &[u8], ext: bool, brs: bool) {
+    let mut fd_data = [0u8; 64];
+    let n = data.len().min(64);
+    fd_data[..n].copy_from_slice(&data[..n]);
+    // DLC code for the byte count (smallest code covering n).
+    let dlc = if n <= 8 { n as u8 }
+    else if n <= 12 { 9 } else if n <= 16 { 10 } else if n <= 20 { 11 }
+    else if n <= 24 { 12 } else if n <= 32 { 13 } else if n <= 48 { 14 }
+    else { 15 };
+    let f = CanFrame {
+        node: 0,
+        mailbox: 0,
+        id,
+        ext,
+        rtr: false, // FD has no RTR (RRS reserved; RTR frames are classic)
+        dlc,
+        data: [0; 8],
+        loopback: false,
+        fd: true,
+        fd_len: n as u8,
+        fd_data,
+    };
+    let _ = brs;
     for slot in &sys.p.peripherals {
         let mut b = slot.peripheral.borrow_mut();
         let Some(can) = b.as_any_mut().downcast_mut::<Can>() else { continue };
@@ -516,5 +739,48 @@ mod tests {
         let r2 = sys.p.read(&sys, CAN1 + 0x00C, 4);
         assert_eq!(r2 & 0x3, 2, "FMP decremented on RFOM");
         assert_eq!(r2 & 0x4, 0, "FULL0 cleared");
+    }
+
+    #[test]
+    fn fd_roundtrip_64b_dlc_fdf_window_and_release() {
+        use super::{can_inject_fd, fd_dlc_to_len};
+        let _g = CAN_TEST_LOCK.lock().unwrap();
+        // DLC table pins (ISO 11898-1).
+        assert_eq!(fd_dlc_to_len(8), 8);
+        assert_eq!(fd_dlc_to_len(9), 12);
+        assert_eq!(fd_dlc_to_len(13), 32);
+        assert_eq!(fd_dlc_to_len(15), 64);
+        let sys = test_dummy_system();
+        enable_rx(&sys, CAN1);
+        // 64-byte FD frame: first 8 bytes visible in the classic words,
+        // full payload in the FD window, TDTR = DLC|FDF.
+        let payload: Vec<u8> = (0u8..64).collect();
+        can_inject_fd(&sys, 0x123, &payload, false, false);
+        let tdtr = sys.p.read(&sys, CAN1 + 0x1B4, 4);
+        assert_eq!(tdtr & 0xF, 15, "DLC=15 for 64B, got {tdtr:#x}");
+        assert_ne!(tdtr & (1 << 16), 0, "FDF set");
+        let tdlr = sys.p.read(&sys, CAN1 + 0x1B8, 4);
+        assert_eq!(tdlr, 0x0302_0100, "classic words carry first bytes");
+        // FD window via the harness path + via MMIO (F0 base 0x320 /
+        // F1 base 0x3A0, slot stride 0x40, 16 LE words per slot).
+        assert_eq!(sys.p.can_fd_len(CAN1, 0, 0), 64, "fd_len 64");
+        for i in [0usize, 7, 8, 31, 63] {
+            assert_eq!(sys.p.can_fd_byte(CAN1, 0, 0, i), i as u8, "fd byte {i}");
+            let w = sys.p.read(&sys, CAN1 + 0x320 + (i & !3) as u32, 4);
+            assert_eq!(((w >> (8 * (i % 4))) & 0xFF) as u8, i as u8, "mmio fd byte {i}");
+        }
+        // RFOM release shifts the FD window with the FIFO (oldest gone).
+        let p2: Vec<u8> = (100u8..116).collect(); // 16 bytes -> DLC 10
+        can_inject_fd(&sys, 0x124, &p2, false, true);
+        sys.p.write(&sys, CAN1 + 0x00C, 4, 0x20); // RFOM
+        assert_eq!(sys.p.can_fd_len(CAN1, 0, 0), 16, "window shifted to 2nd frame");
+        assert_eq!(sys.p.can_fd_byte(CAN1, 0, 0, 0), 100, "2nd frame first byte");
+        let tdtr2 = sys.p.read(&sys, CAN1 + 0x1B4, 4);
+        assert_eq!(tdtr2 & 0xF, 10, "DLC=10 for 16B");
+        // Classic frame after FD: window cleared for that slot.
+        tx_frame(&sys, CAN2, 0x200, &[7; 8]);
+        arbitrate_bus(&sys);
+        sys.p.write(&sys, CAN1 + 0x00C, 4, 0x20); // release the 16B FD frame
+        assert_eq!(sys.p.can_fd_len(CAN1, 0, 0), 0, "classic slot has no FD length");
     }
 }

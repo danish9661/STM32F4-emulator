@@ -108,6 +108,66 @@ impl Peripherals {
 
     /// Mark the PWR peripheral as having woken from low-power (sets CSR WUF).
     /// Called by the emulator when the core resumes after a WFI/WFE halt.
+    /// Run a closure on the I2C peripheral with the given base address.
+    fn with_i2c<R>(&self, base: u32, f: impl FnOnce(&mut crate::peripherals::i2c::I2c) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if slot.start == base {
+                if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::i2c::I2c>() {
+                    return Some(f(u));
+                }
+                break;
+            }
+        }
+        None
+    }
+
+    /// Harness = the other master: arm arbitration loss on the next address
+    /// phase of the I2C block at `base` (one-shot; ARLO latches, bus lost).
+    pub fn i2c_arm_arb_loss(&self, base: u32) {
+        self.with_i2c(base, |u| u.arm_arb_loss());
+    }
+
+    /// Harness = the SMBus alerting device: arm the address returned in DR
+    /// on the next Alert-Response-Address read of the block at `base`.
+    pub fn i2c_arm_smbus_alert(&self, base: u32, addr: u8) {
+        self.with_i2c(base, |u| u.arm_smbus_alert(addr));
+    }
+
+    /// Current PEC accumulator of the I2C block at `base` (scope probe).
+    pub fn i2c_pec(&self, base: u32) -> u8 {
+        self.with_i2c(base, |u| u.pec()).unwrap_or(0)
+    }
+
+    /// Run a closure on the CAN node whose register block starts at `base`
+    /// (0x40006400 = CAN1, 0x40006800 = CAN2).
+    fn with_can<R>(&self, base: u32, f: impl FnOnce(&mut crate::peripherals::can::Can) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if slot.start == base {
+                if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::can::Can>() {
+                    return Some(f(u));
+                }
+                break;
+            }
+        }
+        None
+    }
+
+    /// CAN FD payload byte for (`base`, `fifo`, `slot`, `idx`) — the FD
+    /// window read path for harnesses (firmware uses the MMIO window).
+    pub fn can_fd_byte(&self, base: u32, fifo: usize, slot: usize, idx: usize) -> u8 {
+        self.with_can(base, |u| u.fd_byte(fifo, slot, idx)).unwrap_or(0)
+    }
+
+    /// Valid FD payload length for (`base`, `fifo`, `slot`).
+    pub fn can_fd_len(&self, base: u32, fifo: usize, slot: usize) -> u8 {
+        self.with_can(base, |u| u.fd_payload_len(fifo, slot)).unwrap_or(0)
+    }
+
+    /// FDCAN wire-time cost (virtual instructions) for a frame:
+    /// arbitration at nominal, FD payload at data rate iff BRS.
+    pub fn can_fd_cost(&self, base: u32, fd: bool, brs: bool, payload_bytes: usize) -> u64 {
+        self.with_can(base, |u| u.fd_frame_cost(fd, brs, payload_bytes)).unwrap_or(0)
+    }
     /// Run a closure on the ITM stimulus console (multi-port trace drain).
     fn with_itm<R>(&self, f: impl FnOnce(&mut Itm) -> R) -> Option<R> {
         for slot in &self.peripherals {
@@ -131,18 +191,35 @@ impl Peripherals {
         self.with_itm(|u| u.port_pending(port as usize)).unwrap_or(0)
     }
 
-    /// Run a closure on the USB OTG FS device model (host-side test API).
-    fn with_usb<R>(&self, f: impl FnOnce(&mut UsbFs) -> R) -> Option<R> {
+    /// Run a closure on a USB OTG device model (host-side test API).
+    /// `hs=false` selects the FS block (0x50000000), `hs=true` the HS block
+    /// (0x40040000, FS-mode personality). Falls back to whichever USB block
+    /// exists so single-controller maps keep working.
+    fn with_usb_hs<R>(&self, hs: bool, f: impl FnOnce(&mut UsbFs) -> R) -> Option<R> {
+        use crate::peripherals::usb::{UsbFs, USB_HS_BASE};
+        let want = if hs { USB_HS_BASE } else { 0x5000_0000 };
         for slot in &self.peripherals {
-            if slot.start == 0x5000_0000 {
-                use crate::peripherals::usb::UsbFs;
+            if slot.start == want {
                 if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<UsbFs>() {
                     return Some(f(u));
                 }
                 break;
             }
         }
+        // Fallback: whichever USB block exists (single-controller maps).
+        for slot in &self.peripherals {
+            if slot.start == 0x5000_0000 || slot.start == USB_HS_BASE {
+                if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<UsbFs>() {
+                    return Some(f(u));
+                }
+            }
+        }
         None
+    }
+
+    /// Run a closure on the USB OTG FS device model (host-side test API).
+    fn with_usb<R>(&self, f: impl FnOnce(&mut UsbFs) -> R) -> Option<R> {
+        self.with_usb_hs(false, f)
     }
 
     pub fn usb_reset(&self, sys: &System) {
@@ -173,6 +250,83 @@ impl Peripherals {
 
     pub fn usb_out_status(&self, ep: u32) -> u32 {
         self.with_usb(|u| u.out_status(ep as usize)).unwrap_or(0)
+    }
+
+    /// Harness = the cable: plug/unplug VBUS on the FS block (default
+    /// present). Unplug suspends the device, stops SOF, latches SEDET.
+    pub fn usb_set_vbus(&self, sys: &System, present: bool) {
+        self.with_usb(|u| u.set_vbus(sys, present));
+    }
+
+    /// Internal-DMA progress (bytes moved while DMAEN set): (in, out).
+    pub fn usb_dma_progress(&self, ep: u32) -> (u64, u64) {
+        self.with_usb(|u| u.dma_progress(ep as usize)).unwrap_or((0, 0))
+    }
+
+    /// HS microframe index (DSTS FNSOF low 3 bits) for the FS block —
+    /// harness scope probe for the microframe schedule (FS stays 0:
+    /// 1 ms frames have no microframes; HS counts 0..7).
+    pub fn usb_uframe(&self) -> u32 {
+        self.with_usb(|u| u.uframe()).unwrap_or(0)
+    }
+
+    /// ULPI PHY packet wire rate in Mbit/s (480 HS / 12 FS) for the FS
+    /// block — mirrors the GUSBCFG rate report for harness checks.
+    pub fn usb_ulpi_rate(&self) -> u32 {
+        self.with_usb(|u| u.ulpi_rate_mbps()).unwrap_or(0)
+    }
+
+    /// HS variants of the host-side test API (same semantics, HS block).
+    /// Each falls back to the FS block when no HS slot exists.
+    pub fn usb_hs_reset(&self, sys: &System) {
+        use crate::peripherals::usb::USB_HS_IRQ;
+        if self.with_usb_hs(true, |u| u.host_reset(sys)).is_some() {
+            sys.p.nvic.borrow_mut().clear_pending(USB_HS_IRQ);
+        }
+    }
+
+    pub fn usb_hs_enumerated(&self, sys: &System) {
+        self.with_usb_hs(true, |u| u.host_enumerated(sys));
+    }
+
+    pub fn usb_hs_inject_setup(&self, sys: &System, data: &[u8]) {
+        self.with_usb_hs(true, |u| u.inject_setup(sys, data));
+    }
+
+    pub fn usb_hs_inject_out(&self, sys: &System, ep: u32, data: &[u8]) {
+        self.with_usb_hs(true, |u| u.inject_out(sys, ep as usize, data));
+    }
+
+    pub fn usb_hs_take_in(&self, ep: u32) -> Vec<u8> {
+        self.with_usb_hs(true, |u| u.take_in(ep as usize)).unwrap_or_default()
+    }
+
+    pub fn usb_hs_in_status(&self, ep: u32) -> u32 {
+        self.with_usb_hs(true, |u| u.in_status(ep as usize)).unwrap_or(0)
+    }
+
+    pub fn usb_hs_out_status(&self, ep: u32) -> u32 {
+        self.with_usb_hs(true, |u| u.out_status(ep as usize)).unwrap_or(0)
+    }
+
+    /// Harness = the cable on the HS block.
+    pub fn usb_hs_set_vbus(&self, sys: &System, present: bool) {
+        self.with_usb_hs(true, |u| u.set_vbus(sys, present));
+    }
+
+    /// HS internal-DMA progress (bytes moved while DMAEN set).
+    pub fn usb_hs_dma_progress(&self, ep: u32) -> (u64, u64) {
+        self.with_usb_hs(true, |u| u.dma_progress(ep as usize)).unwrap_or((0, 0))
+    }
+
+    /// HS microframe index (DSTS FNSOF low 3 bits) for the HS block.
+    pub fn usb_hs_uframe(&self) -> u32 {
+        self.with_usb_hs(true, |u| u.uframe()).unwrap_or(0)
+    }
+
+    /// ULPI rate for the HS block.
+    pub fn usb_hs_ulpi_rate(&self) -> u32 {
+        self.with_usb_hs(true, |u| u.ulpi_rate_mbps()).unwrap_or(0)
     }
 
     /// DWT EXCCNT tick: one exception entry (called from every take path
@@ -545,11 +699,21 @@ impl Peripherals {
         peripherals.ensure_core_system_slots();
         // USB OTG FS device block (regs + EP0-3 FIFO strides to 0x50005000).
         // The four SVD OTG_FS_* entries stay dropped (UsbFs::new only
-        // matches the combined name); HS is out of scope (stays dropped).
+        // matches the combined name). HS-in-FS gets its own slot below.
         if let Some(p) = UsbFs::new("USB_OTG_FS") {
             peripherals.peripherals.push(PeripheralSlot {
                 start: 0x5000_0000,
                 end: 0x5000_5000,
+                peripheral: RefCell::new(p),
+            });
+        }
+        // USB OTG HS in FS mode (SVD OTG_HS_GLOBAL @0x40040000, IRQ 77):
+        // same device core as FS, own register window + IRQ line. The
+        // SVD's OTG_HS_* sub-entries stay dropped like the FS ones.
+        if let Some(p) = UsbFs::new("USB_OTG_HS") {
+            peripherals.peripherals.push(PeripheralSlot {
+                start: crate::peripherals::usb::USB_HS_BASE,
+                end: crate::peripherals::usb::USB_HS_BASE + 0x5000,
                 peripheral: RefCell::new(p),
             });
         }
@@ -710,9 +874,19 @@ impl Peripherals {
             peripherals.peripherals.push(PeripheralSlot { start: 0xE000_0000, end: 0xE000_0F00, peripheral: RefCell::new(p) });
         }
         // USB OTG FS device block (regs + EP0-3 FIFO strides to 0x50005000;
-        // no neighbor anywhere near it on either map).
+        // no neighbor anywhere near it on either map). HS-in-FS below.
         if let Some(p) = UsbFs::new("USB_OTG_FS") {
             peripherals.peripherals.push(PeripheralSlot { start: 0x5000_0000, end: 0x5000_5000, peripheral: RefCell::new(p) });
+        }
+        // USB OTG HS in FS mode (SVD OTG_HS_GLOBAL @0x40040000, IRQ 77):
+        // same device core as FS (own window + IRQ line). The SVD's
+        // OTG_HS_* sub-entries stay dropped like the FS ones.
+        if let Some(p) = UsbFs::new("USB_OTG_HS") {
+            peripherals.peripherals.push(PeripheralSlot {
+                start: crate::peripherals::usb::USB_HS_BASE,
+                end: crate::peripherals::usb::USB_HS_BASE + 0x5000,
+                peripheral: RefCell::new(p),
+            });
         }
 
         // Wire SPI-flash CS pins to GPIO write callbacks so deassert edges

@@ -138,12 +138,38 @@ export function audio_source_remaining(): number;
 export function audio_take_capture(): Uint16Array;
 
 /**
+ * Read one CAN FD payload byte for (`base`, `fifo`, `slot`, `idx`) —
+ * the harness path into the FD window (firmware uses the MMIO window).
+ */
+export function can_fd_byte(base: number, fifo: number, slot: number, idx: number): number;
+
+/**
+ * FDCAN wire-time cost (virtual instructions) for a frame: arbitration
+ * at the nominal rate, FD payload at the data rate iff BRS. Firmware
+ * pacing TX-to-TX gaps observes exactly this contract.
+ */
+export function can_fd_cost(base: number, fd: boolean, brs: boolean, payload_bytes: number): bigint;
+
+/**
+ * Valid CAN FD payload length for (`base`, `fifo`, `slot`).
+ */
+export function can_fd_len(base: number, fifo: number, slot: number): number;
+
+/**
  * Inject a CAN frame from an external transmitter onto the shared bus. The
  * frame is delivered to every CAN node (CAN1/CAN2) whose accept filters pass
  * it, so the guest sees it exactly as if another node sent it. `data` is up
  * to 8 bytes; `dlc` caps the length. Standard 11-bit frames.
  */
 export function can_inject(id: number, dlc: number, data: Uint8Array): void;
+
+/**
+ * Inject a CAN FD frame (FDF set, up to 64 bytes) from an external
+ * transmitter. Same filter + FIFO path as classic (arbitration on the ID
+ * is identical); the payload lands in the FD window (`can_fd_read`),
+ * TDTR reports DLC + FDF. `brs` marks bit-rate-switch (flag only).
+ */
+export function can_inject_fd(id: number, data: Uint8Array, brs: boolean): void;
 
 export function clear_watchdog_reset_flags(): void;
 
@@ -486,6 +512,23 @@ export function gpio_set_input(port: number, pin: number, value: boolean): void;
 export function has_pending_interrupt(): boolean;
 
 /**
+ * Harness = the other master: arm arbitration loss on the next address
+ * phase of the I2C block at `base` (one-shot; ARLO latches, bus lost).
+ */
+export function i2c_arm_arb_loss(base: number): void;
+
+/**
+ * Harness = the SMBus alerting device (host-notify source): arm the
+ * address returned in DR on the next Alert-Response-Address read.
+ */
+export function i2c_arm_smbus_alert(base: number, addr: number): void;
+
+/**
+ * Current PEC accumulator of the I2C block at `base` (scope probe).
+ */
+export function i2c_pec(base: number): number;
+
+/**
  * Queue bytes the tapped I2C slave answers on master reads.
  */
 export function i2c_push_rx(peripheral: string, bytes: Uint8Array): void;
@@ -603,6 +646,19 @@ export function qspi_register_flash(name: string, data: Uint8Array): void;
 export function reset_state(): void;
 
 /**
+ * Host entropy words currently pooled (0 = LCG fallback active).
+ */
+export function rng_entropy_avail(): number;
+
+/**
+ * Push host entropy words into the RNG pool (true-noise samples from JS
+ * `crypto.getRandomValues` or equivalent). Consumed FIFO, one word per
+ * regen; when the pool drains the model falls back to the deterministic
+ * LCG (SR SECS reports fallback-active).
+ */
+export function rng_seed_entropy(words: Uint32Array): void;
+
+/**
  * Set a pending interrupt in the NVIC. Negative `irq` values select system
  * exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
  * Used by the FreeRTOS path: the Rust core synthesizes these exceptions
@@ -666,9 +722,74 @@ export function tim_inject_capture(name: string, ch: number): void;
 export function uart_rx_byte(addr: number, byte: number): boolean;
 
 /**
+ * Internal-DMA progress on the FS block: [in_bytes, out_bytes] moved
+ * while GAHBCFG DMAEN was set (firmware polls the EP DMA registers;
+ * the harness reads these counters directly).
+ */
+export function usb_dma_progress(ep: number): BigUint64Array;
+
+/**
  * Simulate enumeration-done at full speed (ENUMDNE + FS speed in DSTS).
  */
 export function usb_enumerated(): void;
+
+/**
+ * Internal-DMA progress on the HS block.
+ */
+export function usb_hs_dma_progress(ep: number): BigUint64Array;
+
+/**
+ * Simulate enumeration-done on the HS block (ENUMDNE + HS speed in DSTS).
+ */
+export function usb_hs_enumerated(): void;
+
+/**
+ * HS IN transfer status: 0 none, 1 data ready, 2 STALL handshake.
+ */
+export function usb_hs_in_status(ep: number): number;
+
+/**
+ * Inject an OUT data packet to an HS endpoint.
+ */
+export function usb_hs_inject_out(ep: number, data: Uint8Array): void;
+
+/**
+ * Inject an 8-byte SETUP packet to HS EP0.
+ */
+export function usb_hs_inject_setup(data: Uint8Array): void;
+
+/**
+ * HS OUT transfer status: 0 none, 2 STALL handshake.
+ */
+export function usb_hs_out_status(ep: number): number;
+
+/**
+ * USB OTG HS (FS-mode personality) host-side test API: same semantics as
+ * the FS exports above, driven against the HS block (0x40040000, IRQ 77).
+ * Each falls back to the FS block when no HS slot exists.
+ * Simulate a USB bus reset on the HS block.
+ */
+export function usb_hs_reset(): void;
+
+/**
+ * Harness = the cable on the HS block.
+ */
+export function usb_hs_set_vbus(present: boolean): void;
+
+/**
+ * Drain a completed HS device-to-host IN blob.
+ */
+export function usb_hs_take_in(ep: number): Uint8Array;
+
+/**
+ * HS microframe index for the HS block.
+ */
+export function usb_hs_uframe(): number;
+
+/**
+ * ULPI rate for the HS block.
+ */
+export function usb_hs_ulpi_rate(): number;
 
 /**
  * IN transfer status: 0 none, 1 data ready, 2 STALL handshake.
@@ -700,10 +821,27 @@ export function usb_out_status(ep: number): number;
 export function usb_reset(): void;
 
 /**
+ * Harness = the cable: plug/unplug VBUS on the FS block (default present).
+ * Unplug suspends the device, stops SOF, latches SEDET + BSVLD clear.
+ */
+export function usb_set_vbus(present: boolean): void;
+
+/**
  * Drain a completed device-to-host IN blob (empty = none pending;
  * check usb_in_status first to tell ZLP apart).
  */
 export function usb_take_in(ep: number): Uint8Array;
+
+/**
+ * HS microframe index (DSTS FNSOF low 3 bits, 0..7) for the FS block
+ * (always 0 — FS has 1 ms frames, no microframes).
+ */
+export function usb_uframe(): number;
+
+/**
+ * ULPI PHY packet wire rate in Mbit/s (480 HS / 12 FS) for the FS block.
+ */
+export function usb_ulpi_rate(): number;
 
 export function wwdg_reset_flag(): boolean;
 
@@ -722,7 +860,11 @@ export interface InitOutput {
     readonly audio_load_wav: (a: number, b: number, c: number) => void;
     readonly audio_source_remaining: () => number;
     readonly audio_take_capture: (a: number) => void;
+    readonly can_fd_byte: (a: number, b: number, c: number, d: number) => number;
+    readonly can_fd_cost: (a: number, b: number, c: number, d: number) => bigint;
+    readonly can_fd_len: (a: number, b: number, c: number) => number;
     readonly can_inject: (a: number, b: number, c: number, d: number) => void;
+    readonly can_inject_fd: (a: number, b: number, c: number, d: number) => void;
     readonly clear_watchdog_reset_flags: () => void;
     readonly dcmi_clear: () => void;
     readonly dcmi_feed_frame: (a: number, b: number, c: number, d: number) => void;
@@ -788,6 +930,9 @@ export interface InitOutput {
     readonly gpio_read_output: (a: number, b: number) => number;
     readonly gpio_set_input: (a: number, b: number, c: number) => void;
     readonly has_pending_interrupt: () => number;
+    readonly i2c_arm_arb_loss: (a: number) => void;
+    readonly i2c_arm_smbus_alert: (a: number, b: number) => void;
+    readonly i2c_pec: (a: number) => number;
     readonly i2c_push_rx: (a: number, b: number, c: number, d: number) => void;
     readonly i2c_regfile_get: (a: number, b: number, c: number) => number;
     readonly i2c_regfile_set: (a: number, b: number, c: number, d: number) => void;
@@ -809,6 +954,8 @@ export interface InitOutput {
     readonly pwr_wakeup_standby: () => void;
     readonly qspi_register_flash: (a: number, b: number, c: number, d: number) => void;
     readonly reset_state: () => void;
+    readonly rng_entropy_avail: () => number;
+    readonly rng_seed_entropy: (a: number, b: number) => void;
     readonly set_intr_pending: (a: number) => void;
     readonly spi_flash_debug: (a: number, b: number, c: number) => void;
     readonly spi_push_miso: (a: number, b: number, c: number, d: number) => void;
@@ -819,13 +966,28 @@ export interface InitOutput {
     readonly tick_peripherals: () => void;
     readonly tim_inject_capture: (a: number, b: number, c: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;
+    readonly usb_dma_progress: (a: number, b: number) => void;
     readonly usb_enumerated: () => void;
+    readonly usb_hs_dma_progress: (a: number, b: number) => void;
+    readonly usb_hs_enumerated: () => void;
+    readonly usb_hs_in_status: (a: number) => number;
+    readonly usb_hs_inject_out: (a: number, b: number, c: number) => void;
+    readonly usb_hs_inject_setup: (a: number, b: number) => void;
+    readonly usb_hs_out_status: (a: number) => number;
+    readonly usb_hs_reset: () => void;
+    readonly usb_hs_set_vbus: (a: number) => void;
+    readonly usb_hs_take_in: (a: number, b: number) => void;
+    readonly usb_hs_uframe: () => number;
+    readonly usb_hs_ulpi_rate: () => number;
     readonly usb_in_status: (a: number) => number;
     readonly usb_inject_out: (a: number, b: number, c: number) => void;
     readonly usb_inject_setup: (a: number, b: number) => void;
     readonly usb_out_status: (a: number) => number;
     readonly usb_reset: () => void;
+    readonly usb_set_vbus: (a: number) => void;
     readonly usb_take_in: (a: number, b: number) => void;
+    readonly usb_uframe: () => number;
+    readonly usb_ulpi_rate: () => number;
     readonly wasmcpu_fault_len: (a: number) => number;
     readonly wasmcpu_fault_op1: (a: number) => number;
     readonly wasmcpu_fault_op2: (a: number) => number;

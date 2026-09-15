@@ -24,8 +24,29 @@ const LINE_CODING_BYTES = [0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08];
 const ECHO1 = [72, 101, 108, 108, 111, 85, 83, 66]; // HelloUSB
 const ECHO2 = [87, 111, 114, 108, 100, 33, 33, 33]; // World!!!
 
-export function createUsbHost(bindings) {
+export function createUsbHost(bindings, opts = {}) {
     const U8 = (a) => Uint8Array.from(a);
+    // HS mode: drive the HS block (0x40040000, IRQ 77) through the usb_hs_*
+    // exports instead of the FS ones. Same script, same checks — the HS
+    // core is the FS device core in FS-mode personality.
+    const hs = !!opts.hs;
+    const api = hs ? {
+        reset: () => bindings.usb_hs_reset(),
+        enumerated: () => bindings.usb_hs_enumerated(),
+        injectSetup: (d) => bindings.usb_hs_inject_setup(d),
+        injectOut: (ep, d) => bindings.usb_hs_inject_out(ep, d),
+        inStatus: (ep) => bindings.usb_hs_in_status(ep),
+        takeIn: (ep) => bindings.usb_hs_take_in(ep),
+        outStatus: (ep) => bindings.usb_hs_out_status(ep),
+    } : {
+        reset: () => bindings.usb_reset(),
+        enumerated: () => bindings.usb_enumerated(),
+        injectSetup: (d) => bindings.usb_inject_setup(d),
+        injectOut: (ep, d) => bindings.usb_inject_out(ep, d),
+        inStatus: (ep) => bindings.usb_in_status(ep),
+        takeIn: (ep) => bindings.usb_take_in(ep),
+        outStatus: (ep) => bindings.usb_out_status(ep),
+    };
     // Script: each entry runs once, in order. `take` entries poll until
     // the IN blob arrives (STALl aborts the run loudly). `takeStall`
     // waits for status 2 (STALL handshake asserted), `waitClear` waits
@@ -33,9 +54,9 @@ export function createUsbHost(bindings) {
     // cleared) — the STALL set/clear round-trip mirror of test_usb.mjs.
     const script = [
         { waitUart: 'USB init done' },
-        { fire: () => bindings.usb_reset() },
+        { fire: () => api.reset() },
         { waitUart: 'USBRST' },
-        { fire: () => bindings.usb_enumerated() },
+        { fire: () => api.enumerated() },
         { waitUart: 'ENUMDNE' },
         { setup: SETUPS.dev }, { take: 0 }, { out: { ep: 0, data: [] } },
         { setup: SETUPS.cfg }, { take: 0 }, { out: { ep: 0, data: [] } },
@@ -63,36 +84,36 @@ export function createUsbHost(bindings) {
         }
         if (op.fire) { try { op.fire(); } catch (e) {} pc++; return; }
         if (op.setup) {
-            try { bindings.usb_inject_setup(U8(op.setup)); } catch (e) {}
+            try { api.injectSetup(U8(op.setup)); } catch (e) {}
             pc++;
             return;
         }
         if (op.out) {
-            try { bindings.usb_inject_out(op.out.ep, U8(op.out.data)); } catch (e) {}
+            try { api.injectOut(op.out.ep, U8(op.out.data)); } catch (e) {}
             pc++;
             return;
         }
         if (op.take !== undefined) {
             let st = 0;
-            try { st = bindings.usb_in_status(op.take); } catch (e) {}
+            try { st = api.inStatus(op.take); } catch (e) {}
             if (st === 2) { done = true; return; } // STALL: stop driving
             if (st === 1) {
-                try { bindings.usb_take_in(op.take); } catch (e) {}
+                try { api.takeIn(op.take); } catch (e) {}
                 pc++;
             }
             return;
         }
         if (op.takeStall !== undefined) {
             let st = 0;
-            try { st = bindings.usb_in_status(op.takeStall); } catch (e) {}
+            try { st = api.inStatus(op.takeStall); } catch (e) {}
             if (st === 2) pc++; // handshake asserted — advance to waitClear
             return;
         }
         if (op.waitClear) {
             if (!uartText.includes(op.waitClear.marker)) return;
             let st = 2, ost = 2;
-            try { st = bindings.usb_in_status(op.waitClear.ep); } catch (e) {}
-            try { ost = bindings.usb_out_status(op.waitClear.ep); } catch (e) {}
+            try { st = api.inStatus(op.waitClear.ep); } catch (e) {}
+            try { ost = api.outStatus(op.waitClear.ep); } catch (e) {}
             if (st !== 2 && ost !== 2) pc++; // cleared both dirs — continue enum
             return;
         }

@@ -191,6 +191,39 @@ pub fn can_inject(id: u32, dlc: u32, data: &[u8]) {
     crate::peripherals::can::can_inject(sys(), id, dlc, data, false, false);
 }
 
+/// Inject a CAN FD frame (FDF set, up to 64 bytes) from an external
+/// transmitter. Same filter + FIFO path as classic (arbitration on the ID
+/// is identical); the payload lands in the FD window (`can_fd_read`),
+/// TDTR reports DLC + FDF. `brs` marks bit-rate-switch (flag only).
+#[wasm_bindgen]
+pub fn can_inject_fd(id: u32, data: &[u8], brs: bool) {
+    crate::peripherals::can::can_inject_fd(sys(), id, data, false, brs);
+}
+
+/// Read one CAN FD payload byte for (`base`, `fifo`, `slot`, `idx`) —
+/// the harness path into the FD window (firmware uses the MMIO window).
+#[wasm_bindgen]
+pub fn can_fd_byte(base: u32, fifo: usize, slot: usize, idx: usize) -> u8 {
+    let sys = crate::sys();
+    sys.p.can_fd_byte(base, fifo, slot, idx)
+}
+
+/// Valid CAN FD payload length for (`base`, `fifo`, `slot`).
+#[wasm_bindgen]
+pub fn can_fd_len(base: u32, fifo: usize, slot: usize) -> u8 {
+    let sys = crate::sys();
+    sys.p.can_fd_len(base, fifo, slot)
+}
+
+/// FDCAN wire-time cost (virtual instructions) for a frame: arbitration
+/// at the nominal rate, FD payload at the data rate iff BRS. Firmware
+/// pacing TX-to-TX gaps observes exactly this contract.
+#[wasm_bindgen]
+pub fn can_fd_cost(base: u32, fd: bool, brs: bool, payload_bytes: usize) -> u64 {
+    let sys = crate::sys();
+    sys.p.can_fd_cost(base, fd, brs, payload_bytes)
+}
+
 /// Host/JS-driven TIM input-capture edge. Simulate a TIx edge on timer `name`
 /// channel `ch` and latch the live counter into its capture register (only if
 /// the channel is configured for input capture via CCxS). Mirrors
@@ -684,6 +717,121 @@ pub fn usb_out_status(ep: u32) -> u32 {
     sys.p.usb_out_status(ep)
 }
 
+/// USB OTG HS (FS-mode personality) host-side test API: same semantics as
+/// the FS exports above, driven against the HS block (0x40040000, IRQ 77).
+/// Each falls back to the FS block when no HS slot exists.
+
+/// Simulate a USB bus reset on the HS block.
+#[wasm_bindgen]
+pub fn usb_hs_reset() {
+    let sys = crate::sys();
+    sys.p.usb_hs_reset(sys);
+}
+
+/// Simulate enumeration-done on the HS block (ENUMDNE + HS speed in DSTS).
+#[wasm_bindgen]
+pub fn usb_hs_enumerated() {
+    let sys = crate::sys();
+    sys.p.usb_hs_enumerated(sys);
+}
+
+/// Inject an 8-byte SETUP packet to HS EP0.
+#[wasm_bindgen]
+pub fn usb_hs_inject_setup(data: &[u8]) {
+    let sys = crate::sys();
+    sys.p.usb_hs_inject_setup(sys, data);
+}
+
+/// Inject an OUT data packet to an HS endpoint.
+#[wasm_bindgen]
+pub fn usb_hs_inject_out(ep: u32, data: &[u8]) {
+    let sys = crate::sys();
+    sys.p.usb_hs_inject_out(sys, ep, data);
+}
+
+/// Drain a completed HS device-to-host IN blob.
+#[wasm_bindgen]
+pub fn usb_hs_take_in(ep: u32) -> Vec<u8> {
+    let sys = crate::sys();
+    sys.p.usb_hs_take_in(ep)
+}
+
+/// HS IN transfer status: 0 none, 1 data ready, 2 STALL handshake.
+#[wasm_bindgen]
+pub fn usb_hs_in_status(ep: u32) -> u32 {
+    let sys = crate::sys();
+    sys.p.usb_hs_in_status(ep)
+}
+
+/// HS OUT transfer status: 0 none, 2 STALL handshake.
+#[wasm_bindgen]
+pub fn usb_hs_out_status(ep: u32) -> u32 {
+    let sys = crate::sys();
+    sys.p.usb_hs_out_status(ep)
+}
+
+/// Harness = the cable: plug/unplug VBUS on the FS block (default present).
+/// Unplug suspends the device, stops SOF, latches SEDET + BSVLD clear.
+#[wasm_bindgen]
+pub fn usb_set_vbus(present: bool) {
+    let sys = crate::sys();
+    sys.p.usb_set_vbus(sys, present);
+}
+
+/// Harness = the cable on the HS block.
+#[wasm_bindgen]
+pub fn usb_hs_set_vbus(present: bool) {
+    let sys = crate::sys();
+    sys.p.usb_hs_set_vbus(sys, present);
+}
+
+/// Internal-DMA progress on the FS block: [in_bytes, out_bytes] moved
+/// while GAHBCFG DMAEN was set (firmware polls the EP DMA registers;
+/// the harness reads these counters directly).
+#[wasm_bindgen]
+pub fn usb_dma_progress(ep: u32) -> Vec<u64> {
+    let sys = crate::sys();
+    let (i, o) = sys.p.usb_dma_progress(ep);
+    vec![i, o]
+}
+
+/// Internal-DMA progress on the HS block.
+#[wasm_bindgen]
+pub fn usb_hs_dma_progress(ep: u32) -> Vec<u64> {
+    let sys = crate::sys();
+    let (i, o) = sys.p.usb_hs_dma_progress(ep);
+    vec![i, o]
+}
+
+/// HS microframe index (DSTS FNSOF low 3 bits, 0..7) for the FS block
+/// (always 0 — FS has 1 ms frames, no microframes).
+#[wasm_bindgen]
+pub fn usb_uframe() -> u32 {
+    let sys = crate::sys();
+    sys.p.usb_uframe()
+}
+
+/// HS microframe index for the HS block.
+#[wasm_bindgen]
+pub fn usb_hs_uframe() -> u32 {
+    let sys = crate::sys();
+    sys.p.usb_hs_uframe()
+}
+
+/// ULPI PHY packet wire rate in Mbit/s (480 HS / 12 FS) for the FS block.
+#[wasm_bindgen]
+pub fn usb_ulpi_rate() -> u32 {
+    let sys = crate::sys();
+    sys.p.usb_ulpi_rate()
+}
+
+/// ULPI rate for the HS block.
+#[wasm_bindgen]
+pub fn usb_hs_ulpi_rate() -> u32 {
+    let sys = crate::sys();
+    sys.p.usb_hs_ulpi_rate()
+}
+
 /// Drain one ITM stimulus port's queued trace bytes (oldest first).
 /// Port 0 sinks into the UART console instead and always drains empty here;
 /// ports 1-31 queue per-port streams for the JS driver.
@@ -887,6 +1035,46 @@ pub fn i2c_regfile_set(peripheral: &str, offset: usize, value: u8) {
     {
         d.borrow_mut().set(offset, value);
     }
+}
+
+// ── I2C multi-master + SMBus/PEC harness ─────────────────────────────────
+
+/// Harness = the other master: arm arbitration loss on the next address
+/// phase of the I2C block at `base` (one-shot; ARLO latches, bus lost).
+#[wasm_bindgen]
+pub fn i2c_arm_arb_loss(base: u32) {
+    let sys = crate::sys();
+    sys.p.i2c_arm_arb_loss(base);
+}
+
+/// Harness = the SMBus alerting device (host-notify source): arm the
+/// address returned in DR on the next Alert-Response-Address read.
+#[wasm_bindgen]
+pub fn i2c_arm_smbus_alert(base: u32, addr: u8) {
+    let sys = crate::sys();
+    sys.p.i2c_arm_smbus_alert(base, addr);
+}
+
+/// Current PEC accumulator of the I2C block at `base` (scope probe).
+#[wasm_bindgen]
+pub fn i2c_pec(base: u32) -> u8 {
+    let sys = crate::sys();
+    sys.p.i2c_pec(base)
+}
+
+/// Push host entropy words into the RNG pool (true-noise samples from JS
+/// `crypto.getRandomValues` or equivalent). Consumed FIFO, one word per
+/// regen; when the pool drains the model falls back to the deterministic
+/// LCG (SR SECS reports fallback-active).
+#[wasm_bindgen]
+pub fn rng_seed_entropy(words: &[u32]) {
+    crate::peripherals::rng::rng_seed_entropy(words);
+}
+
+/// Host entropy words currently pooled (0 = LCG fallback active).
+#[wasm_bindgen]
+pub fn rng_entropy_avail() -> usize {
+    crate::peripherals::rng::rng_entropy_avail()
 }
 
 // ── QSPI external flash (JS-provided image) ───────────────────────────────

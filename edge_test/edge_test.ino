@@ -103,7 +103,7 @@ static int i2c_write_eeprom(uint8_t addr, uint8_t data) {
     I2C_DR = data;
     while (!(I2C_SR1 & (1 << 6)));
     I2C_CR1 |= (1 << 9);
-    return (I2C_SR1 & (1 << 9)) ? -1 : 0;
+    return (I2C_SR1 & (1 << 10)) ? -1 : 0;
 }
 
 static int i2c_read_eeprom(uint8_t addr, uint8_t *out) {
@@ -126,7 +126,7 @@ static int i2c_read_eeprom(uint8_t addr, uint8_t *out) {
     while (!(I2C_SR1 & (1 << 5)));
     *out = I2C_DR;
     I2C_CR1 |= (1 << 9);
-    return (I2C_SR1 & (1 << 9)) ? -1 : 0;
+    return (I2C_SR1 & (1 << 10)) ? -1 : 0;
 }
 
 volatile uint32_t dma_src[4] = {0xDEADBEEF, 0xCAFEBABE, 0x12345678, 0x87654321};
@@ -231,14 +231,14 @@ void setup() {
     CHECK(i2c_write_eeprom(0x20, 0x5A) == 0, "I2C EEPROM overwrite");
     CHECK(i2c_read_eeprom(0x20, &val) == 0 && val == 0x5A, "I2C EEPROM read after overwrite");
 
-    // Invalid address NACK — emulator sets AF (bit 9), not ADDR
+    // Invalid address NACK — silicon AF is SR1 bit 10 (ARLO is bit 9)
     I2C_CR1 |= (1 << 8);
     while (!(I2C_SR1 & 1));
     I2C_DR = 0xFE;
     uint32_t sr1;
     int i2c_nack_timeout = 10000;
-    do { sr1 = I2C_SR1; } while (!(sr1 & (1 << 9)) && i2c_nack_timeout-- > 0);
-    CHECK((sr1 & (1 << 9)) != 0, "I2C NACK on invalid address");
+    do { sr1 = I2C_SR1; } while (!(sr1 & (1 << 10)) && i2c_nack_timeout-- > 0);
+    CHECK((sr1 & (1 << 10)) != 0, "I2C NACK on invalid address");
 
     // SWRST preserves PE
     I2C_CR1 = 0x8001;

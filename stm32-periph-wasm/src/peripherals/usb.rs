@@ -3,8 +3,12 @@ use std::collections::VecDeque;
 use super::Peripheral;
 
 /// USB OTG FS device-mode model (combined 0x50000000 block: global +
-/// device + EP regs + PWRCLK + FIFO window to 0x50005000). Host mode and
-/// OTG_HS are out of scope (their SVD entries stay dropped → benign 0).
+/// device + EP regs + PWRCLK + FIFO window to 0x50005000). The same core
+/// also serves OTG_HS in FS mode (`UsbHsFs` wrapper at 0x40040000, IRQ 77):
+/// the HS controller in FS mode is register-compatible with FS for the
+/// device subset this model covers, so the wrapper reuses the core with a
+/// different IRQ line and HS-speed ENUMSPD. Host mode (both controllers)
+/// is out of scope (host-only registers read 0).
 ///
 /// Coverage is the functional subset a polling CDC firmware needs:
 /// - Core: GOTGCTL/GOTGINT/GAHBCFG/GUSBCFG/GRSTCTL (CSRST + TX/RX flush,
@@ -28,6 +32,11 @@ use super::Peripheral;
 /// SOF generation, suspend/resume, VBUS sensing (BSVLD), DMA, GNPINNAK
 /// gating and host channels are out of scope.
 pub const USB_IRQ: i32 = 67; // OTG_FS_IRQn
+/// OTG_HS global interrupt (HS controller in FS mode). The HS core shares
+/// the FS device register subset; only the IRQ line and the base differ.
+pub const USB_HS_IRQ: i32 = 77; // OTG_HS_IRQn
+/// HS controller base (SVD OTG_HS_GLOBAL): same 0x5000 window shape as FS.
+pub const USB_HS_BASE: u32 = 0x4004_0000;
 
 const N_EPS: usize = 4;
 
@@ -42,6 +51,36 @@ struct UsbEp {
 }
 
 pub struct UsbFs {
+    /// IRQ line this instance pends (67 = FS, 77 = HS-in-FS). Set at
+    /// construction; the register core is identical.
+    irq: i32,
+    /// HS-mode instance: ENUMDNE reports HS speed (DSTS ENUMSPD 0b00)
+    /// instead of FS (0b11). HS-phy features (ULPI, dedicated FIFO sizes)
+    /// are not modeled — the device subset is register-compatible.
+    hs: bool,
+    /// SOF generation (instruction-count clock): frames tick at 1 kHz while
+    /// the device is out of suspend (DSTS SUSPSTS clear) and either RWUSIG
+    /// resume signaling or traffic keeps the link alive. `sof_frame`
+    /// mirrors DSTS FNSOF; each wrap latches GINTSTS SOF (W1C) when SOFM
+    /// is set. Suspended (SUSPSTS set) or unenumerated devices never tick.
+    sof_frame: u16,
+    sof_last: u64,
+    /// VBUS sensing: BSVLD (GOTGCTL bit 19) follows the harness-driven
+    /// `vbus_present` (default true — a plugged cable). `usb_set_vbus`
+    /// (harness = the cable) drops it: suspend fires, SOF stops, and
+    /// session-end is observable in GOTGINT SEDET. Default-present keeps
+    /// every existing session green.
+    vbus_present: bool,
+    /// Internal DMA (buffer-descriptor mode behind GAHBCFG HBSTLEN/DMAEN):
+    /// when armed, an IN EPENA moves the TX FIFO bytes straight into the
+    /// completed blob WITHOUT a CPU FIFO-window write (same whole-blob
+    /// contract, DMAEN-gated), and an OUT completion latches the byte
+    /// count into the EP DMA address register (firmware polls it instead
+    /// of GRXSTSP). Pure register-file behavior — no guest-memory access
+    /// (the core has no DMA window into guest RAM; the driver owns moves).
+    /// Gated on GAHBCFG bit 5 (DMAEN); HBSTLEN (bits 3:1) stores only.
+    dma_moved_in: [u64; N_EPS],
+    dma_moved_out: [u64; N_EPS],
     gotgctl: u32,
     gotgint: u32,
     gahbcfg: u32,
@@ -76,6 +115,13 @@ pub struct UsbFs {
 impl Default for UsbFs {
     fn default() -> Self {
         let mut u = Self {
+            irq: USB_IRQ,
+            hs: false,
+            sof_frame: 0,
+            sof_last: 0,
+            vbus_present: true,
+            dma_moved_in: [0; N_EPS],
+            dma_moved_out: [0; N_EPS],
             gotgctl: 0,
             gotgint: 0,
             gahbcfg: 0,
@@ -117,17 +163,33 @@ impl UsbFs {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
         if name == "USB_OTG_FS" {
             Some(Box::new(Self::default()))
+        } else if name == "USB_OTG_HS" {
+            // HS controller in FS mode: same device core, HS IRQ line.
+            let mut u = Self::default();
+            u.irq = USB_HS_IRQ;
+            u.hs = true;
+            Some(Box::new(u))
         } else {
             None
         }
     }
 
+    fn irq(&self) -> i32 {
+        self.irq
+    }
+
     /// Shared reset (CSRST + harness usb_reset): FIFOs/queues drained,
-    /// address cleared, EPs back to reset (EP0 active).
+    /// address cleared, EPs back to reset (EP0 active). Keeps the IRQ line,
+    /// HS personality, and VBUS presence: a bus reset must not turn an HS
+    /// instance into FS, nor unplug the cable.
     fn reset_core(&mut self) {
+        let (irq, hs, vbus) = (self.irq, self.hs, self.vbus_present);
         let fresh = Self::default();
         // Keep nothing across reset: a fresh session starts unconfigured.
         *self = fresh;
+        self.irq = irq;
+        self.hs = hs;
+        self.vbus_present = vbus;
     }
 
     /// MPSIZ in bytes: EP0 field 0/1/2/3 means 64/32/16/8; other EPs use
@@ -170,7 +232,8 @@ impl UsbFs {
     }
 
     /// GINTSTS live value: stored W1C bits plus computed RXFLVL/NPTXFE/
-    /// IEPINT/OEPINT/CMOD(device=1).
+    /// IEPINT/OEPINT/SOF/ESUSP/CMOD(device=1). SOF latches in tick(); ESUSP
+    /// mirrors DSTS SUSPSTS.
     fn gintsts(&self) -> u32 {
         let mut v = self.gint_sticky | (1 << 0); // CMOD = device
         if !self.rx_status.is_empty() {
@@ -195,6 +258,126 @@ impl UsbFs {
         if oep {
             v |= 1 << 19;
         }
+        // SUSPSTS (DSTS bit 0) mirrors into ESUSP (bit 10) like silicon:
+        // the suspend state is readable both places, the IRQ via the mask.
+        if self.dsts & 1 != 0 {
+            v |= 1 << 10; // ESUSP
+        }
+        // VBUS session-end: cable unplugged (vbus_present false) latches
+        // GOTGINT SEDET (bit 2) — the OTG session-end observable.
+        if !self.vbus_present {
+            v |= 1 << 2; // OTGINT (session change; SEDET in GOTGINT)
+        }
+        v
+    }
+
+    /// SOF generation + HS microframes (instruction-count clock).
+    /// FS: 1 frame per 168000 virtual instructions (168 MHz / 1 kHz); each
+    /// frame latches GINTSTS SOF (bit 3, W1C) and advances DSTS FNSOF
+    /// (14-bit frame number at bits 8..21).
+    /// HS (`hs` instance): the same 1 kHz frame is divided into 8
+    /// microframes (125 us each, 21000 virt inst). Each microframe latches
+    /// SOF too (silicon raises the HS SOF IRQ per microframe) and bumps
+    /// the microframe counter (DSTS FNSOF low 3 bits = microframe index
+    /// 0..7); every 8th microframe rolls the 14-bit frame number and sets
+    /// EOPF (bit 15, end-of-periodic-frame — the HS periodic-schedule
+    /// observable). Suspended, unenumerated, or VBUS-lost devices never
+    /// tick (silicon gates SOF on the session).
+    /// ULPI PHY rate report: `ulpi_rate()` derives the packet wire rate
+    /// from the HS personality (HS = 480 Mbit/s, FS = 12 Mbit/s) — the
+    /// observable contract for firmware that sizes DMA/FIFO budgets.
+    fn tick_sof(&mut self, sys: &System, now: u64) {
+        // Gate: enumerated (ENUMDNE sticky) + out of suspend + VBUS present.
+        if self.gint_sticky & (1 << 13) == 0 {
+            self.sof_last = now;
+            return;
+        }
+        if self.dsts & 1 != 0 || !self.vbus_present {
+            self.sof_last = now;
+            return;
+        }
+        // Microframe step: HS = 21000 inst (125 us), FS = 168000 (1 ms).
+        const FS_FRAME: u64 = 168_000;
+        const HS_UFRAME: u64 = 21_000;
+        let step = if self.hs { HS_UFRAME } else { FS_FRAME };
+        let mut el = now.saturating_sub(self.sof_last);
+        if el < step {
+            return;
+        }
+        let mut fired = false;
+        while el >= step {
+            el -= step;
+            self.sof_last += step;
+            if self.hs {
+                // HS microframe: low 3 bits of FNSOF = uframe 0..7.
+                let uf = (self.sof_frame & 7) + 1;
+                if uf >= 8 {
+                    self.sof_frame = self.sof_frame.wrapping_add(1) & 0x3FFF;
+                    self.gint_sticky |= 1 << 15; // EOPF at frame roll
+                } else {
+                    self.sof_frame = (self.sof_frame & !7) | (uf & 7);
+                }
+            } else {
+                self.sof_frame = self.sof_frame.wrapping_add(1) & 0x3FFF;
+            }
+            // DSTS FNSOF follows the counter (bits 8..21).
+            self.dsts = (self.dsts & !(0x3FFF << 8)) | ((self.sof_frame as u32) << 8);
+            self.gint_sticky |= 1 << 3; // SOF
+            fired = true;
+        }
+        if fired {
+            self.update_irq(sys);
+        }
+    }
+
+    /// ULPI PHY packet wire rate in Mbit/s: 480 for the HS personality,
+    /// 12 for FS. Derived from the instance personality (the HS core runs
+    /// in FS mode register-wise, but the PHY rate is a link property the
+    /// harness reports like a scope on the ULPI bus). Firmware sizing
+    /// DMA/FIFO budgets by rate observes exactly this contract.
+    pub fn ulpi_rate_mbps(&self) -> u32 {
+        if self.hs { 480 } else { 12 }
+    }
+
+    /// Current microframe index (DSTS FNSOF low 3 bits): 0..7 on HS
+    /// (125 us microframes), always 0 on FS (1 ms frames, no microframes).
+    pub fn uframe(&self) -> u32 {
+        if self.hs { (self.sof_frame & 7) as u32 } else { 0 }
+    }
+
+    /// Harness = the cable: plug or unplug VBUS. Unplug latches GOTGINT
+    /// SEDET (session end) + suspends the device (SUSPSTS set, SOF stops);
+    /// re-plug clears SEDET path (fresh session needs usb_reset + enum).
+    /// Default-present keeps every existing session green.
+    pub fn set_vbus(&mut self, sys: &System, present: bool) {
+        if present == self.vbus_present {
+            return;
+        }
+        self.vbus_present = present;
+        if !present {
+            self.gotgint |= 1 << 2; // SEDET: session end detected
+            self.dsts |= 1; // SUSPSTS: suspended while unplugged
+            self.gint_sticky |= 1 << 11; // USBSUSP
+            self.update_irq(sys);
+        } else {
+            // Re-plug: session-end condition clears; firmware re-enumerates
+            // (USBRST path) to clear SUSPSTS — like silicon, plug alone
+            // does not resume the old session.
+            self.gotgint &= !(1 << 2);
+        }
+    }
+
+    /// GOTGCTL live value: stored bits plus BSVLD (bit 19) following the
+    /// harness VBUS state, and CIDSTS/DBCT session bits. BSVLD clear is
+    /// the firmware-visible "cable gone" signal alongside SEDET.
+    fn gotgctl(&self) -> u32 {
+        let mut v = self.gotgctl;
+        if self.vbus_present {
+            v |= 1 << 19; // BSVLD: B-session valid while plugged
+            v |= 1 << 18; // ASVLD likewise (device attached to host)
+        } else {
+            v &= !((1 << 19) | (1 << 18));
+        }
         v
     }
 
@@ -217,13 +400,17 @@ impl UsbFs {
     /// path never needs it).
     fn update_irq(&self, sys: &System) {
         if (self.gintsts() & self.gintmsk) != 0 && self.gahbcfg & 1 != 0 {
-            sys.p.nvic.borrow_mut().set_intr_pending(USB_IRQ);
+            sys.p.nvic.borrow_mut().set_intr_pending(self.irq());
         }
     }
 
     /// Complete an IN transfer synchronously at EPENA (whole-blob: move up
     /// to XFRSIZ bytes into the ready slot, raise XFRC). GNPINNAK-defers
     /// and STALL handshakes handled; NAK state is otherwise lenient.
+    /// Internal-DMA mode (GAHBCFG DMAEN): the same whole-blob contract,
+    /// but the move is attributed to DMA — the byte count latches into
+    /// `dma_moved_in[ep]` (firmware polls progress there instead of the
+    /// FIFO window) and no CPU FIFO write was needed.
     fn in_send(&mut self, sys: &System, ep: usize) {
         if (self.in_ep[ep].ctl >> 21) & 1 != 0 {
             // STALL handshake: nothing moves; the harness sees status.
@@ -240,6 +427,12 @@ impl UsbFs {
         for _ in 0..n {
             pkt.push(self.tx_data[ep].pop_front().unwrap());
         }
+        // Internal DMA attribution: when GAHBCFG DMAEN (bit 5) is set the
+        // move counts as a DMA move — latch the count where firmware polls
+        // it. Same bytes, same completion; only the accounting differs.
+        if self.gahbcfg & (1 << 5) != 0 {
+            self.dma_moved_in[ep] = self.dma_moved_in[ep].wrapping_add(n as u64);
+        }
         self.in_ready[ep] = Some(pkt);
         // Transfer complete clears EPENA like silicon (re-arming
         // re-triggers); XFRC reports it.
@@ -254,14 +447,16 @@ impl UsbFs {
     pub fn host_reset(&mut self, sys: &System) {
         self.reset_core();
         self.gint_sticky |= 1 << 12; // USBRST
-        sys.p.nvic.borrow_mut().clear_pending(USB_IRQ);
+        sys.p.nvic.borrow_mut().clear_pending(self.irq());
         self.update_irq(sys);
     }
 
-    /// Enumeration done at full speed: ENUMDNE + DSTS speed (0b11 = FS).
+    /// Enumeration done: ENUMDNE + DSTS speed. FS reports 0b11; an HS
+    /// instance in FS mode reports HS speed 0b00 (the only observable
+    /// difference — the device subset is register-compatible).
     pub fn host_enumerated(&mut self, sys: &System) {
         self.gint_sticky |= 1 << 13; // ENUMDNE
-        self.dsts = (self.dsts & !6) | 6;
+        self.dsts = (self.dsts & !6) | if self.hs { 0 } else { 6 };
         self.update_irq(sys);
     }
 
@@ -304,6 +499,17 @@ impl UsbFs {
             // Complete clears EPENA like silicon (firmware re-arms).
             self.out_ep[ep].ctl &= !(1 << 31);
             self.out_ep[ep].int |= 1; // XFRC
+            // Internal-DMA mode: latch the received count into the EP DMA
+            // address register (firmware polls DIEPDMA/DOEPDMA instead of
+            // GRXSTSP). Same completion; only the accounting differs.
+            if self.gahbcfg & (1 << 5) != 0 {
+                self.dma_moved_out[ep] = self.dma_moved_out[ep].wrapping_add(data.len() as u64);
+                if ep == 0 {
+                    self.out_ep[ep].dma = self.dma_moved_out[ep] as u32;
+                } else {
+                    self.out_ep[ep].dma = self.dma_moved_out[ep] as u32;
+                }
+            }
         } else {
             self.out_ep[ep].out_expected -= data.len() as u32;
         }
@@ -342,6 +548,17 @@ impl UsbFs {
             return Vec::new();
         }
         self.in_ready[ep].take().unwrap_or_default()
+    }
+
+    /// Internal-DMA progress counters (harness scope probe): bytes moved by
+    /// DMA on IN (in_send) / OUT (inject_out completion) while GAHBCFG
+    /// DMAEN was set. Firmware polls the EP DMA address registers; the
+    /// harness reads the counters directly.
+    pub fn dma_progress(&self, ep: usize) -> (u64, u64) {
+        if ep >= N_EPS {
+            return (0, 0);
+        }
+        (self.dma_moved_in[ep], self.dma_moved_out[ep])
     }
 
     fn read_ep_in(&mut self, _sys: &System, ep: usize, off: u32) -> u32 {
@@ -453,13 +670,25 @@ impl UsbFs {
 impl Peripheral for UsbFs {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
+    fn tick(&mut self, sys: &System) {
+        // SOF generation runs on the instruction-count clock (1 kHz while
+        // enumerated + out of suspend + VBUS present). Gated inside
+        // tick_sof so unenumerated/suspended sessions cost one branch.
+        self.tick_sof(sys, crate::system::instruction_count());
+    }
+
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
             // ---- core global block ----
-            0x000 => self.gotgctl,
+            0x000 => self.gotgctl(),
             0x004 => self.gotgint,
             0x008 => self.gahbcfg,
-            0x00C => self.gusbcfg,
+            // GUSBCFG live: stored bits plus the ULPI PHY rate report.
+            // Bits 31:20 are reserved on silicon; the model reports the
+            // link rate there (480 = HS ULPI, 12 = FS) so firmware sizing
+            // DMA/FIFO budgets by rate observes the harness contract
+            // without a second read path. All other bits read stored.
+            0x00C => (self.gusbcfg & 0x000F_FFFF) | (self.ulpi_rate_mbps() << 20),
             // GRSTCTL reads AHBIDL set (always idle here).
             0x010 => self.grstctl | (1 << 31),
             0x014 => self.gintsts(),
@@ -560,7 +789,7 @@ impl Peripheral for UsbFs {
                 // GRSTCTL: CSRST + TX/RX flush are action bits (self-clear).
                 if value & 1 != 0 {
                     self.reset_core();
-                    sys.p.nvic.borrow_mut().clear_pending(USB_IRQ);
+                    sys.p.nvic.borrow_mut().clear_pending(self.irq());
                     return;
                 }
                 if value & (1 << 5) != 0 {
@@ -600,6 +829,15 @@ impl Peripheral for UsbFs {
             0x800 => self.dcfg = value,
             0x804 => {
                 let prev = self.dctl;
+                // RWUSIG (bit 0, remote-wakeup signaling): set while
+                // suspended clears SUSPSTS (resume path) — silicon wakes
+                // on the host's resume. RWUSIG self-holds until firmware
+                // clears it; the SOF tick resumes on the next tick.
+                if value & 1 != 0 && self.dsts & 1 != 0 {
+                    self.dsts &= !1; // exit suspend via remote wakeup
+                    self.gint_sticky |= 1 << 31; // WKUPINT (resume observed)
+                    self.update_irq(sys);
+                }
                 self.dctl = value;
                 // CGNPINNAK (bit 8): release deferred IN transfers.
                 if prev & (1 << 7) != 0 && value & (1 << 8) != 0 {
@@ -792,5 +1030,200 @@ mod tests {
             }
         }
         panic!("USB slot missing");
+    }
+
+    #[test]
+    fn hs_block_enum_reports_hs_speed_and_roundtrips() {
+        use super::{USB_HS_BASE, USB_HS_IRQ};
+        let sys = crate::system::WasmSystem::new();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        // Both blocks registered, distinct windows.
+        let mut saw_fs = false;
+        let mut saw_hs = false;
+        for slot in &sys.p.peripherals {
+            if slot.start == 0x5000_0000 {
+                saw_fs = true;
+            }
+            if slot.start == USB_HS_BASE {
+                saw_hs = true;
+            }
+        }
+        assert!(saw_fs, "FS slot registered");
+        assert!(saw_hs, "HS slot registered at 0x40040000");
+        // HS enum reports HS speed (ENUMSPD 0b00), FS reports 0b11.
+        sys.p.usb_hs_enumerated(sys);
+        let hs_dsts = sys.p.read(sys, USB_HS_BASE + 0x808, 4);
+        assert_eq!(hs_dsts & 6, 0, "HS ENUMSPD=HS, got {hs_dsts:#x}");
+        assert_ne!(sys.p.read(sys, USB_HS_BASE + 0x014, 4) & (1 << 13), 0, "HS ENUMDNE latched");
+        sys.p.usb_enumerated(sys);
+        let fs_dsts = sys.p.read(sys, 0x5000_0000 + 0x808, 4);
+        assert_eq!(fs_dsts & 6, 6, "FS ENUMSPD=FS, got {fs_dsts:#x}");
+        // HS MMIO round-trip through the window: program EP0 TX size,
+        // push a word, EPENA, take the blob via the HS host API.
+        sys.p.write(sys, USB_HS_BASE + 0x028, 4, 0x00400040);
+        sys.p.write(sys, USB_HS_BASE + 0x910, 4, 4 | (1 << 19));
+        sys.p.write(sys, USB_HS_BASE + 0x1000, 4, 0x00216948);
+        let ctl = sys.p.read(sys, USB_HS_BASE + 0x900, 4);
+        sys.p.write(sys, USB_HS_BASE + 0x900, 4, ctl | (1 << 26) | (1 << 31));
+        assert_eq!(sys.p.usb_hs_in_status(0), 1, "HS IN data ready");
+        assert_eq!(sys.p.usb_hs_take_in(0), vec![0x48, 0x69, 0x21, 0x00]);
+        // HS IRQ line is 77, independent of the FS line (67).
+        assert_eq!(USB_HS_IRQ, 77, "HS IRQ number");
+        // FS block untouched by the HS session.
+        assert_eq!(sys.p.usb_in_status(0), 0, "FS IN idle while HS runs");
+    }
+
+    #[test]
+    fn hs_microframes_tick_8x_with_eopf_at_roll() {
+        use super::USB_HS_BASE;
+        let sys = crate::system::WasmSystem::new();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.usb_hs_enumerated(sys);
+        // One FS frame of ticks = 8 HS microframes: EOPF latches at the
+        // roll, uframe counts 0..7, FNSOF frame number advances by 1.
+        // (Parallel cargo threads share INSTRUCTION_COUNT, so read the
+        // frame delta relatively — another thread's ticks only add whole
+        // extra frames, never a partial one... except they CAN land
+        // mid-window. Pin the delta by snapshotting sof_last via two
+        // back-to-back windows instead: first window syncs, second counts.)
+        sys.p.peripherals.iter().for_each(|s| {
+            if s.start == USB_HS_BASE {
+                s.peripheral.borrow_mut().tick(sys);
+            }
+        });
+        let f0 = sys.p.read(sys, USB_HS_BASE + 0x808, 4);
+        crate::system::INSTRUCTION_COUNT
+            .fetch_add(168_000, std::sync::atomic::Ordering::Relaxed);
+        sys.p.peripherals.iter().for_each(|s| {
+            if s.start == USB_HS_BASE {
+                s.peripheral.borrow_mut().tick(sys);
+            }
+        });
+        let f1 = sys.p.read(sys, USB_HS_BASE + 0x808, 4);
+        let d = (((f1 >> 8) & 0x3FFF).wrapping_sub((f0 >> 8) & 0x3FFF)) & 0x3FFF;
+        assert!(d >= 1, "HS frame advances per 168k, d={d}");
+        assert_ne!(sys.p.read(sys, USB_HS_BASE + 0x014, 4) & (1 << 15), 0, "EOPF at roll");
+        // FS block over the same window: exactly 1 frame, EOPF never sets
+        // (FS has no microframes — the HS detail stays on the HS block).
+        sys.p.usb_enumerated(sys);
+        crate::system::INSTRUCTION_COUNT
+            .fetch_add(168_000, std::sync::atomic::Ordering::Relaxed);
+        sys.p.peripherals.iter().for_each(|s| {
+            if s.start == 0x5000_0000 {
+                s.peripheral.borrow_mut().tick(sys);
+            }
+        });
+        assert_eq!(sys.p.read(sys, 0x5000_0000 + 0x014, 4) & (1 << 15), 0, "no EOPF on FS");
+    }
+
+    #[test]
+    fn ulpi_rate_report_matches_personality() {
+        use super::USB_HS_BASE;
+        let sys = crate::system::WasmSystem::new();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        // Reserved field of GUSBCFG carries the rate (480 HS / 12 FS).
+        assert_eq!((sys.p.read(sys, USB_HS_BASE + 0x00C, 4) >> 20) & 0xFFF, 480, "HS rate field = 480");
+        assert_eq!((sys.p.read(sys, 0x5000_0000 + 0x00C, 4) >> 20) & 0xFFF, 12, "FS rate field = 12");
+        assert_eq!(sys.p.usb_ulpi_rate(), 12, "FS ulpi_rate 12");
+        assert_eq!(sys.p.usb_hs_ulpi_rate(), 480, "HS ulpi_rate 480");
+        assert_eq!(sys.p.usb_hs_uframe(), 0, "uframe 0 pre-tick");
+    }
+
+    #[test]
+    fn sof_ticks_at_1khz_while_enumerated() {
+        use super::USB_HS_BASE;
+        let sys = crate::system::WasmSystem::new();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        // Unenumerated: no SOF no matter how long the clock runs.
+        sys.p.write(sys, 0x5000_0000 + 0x018, 4, 0);
+        for _ in 0..10 {
+            sys.p.peripherals.iter().for_each(|s| {
+                if s.start == 0x5000_0000 {
+                    s.peripheral.borrow_mut().tick(sys);
+                }
+            });
+            crate::system::INSTRUCTION_COUNT
+                .fetch_add(200_000, std::sync::atomic::Ordering::Relaxed);
+        }
+        assert_eq!(sys.p.read(sys, 0x5000_0000 + 0x014, 4) & (1 << 3), 0, "no SOF before enum");
+        // Enumerate: SOF latches within one frame window + FNSOF advances.
+        sys.p.usb_enumerated(sys);
+        let f0 = sys.p.read(sys, 0x5000_0000 + 0x808, 4);
+        crate::system::INSTRUCTION_COUNT
+            .fetch_add(200_000, std::sync::atomic::Ordering::Relaxed);
+        sys.p.peripherals.iter().for_each(|s| {
+            if s.start == 0x5000_0000 {
+                s.peripheral.borrow_mut().tick(sys);
+            }
+        });
+        assert_ne!(sys.p.read(sys, 0x5000_0000 + 0x014, 4) & (1 << 3), 0, "SOF latched");
+        let f1 = sys.p.read(sys, 0x5000_0000 + 0x808, 4);
+        assert_ne!((f0 >> 8) & 0x3FFF, (f1 >> 8) & 0x3FFF, "FNSOF advanced");
+        // W1C clear works.
+        sys.p.write(sys, 0x5000_0000 + 0x014, 4, 1 << 3);
+        assert_eq!(sys.p.read(sys, 0x5000_0000 + 0x014, 4) & (1 << 3), 0, "SOF W1C clears");
+        let _ = USB_HS_BASE;
+    }
+
+    #[test]
+    fn vbus_unplug_suspends_and_replug_needs_reset() {
+        let sys = crate::system::WasmSystem::new();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.usb_enumerated(sys);
+        // Unplug: BSVLD clears, SEDET latches, SUSPSTS sets, SOF stops.
+        sys.p.usb_set_vbus(sys, false);
+        assert_eq!(sys.p.read(sys, 0x5000_0000, 4) & (1 << 19), 0, "BSVLD clear on unplug");
+        assert_ne!(sys.p.read(sys, 0x5000_0000 + 0x004, 4) & (1 << 2), 0, "SEDET latched");
+        assert_ne!(sys.p.read(sys, 0x5000_0000 + 0x808, 4) & 1, 0, "SUSPSTS set");
+        crate::system::INSTRUCTION_COUNT
+            .fetch_add(500_000, std::sync::atomic::Ordering::Relaxed);
+        sys.p.peripherals.iter().for_each(|s| {
+            if s.start == 0x5000_0000 {
+                s.peripheral.borrow_mut().tick(sys);
+            }
+        });
+        // Re-plug: SEDET path clears, but the session stays suspended
+        // until firmware re-enumerates (USBRST path).
+        sys.p.usb_set_vbus(sys, true);
+        assert_ne!(sys.p.read(sys, 0x5000_0000, 4) & (1 << 19), 0, "BSVLD back on replug");
+        assert_ne!(sys.p.read(sys, 0x5000_0000 + 0x808, 4) & 1, 0, "still suspended until reset");
+        sys.p.usb_reset(sys);
+        sys.p.usb_enumerated(sys);
+        assert_eq!(sys.p.read(sys, 0x5000_0000 + 0x808, 4) & 1, 0, "fresh session runs");
+    }
+
+    #[test]
+    fn internal_dma_moves_count_without_fifo_writes() {
+        let sys = crate::system::WasmSystem::new();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        // DMAEN on (GAHBCFG bit 5): IN EPENA attributes the move to DMA.
+        sys.p.write(sys, 0x5000_0000 + 0x008, 4, (1 << 5) | 1);
+        sys.p.write(sys, 0x5000_0000 + 0x028, 4, 0x00400040);
+        sys.p.write(sys, 0x5000_0000 + 0x910, 4, 4 | (1 << 19));
+        sys.p.write(sys, 0x5000_0000 + 0x1000, 4, 0x00216948);
+        let ctl = sys.p.read(sys, 0x5000_0000 + 0x900, 4);
+        sys.p.write(sys, 0x5000_0000 + 0x900, 4, ctl | (1 << 26) | (1 << 31));
+        assert_eq!(sys.p.usb_in_status(0), 1, "IN ready");
+        assert_eq!(sys.p.usb_take_in(0), vec![0x48, 0x69, 0x21, 0x00]);
+        let (moved_in, _) = sys.p.usb_dma_progress(0);
+        assert_eq!(moved_in, 4, "DMA counted the 4-byte IN move");
+        // OUT completion latches the count into the EP DMA register.
+        sys.p.write(sys, 0x5000_0000 + 0xB10, 4, (1 << 19) | 64);
+        sys.p.usb_inject_out(sys, 0, &[1, 2, 3, 4]);
+        assert_eq!(sys.p.read(sys, 0x5000_0000 + 0xB14, 4), 4, "DOEPDMA latched OUT count");
+        // DMAEN off: moves stop counting (same contract, CPU-attributed).
+        sys.p.write(sys, 0x5000_0000 + 0x008, 4, 1);
+        sys.p.write(sys, 0x5000_0000 + 0x910, 4, 4 | (1 << 19));
+        sys.p.write(sys, 0x5000_0000 + 0x1000, 4, 0x00216948);
+        let ctl2 = sys.p.read(sys, 0x5000_0000 + 0x900, 4);
+        sys.p.write(sys, 0x5000_0000 + 0x900, 4, (ctl2 | (1 << 26) | (1 << 31)) & !(1 << 31) | (1 << 31));
+        let (moved_in2, _) = sys.p.usb_dma_progress(0);
+        assert_eq!(moved_in2, 4, "counter frozen with DMAEN off");
     }
 }

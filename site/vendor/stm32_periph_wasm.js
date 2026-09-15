@@ -452,6 +452,47 @@ export function audio_take_capture() {
 }
 
 /**
+ * Read one CAN FD payload byte for (`base`, `fifo`, `slot`, `idx`) —
+ * the harness path into the FD window (firmware uses the MMIO window).
+ * @param {number} base
+ * @param {number} fifo
+ * @param {number} slot
+ * @param {number} idx
+ * @returns {number}
+ */
+export function can_fd_byte(base, fifo, slot, idx) {
+    const ret = wasm.can_fd_byte(base, fifo, slot, idx);
+    return ret;
+}
+
+/**
+ * FDCAN wire-time cost (virtual instructions) for a frame: arbitration
+ * at the nominal rate, FD payload at the data rate iff BRS. Firmware
+ * pacing TX-to-TX gaps observes exactly this contract.
+ * @param {number} base
+ * @param {boolean} fd
+ * @param {boolean} brs
+ * @param {number} payload_bytes
+ * @returns {bigint}
+ */
+export function can_fd_cost(base, fd, brs, payload_bytes) {
+    const ret = wasm.can_fd_cost(base, fd, brs, payload_bytes);
+    return BigInt.asUintN(64, ret);
+}
+
+/**
+ * Valid CAN FD payload length for (`base`, `fifo`, `slot`).
+ * @param {number} base
+ * @param {number} fifo
+ * @param {number} slot
+ * @returns {number}
+ */
+export function can_fd_len(base, fifo, slot) {
+    const ret = wasm.can_fd_len(base, fifo, slot);
+    return ret;
+}
+
+/**
  * Inject a CAN frame from an external transmitter onto the shared bus. The
  * frame is delivered to every CAN node (CAN1/CAN2) whose accept filters pass
  * it, so the guest sees it exactly as if another node sent it. `data` is up
@@ -464,6 +505,21 @@ export function can_inject(id, dlc, data) {
     const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
     const len0 = WASM_VECTOR_LEN;
     wasm.can_inject(id, dlc, ptr0, len0);
+}
+
+/**
+ * Inject a CAN FD frame (FDF set, up to 64 bytes) from an external
+ * transmitter. Same filter + FIFO path as classic (arbitration on the ID
+ * is identical); the payload lands in the FD window (`can_fd_read`),
+ * TDTR reports DLC + FDF. `brs` marks bit-rate-switch (flag only).
+ * @param {number} id
+ * @param {Uint8Array} data
+ * @param {boolean} brs
+ */
+export function can_inject_fd(id, data, brs) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.can_inject_fd(id, ptr0, len0, brs);
 }
 
 export function clear_watchdog_reset_flags() {
@@ -1173,6 +1229,35 @@ export function has_pending_interrupt() {
 }
 
 /**
+ * Harness = the other master: arm arbitration loss on the next address
+ * phase of the I2C block at `base` (one-shot; ARLO latches, bus lost).
+ * @param {number} base
+ */
+export function i2c_arm_arb_loss(base) {
+    wasm.i2c_arm_arb_loss(base);
+}
+
+/**
+ * Harness = the SMBus alerting device (host-notify source): arm the
+ * address returned in DR on the next Alert-Response-Address read.
+ * @param {number} base
+ * @param {number} addr
+ */
+export function i2c_arm_smbus_alert(base, addr) {
+    wasm.i2c_arm_smbus_alert(base, addr);
+}
+
+/**
+ * Current PEC accumulator of the I2C block at `base` (scope probe).
+ * @param {number} base
+ * @returns {number}
+ */
+export function i2c_pec(base) {
+    const ret = wasm.i2c_pec(base);
+    return ret;
+}
+
+/**
  * Queue bytes the tapped I2C slave answers on master reads.
  * @param {string} peripheral
  * @param {Uint8Array} bytes
@@ -1422,6 +1507,28 @@ export function reset_state() {
 }
 
 /**
+ * Host entropy words currently pooled (0 = LCG fallback active).
+ * @returns {number}
+ */
+export function rng_entropy_avail() {
+    const ret = wasm.rng_entropy_avail();
+    return ret >>> 0;
+}
+
+/**
+ * Push host entropy words into the RNG pool (true-noise samples from JS
+ * `crypto.getRandomValues` or equivalent). Consumed FIFO, one word per
+ * regen; when the pool drains the model falls back to the deterministic
+ * LCG (SR SECS reports fallback-active).
+ * @param {Uint32Array} words
+ */
+export function rng_seed_entropy(words) {
+    const ptr0 = passArray32ToWasm0(words, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.rng_seed_entropy(ptr0, len0);
+}
+
+/**
  * Set a pending interrupt in the NVIC. Negative `irq` values select system
  * exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
  * Used by the FreeRTOS path: the Rust core synthesizes these exceptions
@@ -1558,10 +1665,153 @@ export function uart_rx_byte(addr, byte) {
 }
 
 /**
+ * Internal-DMA progress on the FS block: [in_bytes, out_bytes] moved
+ * while GAHBCFG DMAEN was set (firmware polls the EP DMA registers;
+ * the harness reads these counters directly).
+ * @param {number} ep
+ * @returns {BigUint64Array}
+ */
+export function usb_dma_progress(ep) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.usb_dma_progress(retptr, ep);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU64FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 8, 8);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * Simulate enumeration-done at full speed (ENUMDNE + FS speed in DSTS).
  */
 export function usb_enumerated() {
     wasm.usb_enumerated();
+}
+
+/**
+ * Internal-DMA progress on the HS block.
+ * @param {number} ep
+ * @returns {BigUint64Array}
+ */
+export function usb_hs_dma_progress(ep) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.usb_hs_dma_progress(retptr, ep);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU64FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 8, 8);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Simulate enumeration-done on the HS block (ENUMDNE + HS speed in DSTS).
+ */
+export function usb_hs_enumerated() {
+    wasm.usb_hs_enumerated();
+}
+
+/**
+ * HS IN transfer status: 0 none, 1 data ready, 2 STALL handshake.
+ * @param {number} ep
+ * @returns {number}
+ */
+export function usb_hs_in_status(ep) {
+    const ret = wasm.usb_hs_in_status(ep);
+    return ret >>> 0;
+}
+
+/**
+ * Inject an OUT data packet to an HS endpoint.
+ * @param {number} ep
+ * @param {Uint8Array} data
+ */
+export function usb_hs_inject_out(ep, data) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.usb_hs_inject_out(ep, ptr0, len0);
+}
+
+/**
+ * Inject an 8-byte SETUP packet to HS EP0.
+ * @param {Uint8Array} data
+ */
+export function usb_hs_inject_setup(data) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.usb_hs_inject_setup(ptr0, len0);
+}
+
+/**
+ * HS OUT transfer status: 0 none, 2 STALL handshake.
+ * @param {number} ep
+ * @returns {number}
+ */
+export function usb_hs_out_status(ep) {
+    const ret = wasm.usb_hs_out_status(ep);
+    return ret >>> 0;
+}
+
+/**
+ * USB OTG HS (FS-mode personality) host-side test API: same semantics as
+ * the FS exports above, driven against the HS block (0x40040000, IRQ 77).
+ * Each falls back to the FS block when no HS slot exists.
+ * Simulate a USB bus reset on the HS block.
+ */
+export function usb_hs_reset() {
+    wasm.usb_hs_reset();
+}
+
+/**
+ * Harness = the cable on the HS block.
+ * @param {boolean} present
+ */
+export function usb_hs_set_vbus(present) {
+    wasm.usb_hs_set_vbus(present);
+}
+
+/**
+ * Drain a completed HS device-to-host IN blob.
+ * @param {number} ep
+ * @returns {Uint8Array}
+ */
+export function usb_hs_take_in(ep) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.usb_hs_take_in(retptr, ep);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * HS microframe index for the HS block.
+ * @returns {number}
+ */
+export function usb_hs_uframe() {
+    const ret = wasm.usb_hs_uframe();
+    return ret >>> 0;
+}
+
+/**
+ * ULPI rate for the HS block.
+ * @returns {number}
+ */
+export function usb_hs_ulpi_rate() {
+    const ret = wasm.usb_hs_ulpi_rate();
+    return ret >>> 0;
 }
 
 /**
@@ -1617,6 +1867,15 @@ export function usb_reset() {
 }
 
 /**
+ * Harness = the cable: plug/unplug VBUS on the FS block (default present).
+ * Unplug suspends the device, stops SOF, latches SEDET + BSVLD clear.
+ * @param {boolean} present
+ */
+export function usb_set_vbus(present) {
+    wasm.usb_set_vbus(present);
+}
+
+/**
  * Drain a completed device-to-host IN blob (empty = none pending;
  * check usb_in_status first to tell ZLP apart).
  * @param {number} ep
@@ -1634,6 +1893,25 @@ export function usb_take_in(ep) {
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
+}
+
+/**
+ * HS microframe index (DSTS FNSOF low 3 bits, 0..7) for the FS block
+ * (always 0 — FS has 1 ms frames, no microframes).
+ * @returns {number}
+ */
+export function usb_uframe() {
+    const ret = wasm.usb_uframe();
+    return ret >>> 0;
+}
+
+/**
+ * ULPI PHY packet wire rate in Mbit/s (480 HS / 12 FS) for the FS block.
+ * @returns {number}
+ */
+export function usb_ulpi_rate() {
+    const ret = wasm.usb_ulpi_rate();
+    return ret >>> 0;
 }
 
 /**
@@ -1715,9 +1993,22 @@ function getArrayU32FromWasm0(ptr, len) {
     return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
 }
 
+function getArrayU64FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getBigUint64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
+
+let cachedBigUint64ArrayMemory0 = null;
+function getBigUint64ArrayMemory0() {
+    if (cachedBigUint64ArrayMemory0 === null || cachedBigUint64ArrayMemory0.byteLength === 0) {
+        cachedBigUint64ArrayMemory0 = new BigUint64Array(wasm.memory.buffer);
+    }
+    return cachedBigUint64ArrayMemory0;
 }
 
 let cachedDataViewMemory0 = null;
@@ -1858,6 +2149,7 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedBigUint64ArrayMemory0 = null;
     cachedDataViewMemory0 = null;
     cachedUint16ArrayMemory0 = null;
     cachedUint32ArrayMemory0 = null;
