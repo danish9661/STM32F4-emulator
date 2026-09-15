@@ -3832,3 +3832,32 @@ mock-pinned (mock-periph 141 checks), and doc-synced (x3 copies). Commit
   app.js/doom.js/doom-worker.js + console.html v39→v40 / doom.html v74→v75
   (`__doomVer` 74→75) + firmware.js v24→v25. `site/usbhost.js` gained the
   `{hs:true}` api-switch (zero behavior change for FS callers).
+
+---
+
+## 32. §31 follow-up: docs sync + v33→v34 + flaky-cargo note (2026-09-15)
+
+Follow-up to §31 (the five-gap commit `6a07187` landed the model code but
+not the doc rows for it). No model changes in this pass — docs + versions
+only, verified by the `chain_all5_final` battery.
+
+- **peripherals.md USB/I2C/CAN/RNG rows** now name the 5-gap surface:
+  USB = microframes/EOPF/`usb_hs_uframe` + ULPI 480/12 + `usb_set_vbus` +
+  `usb_dma_progress` (Loc 1129→1229); I2C = GCALL/ALERT/ARP +
+  `i2c_arm_smbus_alert` (Loc 466→558); CAN = NBTP/DBTP + `can_fd_cost`
+  (Loc 700→785); RNG = `rng_seed_entropy` pool + SECS (Loc 131→222).
+- **Board USB-FS/USB-HS rows** (407/407ve/429 + 401/411 FS-only) synced to
+  the same wording, x3 copies (`docs/` + `site/docs-src/` + `website/docs/`).
+- **?v= 33→34** across app.js/doom.js/doom-worker.js + console.html v40→v41
+  / doom.html v75→v76 (`__doomVer` 75→76): the committed vendor wasm
+  predates the §31 model code (RNG-tick/RCC-RDY/HS + AF-fix + all-5), so
+  browsers ran the stale model until this bump. The chain rebuilds vendor
+  wasm first, so the bump matches the fresh build.
+- **Cargo 101 flake note**: the chained `cargo test --release` exited 101
+  with no failing test name in the log (lib-harness error line only);
+  6 consecutive standalone re-runs after (incl. `--test-threads=1`) all
+  pass 213/213 with no code change. Recorded in
+  `.pw-scratch/chain_all5_final.verdict`, not investigated further.
+- Battery (`.pw-scratch/chain_all5_final.{log,verdict}`): BUILD 0, mock
+  141/141, matrix 156/156, feat 1/1 both maps, browser smoke v34
+  (usb/dcmi/blinky) all EXIT 0.
