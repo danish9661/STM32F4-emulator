@@ -19,6 +19,21 @@ const DCMI_REGS_END: u32 = 0x5005_0400;
 /// source is an external camera sensor fed by the JS hardware layer via
 /// `dcmi_feed_frame` — the model consumes that frame with VSYNC/LINE/FRAME
 /// semantics and a small pixel FIFO, exactly like the real peripheral.
+///
+/// Pin-sync sampling (VSYNC/HSYNC/PCLK) is harness-gated, not free-run:
+/// - CAPTURE rising latches "await VSYNC": the frame does NOT load until
+///   the harness asserts VSYNC (`dcmi_set_sync(vsync=true)` — the camera
+///   starting a new frame). Without a VSYNC edge the capture pends with
+///   VSYNC flag set and no data (silicon waits for the sensor the same
+///   way; the old model loaded immediately, which skipped the wait).
+/// - HSYNC gates LINES: while the harness holds HSYNC low
+///   (`dcmi_set_sync(_,hsync=false)` — horizontal blanking), tick() does
+///   not advance pixels (silicon samples only during line-valid). Default
+///   high (continuous sensor), so existing sessions are unaffected.
+/// - PCLK is the pixel clock: `dcmi_set_pclk(div)` scales PIXELS_PER_TICK
+///   (div 1 = full 16 px/tick, div N = 16/N, min 1). Default 1.
+/// All three default to free-run (VSYNC auto-asserted, HSYNC high, PCLK/1)
+/// so firmware that never touches sync observes the old behavior exactly.
 pub struct Dcmi {
     cr: u32, sr: u32, ris: u32, ier: u32,
     escr: u32, esur: u32, cwstrt: u32, cwsiz: u32, dr: u32,
@@ -28,6 +43,12 @@ pub struct Dcmi {
     frame_w: u32, frame_h: u32,
     frame_x: u32, frame_y: u32,
     vsync: bool,
+    /// CAPTURE armed but awaiting the VSYNC edge (see struct doc).
+    await_vsync: bool,
+    /// HSYNC line level from the harness (false = blanking, hold pixels).
+    hsync: bool,
+    /// PCLK divider from the harness (>= 1; pixels per tick = 16/div).
+    pclk_div: u32,
 }
 
 impl Default for Dcmi {
@@ -38,6 +59,9 @@ impl Default for Dcmi {
             fifo: Vec::new(),
             frame: None, frame_w: 0, frame_h: 0,
             frame_x: 0, frame_y: 0, vsync: false,
+            await_vsync: false,
+            hsync: true,
+            pclk_div: 1,
         }
     }
 }
@@ -45,6 +69,39 @@ impl Default for Dcmi {
 impl Dcmi {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
         if name == "DCMI" { Some(Box::new(Self::default())) } else { None }
+    }
+
+    /// Load the JS-fed frame at a VSYNC edge (shared by the CAPTURE-rising
+    /// fast path and the harness edge path).
+    fn load_frame(&mut self) {
+        if let Some((w, h, data)) = crate::system::dcmi_frame() {
+            self.frame = Some((w, h, data));
+            self.frame_w = w;
+            self.frame_h = h;
+            self.frame_x = 0;
+            self.frame_y = 0;
+            self.fifo.clear();
+            self.vsync = true;
+            self.sr |= 1;      // VSYNC
+            self.ris |= 1 << 2; // FRS pending at frame start too
+        } else {
+            self.frame = None;
+        }
+        self.await_vsync = false;
+    }
+
+    /// Harness VSYNC edge (camera starting a frame): if a capture is
+    /// armed and awaiting VSYNC, load the frame now.
+    pub fn vsync_edge(&mut self) {
+        if self.await_vsync && self.cr & 1 != 0 {
+            self.load_frame();
+        }
+    }
+
+    /// Harness sync levels: HSYNC line + PCLK divider (see struct doc).
+    pub fn set_sync_levels(&mut self, hsync: bool, pclk_div: u32) {
+        self.hsync = hsync;
+        self.pclk_div = pclk_div.max(1);
     }
 
     fn fire_interrupts(&mut self, sys: &System) {
@@ -258,19 +315,22 @@ impl Peripheral for Dcmi {
                 self.cr = value & 0x4FFF;
                 let now_capture = self.cr & 1 != 0;
                 if now_capture && !was_capture {
-                    // CAPTURE rising: start consuming the JS-fed frame.
-                    if let Some((w, h, data)) = crate::system::dcmi_frame() {
-                        self.frame = Some((w, h, data));
-                        self.frame_w = w;
-                        self.frame_h = h;
-                        self.frame_x = 0;
-                        self.frame_y = 0;
-                        self.fifo.clear();
-                        self.vsync = true;
-                        self.sr |= 1;      // VSYNC
-                        self.ris |= 1 << 2; // FRS pending at frame start too
+                    // CAPTURE rising: arm "await VSYNC" — the frame loads
+                    // on the harness VSYNC edge (dcmi_set_sync), not here.
+                    // VSYNC flag raises immediately (capture armed); data
+                    // flows once the sensor starts the frame. If the
+                    // harness pre-asserted VSYNC (level already high), the
+                    // edge is considered arrived and the frame loads now —
+                    // that keeps the default free-run path identical.
+                    self.await_vsync = true;
+                    self.fifo.clear();
+                    self.vsync = true;
+                    self.sr |= 1;      // VSYNC
+                    if crate::system::dcmi_sync_vsync() {
+                        self.load_frame();
                     } else {
                         self.frame = None;
+                        self.ris |= 1 << 2; // FRS pending at frame start too
                     }
                 }
             }
@@ -295,6 +355,10 @@ impl Peripheral for Dcmi {
 
     fn tick(&mut self, sys: &System) {
         if self.cr & 1 == 0 { return; }
+        // Awaiting VSYNC: no pixels flow until the harness edge arrives.
+        if self.await_vsync { return; }
+        // HSYNC low (horizontal blanking): hold pixels this tick.
+        if !self.hsync { return; }
         // If a DMA transfer is queued against our registers, the DMA is the
         // consumer — let it pull the pixels. Streaming them into the 4-deep
         // FIFO here first would drop all but the last four before the DMA
@@ -315,7 +379,9 @@ impl Peripheral for Dcmi {
                 return;
             }
         }
-        for _ in 0..PIXELS_PER_TICK {
+        // PCLK divider: 16/div pixels per tick (min 1).
+        let n = (PIXELS_PER_TICK / self.pclk_div.max(1) as usize).max(1);
+        for _ in 0..n {
             if self.frame_y >= self.frame_h { break; }
             self.feed_next_pixel();
         }

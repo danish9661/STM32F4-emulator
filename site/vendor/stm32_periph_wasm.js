@@ -308,6 +308,17 @@ export function adc_clear_channel_value(peripheral, channel) {
 }
 
 /**
+ * Whether the last ADC CDR read returned a latched simultaneous pair
+ * (dual regular-simultaneous mode with both sides conversion-ready).
+ * Harness scope probe for dual-mode simultaneity.
+ * @returns {boolean}
+ */
+export function adc_dual_latched() {
+    const ret = wasm.adc_dual_latched();
+    return ret !== 0;
+}
+
+/**
  * Force an ADC channel's next conversion(s) to return `value` (clamped to
  * 12-bit) instead of the synthetic temp/vref/vbat/random default. Unlike
  * spi_tap/i2c_register_slave this can be called any time, including after
@@ -522,6 +533,18 @@ export function can_inject_fd(id, data, brs) {
     wasm.can_inject_fd(id, ptr0, len0, brs);
 }
 
+/**
+ * Harness = the wire fault: one error event on the CAN node at `base`
+ * (TEC +8, LEC latched 0-7; BOFF at TEC > 255). `recover=true` models
+ * 128x11 recessive bits (counters + LEC cleared, bus recovered).
+ * @param {number} base
+ * @param {number} lec
+ * @param {boolean} recover
+ */
+export function can_note_error(base, lec, recover) {
+    wasm.can_note_error(base, lec, recover);
+}
+
 export function clear_watchdog_reset_flags() {
     wasm.clear_watchdog_reset_flags();
 }
@@ -544,6 +567,19 @@ export function dcmi_feed_frame(w, h, pixels) {
     const ptr0 = passArray8ToWasm0(pixels, wasm.__wbindgen_export2);
     const len0 = WASM_VECTOR_LEN;
     wasm.dcmi_feed_frame(w, h, ptr0, len0);
+}
+
+/**
+ * Harness = the camera sync lines: drive VSYNC/HSYNC levels and the PCLK
+ * divider. A rising VSYNC edge loads an armed capture (CAPTURE set, frame
+ * fed); HSYNC low holds pixels (horizontal blanking); PCLK div scales
+ * pixels-per-tick (16/div, min 1). Defaults (true, true, 1) = free-run.
+ * @param {boolean} vsync
+ * @param {boolean} hsync
+ * @param {number} pclk_div
+ */
+export function dcmi_set_sync(vsync, hsync, pclk_div) {
+    wasm.dcmi_set_sync(vsync, hsync, pclk_div);
 }
 
 /**
@@ -1114,6 +1150,28 @@ export function flash_take_erase() {
 }
 
 /**
+ * Harness = the NAND flash array: bind an erased (0xFF) backing array of
+ * `size` bytes to FSMC bank `bank` (0-3). Untapped data accesses go to
+ * this array (program clears bits, reads return stored bytes).
+ * @param {number} bank
+ * @param {number} size
+ */
+export function fsmc_bind_nand(bank, size) {
+    wasm.fsmc_bind_nand(bank, size);
+}
+
+/**
+ * Erase `len` bytes at `offset` in FSMC bank `bank` (restore 0xFF) —
+ * the silicon block-erase firmware runs before reprogram.
+ * @param {number} bank
+ * @param {number} offset
+ * @param {number} len
+ */
+export function fsmc_nand_erase(bank, offset, len) {
+    wasm.fsmc_nand_erase(bank, offset, len);
+}
+
+/**
  * Queue values the JS device answers on subsequent bank reads, oldest
  * first. An exhausted queue reads back 0.
  * @param {number} bank
@@ -1497,6 +1555,16 @@ export function qspi_register_flash(name, data) {
 }
 
 /**
+ * Harness = the failing oscillator: mark RCC HSE (bit 0) / PLL (bit 1)
+ * dead or alive. Dead sources read RDY 0 and SWS falls back to HSI.
+ * @param {number} src_mask
+ * @param {boolean} dead
+ */
+export function rcc_inject_failure(src_mask, dead) {
+    wasm.rcc_inject_failure(src_mask, dead);
+}
+
+/**
  * Clear all process-lifetime globals so a NEW emulator instance starts
  * clean.  Must be called before registering that instance's devices.
  * Without it, `ExtDevices` accumulates and a second instance silently binds
@@ -1635,6 +1703,20 @@ export function tick_n(delta) {
  */
 export function tick_peripherals() {
     wasm.tick_peripherals();
+}
+
+/**
+ * Host/JS-driven quadrature step on an encoder-mode timer: one TI edge
+ * (`ti` 0 = TI1, 1 = TI2; `rising` = edge polarity). Counts per the
+ * SMS/polarity rules; no-op outside encoder modes 1-3.
+ * @param {string} name
+ * @param {number} ti
+ * @param {boolean} rising
+ */
+export function tim_encoder_step(name, ti, rising) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.tim_encoder_step(ptr0, len0, ti, rising);
 }
 
 /**

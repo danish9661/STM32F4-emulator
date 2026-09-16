@@ -41,6 +41,11 @@ impl Spi {
     pub fn is_16bits(&self) -> bool { self.cr1 & (1 << 11) != 0 }
     fn is_i2s(&self) -> bool { self.i2scfgr & 1 != 0 } // I2SMOD
 
+    /// Slave mode selected (CR1 MSTR bit 2 clear): stored-only flag —
+    /// transfers still run the master path (no external SCK driver
+    /// exists to gate on). Harness scope probe for the slave substitute.
+    pub fn slave_selected(&self) -> bool { self.cr1 & (1 << 2) == 0 }
+
     fn active_device(&mut self, sys: &System) -> Option<Rc<RefCell<dyn ExtDevice<(), u8>>>> {
         let selected = self.sel_state(sys);
         selected.0.clone()
@@ -154,6 +159,16 @@ impl Peripheral for Spi {
 
     fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
+            // CR1 stores verbatim (MSTR bit 2 selects master/slave, SSM/SSI
+            // software-slave management, LSBFIRST/BR/CPOL/CPHA, CRCEN/CRCNEXT
+            // CRC control, BIDIMODE/BIDIOE, RXONLY). Slave mode (MSTR=0) is
+            // stored but transfers still run the master path: the model has
+            // no external SCK driver, so NSS never gates and DR writes still
+            // clock the attached device (documented substitute — firmware
+            // probing MSTR=0 observes the stored bit + working transfers,
+            // never slave-gated behavior). CRCEN/CRCNEXT store; the CRC
+            // registers (RXCRCR/TXCRCR) are readable/writable storage, never
+            // computed (documented substitute).
             0x0000 => self.cr1 = value,
             0x0004 => {
                 self.cr2 = value;

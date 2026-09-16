@@ -44,6 +44,27 @@ impl Usart {
         })
     }
 
+    /// LIN mode active (CR2 LINEN bit 14): the model stores the bit but
+    /// does not speak LIN — TX/RX run the plain async path (documented
+    /// substitute; firmware enabling LINEN observes stored-bit + working
+    /// async, never LIN break/sync framing).
+    pub fn lin_active(&self) -> bool {
+        self.cr2 & (1 << 14) != 0
+    }
+
+    /// Smartcard mode active (CR3 SCEN bit 5 + NACK bit 4): stored only —
+    /// no T=0/T=1 protocol, no guard-time handling (GTPR stores too).
+    pub fn sc_active(&self) -> bool {
+        self.cr3 & (1 << 5) != 0
+    }
+
+    /// IrDA mode active (CR3 IREN bit 1, IRLP bit 2 = low-power): stored
+    /// only — no 3/16-pulse modulation (the TX byte still sinks to the
+    /// UART console unmodulated; documented substitute).
+    pub fn irda_active(&self) -> bool {
+        self.cr3 & (1 << 1) != 0
+    }
+
     fn update_interrupt(&mut self, sys: &System) {
         let mut pending = false;
         if self.cr1 & (1 << 6) != 0 && self.sr & (1 << 6) != 0 { pending = true; } // TCIE + TC
@@ -107,7 +128,13 @@ impl Peripheral for Usart {
                 self.cr1 = value & 0xFFFF;
                 self.update_interrupt(sys);
             }
+            // CR2: LINEN (bit 14), STOP (13:12), CLKEN/CPOL/CPHA/LBCL,
+            // LBDIE/LBDL/ADD — stored verbatim (LIN mode itself is a
+            // protocol the model does not speak; see lin_active()).
             0x10 => self.cr2 = value & 0xFFFF,
+            // CR3: ONEBIT/CTSIE/CTSE/RTSE/DMAT/DMAR/SCEN/NACK/HDSEL/
+            // IRLP/IREN/EIE — stored verbatim (Smartcard/IrDA modes are
+            // protocols the model does not speak; see sc_active()).
             0x14 => self.cr3 = value & 0xFFFF,
             0x18 => self.gtp = value,
             _ => {}

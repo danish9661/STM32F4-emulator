@@ -121,6 +121,7 @@ impl Can {
         self.tsr |= 1 << (8 + i);                  // TXOK
         self.tsr |= 1 << (16 + i);                 // TME (mailbox empty again)
         self.tsr |= 1 << (31 - 4 * i);             // RQCP (bits 31/27/23)
+        self.note_success(); // clean TX recovers TEC toward 0, clears LEC
         self.fire_interrupts(sys);
     }
 
@@ -241,6 +242,64 @@ impl Can {
         arb + payload_bytes as u64 * rate
     }
 
+    /// Error counters + bus-off state (classic bxCAN, observable subset):
+    /// - TEC/REC live in ESR bits 23:16 / 31:24. The model counts TX
+    ///   completions down toward 0 (errors would count up — the harness
+    ///   drives errors via `can_note_error`, see below); a quiet bus
+    ///   reads 0/0 like silicon after reset.
+    /// - BOFF (ESR bit 2): set when TEC exceeds 255 (classic bus-off
+    ///   entry); cleared when the harness recovers the bus
+    ///   (`can_note_error` with recover=true models 128x11 recessive
+    ///   bits). EPVF (bit 1, TEC/REC > 127) and EWGF (bit 0, > 96)
+    ///   derive live from the counters like silicon.
+    /// - LEC (bits 6:4): last error code, latched by `can_note_error`
+    ///   (0 none, 1 stuff, 2 form, 3 ack, 4 bit-recessive, 5 bit-dominant,
+    ///   6 CRC, 7 custom). Cleared on a clean completion or by writing
+    ///   ESR (silicon: LEC clears on read after a good frame; the write
+    ///   path here mirrors the mock's needs — documented, not silent).
+    pub fn note_error(&mut self, sys: &System, lec: u8, recover: bool) {
+        if recover {
+            self.esr &= !((0xFF << 16) | (0xFF << 24) | (1 << 2) | (7 << 4));
+            self.msr &= !(1 << 2); // clear ERRI-adjacent latched state view
+            self.fire_interrupts(sys);
+            return;
+        }
+        // One error event: TEC +8 (transmit error), LEC latched.
+        let tec = ((self.esr >> 16) & 0xFF).saturating_add(8).min(256);
+        if tec >= 256 {
+            self.esr |= 1 << 2; // BOFF
+            self.esr = (self.esr & !(0xFF << 16)) | (0xFF << 16);
+        } else {
+            self.esr = (self.esr & !(0xFF << 16)) | ((tec & 0xFF) << 16);
+        }
+        self.esr = (self.esr & !(7 << 4)) | ((lec as u32 & 7) << 4);
+        self.fire_interrupts(sys);
+    }
+
+    /// Successful TX completion decrements TEC toward 0 (classic
+    /// error-passive recovery direction) and clears a latched LEC.
+    fn note_success(&mut self) {
+        let tec = (self.esr >> 16) & 0xFF;
+        if tec > 0 {
+            let nt = tec.saturating_sub(1);
+            self.esr = (self.esr & !(0xFF << 16)) | (nt << 16);
+            if nt <= 127 {
+                self.esr &= !(1 << 2); // leave bus-off below threshold
+            }
+        }
+    }
+
+    /// Live ESR view: EPVF/EWGF derived from TEC/REC thresholds (silicon
+    /// computes them continuously; the stored ESR holds TEC/REC/LEC/BOFF).
+    fn esr_live(&self) -> u32 {
+        let mut v = self.esr;
+        let tec = (v >> 16) & 0xFF;
+        let rec = (v >> 24) & 0xFF;
+        if tec > 96 || rec > 96 { v |= 1; } else { v &= !1; } // EWGF
+        if tec > 127 || rec > 127 { v |= 1 << 1; } else { v &= !(1 << 1); } // EPVF
+        v
+    }
+
     /// Test whether `f` passes any filter bank of this node. Filter layout
     /// follows the real F407: 28 global banks (CAN2 uses 14..27), fa1r
     /// enables, fm1r mask/list, fs1r 32/16-bit; masks live in word 2b+1.
@@ -333,7 +392,7 @@ impl Peripheral for Can {
             0x00C => self.rf0r,
             0x010 => self.rf1r,
             0x014 => self.ier,
-            0x018 => self.esr,
+            0x018 => self.esr_live(),
             0x01C => self.btr,
             0x180..=0x1AC => {
                 let i = ((offset - 0x180) / 0x10) as usize;

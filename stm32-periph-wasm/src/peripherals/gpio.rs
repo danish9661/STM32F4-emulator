@@ -76,6 +76,12 @@ impl GpioPorts {
     /// ODR alone on these pins). Nibble data and clocks are electrical-
     /// only: no firmware can sample 25/50 MHz data, so activity levels
     /// are the complete observable contract.
+    ///
+    /// PPS pin mirror (PTP PPS output, RMII AF11-adjacent PB5 on the
+    /// Discovery rig): `eth_pps_pin(sys)` reads the live PPS square-wave
+    /// level (50% duty at the PTPPPSCR rate, TSE-gated) ORed into IDR —
+    /// the firmware-visible "PPS pin itself" (the edge counter stays the
+    /// scope probe; this mirror is what guest code polls).
     pub fn register_eth_mirrors(&mut self) {
         // SYSCFG PMC bit 23: 1 = RMII, 0 = MII.
         fn rmii(sys: &System) -> bool {
@@ -97,6 +103,33 @@ impl GpioPorts {
         self.add_read_callback(Pin::new(2, 1), |_| true); // MDC idle
         self.add_read_callback(Pin::new(0, 3), move |sys: &System| {
             !rmii(sys) && crate::peripherals::eth::eth_mii_signals(sys).2
+        });
+        // PPS pin mirror (PB5): live PPS square-wave level, TSE-gated.
+        // Reads the PTP block WITHOUT the with_ptp slot scan (that scan
+        // borrows every peripheral slot — calling it from inside this
+        // read callback, which itself runs under the GPIO slot borrow
+        // held by the IDR read path, panics "already borrowed"). The
+        // math below duplicates eth_pps_level on the directly-held PTP
+        // block — INCLUDING the ptp_advance(now) freshness step (a pure
+        // residue read goes stale whenever the dashboard is the only
+        // reader: the PTP-block tick may last have run many idle ticks
+        // ago, and eth_pps_level's own advance can't help from here).
+        self.add_read_callback(Pin::new(1, 5), move |sys: &System| {
+            for slot in &sys.p.peripherals {
+                // PTP block: MAC base +0x700 (0x40028700 on F407).
+                if slot.start == 0x4002_8700 {
+                    let mut b = match slot.peripheral.try_borrow_mut() {
+                        Ok(b) => b,
+                        Err(_) => return false,
+                    };
+                    if let Some(mac) = b.as_any_mut().downcast_mut::<crate::peripherals::eth::EthernetMac>() {
+                        mac.ptp_advance(sys, crate::system::instruction_count());
+                        return mac.pps_pin_level();
+                    }
+                    return false;
+                }
+            }
+            false
         });
     }
 

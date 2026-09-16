@@ -108,6 +108,29 @@ impl Peripherals {
 
     /// Mark the PWR peripheral as having woken from low-power (sets CSR WUF).
     /// Called by the emulator when the core resumes after a WFI/WFE halt.
+    /// Whether the last CDR read returned a latched simultaneous pair
+    /// (dual-mode simultaneity scope probe).
+    pub fn adc_dual_latched(&self) -> bool {
+        for slot in &self.peripherals {
+            if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::adc::AdcCommon>() {
+                return u.dual_latched();
+            }
+        }
+        false
+    }
+
+    /// Harness = the failing oscillator: mark RCC HSE (bit 0) / PLL
+    /// (bit 1) dead or alive (SWS falls back to HSI while dead).
+    pub fn rcc_inject_failure(&self, src_mask: u32, dead: bool) {
+        for slot in &self.peripherals {
+            if slot.start == 0x4002_3800 {
+                if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::rcc::Rcc>() {
+                    u.inject_failure(src_mask, dead);
+                }
+                break;
+            }
+        }
+    }
     /// Run a closure on the I2C peripheral with the given base address.
     fn with_i2c<R>(&self, base: u32, f: impl FnOnce(&mut crate::peripherals::i2c::I2c) -> R) -> Option<R> {
         for slot in &self.peripherals {
@@ -136,6 +159,30 @@ impl Peripherals {
     /// Current PEC accumulator of the I2C block at `base` (scope probe).
     pub fn i2c_pec(&self, base: u32) -> u8 {
         self.with_i2c(base, |u| u.pec()).unwrap_or(0)
+    }
+
+    /// Run a closure on the FSMC controller (single instance per map).
+    fn with_fsmc<R>(&self, f: impl FnOnce(&mut crate::peripherals::fsmc::Fsmc) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::fsmc::Fsmc>() {
+                return Some(f(u));
+            }
+        }
+        None
+    }
+
+    /// Harness = the NAND flash array: bind an erased (0xFF) backing array
+    /// of `size` bytes to FSMC bank `bank` (0-3). Data-space accesses
+    /// without a tap go to this array (program clears bits, reads return
+    /// stored bytes); a tap still wins when present.
+    pub fn fsmc_bind_nand(&self, bank: usize, size: usize) {
+        self.with_fsmc(|u| u.bind_nand(bank, size));
+    }
+
+    /// Erase one NAND page (restore 0xFF) at byte `offset`, `len` bytes.
+    /// Models the silicon block-erase (firmware erases before reprogram).
+    pub fn fsmc_nand_erase(&self, bank: usize, offset: usize, len: usize) {
+        self.with_fsmc(|u| u.nand_erase(bank, offset, len));
     }
 
     /// Run a closure on the CAN node whose register block starts at `base`
@@ -167,6 +214,13 @@ impl Peripherals {
     /// arbitration at nominal, FD payload at data rate iff BRS.
     pub fn can_fd_cost(&self, base: u32, fd: bool, brs: bool, payload_bytes: usize) -> u64 {
         self.with_can(base, |u| u.fd_frame_cost(fd, brs, payload_bytes)).unwrap_or(0)
+    }
+
+    /// Harness = the wire fault: one error event on the CAN node at `base`
+    /// (TEC +8, LEC latched; BOFF at TEC > 255). `recover=true` models
+    /// 128x11 recessive bits (bus recovery, counters + LEC cleared).
+    pub fn can_note_error(&self, sys: &System, base: u32, lec: u8, recover: bool) {
+        self.with_can(base, |u| u.note_error(sys, lec, recover));
     }
     /// Run a closure on the ITM stimulus console (multi-port trace drain).
     fn with_itm<R>(&self, f: impl FnOnce(&mut Itm) -> R) -> Option<R> {

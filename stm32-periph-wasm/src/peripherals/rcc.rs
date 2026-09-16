@@ -24,6 +24,9 @@ pub struct Rcc {
     pll_on_inst: u64,
     lsi_on_inst: u64,
     lse_on_inst: u64,
+    /// Harness-injected source failures (see failed()): bit 0 = HSE dead,
+    /// bit 1 = PLL dead. Cleared on the source's ON-bit rising edge.
+    fail_mask: u32,
 }
 
 impl Default for Rcc {
@@ -38,6 +41,7 @@ impl Default for Rcc {
             pll_on_inst: u64::MAX,
             lsi_on_inst: u64::MAX,
             lse_on_inst: u64::MAX,
+            fail_mask: 0,
             pllcfgr: 0, cir: 0,
             ahb1rstr: 0, ahb2rstr: 0, ahb3rstr: 0,
             apb1rstr: 0, apb2rstr: 0,
@@ -59,11 +63,28 @@ impl Rcc {
     fn now(&self) -> u64 { instruction_count() }
 
     fn hse_rdy(&self) -> bool {
+        if self.fail_mask & 1 != 0 {
+            return false; // dead source never locks
+        }
         self.cr & (1 << 16) != 0 && self.now().wrapping_sub(self.hse_on_inst) > 200
     }
 
     fn pll_rdy(&self) -> bool {
+        if self.fail_mask & 2 != 0 {
+            return false;
+        }
         self.cr & (1 << 24) != 0 && self.now().wrapping_sub(self.pll_on_inst) > 400
+    }
+
+    /// Harness = the failing oscillator: mark HSE (`src` bit 0) / PLL
+    /// (bit 1) dead or alive. Dead sources read RDY 0 and SWS falls back
+    /// to HSI; re-enabling the source (CR ON rising) clears the failure.
+    pub fn inject_failure(&mut self, src_mask: u32, dead: bool) {
+        if dead {
+            self.fail_mask |= src_mask & 3;
+        } else {
+            self.fail_mask &= !(src_mask & 3);
+        }
     }
 
     fn build_cr(&mut self) -> u32 {
@@ -79,8 +100,25 @@ impl Rcc {
 
     fn cfgr_with_sws(&self) -> u32 {
         let sw = self.cfgr & 0x3;
+        // SWS mirrors SW — unless a clock failure was injected (see
+        // fail_src): a failed source falls back to HSI (SWS=00) like
+        // silicon's CSS fallback, regardless of SW.
+        if self.failed() != 0 {
+            return (self.cfgr & !0xC) | (0 << 2);
+        }
         // SWS immediately mirrors SW (per reference implementation)
         (self.cfgr & !0xC) | (sw << 2)
+    }
+
+    /// Injected-failed source mask (harness = the failing oscillator):
+    /// bit 0 = HSE dead, bit 1 = PLL dead (lock loss). Set via
+    /// `rcc_inject_failure`; cleared by re-enabling the source (CR
+    /// ON-bit rising edge re-arms the settle window AND clears the
+    /// failure — silicon restarts the oscillator on re-enable).
+    /// While set: RDY reads 0 (no lock on a dead source) and SWS falls
+    /// back to HSI (CSS behavior). Default 0 (sources always lock).
+    fn failed(&self) -> u32 {
+        self.fail_mask
     }
 
     pub fn system_clock_hz(&self) -> u64 {
@@ -180,11 +218,19 @@ impl Peripheral for Rcc {
             0x00 => {
                 let old_hseon = self.cr & (1 << 16);
                 let new_hseon = value & (1 << 16);
-                if old_hseon == 0 && new_hseon != 0 { self.hse_on_inst = instruction_count(); }
+                // Re-enabling a failed source clears the failure (silicon
+                // restarts the oscillator; the settle window re-arms).
+                if old_hseon == 0 && new_hseon != 0 {
+                    self.hse_on_inst = instruction_count();
+                    self.fail_mask &= !1;
+                }
                 if old_hseon != 0 && new_hseon == 0 { self.hse_on_inst = u64::MAX; }
                 let old_pllon = self.cr & (1 << 24);
                 let new_pllon = value & (1 << 24);
-                if old_pllon == 0 && new_pllon != 0 { self.pll_on_inst = instruction_count(); }
+                if old_pllon == 0 && new_pllon != 0 {
+                    self.pll_on_inst = instruction_count();
+                    self.fail_mask &= !2;
+                }
                 if old_pllon != 0 && new_pllon == 0 { self.pll_on_inst = u64::MAX; }
                 self.cr = value;
             }

@@ -3,6 +3,7 @@ sidebar_position: 3
 title: Networking
 description: Ethernet on the emulated F407/F429 — MAC/PHY, filters, PTP, WOL, LwIP sockets, netsim and gateway.
 ---
+
 # Ethernet / Networking — board support matrix
 
 Status (2026-09-14): the Ethernet **MAC level is fully modeled** on every

@@ -87,6 +87,20 @@ impl Dac {
             _ => {}
         }
     }
+
+    /// Physical-sink sample probe (harness scope): the 12-bit value the
+    /// analog pin would carry right now = DOR when the channel is enabled,
+    /// else undriven (None → harness reads "floating"). There is no analog
+    /// pin layer — this is the documented substitute: DOR readback IS the
+    /// sink value (register model real), and firmware polling DOR observes
+    /// exactly what the probe reports.
+    pub fn sink_sample(&self, ch: u8) -> Option<u16> {
+        match ch {
+            1 => if self.cr & 1 != 0 { Some((self.dor1 & 0xFFF) as u16) } else { None },
+            2 => if self.cr & (1 << 16) != 0 { Some((self.dor2 & 0xFFF) as u16) } else { None },
+            _ => None,
+        }
+    }
 }
 
 impl Peripheral for Dac {

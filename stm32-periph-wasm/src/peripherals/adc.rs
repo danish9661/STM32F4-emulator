@@ -19,6 +19,64 @@ fn adc_rand() -> u32 {
 ///   (the dual regular-simultaneous layout; ADC3 has no CDR half).
 pub struct AdcCommon {
     ccr: u32,
+    /// Latched simultaneous pair (dual-mode CDR): (lo, hi, valid).
+    dual_pair: (u16, u16, bool),
+}
+
+impl AdcCommon {
+    /// DUAL field (CCR bits 4:0): 1 = regular-simultaneous, 2 =
+    /// injected-simultaneous; other values = independent mode.
+    fn dual_mode(&self) -> bool {
+        matches!(self.ccr & 0x1F, 1 | 2)
+    }
+
+    /// Both ADC1+ADC2 conversion-ready (EOC set in their SR)?
+    /// Non-consuming: peeks at the stored SR word, never touches DR/SR
+    /// (a CDR read must not consume the conversions it samples — the
+    /// latch holds them until BOTH sides are fresh).
+    fn both_ready(sys: &System) -> bool {
+        let mut ready = [false, false];
+        for slot in &sys.p.peripherals {
+            for (i, base) in [0x4001_2000u32, 0x4001_2100].iter().enumerate() {
+                if slot.start == *base {
+                    let mut b = slot.peripheral.borrow_mut();
+                    if let Some(a) = b.as_any_mut().downcast_mut::<Adc>() {
+                        ready[i] = a.sr_eoc();
+                    }
+                    break;
+                }
+            }
+        }
+        ready[0] && ready[1]
+    }
+
+    /// Sample both DR halves WITHOUT consuming EOC (peek, not a DR read:
+    /// Adc::read(0x4C) clears EOC, which would eat the other side's flag
+    /// mid-sample and the latch could never hold across reads).
+    fn peek_halves(sys: &System) -> (u16, u16) {
+        let mut lo = 0u16;
+        let mut hi = 0u16;
+        for slot in &sys.p.peripherals {
+            if slot.start == 0x4001_2000 {
+                let mut b = slot.peripheral.borrow_mut();
+                if let Some(a) = b.as_any_mut().downcast_mut::<Adc>() {
+                    lo = (a.dr & 0xFFFF) as u16;
+                }
+            } else if slot.start == 0x4001_2100 {
+                let mut b = slot.peripheral.borrow_mut();
+                if let Some(a) = b.as_any_mut().downcast_mut::<Adc>() {
+                    hi = (a.dr & 0xFFFF) as u16;
+                }
+            }
+        }
+        (lo, hi)
+    }
+
+    /// Whether the last CDR read returned a latched simultaneous pair.
+    /// Harness scope probe for dual-mode simultaneity.
+    pub fn dual_latched(&self) -> bool {
+        self.dual_pair.2
+    }
 }
 
 fn adc_irq(name: &str) -> i32 {
@@ -82,6 +140,12 @@ impl Adc {
     }
     fn eoc_enabled(&self) -> bool { self.cr1 & (1 << 5) != 0 }
     fn ovr_enabled(&self) -> bool { self.cr1 & (1 << 4) != 0 }
+    /// EOC flag peek for the common block's non-consuming mirrors
+    /// (CSR/CDR must never clear flags — clearing happens only via the
+    /// ADC's own SR/DR read arms).
+    fn sr_eoc(&self) -> bool { self.sr & (1 << 1) != 0 }
+    /// OVR flag peek (same non-consuming contract as sr_eoc).
+    fn sr_ovr(&self) -> bool { self.sr & (1 << 5) != 0 }
 
     fn fire_interrupts(&mut self, sys: &System) {
         let irq = adc_irq(&self.name);
@@ -445,7 +509,7 @@ impl AdcCommon {
         // F407 SVD names it ADC_Common; the F429 Keil SVD calls the same
         // block C_ADC (same base 0x40012300, same CSR/CCR/CDR layout).
         if name == "ADC_Common" || name == "ADCCommon" || name == "C_ADC" {
-            Some(Box::new(Self { ccr: 0 }))
+            Some(Box::new(Self { ccr: 0, dual_pair: (0, 0, false) }))
         } else {
             None
         }
@@ -453,16 +517,23 @@ impl AdcCommon {
 
     /// CSR bit positions for ADCn (n = 0/1/2): EOC at 1+8n, OVR at 5+8n.
     fn csr_bits(sys: &System) -> u32 {
+        // Read-only mirror of the per-ADC EOC/OVR flags: must NOT consume
+        // them. Clearing happens only via the ADC's own SR/DR reads.
+        // NOTE: this reads the stored flag WORD directly (sr_eoc/sr_ovr),
+        // never the SR read arm (which clears SR) — an early version went
+        // through the arm, so sampling CSR ate both EOCs and the dual CDR
+        // latch could never hold across reads (caught by the mock's
+        // one-sided-reconversion pin, not by review).
         let mut v = 0u32;
         for (i, base) in [0x4001_2000u32, 0x4001_2100, 0x4001_2200].iter().enumerate() {
             for slot in &sys.p.peripherals {
                 if slot.start == *base {
                     let mut b = slot.peripheral.borrow_mut();
                     if let Some(a) = b.as_any_mut().downcast_mut::<Adc>() {
-                        if a.sr & (1 << 1) != 0 {
+                        if a.sr_eoc() {
                             v |= 1 << (1 + 8 * i);
                         }
-                        if a.sr & (1 << 5) != 0 {
+                        if a.sr_ovr() {
                             v |= 1 << (5 + 8 * i);
                         }
                     }
@@ -474,6 +545,15 @@ impl AdcCommon {
     }
 
     /// CDR halves: low = ADC1.DR, high = ADC2.DR.
+    /// Dual regular-simultaneous mode (CCR DUAL[4:0] = 0b00001/0b00010):
+    /// when the common block is in a dual mode AND both ADC1+ADC2 have a
+    /// conversion ready (EOC set), CDR latches the SIMULTANEOUS pair —
+    /// both halves update on the same read (the silicon guarantee: the
+    /// two halves are the same conversion instant). Outside dual mode
+    /// (or with only one side ready) each half follows its own ADC live
+    /// (the old behavior — kept verbatim for the non-dual path).
+    /// `dual_latched` reports whether the last CDR read was a latched
+    /// simultaneous pair (harness scope probe for the simultaneity).
     fn cdr_halves(sys: &System) -> u32 {
         let mut lo = 0u32;
         let mut hi = 0u32;
@@ -502,7 +582,26 @@ impl Peripheral for AdcCommon {
             // own SR read clears them).
             0x00 => Self::csr_bits(sys),
             0x04 => self.ccr,
-            0x08 => Self::cdr_halves(sys),
+            // CDR: dual-mode simultaneous latch when DUAL[4:0] is 1/2 and
+            // both sides are conversion-ready; else live halves. The
+            // latched pair is what makes "simultaneous" observable: two
+            // back-to-back CDR reads return the SAME pair even if a new
+            // conversion lands on one side between them (the latch only
+            // refreshes when both sides are ready again). Sampling is a
+            // peek (no DR read: that would clear EOC and eat the other
+            // side's flag mid-sample, so the latch could never hold).
+            0x08 => {
+                if self.dual_mode() && Self::both_ready(sys) {
+                    let (lo, hi) = Self::peek_halves(sys);
+                    self.dual_pair = (lo, hi, true);
+                    (lo as u32) | ((hi as u32) << 16)
+                } else if self.dual_pair.2 && self.dual_mode() {
+                    (self.dual_pair.0 as u32) | ((self.dual_pair.1 as u32) << 16)
+                } else {
+                    self.dual_pair.2 = false;
+                    Self::cdr_halves(sys)
+                }
+            }
             _ => 0,
         }
     }
@@ -510,7 +609,15 @@ impl Peripheral for AdcCommon {
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
         match offset {
             // CSR is read-only (flags clear via the ADC's own SR).
-            0x04 => self.ccr = value & 0x00FF_FFFF,
+            // CCR: leaving/entering a dual mode drops the latch (fresh
+            // pair required after a mode change — silicon re-arms).
+            0x04 => {
+                let was_dual = self.dual_mode();
+                self.ccr = value & 0x00FF_FFFF;
+                if self.dual_mode() != was_dual {
+                    self.dual_pair.2 = false;
+                }
+            }
             _ => {}
         }
     }

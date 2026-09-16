@@ -625,6 +625,48 @@ pub fn dcmi_clear() {
         *m.lock().unwrap() = None;
     }
 }
+// ── DCMI pin-sync harness levels (VSYNC/HSYNC/PCLK) ──────────────────────
+// The camera's sync lines, driven by the JS hardware layer (or tests):
+// VSYNC high = sensor in-frame (CAPTURE-rising with VSYNC high loads
+// immediately = free-run default); HSYNC high = line-valid (low holds
+// pixels = horizontal blanking); PCLK divider scales pixels-per-tick.
+// Defaults (true, true, 1) reproduce the old free-run behavior exactly.
+static DCMI_SYNC_VSYNC: AtomicBool = AtomicBool::new(true);
+static DCMI_SYNC_HSYNC: AtomicBool = AtomicBool::new(true);
+static DCMI_PCLK_DIV: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+pub(crate) fn dcmi_sync_vsync() -> bool { DCMI_SYNC_VSYNC.load(Ordering::Relaxed) }
+fn dcmi_sync_hsync() -> bool { DCMI_SYNC_HSYNC.load(Ordering::Relaxed) }
+fn dcmi_pclk_div() -> u32 { DCMI_PCLK_DIV.load(Ordering::Relaxed).max(1) }
+/// Harness = the camera: drive VSYNC/HSYNC levels (rising VSYNC edge loads
+/// an armed capture) and the PCLK divider. Returns nothing; the DCMI slot
+/// picks the levels up on its next tick/write.
+pub fn dcmi_set_sync(vsync: bool, hsync: bool, pclk_div: u32) {
+    let prev_vsync = DCMI_SYNC_VSYNC.swap(vsync, Ordering::Relaxed);
+    DCMI_SYNC_HSYNC.store(hsync, Ordering::Relaxed);
+    DCMI_PCLK_DIV.store(pclk_div.max(1), Ordering::Relaxed);
+    // Rising VSYNC edge: deliver to the armed capture (if any).
+    if vsync && !prev_vsync {
+        let sys = crate::sys();
+        for slot in &sys.p.peripherals {
+            let mut b = slot.peripheral.borrow_mut();
+            if let Some(d) = b.as_any_mut().downcast_mut::<crate::peripherals::dcmi::Dcmi>() {
+                d.vsync_edge();
+                // Mirror the levels into the slot too (writes/ticks read
+                // the slot copy; the globals are the handoff).
+                d.set_sync_levels(hsync, pclk_div.max(1));
+            }
+        }
+    } else {
+        // Level-only change: still mirror into the slot.
+        let sys = crate::sys();
+        for slot in &sys.p.peripherals {
+            let mut b = slot.peripheral.borrow_mut();
+            if let Some(d) = b.as_any_mut().downcast_mut::<crate::peripherals::dcmi::Dcmi>() {
+                d.set_sync_levels(hsync, pclk_div.max(1));
+            }
+        }
+    }
+}
 
 pub struct WasmSystem {
     pub p: Rc<Peripherals>,

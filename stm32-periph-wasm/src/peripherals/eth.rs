@@ -389,7 +389,12 @@ impl EthernetMac {
     /// and fire the target interrupt. TSE gates everything, like silicon.
     /// The target latches TSTS (MACSR + DMASR mirror) whether or not the
     /// interrupt is enabled; the IRQ itself needs TSITE and TSTIM.
-    fn ptp_advance(&mut self, sys: &System, now: u64) {
+    /// NOTE: the GPIO PB5 mirror calls pps_pin_level() directly on a
+    /// held borrow (a slot scan inside a peripheral borrow would panic
+    /// "already borrowed"), so the advance must ALSO run there — it does
+    /// (see the IDR arm in gpio.rs). Any new TSE-gated dashboard reader
+    /// must advance first or it will go stale the same way.
+    pub fn ptp_advance(&mut self, sys: &System, now: u64) {
         self.ptp_now_advance(now);
         if self.ptp_target_armed
             && (self.ptp_sec > self.ptp_tsec
@@ -979,6 +984,16 @@ fn with_ptp(sys: &System, f: impl FnOnce(&EthernetMac) -> u64) -> u64 {
         let mut b = slot.peripheral.borrow_mut();
         if let Some(mac) = b.as_any_mut().downcast_mut::<EthernetMac>() {
             if mac.block_id() == 2 {
+                // Advance the PTP clock to the live instruction count
+                // BEFORE the read: ptp_advance only runs on PTP-block
+                // ticks, but TSE-gated dashboard reads (eth_pps_level,
+                // eth_pps_count, ptp_sec/sub) must observe a fresh clock
+                // even when the dashboard is the only reader (e.g. a
+                // scope loop that never touches registers, or a PB5 IDR
+                // read on another block's tick). `now` monotonicity is
+                // guarded inside (saturating elapsed), so double-advance
+                // is a no-op.
+                mac.ptp_advance(sys, crate::system::instruction_count());
                 return f(mac);
             }
         }
@@ -1770,7 +1785,9 @@ pub fn eth_pps_count(sys: &System) -> u32 {
 
 /// Driver entry: PPS pin level (square wave at the PTPPPSCR rate, 50%
 /// duty from the edge residue). The readable model of the PPS output —
-/// a harness samples this like a logic analyzer on the pin.
+/// a harness samples this like a logic analyzer on the pin. Also wired
+/// to the PB5 IDR mirror (see gpio register_eth_mirrors) so guest
+/// firmware polling the pin observes the same level.
 pub fn eth_pps_level(sys: &System) -> bool {    with_ptp(sys, |p| {
         if p.ptptscr & 1 == 0 {
             return 0;
@@ -1781,6 +1798,38 @@ pub fn eth_pps_level(sys: &System) -> bool {    with_ptp(sys, |p| {
         }
         ((p.pps_acc >= (1u64 << (30 - n))) as u64)
     }) != 0
+}
+
+/// GPIO IDR mirror source for the PPS pin (PB5): same level eth_pps_level
+/// reports (TSE-gated 50% square wave). Plain function of PTP state —
+/// safe to call from inside the GPIO read-callback borrow.
+/// (Kept for API compat; the live IDR path calls pps_pin_level() on the
+/// held PTP block directly — this wrapper would re-scan slots and panic
+/// "already borrowed" inside a peripheral borrow, so never call it from
+/// one. It also advances the clock first, so dashboard-vs-mirror reads
+/// in either order agree.)
+pub fn eth_pps_pin(sys: &System) -> bool {
+    eth_pps_level(sys)
+}
+
+impl EthernetMac {
+    /// PPS square-wave level for the PB5 IDR mirror (same math as
+    /// eth_pps_level, callable on a directly-held borrow — no slot scan,
+    /// so no "already borrowed" panic inside GPIO read callbacks).
+    /// TSE-gated ONLY (like eth_pps_level): the PTP tick advances the
+    /// clock whenever TSE is set, regardless of which block ticks, so
+    /// pps_acc is fresh for any block's read path — but NOT for a raw
+    /// eth_pps_level() call that advances nothing (it is a pure read).
+    pub fn pps_pin_level(&self) -> bool {
+        if self.ptptscr & 1 == 0 {
+            return false;
+        }
+        let n = (self.ptpppscr & 0xF) as u32;
+        if n >= 31 {
+            return false;
+        }
+        self.pps_acc >= (1u64 << (30 - n))
+    }
 }
 
 #[cfg(test)]

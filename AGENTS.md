@@ -3893,3 +3893,71 @@ Docs-only follow-up to §32 (no model changes — the 5-gap model code from
   is the real AF-fix payload (3 changed lines). Left uncommitted on
   purpose — commit only the `.hex`/`.bin`/`.elf` side if a clean
   map-regeneration is ever needed.
+
+## 34. Mock-consumer wiring for the §31-gap model code + PTP/PB5 + CSR fixes (2026-09-16)
+
+The §31 model code (HMAC, ADC dual latch, TIM encoder, RCC fail-inject,
+FSMC NAND + wait states, DCMI pin-sync, CAN error counters, PPS PB5
+mirror, PWR stop-regulator, USART/SPI/DAC probes) landed WITHOUT its
+mock-consumer pins — the imports sat unused in
+`site/test_periph_mock_consumer.mjs` and the old NOT-modeled asserts
+(HMAC-ignores-key, encoder-holds, sources-always-lock, TEC-stays-0,
+untapped-reads-0, free-run DCMI) FAILed against the new model. This
+session wired all of it: mock 141 → **168 checks PASS** (169 with t_ulpi, removed below), cargo **217**,
+matrix **156/156**, feat 1/1 both maps (greenboard_all4 green).
+
+- **Probes that needed NO export** (`slave_selected`, `lin/sc/irda_active`,
+  `sink_sample`): model methods existed but were never exported — the mock
+  asserts the MMIO-observable behavior (MSTR stores, mode bits store, DOR
+  mirrors), so no new export was added. Rule: only add a wasm export when
+  the behavior is NOT MMIO-observable (harness-driven inputs like
+  `can_note_error`, or cross-peripheral state like `adc_dual_latched`).
+- **Real bugs found by the wiring** (each caught by the mock, not review):
+  1. **PTP dashboard staleness**: `with_ptp` was a pure read — `ptp_advance`
+     only ran on PTP-block ticks, so scope loops (`eth_pps_level()` with no
+     register traffic) froze. Fix: `with_ptp` advances to the live
+     instruction count first (saturating elapsed = idempotent).
+  2. **PB5 mirror reentrancy**: the GPIO IDR callback runs under the GPIO
+     slot borrow, so it must NOT call the slot-scanning `with_ptp`
+     (panics "already borrowed"). It borrows the PTP block directly
+     (`try_borrow_mut`), advances, and calls `pps_pin_level()` — which is
+     why `ptp_advance` had to go `pub`. Same rule as the existing
+     `pmt_irq62` deferred-drain pattern.
+  3. **PB5/PPS test-phase bug**: two loops 200k inst apart CAN sit in
+     opposite halves of a 32768 Hz square wave — pair mirror+dashboard per
+     sample at the same instant instead of loop-vs-loop "both toggle".
+  4. **ADC CSR mirror consumed EOCs**: `csr_bits` went through the ADC SR
+     read arm (which clears SR), so sampling CSR ate both EOCs and the dual
+     latch could never hold. Added `sr_eoc()`/`sr_ovr()` non-consuming
+     peeks; CSR/CDR mirrors use them, clearing stays on SR/DR read arms.
+  5. **Mock self-consumption trap**: any SR/DR/CR2-trigger read of EITHER
+     ADC between two CDR reads legitimately ends the latched state (EOC
+     clears on SR/DR read) — the reconversion sequence must use write-edge
+     + ticks with NO reads between the CDR pair, else the test pins a
+     REFRESH as HOLD and the failure is the test's.
+- **Docs**: `docs/peripherals.md` rows now describe the live behavior
+  (HMAC FIPS-198, dual latch, encoder, fail-inject, NAND + BUSY, DCMI sync,
+  CAN errors, PB5 mirror) with `wc -l` Loc refreshed; board-doc mock names
+  normalized to the real test fn names (`t_pps`, `t_hash`, `t_rcc`,
+  `t_can_err`, `t_adc_dual`, `t_tim_enc`, `t_fsmc`, `t_dcmi`, …) and
+  re-synced x3 via `tools/sync-docs.mjs` + `sync-website-docs.mjs`.
+- **?v= 34→35** (app.js/doom.js/doom-worker.js vendor literals) for the
+  rebuilt vendor wasm. `pkg/` (nodejs target) rebuilt alongside so both
+  artifacts match the same source.
+- **Removed superseded `t_ulpi`** (per the §33 flag): the viewport-benign-0
+  assert duplicated `t_ulpi_rate` ground (same HS ULPI window, now a real
+  rate report). 169 → 168 checks, still green.
+- **Browser smoke v35: 40/41 PASS, 1 pre-existing FAIL** (`standby_demo`
+  times out in headless Chrome; node `test_standby.mjs` PASSes — the STANDBY
+  sleep path works, the browser harness times out on it. Same single failure
+  class as the pre-removal sweeps in §22, not a v35 regression: blinky, both
+  eth_http maps, usb, dcmi, doom-adjacent presets all green on the new bytes).
+- **CLI check on the rebuilt `pkg/`**: `verify_ethernet.sh` (gateway path)
+  gives eth_test PASS both maps; eth_http/eth_dhcp stall at DHCP→TCP under a
+  2M budget with the gateway's port-forward/DHCP chatter in the log — same
+  behavior class as the documented gateway-timing sensitivity (§10: dead/
+  stale gateway burns budget in DHCP wait). The in-repo netsim path
+  (matrix `test_board_matrix.mjs` + feat probes, both green above) is the
+  authoritative ETH proof; the gateway run needs a quiet box + longer budget
+  before it means anything. `pkg/` (nodejs target) rebuilt alongside so both
+  artifacts match the same source.

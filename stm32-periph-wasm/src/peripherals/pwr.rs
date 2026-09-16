@@ -24,6 +24,10 @@ pub struct Pwr {
     overdrive_en: bool,
     overdrive_sw_en: bool,
     underdrive_en: bool,
+    /// STOP-mode low-power regulator active (LPDS bit 0 or FPDS bit 9
+    /// set in CR): while set, VOSRDY reads 0 (regulator not "ready"
+    /// until wake + settle). Cleared on wake; see the CR write path.
+    stop_regulator: bool,
 }
 // PVD/VOSRDY model note: PLS[7:5] is observable — PVDO (CSR bit 2) follows
 // it against a fixed emulated supply. The emulator has no analog rail, so
@@ -45,6 +49,7 @@ impl Default for Pwr {
             overdrive_en: false,
             overdrive_sw_en: false,
             underdrive_en: false,
+            stop_regulator: false,
         }
     }
 }
@@ -58,8 +63,16 @@ impl Pwr {
     /// the core wakes from a WFI/WFE low-power state so firmware can
     /// confirm the wakeup source by reading PWR->CSR.
     /// NOTE: WUF is CSR bit 0 on silicon (SVD: PWR_CSR.WUF @0; SBF @1).
+    /// Wake also exits the STOP low-power regulator state (LPDS/FPDS):
+    /// VOSRDY re-arms its settle window (flash/regulator need the delay
+    /// before reads are valid), and the stop_regulator latch clears.
     pub fn wakeup(&mut self) {
+        use crate::system::instruction_count;
         self.csr |= 1 << 0;
+        if self.stop_regulator {
+            self.stop_regulator = false;
+            self.vos_settle_until = instruction_count().wrapping_add(1_000);
+        }
     }
 
     /// Enter standby entry bookkeeping (PDDS=1 + SLEEPDEEP WFI path): set
@@ -72,8 +85,14 @@ impl Pwr {
 
     /// Wakeup from standby: set WUF (CSR bit 0). SBF stays set until the
     /// guest clears it via CR CSBF (bit 3) — silicon behavior.
+    /// Like wakeup(), exits the STOP low-power regulator state.
     pub fn wakeup_standby(&mut self) {
+        use crate::system::instruction_count;
         self.csr |= 1 << 0;
+        if self.stop_regulator {
+            self.stop_regulator = false;
+            self.vos_settle_until = instruction_count().wrapping_add(1_000);
+        }
     }
 
     /// Clear WUF (CR CWUF, bit 2) / SBF (CR CSBF, bit 3). Called from the
@@ -105,7 +124,10 @@ impl Peripheral for Pwr {
                 let now = instruction_count();
                 let mut v = self.csr;
                 if self.cr & (1 << 4) != 0 { v &= !(1 << 2); } else { v |= 1 << 2; }
-                if now >= self.vos_settle_until { v |= 1 << 14; } else { v &= !(1 << 14); }
+                // STOP low-power regulator (LPDS/FPDS): VOSRDY reads 0
+                // while the regulator is in low-power (until wake + settle).
+                if self.stop_regulator { v &= !(1 << 14); }
+                else if now >= self.vos_settle_until { v |= 1 << 14; } else { v &= !(1 << 14); }
                 if self.overdrive_en && now >= self.od_settle_until { v |= 1 << 16; } else { v &= !(1 << 16); }
                 if self.overdrive_sw_en && now >= self.odsw_settle_until { v |= 1 << 17; } else { v &= !(1 << 17); }
                 if self.underdrive_en && now >= self.ud_settle_until { v |= 3 << 18; } else { v &= !(3 << 18); }
@@ -124,12 +146,36 @@ impl Peripheral for Pwr {
                 // (VOS[15:14], ODEN/ODSWEN/UDEN[18:16]) so family-header
                 // guests observe the handshake instead of stuck bits.
                 // VOS write re-arms the VOSRDY settle window.
+                //
+                // STOP-mode regulator bits are live, not just stored:
+                // - LPDS (bit 0): low-power regulator in STOP. Observable:
+                //   while STOP is entered with LPDS set, VOSRDY reads 0
+                //   (regulator in low-power, not "ready") until wake +
+                //   settle; the emulator's sleep drain calls pwr_wakeup,
+                //   which starts the VOS settle window like a VOS write.
+                // - FPDS (bit 9): flash power-down in STOP. Observable:
+                //   while set, a post-wake flash access window applies —
+                //   modeled as VOSRDY held 0 for the same settle window
+                //   (flash needs the regulator back before reads are
+                //   valid; silicon guarantees this via the wakeup delay).
+                // Both clear on wake like the low-power state itself.
                 let old_vos = (self.cr >> 14) & 3;
+                let old_lpds = self.cr & 1 != 0;
+                let old_fpds = self.cr & (1 << 9) != 0;
                 self.cr = (self.cr & 0xE000) | (value & 0x1FFF)
                     | (value & (0x3 << 14)) | (value & (0x7 << 16));
                 if ((value >> 14) & 3) != old_vos {
                     self.vos_settle_until =
                         instruction_count().wrapping_add(1_000);
+                }
+                let new_lpds = value & 1 != 0;
+                let new_fpds = value & (1 << 9) != 0;
+                if (new_lpds != old_lpds || new_fpds != old_fpds) && (new_lpds || new_fpds) {
+                    // Entering a low-power STOP flavor: regulator leaves
+                    // "ready" until wake re-arms it (see wakeup()).
+                    self.stop_regulator = true;
+                } else if !new_lpds && !new_fpds {
+                    self.stop_regulator = false;
                 }
                 // Overdrive handshake edges (F429 §5.3): ODEN starts the
                 // ODRDY window; ODSWEN (only after ODRDY) starts the
@@ -196,5 +242,35 @@ mod tests {
         p.write(&sys, 0x00, (1 << 18) | (1 << 8));
         crate::system::INSTRUCTION_COUNT.fetch_add(6_000, Ordering::Relaxed);
         assert_ne!(p.read(&sys, 0x04) & (3 << 18), 0, "UDRDY after settle");
+    }
+
+    #[test]
+    fn stop_regulator_lpds_fpds_hold_vosrdy_until_wake() {
+        use std::sync::atomic::Ordering;
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Pwr::new("PWR").unwrap();
+        let p = boxed.as_any_mut().downcast_mut::<Pwr>().unwrap();
+        // LPDS set: VOSRDY drops at once (regulator in low-power)...
+        p.write(&sys, 0x00, 1 | (1 << 8)); // LPDS + DBP
+        assert_eq!(p.read(&sys, 0x04) & (1 << 14), 0, "VOSRDY 0 with LPDS");
+        // ...and stays 0 across time (no settle elapse while stopped).
+        crate::system::INSTRUCTION_COUNT.fetch_add(50_000, Ordering::Relaxed);
+        assert_eq!(p.read(&sys, 0x04) & (1 << 14), 0, "VOSRDY held 0 while LPDS");
+        // Wake: WUF sets, VOSRDY re-arms its settle window, then returns.
+        p.wakeup();
+        assert_ne!(p.read(&sys, 0x04) & 1, 0, "WUF on wake");
+        assert_eq!(p.read(&sys, 0x04) & (1 << 14), 0, "VOSRDY settling after wake");
+        crate::system::INSTRUCTION_COUNT.fetch_add(2_000, Ordering::Relaxed);
+        assert_ne!(p.read(&sys, 0x04) & (1 << 14), 0, "VOSRDY back after wake settle");
+        // FPDS alone behaves the same (flash power-down in STOP).
+        p.write(&sys, 0x00, (1 << 9) | (1 << 8)); // FPDS + DBP
+        assert_eq!(p.read(&sys, 0x04) & (1 << 14), 0, "VOSRDY 0 with FPDS");
+        p.wakeup_standby();
+        crate::system::INSTRUCTION_COUNT.fetch_add(2_000, Ordering::Relaxed);
+        assert_ne!(p.read(&sys, 0x04) & (1 << 14), 0, "VOSRDY back after standby wake");
+        // Clearing both bits without wake also exits (guest abort path).
+        p.write(&sys, 0x00, 1 << 8);
+        crate::system::INSTRUCTION_COUNT.fetch_add(2_000, Ordering::Relaxed);
+        assert_ne!(p.read(&sys, 0x04) & (1 << 14), 0, "VOSRDY with LPDS/FPDS clear");
     }
 }

@@ -213,10 +213,15 @@ impl Timer {
             return;
         }
         // Encoder modes (SMS=001/010/011): the counter advances ONLY on
-        // TI1/TI2 pin edges, which need the pin layer — with no edges the
-        // counter holds at whatever the guest wrote. (Slave-mode reset /
-        // trigger routing below still applies; only the free-running
-        // time-base is suppressed.)
+        // TI1/TI2 pin edges. Harness = the quadrature source: each call to
+        // `encoder_step` advances (or retreats) the counter by one step,
+        // honoring SMS direction gating (mode 1 = TI1 only, mode 2 = TI2
+        // only, mode 3 = both) and the CCER TI1P/TI2P polarity (inverted
+        // edge counts down in mode 3; in x1 modes polarity selects which
+        // physical edge steps). With no steps the counter holds at
+        // whatever the guest wrote (slave-mode reset/trigger routing
+        // below still applies; only the free-running time-base is
+        // suppressed). (RM0090 §18.3.3.)
         if (self.smcr & 0x7) >= 1 && (self.smcr & 0x7) <= 3 {
             return;
         }
@@ -348,6 +353,57 @@ impl Timer {
             sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
         }
     }
+
+    /// Harness = the quadrature encoder: one TI edge step. `ti` selects
+    /// the input (0 = TI1, 1 = TI2), `rising` the edge polarity.
+    /// - SMS mode 1 (TI1-only): only TI1 steps count; mode 2 (TI2-only):
+    ///   only TI2 steps count; mode 3 (both): every step counts.
+    /// - Direction: CCER TI1P (bit 1) / TI2P (bit 5) invert the sense —
+    ///   a rising edge on an inverted input (or falling on a normal one)
+    ///   counts DOWN in mode 3; x1 modes count UP on their selected edge
+    ///   (rising when non-inverted, falling when inverted) and ignore the
+    ///   other edge. Counter wraps at ARR (up) / 0 (down, reload ARR).
+    /// No-op unless the timer is in an encoder SMS mode.
+    pub fn encoder_step(&mut self, ti: usize, rising: bool) {
+        let sms = (self.smcr & 0x7) as u8;
+        if sms < 1 || sms > 3 {
+            return;
+        }
+        if sms == 1 && ti != 0 {
+            return;
+        }
+        if sms == 2 && ti != 1 {
+            return;
+        }
+        let inverted = if ti == 0 {
+            self.ccer & (1 << 1) != 0 // TI1P
+        } else {
+            self.ccer & (1 << 5) != 0 // TI2P
+        };
+        let up = if sms == 3 {
+            // x2/x4: inverted sense flips direction.
+            rising != inverted
+        } else {
+            // x1: only the selected edge steps (up); other edge ignored.
+            if rising == inverted {
+                return;
+            }
+            true
+        };
+        if up {
+            if self.cnt < self.arr {
+                self.cnt += 1;
+            } else {
+                self.cnt = 0;
+                self.sr |= 1; // UIF on wrap (silicon update event)
+            }
+        } else if self.cnt > 0 {
+            self.cnt -= 1;
+        } else {
+            self.cnt = self.arr;
+            self.sr |= 1;
+        }
+    }
 }
 
 /// Host/JS-driven capture edge: simulate a TIx edge on `name` channel `ch` and
@@ -360,6 +416,19 @@ pub fn tim_inject_capture(sys: &System, name: &str, ch: u32) {
         let Some(t) = b.as_any_mut().downcast_mut::<Timer>() else { continue };
         if t.name == name {
             t.capture_trigger(ch as usize, sys);
+        }
+    }
+}
+
+/// Host/JS-driven quadrature step: one TI edge (`ti` 0 = TI1, 1 = TI2,
+/// `rising` = edge polarity) on the encoder-mode timer `name`. Counts per
+/// SMS/polarity rules in `encoder_step`; no-op outside encoder modes.
+pub fn tim_encoder_step(sys: &System, name: &str, ti: u32, rising: bool) {
+    for slot in &sys.p.peripherals {
+        let mut b = slot.peripheral.borrow_mut();
+        let Some(t) = b.as_any_mut().downcast_mut::<Timer>() else { continue };
+        if t.name == name {
+            t.encoder_step(ti as usize, rising);
         }
     }
 }

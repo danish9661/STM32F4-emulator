@@ -88,6 +88,13 @@ export class WasmCpu {
 export function adc_clear_channel_value(peripheral: string, channel: number): void;
 
 /**
+ * Whether the last ADC CDR read returned a latched simultaneous pair
+ * (dual regular-simultaneous mode with both sides conversion-ready).
+ * Harness scope probe for dual-mode simultaneity.
+ */
+export function adc_dual_latched(): boolean;
+
+/**
  * Force an ADC channel's next conversion(s) to return `value` (clamped to
  * 12-bit) instead of the synthetic temp/vref/vbat/random default. Unlike
  * spi_tap/i2c_register_slave this can be called any time, including after
@@ -171,6 +178,13 @@ export function can_inject(id: number, dlc: number, data: Uint8Array): void;
  */
 export function can_inject_fd(id: number, data: Uint8Array, brs: boolean): void;
 
+/**
+ * Harness = the wire fault: one error event on the CAN node at `base`
+ * (TEC +8, LEC latched 0-7; BOFF at TEC > 255). `recover=true` models
+ * 128x11 recessive bits (counters + LEC cleared, bus recovered).
+ */
+export function can_note_error(base: number, lec: number, recover: boolean): void;
+
 export function clear_watchdog_reset_flags(): void;
 
 /**
@@ -183,6 +197,14 @@ export function dcmi_clear(): void;
  * row-major, width x height). The next CAPTURE start consumes it.
  */
 export function dcmi_feed_frame(w: number, h: number, pixels: Uint8Array): void;
+
+/**
+ * Harness = the camera sync lines: drive VSYNC/HSYNC levels and the PCLK
+ * divider. A rising VSYNC edge loads an armed capture (CAPTURE set, frame
+ * fed); HSYNC low holds pixels (horizontal blanking); PCLK div scales
+ * pixels-per-tick (16/div, min 1). Defaults (true, true, 1) = free-run.
+ */
+export function dcmi_set_sync(vsync: boolean, hsync: boolean, pclk_div: number): void;
 
 /**
  * Blend FG over BG ("over" operator) into the output mode. `fg_alpha`
@@ -469,6 +491,19 @@ export function flash_is_programming(): boolean;
 export function flash_take_erase(): Uint32Array;
 
 /**
+ * Harness = the NAND flash array: bind an erased (0xFF) backing array of
+ * `size` bytes to FSMC bank `bank` (0-3). Untapped data accesses go to
+ * this array (program clears bits, reads return stored bytes).
+ */
+export function fsmc_bind_nand(bank: number, size: number): void;
+
+/**
+ * Erase `len` bytes at `offset` in FSMC bank `bank` (restore 0xFF) —
+ * the silicon block-erase firmware runs before reprogram.
+ */
+export function fsmc_nand_erase(bank: number, offset: number, len: number): void;
+
+/**
  * Queue values the JS device answers on subsequent bank reads, oldest
  * first. An exhausted queue reads back 0.
  */
@@ -638,6 +673,12 @@ export function pwr_wakeup_standby(): void;
 export function qspi_register_flash(name: string, data: Uint8Array): void;
 
 /**
+ * Harness = the failing oscillator: mark RCC HSE (bit 0) / PLL (bit 1)
+ * dead or alive. Dead sources read RDY 0 and SWS falls back to HSI.
+ */
+export function rcc_inject_failure(src_mask: number, dead: boolean): void;
+
+/**
  * Clear all process-lifetime globals so a NEW emulator instance starts
  * clean.  Must be called before registering that instance's devices.
  * Without it, `ExtDevices` accumulates and a second instance silently binds
@@ -705,6 +746,13 @@ export function tick_n(delta: number): void;
  * post-step driver tick must not add the budget a second time.
  */
 export function tick_peripherals(): void;
+
+/**
+ * Host/JS-driven quadrature step on an encoder-mode timer: one TI edge
+ * (`ti` 0 = TI1, 1 = TI2; `rising` = edge polarity). Counts per the
+ * SMS/polarity rules; no-op outside encoder modes 1-3.
+ */
+export function tim_encoder_step(name: string, ti: number, rising: boolean): void;
 
 /**
  * Host/JS-driven TIM input-capture edge. Simulate a TIx edge on timer `name`
@@ -851,6 +899,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wasmcpu_free: (a: number, b: number) => void;
     readonly adc_clear_channel_value: (a: number, b: number, c: number) => void;
+    readonly adc_dual_latched: () => number;
     readonly adc_set_channel_value: (a: number, b: number, c: number, d: number) => void;
     readonly adc_take_dma: (a: number) => void;
     readonly add_i2c_eeprom: (a: number, b: number, c: number, d: number, e: number) => void;
@@ -865,9 +914,11 @@ export interface InitOutput {
     readonly can_fd_len: (a: number, b: number, c: number) => number;
     readonly can_inject: (a: number, b: number, c: number, d: number) => void;
     readonly can_inject_fd: (a: number, b: number, c: number, d: number) => void;
+    readonly can_note_error: (a: number, b: number, c: number) => void;
     readonly clear_watchdog_reset_flags: () => void;
     readonly dcmi_clear: () => void;
     readonly dcmi_feed_frame: (a: number, b: number, c: number, d: number) => void;
+    readonly dcmi_set_sync: (a: number, b: number, c: number) => void;
     readonly dma2d_blend: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => void;
     readonly dma2d_convert: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly dma2d_job_done: () => void;
@@ -921,6 +972,8 @@ export interface InitOutput {
     readonly flash_erase_applied: () => void;
     readonly flash_is_programming: () => number;
     readonly flash_take_erase: (a: number) => void;
+    readonly fsmc_bind_nand: (a: number, b: number) => void;
+    readonly fsmc_nand_erase: (a: number, b: number, c: number) => void;
     readonly fsmc_push_data: (a: number, b: number, c: number) => void;
     readonly fsmc_take_events: (a: number, b: number) => void;
     readonly fsmc_tap: (a: number) => void;
@@ -953,6 +1006,7 @@ export interface InitOutput {
     readonly pwr_wakeup: () => void;
     readonly pwr_wakeup_standby: () => void;
     readonly qspi_register_flash: (a: number, b: number, c: number, d: number) => void;
+    readonly rcc_inject_failure: (a: number, b: number) => void;
     readonly reset_state: () => void;
     readonly rng_entropy_avail: () => number;
     readonly rng_seed_entropy: (a: number, b: number) => void;
@@ -964,6 +1018,7 @@ export interface InitOutput {
     readonly tick: () => void;
     readonly tick_n: (a: number) => void;
     readonly tick_peripherals: () => void;
+    readonly tim_encoder_step: (a: number, b: number, c: number, d: number) => void;
     readonly tim_inject_capture: (a: number, b: number, c: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;
     readonly usb_dma_progress: (a: number, b: number) => void;

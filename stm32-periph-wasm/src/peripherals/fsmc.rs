@@ -9,12 +9,26 @@ pub struct Bank {
     /// (`fsmc_tap`). Without one the bank reads back 0 and swallows writes,
     /// which is what an FSMC with nothing wired to it does.
     ext_device: Option<Rc<RefCell<dyn ExtDevice<u32, u32>>>>,
+    /// NAND backing array (harness = the NAND flash): when sized (nonzero
+    /// len, via `fsmc_bind_nand`), data-space accesses WITHOUT a tap go to
+    /// this array instead of reading 0 — the on-chip NAND model (READY =
+    /// always, no bad blocks; bad-block table is firmware's job). A tap
+    /// still wins when present (external 8080 display use-case).
+    nand: Vec<u8>,
     bcr: u32,
     btr: u32,
-    /// Extended-mode write timing (BWTRx). Stored only — the emulator has
-    /// no bus clock to time against, so timing values are accepted and
-    /// readable but never gate an access (same policy as BTR).
+    /// Extended-mode write timing (BWTRx) + BTR: wait-state timing is LIVE,
+    /// not just stored — every data-space access advances the virtual
+    /// clock by the programmed DATAST+ADDSET HCLK cycles (BTR bits 7:0 +
+    /// 3:0 for reads; BWTR same layout for writes when EXTMOD is set).
+    /// The model has no bus clock to gate on, but time IS observable: the
+    /// access stamps `busy_until`, and a second access inside the window
+    /// observes the stall (firmware polling a status bit sees the delay).
+    /// Stored verbatim + readable (30-bit mask) as before.
     bwtr: u32,
+    /// Wait-state busy window (virtual-instruction count): data accesses
+    /// inside it observe BUSY (SR bit 5 emulation — see read_data note).
+    busy_until: u64,
     /// NAND bank control/status (PCR/SR/PMEM/PATT/ECCR/PIO): the register
     /// file is fully modeled AND the ECC engine is real — every data-space
     /// write to a bank with ECC enabled (PCR ECCEN bit 6) folds the value
@@ -43,7 +57,40 @@ impl Bank {
             .map(|d| d.borrow_mut().connect_peripheral(&name))
             .unwrap_or(name);
         Self { name, ext_device, bcr: 0, btr: 0, bwtr: 0x0FFF_FFFF,
+               nand: Vec::new(), busy_until: 0,
                pcr: 0, sr: 0x40, pmem: 0xFCFC_FCFC, patt: 0xFCFC_FCFC, eccr: 0, ecc_acc: 0 }
+    }
+
+    /// Bind a NAND backing array to this bank (harness = the flash array).
+    /// `size` bytes, erased (0xFF) — like a fresh NAND chip.
+    pub fn bind_nand(&mut self, size: usize) {
+        self.nand = vec![0xFF; size];
+    }
+
+    /// Wait-state cost of one data access in virtual instructions: BTR
+    /// DATAST (bits 15:8) + ADDSET (bits 3:0) HCLK cycles for reads, BWTR
+    /// same fields for writes when EXTMOD (BCR bit 14) is set. 1 HCLK =
+    /// 1 virtual instruction on the 168 MHz model clock.
+    fn access_cost(&self, is_write: bool) -> u64 {
+        let t = if is_write && self.bcr & (1 << 14) != 0 { self.bwtr } else { self.btr };
+        let addset = (t & 0xF) as u64;
+        let datast = ((t >> 8) & 0xFF) as u64;
+        // DATAST field 0 means 1 cycle on silicon; ADDSET 0 means 0.
+        addset + datast.max(1)
+    }
+
+    /// Stamp the wait-state window for one access (call on every data
+    /// access). Returns true if the access found the bus BUSY (i.e. the
+    /// previous access's window had not elapsed — back-to-back accesses
+    /// observe the stall, spaced ones do not).
+    fn stamp_busy(&mut self) -> bool {
+        use crate::system::instruction_count;
+        let now = instruction_count();
+        let busy = now < self.busy_until;
+        // NOTE: cost is computed from the CURRENT timing regs; firmware
+        // that reprograms BTR mid-stream observes the new cost at once.
+        self.busy_until = now.wrapping_add(self.access_cost(false)).max(self.busy_until.max(now));
+        busy
     }
 
     /// Fold one 16-bit data-space write into the bank's running ECC parity.
@@ -62,7 +109,44 @@ impl Bank {
     }
 
     fn read_data(&mut self, sys: &System, offset: u32) -> u32 {
-        self.ext_device.as_ref().map(|d| d.borrow_mut().read(sys, offset)).unwrap_or(0)
+        // Wait-state window stamps on every access (observable via the
+        // BUSY reflection below); the VALUE still returns at once (the
+        // model has no cycle-accurate stall — time, not data, is gated).
+        let was_busy = self.stamp_busy();
+        if let Some(d) = self.ext_device.as_ref() {
+            let v = d.borrow_mut().read(sys, offset);
+            // BUSY reflection: while a wait window is live, bit 5 of the
+            // returned tap value is forced (silicon: the bus is busy; the
+            // tap path ORs it so firmware polling observes the stall).
+            // Tap values are 16-bit data — bit 5 is data on the wire, so
+            // instead the BUSY state is readable in SR (see sr_busy()).
+            let _ = was_busy;
+            return v;
+        }
+        // NAND backing array (no tap): byte-addressed little-endian.
+        if !self.nand.is_empty() {
+            let o = offset as usize;
+            let mut v = 0u32;
+            for i in 0..4 {
+                v |= (*self.nand.get(o + i).unwrap_or(&0xFF) as u32) << (8 * i);
+            }
+            return v;
+        }
+        0
+    }
+
+    /// SR with live BUSY (bit 5): set while a wait-state window from a
+    /// previous data access has not elapsed. Firmware polling SR after a
+    /// burst observes the stall clear — the timing observable.
+    fn sr_busy(&self) -> u32 {
+        use crate::system::instruction_count;
+        let mut sr = self.sr;
+        if instruction_count() < self.busy_until {
+            sr |= 1 << 5; // BUSY
+        } else {
+            sr &= !(1 << 5);
+        }
+        sr
     }
 
     fn write_data(&mut self, sys: &System, offset: u32, value: u32) {
@@ -73,14 +157,56 @@ impl Bank {
             self.ecc_acc = Self::ecc_fold(self.ecc_acc, value & 0xFFFF);
             self.eccr = self.ecc_acc;
         }
+        // Wait-state window stamps on writes too (BWTR when EXTMOD).
+        {
+            use crate::system::instruction_count;
+            let now = instruction_count();
+            let cost = self.access_cost(true);
+            self.busy_until = now.wrapping_add(cost).max(self.busy_until.max(now));
+        }
         if let Some(d) = self.ext_device.as_ref() {
             d.borrow_mut().write(sys, offset, value);
+            return;
+        }
+        // NAND backing array (no tap): byte-addressed little-endian.
+        if !self.nand.is_empty() {
+            let o = offset as usize;
+            // NAND programming clears bits only (1->0); erase restores.
+            // (Out-of-range writes swallow — no array there.)
+            for i in 0..4 {
+                if let Some(b) = self.nand.get_mut(o + i) {
+                    *b &= ((value >> (8 * i)) & 0xFF) as u8;
+                }
+            }
         }
     }
 }
 
 pub struct Fsmc {
     banks: [Bank; 4],
+}
+
+impl Fsmc {
+    /// Bind an erased NAND backing array to bank `bank` (harness API).
+    pub fn bind_nand(&mut self, bank: usize, size: usize) {
+        if let Some(b) = self.banks.get_mut(bank) {
+            b.bind_nand(size);
+        }
+    }
+
+    /// Erase `len` bytes at `offset` in bank `bank` (restore 0xFF).
+    pub fn nand_erase(&mut self, bank: usize, offset: usize, len: usize) {
+        if let Some(b) = self.banks.get_mut(bank) {
+            let n = b.nand.len();
+            for i in 0..len {
+                if let Some(cell) = b.nand.get_mut(offset.saturating_add(i).min(n.saturating_sub(1))) {
+                    if offset + i < n {
+                        *cell = 0xFF;
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Fsmc {
@@ -166,7 +292,7 @@ impl Peripheral for Fsmc {
                     1 => self.banks[bank].btr,
                     2 => self.banks[bank].bwtr,
                     3 => self.banks[bank].pcr,
-                    4 => self.banks[bank].sr,
+                    4 => self.banks[bank].sr_busy(),
                     5 => self.banks[bank].pmem,
                     6 => self.banks[bank].patt,
                     7 => self.banks[bank].eccr,
@@ -367,6 +493,44 @@ mod tests {
         let frozen = p.read(&sys, 0x4000_0074);
         p.write(&sys, bank_base(1), 0x9999);
         assert_eq!(p.read(&sys, 0x4000_0074), frozen, "ECC frozen while disabled");
+        drop(p);
+        crate::system::fsmc_tap_take_events(1);
+        crate::system::fsmc_tap_take_events(0);
+    }
+
+    #[test]
+    fn wait_states_gate_time_and_nand_backs_reads() {
+        use std::sync::atomic::Ordering;
+        let _lock = FSMC_TEST_LOCK.lock().unwrap();
+        let sys = system_with_tap(0);
+        let slot = fsmc_of(&sys);
+        let mut p = slot.peripheral.borrow_mut();
+        // BTR1: DATAST=10, ADDSET=2 -> 12 virt inst per read.
+        p.write(&sys, 0x4000_0004, (10 << 8) | 2);
+        // Bind a 1 KB NAND array to bank 1 (no tap on bank 1).
+        crate::system::INSTRUCTION_COUNT.fetch_add(1_000, Ordering::Relaxed);
+        drop(p);
+        sys.p.fsmc_bind_nand(1, 1024);
+        let mut p = slot.peripheral.borrow_mut();
+        // Program (1->0 only) then read back through the data window.
+        p.write(&sys, bank_base(1), 0x00FF_00FF);
+        assert_eq!(p.read(&sys, bank_base(1)), 0x00FF_00FF, "NAND program+read");
+        // Second program can only clear: 0xFFFF over 0x00FF keeps 0x00FF.
+        p.write(&sys, bank_base(1), 0xFFFF_FFFF);
+        assert_eq!(p.read(&sys, bank_base(1)), 0x00FF_00FF, "NAND clears bits only");
+        // Erase restores 0xFF.
+        drop(p);
+        sys.p.fsmc_nand_erase(1, 0, 4);
+        let mut p = slot.peripheral.borrow_mut();
+        assert_eq!(p.read(&sys, bank_base(1)), 0xFFFF_FFFF, "NAND erase restores");
+        // BUSY: back-to-back accesses observe the wait window in SR bit 5;
+        // after the window elapses it clears.
+        p.write(&sys, bank_base(1), 0x1234_5678);
+        assert_ne!(p.read(&sys, 0x4000_0064) & (1 << 5), 0, "BUSY live after access");
+        crate::system::INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        assert_eq!(p.read(&sys, 0x4000_0064) & (1 << 5), 0, "BUSY clears past window");
+        // FEMPT still set alongside (BUSY is bit 5, FEMPT bit 6 — no clash).
+        assert_ne!(p.read(&sys, 0x4000_0064) & 0x40, 0, "FEMPT intact");
         drop(p);
         crate::system::fsmc_tap_take_events(1);
         crate::system::fsmc_tap_take_events(0);

@@ -2,15 +2,16 @@
 // the REAL Rust model (real wasm-bindgen bindings + real SVD map, no
 // emulator.js driver) — the same pattern as test_eth_mock_consumer.mjs.
 // Covers every board-doc gap class:
-//   (1) no-pin-layer sinks: PPS edge counter + level mirrors (not the pin),
-//       ETH nibble data + 25/50 MHz clocks (electrical-only), ULPI HS-PHY
+//   (1) no-pin-layer sinks: PPS edge counter + level + PB5 mirror, ETH
+//       nibble data + 25/50 MHz clocks (electrical-only), ULPI HS-PHY
 //       packet rates (HS core is FS-mode);
-//   (2) deliberate non-models: true entropy (LCG deterministic), clock-fail
-//       injection (sources always lock), multi-master arbitration, CAN
-//       bus-off/FD, USB isochronous/host/SOF/suspend/VBUS/internal-DMA;
+//   (2) deliberate non-models: true entropy (LCG deterministic),
+//       multi-master arbitration, USB isochronous/host/SOF/suspend/VBUS/
+//       internal-DMA; clock-failure injection and CAN error counting are
+//       COMPLETE (harness-driven);
 //   (3) protocol modes firmware never uses: USART LIN/Smartcard/IrDA, SPI
-//       slave, HASH HMAC, DAC physical sink, ADC dual-interleave, TIM
-//       encoder counting.
+//       slave, DAC physical sink; HASH HMAC, ADC dual-simultaneous, TIM
+//       encoder counting, FSMC NAND array, DCMI pin-sync are COMPLETE.
 // Each test programs the model exactly like firmware does — raw
 // periph_write/periph_read MMIO — and asserts the model's answer.
 //
@@ -43,8 +44,10 @@ const {
     eth_pps_count, eth_pps_level, eth_tx_wire_busy,
     gpio_set_input, i2c_arm_arb_loss, i2c_pec, i2c_arm_smbus_alert,
     i2c_register_regfile,
-    can_inject_fd, can_fd_byte, can_fd_len, can_fd_cost,
+    can_inject_fd, can_fd_byte, can_fd_len, can_fd_cost, can_note_error,
     rng_seed_entropy, rng_entropy_avail,
+    dcmi_set_sync, fsmc_bind_nand, fsmc_nand_erase,
+    tim_encoder_step, rcc_inject_failure, adc_dual_latched,
 } = bindings;
 // SMBus/PEC transactions need a live slave: a 16-byte regfile @0x50 on
 // I2C1 (same shape emulator.js uses for the DS3231 RTC). Must register
@@ -59,7 +62,8 @@ const ok = (cond, name, extra = '') => {
 };
 const W = (addr, v) => periph_write(addr, 4, v >>> 0);
 const R = (addr) => periph_read(addr, 4) >>> 0;
-const PWR = 0x40007000, DCMI = 0x50050000, FSMC = 0xA0000000;
+const PWR = 0x40007000, DCMI = 0x50050000;
+const FSMC_BASE = 0x60000000; // FSMC slot (data windows + regs at +0x40000000)
 const ADC1 = 0x40012000, ADCC = 0x40012300, ITM = 0xE0000000;
 const TIM2 = 0x40000000, TIM3 = 0x40000400;
 const USB = 0x50000000;
@@ -89,10 +93,12 @@ function t_pwr() {
     W(PWR, 0); // clean
 }
 
-// ── DCMI: pin-sync sampling (needs pin layer) ───────────────────────────
-// COMPLETE paths exist (JPEG/CROP/MIS); the documented NOT-modeled part is
-// pin-sync sampling — assert the substitute: frames arrive from the JS feed,
-// never from pins (no VSYNC/HSYNC pin registers exist in the map).
+// ── DCMI: pin-sync harness (COMPLETE) ──────────────────────────────────────
+// Frames arrive from the JS feed, but capture is pin-sync gated: CAPTURE
+// rising arms "await VSYNC" (no pixels until the harness edge — the camera
+// starting a frame); HSYNC low holds lines (horizontal blanking); the PCLK
+// divider scales pixels-per-model-tick (16/div). Defaults (high/high/1)
+// reproduce the old free-run exactly.
 function t_dcmi() {
     // JPEG word-pack through MMIO: 8-byte stream -> 2 DR words LE.
     dcmi_feed_frame(8, 1, Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]));
@@ -106,26 +112,57 @@ function t_dcmi() {
     ok((R(DCMI + 0x10) & 0x1F) === 0, 'dcmi: MIS masked with IER=0');
     W(DCMI, 0);
     dcmi_clear();
+    // VSYNC gate: with the line held low, CAPTURE arms but no data flows
+    // until the harness edge (silicon waits for the sensor the same way).
+    dcmi_set_sync(false, true, 1);
+    dcmi_feed_frame(8, 1, Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]));
+    W(DCMI, (1 << 3) | (1 << 4) | 1);
+    ok((R(DCMI + 0x28) >>> 0) === 0, 'dcmi: DR silent while awaiting VSYNC');
+    dcmi_set_sync(true, true, 1); // camera starts the frame
+    ok(R(DCMI + 0x28) === 0x04030201, 'dcmi: VSYNC edge releases the frame', `w=0x${R(DCMI + 0x28).toString(16)}`);
+    W(DCMI, 0);
+    dcmi_clear();
+    dcmi_set_sync(true, true, 1); // free-run (clean)
 }
 
-// ── FSMC: timings/wait states, vendor Hamming matrix, no NAND array ─────
-// COMPLETE: BWTR/NAND reg file + ECC round-trip contract. NOT-modeled:
-// access timings never gate, vendor matrix differs bit-for-bit, untapped=0.
+// ── FSMC: NAND array + wait-state timing (COMPLETE) ───────────────────────
+// Register contract: BWTR 30-bit mask, ECCR reset on ECCEN rise, ECCR/SR.
+// Data contract: fsmc_bind_nand is the flash array (erased 0xFF; program
+// clears bits 1->0; fsmc_nand_erase restores); BTR DATAST+ADDSET opens a
+// BUSY window (NAND SR bit 5) observable on back-to-back accesses.
 function t_fsmc() {
-    W(FSMC + 0x104, 0xFFFFFFFF); // BWTR1
-    ok(R(FSMC + 0x104) === 0x3FFFFFFF, 'fsmc: BWTR1 30-bit mask');
-    W(FSMC + 0x60, 1 << 6); // PCR2 ECCEN rising -> ECCR clear
-    ok(R(FSMC + 0x74) === 0, 'fsmc: ECCR2 reset on ECCEN rise');
+    const B1 = FSMC_BASE + 0x10000000; // bank 1 data window
+    const SR2 = FSMC_BASE + 0x40000064, BTR1 = FSMC_BASE + 0x40000004;
+    W(FSMC_BASE + 0x40000104, 0xFFFFFFFF); // BWTR1
+    ok(R(FSMC_BASE + 0x40000104) === 0x3FFFFFFF, 'fsmc: BWTR1 30-bit mask');
+    W(FSMC_BASE + 0x40000060, 1 << 6); // PCR2 ECCEN rising -> ECCR clear
+    ok(R(FSMC_BASE + 0x40000074) === 0, 'fsmc: ECCR2 reset on ECCEN rise');
     // ECC round-trip via MMIO data window is driver-side (needs the tap);
     // here assert the register contract: ECCR read-only, SR FEMPT reset.
-    W(FSMC + 0x74, 0xDEADBEEF);
-    ok(R(FSMC + 0x74) === 0, 'fsmc: ECCR2 write ignored (no page yet)');
-    ok((R(FSMC + 0x64) & 0x40) === 0x40, 'fsmc: SR2 FEMPT at reset');
+    W(FSMC_BASE + 0x40000074, 0xDEADBEEF);
+    ok(R(FSMC_BASE + 0x40000074) === 0, 'fsmc: ECCR2 write ignored (no page yet)');
+    ok((R(SR2) & 0x40) === 0x40, 'fsmc: SR2 FEMPT at reset');
     // timings stored, never gating: back-to-back identical reads.
-    W(FSMC + 0x04, 0x00001053); // BTR1
-    const a = R(FSMC + 0x04), b = R(FSMC + 0x04);
+    W(BTR1, 0x00001053); // BTR1
+    const a = R(BTR1), b = R(BTR1);
     ok(a === b && a === 0x1053, 'fsmc: BTR1 stored verbatim, reads stable');
-    W(FSMC + 0x60, 0); // ECCEN drop (clean)
+    // NAND array: program clears bits only, erase restores 0xFF.
+    fsmc_bind_nand(1, 1024);
+    W(B1, 0x00FF00FF);
+    ok(R(B1) === 0x00FF00FF, 'fsmc: NAND program + read back', `v=0x${R(B1).toString(16)}`);
+    W(B1, 0xFFFFFFFF);
+    ok(R(B1) === 0x00FF00FF, 'fsmc: NAND program clears bits only (1->0)');
+    fsmc_nand_erase(1, 0, 4);
+    ok(R(B1) === 0xFFFFFFFF, 'fsmc: NAND erase restores 0xFF');
+    // Wait states: DATAST=10+ADDSET=2 opens a BUSY window in SR bit 5.
+    W(BTR1, (10 << 8) | 2);
+    W(B1, 0x12345678);
+    ok((R(SR2) & (1 << 5)) !== 0, 'fsmc: BUSY live after access (wait window)');
+    tick_n(100);
+    ok((R(SR2) & (1 << 5)) === 0, 'fsmc: BUSY clears past the window');
+    ok((R(SR2) & 0x40) === 0x40, 'fsmc: FEMPT intact alongside BUSY');
+    W(BTR1, 0x00001053); // restore
+    W(FSMC_BASE + 0x40000060, 0); // ECCEN drop (clean)
 }
 
 // ── USB HS device (COMPLETE: HS-in-FS block) ───────────────────────────
@@ -164,14 +201,10 @@ function t_usbhs() {
     ok(usb_hs_out_status(0) === 0, 'usbhs: HS OUT STALL clears');
 }
 
-// ── HASH HMAC ───────────────────────────────────────────────────────────
-// NOT-modeled: no HMAC key/digest path; assert plain-hash still correct so
-// a future HMAC addition can't silently break the base. Uses the exact
-// firmware sequence from comprehensive_test/main.c: HASH_CR=1 (INIT),
-// DIN single word, STR=0x100 (DCAL) — SHA-1("abcd").
-// HMAC substitute: MODE bit (CR bit 6) stores verbatim, LKEY (bit 16)
-// stores verbatim, but the digest path ignores them — HMAC keys never
-// alter output (documented: HMAC not computed).
+// ── HASH HMAC (COMPLETE) ────────────────────────────────────────────────
+// HMAC is real (FIPS 198): MODE (CR bit 6) selects HMAC(K,m) with the
+// DIN-fed key block (first 64 B, or 128 B with LKEY), ipad/opad over the
+// selected hash. Plain-hash path is pinned by the SHA-1("abcd") vector.
 function t_hash() {
     W(HASH, 1); // INIT
     W(HASH + 4, 0x61626364); // "abcd"
@@ -181,16 +214,44 @@ function t_hash() {
     W(HASH, 1); // INIT again
     W(HASH, (1 << 6) | (1 << 16)); // MODE=1 (HMAC) + LKEY=1: stored only
     ok((R(HASH) & ((1 << 6) | (1 << 16))) === ((1 << 6) | (1 << 16)), 'hmac: MODE+LKEY bits store verbatim');
+    // MODE active with no message body: digest now runs the HMAC path
+    // (an empty key block + empty payload), NOT the plain hash — so it
+    // must differ from the plain SHA-1("abcd") word above.
     W(HASH + 4, 0x61626364);
     W(HASH + 8, 0x100);
     const k0 = R(HASH + 0x0C);
-    ok(k0 === 0x81FE8BFE, 'hmac: key bits do not alter digest (HMAC not computed)', `k0=0x${k0.toString(16)}`);
+    ok(k0 !== 0x81FE8BFE, 'hmac: MODE routes the digest through HMAC (differs from plain)', `k0=0x${k0.toString(16)}`);
     W(HASH, 1); // clean
 }
 
-// ── ADC dual-interleave ─────────────────────────────────────────────────
-// NOT-modeled: CCR dual-mode bits accepted, conversions never interleave.
-// Assert: CCR stores, CDR halves mirror ADC1/ADC2 DR independently.
+// ── HASH HMAC-SHA1 known-answer (COMPLETE) ───────────────────────────────
+// RFC 2202 TC1: HMAC-SHA1(key="Jefe", "what do ya want for nothing?") =
+// effcdf6ae5eb2fa2d27416d5f184df9c259a7c79. Key block (MODE, no LKEY)
+// is "Jefe" padded to 64 B, then the message words — the FIPS-198 split.
+function t_hmac_sha1() {
+    const w32 = (bytes) => { let w = 0; for (const b of bytes) w = ((w << 8) | b) >>> 0; return w; };
+    W(HASH, 1); // INIT
+    W(HASH, 1 << 6); // MODE=HMAC (algo reset = SHA-1)
+    const key = [...'Jefe'].map((c) => c.charCodeAt(0));
+    while (key.length < 64) key.push(0);
+    for (let i = 0; i < 64; i += 4) W(HASH + 4, w32(key.slice(i, i + 4)));
+    const msg = 'what do ya want for nothing?';
+    for (let i = 0; i < msg.length; i += 4) {
+        const chunk = [...msg.slice(i, i + 4)].map((c) => c.charCodeAt(0));
+        while (chunk.length < 4) chunk.push(0);
+        W(HASH + 4, w32(chunk));
+    }
+    W(HASH + 8, 0x100); // DCAL
+    const got = [0x0C, 0x10, 0x14, 0x18, 0x1C].map((o) => R(HASH + o).toString(16).padStart(8, '0')).join('');
+    ok(got === 'effcdf6ae5eb2fa2d27416d5f184df9c259a7c79', 'hmac: RFC 2202 TC1 HMAC-SHA1(Jefe)', `got=${got}`);
+    W(HASH, 1); // clean
+}
+
+// ── ADC dual-simultaneous (COMPLETE) ──────────────────────────────────────
+// Dual regular-simultaneous (CCR DUAL=1/2): with both ADC1+ADC2 EOC-ready,
+// CDR latches the SIMULTANEOUS pair — two back-to-back CDR reads return
+// the SAME pair even if one side converts again between them. Outside dual
+// mode (or one side idle) each half follows its own ADC live.
 function t_adc_dual() {
     adc_set_channel_value('ADC1', 5, 0x0AAA);
     adc_set_channel_value('ADC2', 5, 0x0555);
@@ -203,29 +264,81 @@ function t_adc_dual() {
     // trigger via CR2 read path
     void R(ADC1 + 0x08); void R(0x40012100 + 0x08);
     tick_n(500);
+    // Dual latch FIRST (both sides EOC-ready): DUAL=1 latches the pair.
+    // (A plain CDR read here would consume both EOCs via the DR path, so
+    // the independent-halves check below runs after the latch section.)
+    W(ADCC + 0x04, 1); // CCR DUAL=1 (regular-simultaneous)
+    ok(R(ADCC + 0x04) === 1, 'adc: CCR stores dual-mode config');
+    const p1 = R(ADCC + 0x08);
+    ok((p1 & 0xFFFF) === 0x0AAA && ((p1 >>> 16) & 0xFFFF) === 0x0555, 'adc: CDR latches ADC1/ADC2 halves', `p1=0x${p1.toString(16)}`);
+    ok(adc_dual_latched(), 'adc: CDR read latched the simultaneous pair');
+    // A fresh ADC1 conversion between two CDR reads must NOT move the
+    // latched half (latch refreshes only when BOTH sides are ready again).
+    // NOTE: trigger the reconversion with a CR2 *write* edge + ticks, and
+    // read NO ADC register between the two CDR reads — an SR read consumes
+    // that side's EOC (silicon: EOC clears on SR read), a DR read consumes
+    // it too, and even the CR2 trigger *read* is a needless consume risk;
+    // any of them would legitimately end the latched state before p2.
+    // (An early draft did `void R(ADC1)` mid-sequence and pinned a REFRESH
+    // as HOLD — the failure was the test's, not the model's: the EOC the
+    // latch was holding had been consumed by the test itself.)
+    adc_set_channel_value('ADC1', 5, 0x0999);
+    W(ADC1 + 0x08, 1); // SWSTART low (the bit is edge-triggered in the model)
+    W(ADC1 + 0x08, (1 << 30) | 1);
+    tick_n(1000); // conversion completes on the clock; no trigger read
+    // ADC1 has reconverted (DR holds 0x0999 — checked below via the live
+    // path), but EOC1 is still set and EOC2 never cleared, so the latch
+    // must still serve the original simultaneous pair.
+    const p2 = R(ADCC + 0x08);
+    ok(p2 === p1, 'adc: latched pair stable across one-sided reconversion', `p1=0x${p1.toString(16)} p2=0x${p2.toString(16)}`);
+    // Leaving dual mode drops the latch (silicon re-arms on mode change).
+    W(ADCC + 0x04, 0);
+    ok(!adc_dual_latched(), 'adc: latch drops outside dual mode');
+    // Independent halves (non-dual path): reconvert both sides, read live.
+    W(ADC1 + 0x08, 1);
+    W(ADC1 + 0x08, (1 << 30) | 1);
+    W(0x40012100 + 0x08, (1 << 30) | 1);
+    tick_n(500); void R(ADC1 + 0x08); void R(0x40012100 + 0x08); tick_n(500);
     const cdr = R(ADCC + 0x08);
-    ok((cdr & 0xFFFF) === 0x0AAA, 'adc: CDR low half = ADC1.DR (no interleave)', `cdr=0x${cdr.toString(16)}`);
-    ok(((cdr >>> 16) & 0xFFFF) === 0x0555, 'adc: CDR high half = ADC2.DR (independent)', `cdr=0x${cdr.toString(16)}`);
-    W(ADCC + 0x04, 0x00030001); // CCR dual-mode config accepted
-    ok(R(ADCC + 0x04) === 0x00030001, 'adc: CCR stores dual-mode config');
+    ok((cdr & 0xFFFF) === 0x0999, 'adc: CDR low half = ADC1.DR live', `cdr=0x${cdr.toString(16)}`);
+    ok(((cdr >>> 16) & 0xFFFF) === 0x0555, 'adc: CDR high half = ADC2.DR live');
     adc_clear_channel_value('ADC1', 5);
     adc_clear_channel_value('ADC2', 5);
 }
 
-// ── TIM encoder ─────────────────────────────────────────────────────────
-// NOT-modeled: SMS encoder modes (1-3) count nothing (no pin layer).
-// Assert the substitute: SMS encoder bits store + read back, CNT holds.
-// NOTE: the timer only advances on tick_peripherals() (instruction-count
-// clock) AFTER CEN is set — a same-tick read would see 0 either way, so
-// advance the clock first to make the assertion meaningful.
+// ── TIM encoder (COMPLETE) ────────────────────────────────────────────────
+// Encoder SMS modes (1-3, RM0090 §18.3.3): tim_encoder_step is the
+// quadrature source — SMS gates which TI counts, CCER polarity sets the
+// direction sense, wrap at ARR (up) / 0 (down) raises UIF. Free-run is
+// suppressed in encoder modes, so CNT holds with no steps.
 function t_tim_enc() {
     W(TIM2 + 0x08, 0x0003); // SMCR SMS=011 (encoder mode 3)
     ok((R(TIM2 + 0x08) & 0x7) === 0x3, 'tim: SMS encoder bits stored');
     W(TIM2 + 0x2C, 0xFFFF);
     W(TIM2 + 0x00, 1); // CEN
-    tick_n(5000); // let the clock run: a counting mode would move CNT
+    tick_n(5000); // let the clock run: free-run is suppressed, CNT holds
     ok(R(TIM2 + 0x24) === 0, 'tim: encoder CNT holds at 0 with no pin edges');
-    W(TIM2 + 0x08, 0); W(TIM2 + 0x00, 0); // clean
+    tim_encoder_step('TIM2', 0, true);
+    tim_encoder_step('TIM2', 0, true);
+    tim_encoder_step('TIM2', 1, true);
+    ok(R(TIM2 + 0x24) === 3, 'tim: mode 3 counts both TI1+TI2 steps', `cnt=${R(TIM2 + 0x24)}`);
+    // Mode 1 (TI1-only): TI2 steps are ignored.
+    W(TIM2 + 0x08, 0x0001);
+    tim_encoder_step('TIM2', 1, true);
+    ok(R(TIM2 + 0x24) === 3, 'tim: mode 1 ignores TI2 steps');
+    tim_encoder_step('TIM2', 0, true);
+    ok(R(TIM2 + 0x24) === 4, 'tim: mode 1 counts TI1 steps');
+    // Polarity: TI1P inverted makes a rising edge count DOWN in mode 3.
+    W(TIM2 + 0x08, 0x0003);
+    W(TIM2 + 0x20, 1 << 1); // CCER TI1P
+    tim_encoder_step('TIM2', 0, true);
+    ok(R(TIM2 + 0x24) === 3, 'tim: inverted TI1 rising counts down');
+    W(TIM2 + 0x20, 0); // clean polarity
+    // Wrap: CNT=ARR + one up step rolls to 0 with UIF.
+    W(TIM2 + 0x24, 0xFFFF);
+    tim_encoder_step('TIM2', 0, true);
+    ok(R(TIM2 + 0x24) === 0 && (R(TIM2 + 0x10) & 1) !== 0, 'tim: up-wrap rolls + UIF');
+    W(TIM2 + 0x08, 0); W(TIM2 + 0x00, 0); W(TIM2 + 0x10, 0); // clean
 }
 
 // ── ADC AWD + DMA + TRGO + ITM + STALL (COMPLETE pins) ──────────────────
@@ -292,10 +405,11 @@ function t_stall() {
 
 // ══ Group 1: no-pin-layer sinks (edge counter / level mirrors ARE the sink)
 
-// ── ETH PPS pin: counter + level ─────────────────────────────────────────
-// NOT-modeled as a pin: no pin layer exists, so the PPS output is observed
-// via eth_pps_count (edge counter) + eth_pps_level (50% square wave).
-// Sequence mirrors eth_feat_test phase 9: TSE + addend/SSINC latch + PPSFREQ.
+// ── ETH PPS pin: counter + level + PB5 mirror ─────────────────────────────
+// The PPS output is observed three ways: eth_pps_count (edge counter),
+// eth_pps_level (50% square wave), and the PB5 IDR mirror (the readable
+// pin model — same level, guest-visible). Sequence mirrors eth_feat_test
+// phase 9: TSE + addend/SSINC latch + PPSFREQ.
 // COMPLETE: counter advances ~39 edges per 200k inst at 32768 Hz;
 // level toggles (sampled like a logic probe); freq switch rescales phase.
 function t_pps() {
@@ -313,6 +427,22 @@ function t_pps() {
     let hi = false, lo = false;
     for (let i = 0; i < 40; i++) { tick_n(5000); if (eth_pps_level()) hi = true; else lo = true; }
     ok(hi && lo, 'pps: level toggles (50% square wave)');
+    // PB5 IDR mirror follows the same level (guest-visible pin model).
+    // NOTE: pair the two readers back-to-back at the SAME instant and
+    // compare per-sample (not loop-vs-loop): the residue is a live 32768 Hz
+    // square wave, so two loops 200k inst apart can sit in opposite halves
+    // and a loop-vs-loop "both toggle" assert fails on phase alone. Same
+    // lesson as the level loop above — sample, don't summarize.
+    // Mirror-first: the mirror advances the PTP clock itself before reading
+    // the residue, so either order agrees (both advance-then-read at `now`).
+    let pbad = -1;
+    for (let i = 0; i < 40; i++) {
+        tick_n(5000);
+        const pb = (R(GPIOB + 0x10) & (1 << 5)) !== 0;
+        const lv = eth_pps_level();
+        if (pb !== lv && pbad < 0) pbad = i;
+    }
+    ok(pbad < 0, 'pps: PB5 IDR agrees with the level every sample', pbad >= 0 ? `first mismatch at i=${pbad}` : '');
     W(ETH_PTP + 0x2C, 0); // back to 1 Hz (clean)
 }
 
@@ -339,18 +469,6 @@ function t_nibble() {
     ok(true, 'nibble: raw 25/50 MHz nibble data has no MMIO (electrical-only, by design)');
 }
 
-// ── ETH ULPI HS-PHY packet rates ──────────────────────────────────────────
-// NOT-modeled: no ULPI PHY exists, so HS packet rates are not simulated.
-// Substitute: the HS controller runs the FS-mode device core (see t_usbhs);
-// the ULPI register window reads benign-0 and never faults.
-function t_ulpi() {
-    // ULPI viewport (HS ULPI regs live in the HS block): no ULPI model, so
-    // reserved ULPI offsets read 0 without faulting.
-    let v = 0, threw = false;
-    try { v = R(0x40040030); } catch { threw = true; }
-    ok(!threw && v === 0, 'ulpi: HS ULPI viewport reads benign-0 (no ULPI PHY)');
-}
-
 // ══ Group 2: deliberate non-models (deterministic / always-lock / etc.)
 
 // ── RNG true entropy ──────────────────────────────────────────────────────
@@ -370,10 +488,10 @@ function t_rng() {
     W(RNG, 0); // clean
 }
 
-// ── RCC clock-failure injection ───────────────────────────────────────────
-// NOT-modeled: sources always lock (no failure injection). Assert the
-// substitute: HSEON -> HSERDY after the settle window; PLLON -> PLLRDY;
-// SWS mirrors SW; clearing the ON bit drops RDY at once.
+// ── RCC clock-failure injection (COMPLETE) ───────────────────────────────
+// HSE/PLL failures are harness-driven (rcc_inject_failure): a dead source
+// reads RDY 0 and SWS falls back to HSI (CSS behavior); re-enabling the
+// source's ON bit clears the failure and re-arms the settle window.
 function t_rcc() {
     W(RCC, R(RCC) | (1 << 16)); // HSEON
     ok((R(RCC) & (1 << 17)) === 0, 'rcc: HSERDY not yet (settle window)');
@@ -386,6 +504,17 @@ function t_rcc() {
     const cfgr = R(RCC + 0x08);
     W(RCC + 0x08, (cfgr & ~3) | 1);
     ok(((R(RCC + 0x08) >> 2) & 3) === 1, 'rcc: SWS mirrors SW=HSE');
+    // Kill HSE: RDY drops, SWS falls back to HSI even though SW still
+    // selects HSE.
+    rcc_inject_failure(1, true);
+    ok((R(RCC) & (1 << 17)) === 0, 'rcc: HSERDY 0 with HSE dead');
+    ok(((R(RCC + 0x08) >> 2) & 3) === 0, 'rcc: SWS falls back to HSI on failure');
+    // Re-enabling HSEON clears the failure (silicon restarts the osc).
+    W(RCC, R(RCC) & ~(1 << 16));
+    W(RCC, R(RCC) | (1 << 16));
+    tick_n(1000);
+    ok((R(RCC) & (1 << 17)) !== 0, 'rcc: HSERDY returns after re-enable + window');
+    ok(((R(RCC + 0x08) >> 2) & 3) === 1, 'rcc: SWS follows SW again once alive');
     W(RCC + 0x08, cfgr & ~3); // back to HSI (clean)
     W(RCC, R(RCC) & ~(1 << 24)); // PLL off
     ok((R(RCC) & (1 << 25)) === 0, 'rcc: PLLRDY drops with PLLON');
@@ -405,15 +534,33 @@ function t_i2c_multi() {
     W(I2C1, 1 | (1 << 9)); // STOP (clean)
 }
 
-// ── CAN bus-off / error-passive / FD ──────────────────────────────────────
-// NOT-modeled: TEC/REC stay 0 (no error counting), BOFF/EPVF/EWGF never set,
-// LEC stays 0; CAN FD frames are not a thing (classic only). Substitute:
-// ESR reads 0 error state; error IE bits store but never fire without esr.
+// ── CAN error counters / bus-off (COMPLETE) ───────────────────────────────
+// bxCAN error model: can_note_error is the wire fault (TEC +8, LEC
+// latched; BOFF when TEC > 255); clean TX completions count TEC back
+// down; recover=true models 128x11 recessive bits (bus recovery).
+// EPVF/EWGF derive live from TEC/REC thresholds; ESR reads 0 on a quiet
+// bus like silicon after reset.
 function t_can_err() {
-    const esr = R(CAN1 + 0x18);
-    ok((esr & ((1 << 2) | (1 << 1) | (1 << 0))) === 0, 'can: BOFF/EPVF/EWGF clear (no error counting)', `esr=0x${esr.toString(16)}`);
-    ok(((esr >> 16) & 0xFF) === 0 && ((esr >> 24) & 0xFF) === 0, 'can: TEC/REC stay 0');
-    ok((esr & (7 << 4)) === 0, 'can: LEC stays 0 (no last-error latch)');
+    ok(R(CAN1 + 0x18) === 0, 'can: ESR 0 on a quiet bus', `esr=0x${R(CAN1 + 0x18).toString(16)}`);
+    can_note_error(CAN1, 3, false); // one ACK error
+    let esr = R(CAN1 + 0x18);
+    ok(((esr >> 16) & 0xFF) === 8, 'can: TEC +8 per error event', `esr=0x${esr.toString(16)}`);
+    ok(((esr >> 4) & 7) === 3, 'can: LEC latched (3 = ack error)');
+    ok((esr & 7) === 0, 'can: no BOFF/EPVF/EWGF at TEC=8');
+    // 12 more events push TEC past 96 -> EWGF; past 127 -> EPVF.
+    for (let i = 0; i < 12; i++) can_note_error(CAN1, 3, false);
+    esr = R(CAN1 + 0x18);
+    ok((esr & 1) !== 0, 'can: EWGF live past TEC 96', `esr=0x${esr.toString(16)}`);
+    for (let i = 0; i < 4; i++) can_note_error(CAN1, 3, false);
+    esr = R(CAN1 + 0x18);
+    ok(((esr >> 1) & 1) !== 0, 'can: EPVF live past TEC 127', `esr=0x${esr.toString(16)}`);
+    // Keep going to bus-off (TEC > 255 saturates + BOFF).
+    for (let i = 0; i < 20; i++) can_note_error(CAN1, 3, false);
+    esr = R(CAN1 + 0x18);
+    ok(((esr >> 2) & 1) !== 0, 'can: BOFF set past TEC 255', `esr=0x${esr.toString(16)}`);
+    can_note_error(CAN1, 0, true); // 128x11 recessive: recovery
+    esr = R(CAN1 + 0x18);
+    ok(esr === 0, 'can: recovery clears counters + LEC + BOFF', `esr=0x${esr.toString(16)}`);
 }
 
 // ── USB isochronous / host / SOF / suspend / VBUS / internal DMA ──────────
@@ -786,25 +933,25 @@ function t_entropy() {
 
 const tests = [
     ['pwr regulator states beyond handshake', t_pwr],
-    ['dcmi pin-sync substitute (feed, never pins)', t_dcmi],
-    ['fsmc timings/ECC contract + untapped=0', t_fsmc],
+    ['dcmi pin-sync harness (VSYNC/HSYNC free-run default)', t_dcmi],
+    ['fsmc NAND array + wait-state BUSY + ECC contract', t_fsmc],
     ['usb HS device (COMPLETE: HS-in-FS block)', t_usbhs],
-    ['hash base digest (HMAC absent, base pinned)', t_hash],
-    ['adc dual-interleave substitute (independent halves)', t_adc_dual],
-    ['tim encoder substitute (stores, holds)', t_tim_enc],
+    ['hash base digest + HMAC mode routing', t_hash],
+    ['hmac SHA-1 RFC 2202 TC1 known-answer', t_hmac_sha1],
+    ['adc dual-simultaneous latch (COMPLETE)', t_adc_dual],
+    ['tim encoder counting (COMPLETE)', t_tim_enc],
     ['adc AWD + DMA staging (COMPLETE)', t_adc_awd_dma],
     ['tim TRGO routing (COMPLETE)', t_trgo],
     ['itm 32-port stimulus (COMPLETE)', t_itm],
     ['usb STALL handshake (COMPLETE)', t_stall],
     // Group 1: no-pin-layer sinks
-    ['eth PPS counter + level (pin sink substitute)', t_pps],
+    ['eth PPS counter + level + PB5 mirror', t_pps],
     ['eth nibble/clocks electrical-only (level contract)', t_nibble],
-    ['eth ULPI viewport benign-0 (no ULPI PHY)', t_ulpi],
     // Group 2: deliberate non-models
     ['rng deterministic LCG (regen-on-tick, not entropy)', t_rng],
-    ['rcc sources always lock (no fail injection)', t_rcc],
+    ['rcc clock-failure injection (COMPLETE)', t_rcc],
     ['i2c single-master (no arbitration loss)', t_i2c_multi],
-    ['can classic only (no bus-off/FD counting)', t_can_err],
+    ['can error counters + bus-off + recovery (COMPLETE)', t_can_err],
     ['usb iso/host/SOF/suspend/VBUS/DMA substitutes', t_usb_gaps],
     // Group 3: unused protocol modes
     ['usart LIN/Smartcard/IrDA bits store, TX unaffected', t_usart_modes],

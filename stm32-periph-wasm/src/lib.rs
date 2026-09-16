@@ -224,6 +224,15 @@ pub fn can_fd_cost(base: u32, fd: bool, brs: bool, payload_bytes: usize) -> u64 
     sys.p.can_fd_cost(base, fd, brs, payload_bytes)
 }
 
+/// Harness = the wire fault: one error event on the CAN node at `base`
+/// (TEC +8, LEC latched 0-7; BOFF at TEC > 255). `recover=true` models
+/// 128x11 recessive bits (counters + LEC cleared, bus recovered).
+#[wasm_bindgen]
+pub fn can_note_error(base: u32, lec: u8, recover: bool) {
+    let sys = crate::sys();
+    sys.p.can_note_error(sys, base, lec, recover);
+}
+
 /// Host/JS-driven TIM input-capture edge. Simulate a TIx edge on timer `name`
 /// channel `ch` and latch the live counter into its capture register (only if
 /// the channel is configured for input capture via CCxS). Mirrors
@@ -232,6 +241,22 @@ pub fn can_fd_cost(base: u32, fd: bool, brs: bool, payload_bytes: usize) -> u64 
 #[wasm_bindgen]
 pub fn tim_inject_capture(name: String, ch: u32) {
     crate::peripherals::tim::tim_inject_capture(sys(), &name, ch);
+}
+
+/// Harness = the failing oscillator: mark RCC HSE (bit 0) / PLL (bit 1)
+/// dead or alive. Dead sources read RDY 0 and SWS falls back to HSI.
+#[wasm_bindgen]
+pub fn rcc_inject_failure(src_mask: u32, dead: bool) {
+    let sys = crate::sys();
+    sys.p.rcc_inject_failure(src_mask, dead);
+}
+
+/// Host/JS-driven quadrature step on an encoder-mode timer: one TI edge
+/// (`ti` 0 = TI1, 1 = TI2; `rising` = edge polarity). Counts per the
+/// SMS/polarity rules; no-op outside encoder modes 1-3.
+#[wasm_bindgen]
+pub fn tim_encoder_step(name: String, ti: u32, rising: bool) {
+    crate::peripherals::tim::tim_encoder_step(sys(), &name, ti, rising);
 }
 
 /// Set a pending interrupt in the NVIC. Negative `irq` values select system
@@ -358,6 +383,15 @@ pub fn adc_clear_channel_value(peripheral: &str, channel: u32) {
 #[wasm_bindgen]
 pub fn adc_take_dma() -> Vec<u16> {
     system::adc_take_dma()
+}
+
+/// Whether the last ADC CDR read returned a latched simultaneous pair
+/// (dual regular-simultaneous mode with both sides conversion-ready).
+/// Harness scope probe for dual-mode simultaneity.
+#[wasm_bindgen]
+pub fn adc_dual_latched() -> bool {
+    let sys = crate::sys();
+    sys.p.adc_dual_latched()
 }
 
 #[wasm_bindgen]
@@ -1121,6 +1155,23 @@ pub fn fsmc_push_data(bank: u32, values: &[u32]) {
     system::fsmc_tap_data_push(bank as usize, values);
 }
 
+/// Harness = the NAND flash array: bind an erased (0xFF) backing array of
+/// `size` bytes to FSMC bank `bank` (0-3). Untapped data accesses go to
+/// this array (program clears bits, reads return stored bytes).
+#[wasm_bindgen]
+pub fn fsmc_bind_nand(bank: usize, size: usize) {
+    let sys = crate::sys();
+    sys.p.fsmc_bind_nand(bank, size);
+}
+
+/// Erase `len` bytes at `offset` in FSMC bank `bank` (restore 0xFF) —
+/// the silicon block-erase firmware runs before reprogram.
+#[wasm_bindgen]
+pub fn fsmc_nand_erase(bank: usize, offset: usize, len: usize) {
+    let sys = crate::sys();
+    sys.p.fsmc_nand_erase(bank, offset, len);
+}
+
 // ── DCMI frame source (JS camera sensor) ───────────────────────────────────
 // The camera sensor is external hardware (JS). This feeds one captured
 // frame (8-bit pixels, row-major) into the on-chip DCMI controller, which
@@ -1137,6 +1188,15 @@ pub fn dcmi_feed_frame(w: u32, h: u32, pixels: &[u8]) {
 #[wasm_bindgen]
 pub fn dcmi_clear() {
     system::dcmi_clear();
+}
+
+/// Harness = the camera sync lines: drive VSYNC/HSYNC levels and the PCLK
+/// divider. A rising VSYNC edge loads an armed capture (CAPTURE set, frame
+/// fed); HSYNC low holds pixels (horizontal blanking); PCLK div scales
+/// pixels-per-tick (16/div, min 1). Defaults (true, true, 1) = free-run.
+#[wasm_bindgen]
+pub fn dcmi_set_sync(vsync: bool, hsync: bool, pclk_div: u32) {
+    system::dcmi_set_sync(vsync, hsync, pclk_div);
 }
 
 use cpu::{Cpu, mem::{FlatMemory, Memory}};
