@@ -84,7 +84,7 @@ Nordic all write). If a firmware writes *unshifted* priority values,
 ordering still holds but masking granularity shifts — flag it here.
 
 ### 11. Nested exception SP used the stale bank, not live r13 — FIXED in
-uno-r4 cores (mirror here if the F4 core shares the code)
+F4 (verified 2026-09-16, was already fixed; uno-r4 report confirmed)
 Trigger: Arduino UNO R4 echo firmware (TinyUSB CDC, 1-byte bulk transfers
 at full speed) with AGT0 1ms IRQs nesting inside the USB ISR: after ~31
 transfers the core jumped to 0x1C and faulted (UsageFault on 0xFFFF).
@@ -103,8 +103,14 @@ F1/E1/F9/ED, PSP bank only for FD/ED thread-PSP returns). Proven by
 `ra4m1_usb_cdc_echo` (100B two-packet round-trip through real CDC bulk
 pipes with AGT running) plus the full suites staying green (149
 snapshot incl. 128 legacy CPU, 21 small-core).
-Status: FIXED in uno-r4 (both cores); F4 core should take the same two
-edits if its take/return still use the bank.
+Status: VERIFIED FIXED in F4 (2026-09-16): this tree's `take_exception`
+has no `r13 = msp` reload (comment cites #11 explicitly) and
+`exception_return` unstacks from live `r13` for F1/E1/F9/ED with the PSP
+bank only for FD/ED thread-PSP returns. The dedicated native test
+`cpu/tests.rs::nested_push_outer_returns_clean` (pushing outer + preempting
+inner, the exact hole — existing nesting tests used stackless spinning
+handlers) passes: `cargo test --release nested_push_outer_returns_clean`
+1 passed. No edit needed; closing the mirror item.
 
 ### 12. Predicated 16-bit flag-setting clobbered flags for the next IT slot — FIXED in F4 (uno-r4 report confirmed + generalized)
 Trigger: Arduino `Serial.print(int)` (printNumber's `ite le; addle r3,#48;
