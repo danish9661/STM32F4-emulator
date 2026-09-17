@@ -1597,6 +1597,37 @@ export function rng_seed_entropy(words) {
 }
 
 /**
+ * Harness = the tamper pin: latch RTC TAMP1F (IRQ 2 when TAMPIE).
+ */
+export function rtc_tamper() {
+    wasm.rtc_tamper();
+}
+
+/**
+ * Harness = the timestamp pin event: capture TR/DR/SSR, latch TSF.
+ */
+export function rtc_timestamp() {
+    wasm.rtc_timestamp();
+}
+
+/**
+ * Current SDIO bus-width select (0 = 1-bit, 1 = 4-bit, 2 = 8-bit).
+ * @returns {number}
+ */
+export function sdio_bus_width() {
+    const ret = wasm.sdio_bus_width();
+    return ret;
+}
+
+/**
+ * Harness = the card's DAT1 interrupt line: latch/clear SDIOIT.
+ * @param {boolean} set
+ */
+export function sdio_card_irq(set) {
+    wasm.sdio_card_irq(set);
+}
+
+/**
  * Set a pending interrupt in the NVIC. Negative `irq` values select system
  * exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
  * Used by the FreeRTOS path: the Rust core synthesizes these exceptions
@@ -1605,6 +1636,23 @@ export function rng_seed_entropy(words) {
  */
 export function set_intr_pending(irq) {
     wasm.set_intr_pending(irq);
+}
+
+/**
+ * Harness = the faulty peer: corrupt the RX CRC so the next CRCNEXT
+ * compare on the SPI block at `base` mismatches (latches CRCERR).
+ * @param {number} base
+ */
+export function spi_fault_crc(base) {
+    wasm.spi_fault_crc(base);
+}
+
+/**
+ * Harness = the NSS pin fault: latch MODF on the SPI block at `base`.
+ * @param {number} base
+ */
+export function spi_fault_modf(base) {
+    wasm.spi_fault_modf(base);
 }
 
 /**
@@ -1735,6 +1783,17 @@ export function tim_inject_capture(name, ch) {
 }
 
 /**
+ * Harness = the noisy wire: arm framing (FE) / parity (PE) faults on the
+ * next received byte of the USART at `base`. PE needs PCE enabled.
+ * @param {number} base
+ * @param {boolean} fe
+ * @param {boolean} pe
+ */
+export function uart_fault_rx(base, fe, pe) {
+    wasm.uart_fault_rx(base, fe, pe);
+}
+
+/**
  * Inject a received byte into the UART at the given peripheral base address.
  * Returns true if a peripheral was found at that address.
  * @param {number} addr
@@ -1744,6 +1803,26 @@ export function tim_inject_capture(name, ch) {
 export function uart_rx_byte(addr, byte) {
     const ret = wasm.uart_rx_byte(addr, byte);
     return ret !== 0;
+}
+
+/**
+ * Harness = the CTS peer: drive the CTS input of the USART at `base`.
+ * With CTSE set, deasserted CTS holds TX (TXE/TC clear, byte dropped).
+ * @param {number} base
+ * @param {boolean} asserted
+ */
+export function uart_set_cts(base, asserted) {
+    wasm.uart_set_cts(base, asserted);
+}
+
+/**
+ * Queued TX length of the USART at `base` (scope probe for CTSE-hold).
+ * @param {number} base
+ * @returns {number}
+ */
+export function uart_tx_len(base) {
+    const ret = wasm.uart_tx_len(base);
+    return ret >>> 0;
 }
 
 /**

@@ -360,6 +360,11 @@ impl Memory for FlatMemory {
             if self.mpu_deny(addr, 1, true) {
                 return;
             }
+            // Program-sequence check (wrong width for PSIZE, or address
+            // outside the array): latches PGSERR, write dropped.
+            if crate::sys().p.flash_program_error(addr, 1) {
+                return;
+            }
             if crate::system::flash_is_programming() {
                 let i = (addr - self.flash_base) as usize;
                 if let Some(cell) = self.flash.get_mut(i) {
@@ -396,6 +401,9 @@ impl Memory for FlatMemory {
         if self.unaligned_deny(addr, 2) {
             return;
         }
+        if self.in_flash(addr) && crate::sys().p.flash_program_error(addr, 2) {
+            return;
+        }
         self.write8(addr, (v & 0xFF) as u8);
         self.write8(addr + 1, (v >> 8) as u8);
     }
@@ -409,6 +417,9 @@ impl Memory for FlatMemory {
             return;
         }
         if self.unaligned_deny(addr, 4) {
+            return;
+        }
+        if self.in_flash(addr) && crate::sys().p.flash_program_error(addr, 4) {
             return;
         }
         self.write8(addr, (v & 0xFF) as u8);

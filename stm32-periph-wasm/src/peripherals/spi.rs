@@ -9,6 +9,7 @@ pub struct Spi {
     pub cr2: u32,
     pub srm: u32,
     pub dr: u32,
+    pub crcpr: u32,
     pub rxcrcr: u32,
     pub txcrcr: u32,
     pub rx_buffer: u32,
@@ -18,6 +19,36 @@ pub struct Spi {
     wave_counter: u16,
     devices: Vec<SpiDeviceEntry>,
     last_device: Option<Rc<RefCell<dyn ExtDevice<(), u8>>>>,
+    /// Live CRC shift registers (TX and RX paths). Reset to all-ones on
+    /// CRCEN set and on SPE set (silicon resets the CRC calculation when
+    /// the peripheral is enabled); advanced per transferred byte/word
+    /// with the CRCPR polynomial while CRCEN is set. RXCRCR/TXCRCR reads
+    /// return these (masked to the frame width).
+    crc_tx: u16,
+    crc_rx: u16,
+    /// Error-flag latches (SR bits, cleared by the SR-followed-by-DR
+    /// sequence — i.e. a DR access after an SR read — plus OVR's extra
+    /// CR2 ERRIE path; see read_sr/read_dr below):
+    /// - OVR (bit 6): a new transfer completed while rx_buffer was still
+    ///   unread (previous byte never drained).
+    /// - MODF (bit 5): master-mode fault — NSS pulled low while MSTR+SSM=0
+    ///   (hardware slave management). The harness drives NSS via
+    ///   `spi_fault_modf` (no pin layer exists to pull it).
+    /// - FRE (bit 8): TI-mode frame-format error — set when FRF (CR2 bit 4)
+    ///   is set and a transfer completes (header desync substitute).
+    /// - CRCERR (bit 4): CRC mismatch — set when the CRCNEXT (CR1 bit 12)
+    ///   transfer's received CRC word differs from the computed RX CRC.
+    modf_latched: bool,
+    ovr_latched: bool,
+    fre_latched: bool,
+    crc_err_latched: bool,
+    /// Transfer-in-flight latch for SR BSY (bit 7): set on a DR write,
+    /// cleared when the byte is drained by a DR read.
+    bsy_flight: bool,
+    /// SR read arms the DR-clear sequence: the next DR read/write clears
+    /// OVR/MODF/FRE (silicon: read SR then access DR). Tracked per access
+    /// so a lone DR access without a preceding SR read does NOT clear.
+    sr_seen: bool,
 }
 
 impl Spi {
@@ -45,6 +76,54 @@ impl Spi {
     /// transfers still run the master path (no external SCK driver
     /// exists to gate on). Harness scope probe for the slave substitute.
     pub fn slave_selected(&self) -> bool { self.cr1 & (1 << 2) == 0 }
+
+    /// CRC-16 step with the CRCPR polynomial (MSB-first, no reflection —
+    /// the STM32 SPI CRC block). `crc` is the running register, `data`
+    /// the newly transferred byte.
+    fn crc_step(&self, mut crc: u16, data: u8) -> u16 {
+        let poly = (self.crcpr & 0xFFFF) as u16;
+        crc ^= (data as u16) << 8;
+        for _ in 0..8 {
+            if crc & 0x8000 != 0 {
+                crc = (crc << 1) ^ poly;
+            } else {
+                crc <<= 1;
+            }
+        }
+        crc
+    }
+
+    /// Advance both CRC registers over one transferred frame unit (byte
+    /// in 8-bit mode, both bytes MSB-first in 16-bit mode). No-op unless
+    /// CRCEN (CR1 bit 13) is set. DFF width mismatch between the peers
+    /// is a firmware bug, not modeled — both sides advance identically.
+    fn crc_advance(&mut self, value: u32, rx: u32) {
+        if self.cr1 & (1 << 13) == 0 {
+            return;
+        }
+        if self.is_16bits() {
+            for b in [(value >> 8) as u8, value as u8] {
+                self.crc_tx = self.crc_step(self.crc_tx, b);
+            }
+            for b in [(rx >> 8) as u8, rx as u8] {
+                self.crc_rx = self.crc_step(self.crc_rx, b);
+            }
+        } else {
+            self.crc_tx = self.crc_step(self.crc_tx, value as u8);
+            self.crc_rx = self.crc_step(self.crc_rx, rx as u8);
+        }
+        self.rxcrcr = self.crc_rx as u32;
+        self.txcrcr = self.crc_tx as u32;
+    }
+
+    /// Harness = the NSS pin fault: latch a master-mode fault (MODF, SR
+    /// bit 5). Silicon sets it when NSS is pulled low on a master with
+    /// hardware slave management (SSM=0); the emulator has no NSS pin, so
+    /// the harness drives the fault directly. Cleared by the SR→DR
+    /// sequence like a real MODF (plus MSTR/SPE handling in read_dr).
+    pub fn fault_modf(&mut self) {
+        self.modf_latched = true;
+    }
 
     fn active_device(&mut self, sys: &System) -> Option<Rc<RefCell<dyn ExtDevice<(), u8>>>> {
         let selected = self.sel_state(sys);
@@ -112,7 +191,30 @@ pub fn register_cs_callbacks(&mut self, gpio: &mut GpioPorts) {
                 if (txeie != 0 || rxneie != 0) && self.ready_toggle {
                     sys.p.nvic.borrow_mut().set_intr_pending(irq);
                 }
+                // ERRIE (CR2 bit 5): any latched error flag pends the
+                // same IRQ (silicon ORs MODF/OVR/FRE/CRCERR into it).
+                if self.cr2 & (1 << 5) != 0
+                    && (self.ovr_latched
+                        || self.modf_latched
+                        || self.fre_latched
+                        || self.crc_err_latched)
+                {
+                    sys.p.nvic.borrow_mut().set_intr_pending(irq);
+                }
             }
+        }
+    }
+
+    /// Harness = the faulty peer: corrupt the next received CRC word so a
+    /// CRCNEXT compare mismatches and latches CRCERR. (With an honest
+    /// loopback the CRC always matches, so no test could observe the
+    /// flag otherwise.) Corrupts the computed register itself (a bit-flip
+    /// on the wire is equivalent), so the RXCRCR read path — which serves
+    /// the live register while CRCEN is set — shows the corruption too.
+    pub fn fault_crc(&mut self) {
+        self.crc_rx ^= 0x00FF;
+        if self.cr1 & (1 << 13) == 0 {
+            self.rxcrcr = self.crc_rx as u32;
         }
     }
 }
@@ -125,14 +227,33 @@ impl Peripheral for Spi {
             0x0004 => self.cr2,
             0x0008 => {
                 self.ready_toggle = !self.ready_toggle;
-                if self.is_i2s() {
-                    // I2S SR: RXNE, TXE, etc
-                    (if self.ready_toggle { 0b11 } else { 0 })
-                } else {
-                    let sr = if self.ready_toggle { 0b11 } else { 0 };
-                    self.fire_interrupts(sys);
-                    sr
+                // Live SR: TXE/RXNE toggle with the ready bit (as before);
+                // BSY mirrors SPE (busy while enabled); OVR/MODF/FRE are
+                // the latched error flags; CRCERR is computed on CRCNEXT
+                // compares (see DR write path). Reading SR arms the
+                // SR→DR clear sequence for the latched flags.
+                self.sr_seen = true;
+                let mut sr = if self.ready_toggle { 0b11 } else { 0 };
+                // BSY follows an actual transfer in flight: set on a DR
+                // write, cleared when the byte is drained by a DR read
+                // (silicon: BSY while the shift register is moving). It is
+                // NOT bare SPE — CR1=0xF7 has SPE set with nothing moving,
+                // and the firmware SR-default check pins SR=0x3 there.
+                if self.bsy_flight {
+                    sr |= 1 << 7;
                 }
+                if self.ovr_latched { sr |= 1 << 6; }
+                if self.modf_latched { sr |= 1 << 5; }
+                if self.fre_latched { sr |= 1 << 8; }
+                if self.crc_err_latched { sr |= 1 << 4; }
+                if self.is_i2s() {
+                    // I2S SR: RXNE, TXE, etc (no SPI error flags)
+                    let v = if self.ready_toggle { 0b11 } else { 0 };
+                    self.sr_seen = false;
+                    return v;
+                }
+                self.fire_interrupts(sys);
+                sr
             }
             0x000C => {
                 let v = if self.is_i2s() {
@@ -146,11 +267,43 @@ impl Peripheral for Spi {
                     self.rx_buffer
                 };
                 self.rx_buffer = 0;
+                // Draining the byte ends the flight (BSY clears).
+                self.bsy_flight = false;
+                // DR read completes the SR→DR sequence: clear latched
+                // error flags only if an SR read armed it (a lone DR read
+                // with no preceding SR read leaves flags set, like silicon).
+                // MODF additionally forces master mode off (MSTR clear +
+                // SPE clear per RM0090 — the peripheral drops to slave).
+                if self.sr_seen {
+                    self.ovr_latched = false;
+                    self.fre_latched = false;
+                    self.crc_err_latched = false;
+                    if self.modf_latched {
+                        self.modf_latched = false;
+                        self.cr1 &= !((1 << 2) | (1 << 6)); // MSTR+SPE clear
+                    }
+                    self.sr_seen = false;
+                }
                 v
             }
-             0x0010 => self.dr,
-             0x0014 => self.rxcrcr,
-             0x0018 => self.txcrcr,
+             0x0010 => self.crcpr,
+             0x0014 => {
+                 // RXCRCR reads the live RX CRC register when CRCEN is set
+                 // (computed over received frames); with CRCEN clear it is
+                 // plain storage (legacy spi_tft_test writes 0xAA there).
+                 if self.cr1 & (1 << 13) != 0 {
+                     self.crc_rx as u32
+                 } else {
+                     self.rxcrcr
+                 }
+             }
+             0x0018 => {
+                 if self.cr1 & (1 << 13) != 0 {
+                     self.crc_tx as u32
+                 } else {
+                     self.txcrcr
+                 }
+             }
              0x001C => self.i2scfgr,
              0x0020 => self.i2spr,
             _ => 0
@@ -169,7 +322,20 @@ impl Peripheral for Spi {
             // never slave-gated behavior). CRCEN/CRCNEXT store; the CRC
             // registers (RXCRCR/TXCRCR) are readable/writable storage, never
             // computed (documented substitute).
-            0x0000 => self.cr1 = value,
+            0x0000 => {
+                let old = self.cr1;
+                self.cr1 = value;
+                // CRC calculation resets when CRCEN is newly set or when
+                // the peripheral is newly enabled (silicon behavior).
+                if value & (1 << 13) != 0 && old & (1 << 13) == 0 {
+                    self.crc_tx = 0xFFFF;
+                    self.crc_rx = 0xFFFF;
+                }
+                if value & (1 << 6) != 0 && old & (1 << 6) == 0 {
+                    self.crc_tx = 0xFFFF;
+                    self.crc_rx = 0xFFFF;
+                }
+            }
             0x0004 => {
                 self.cr2 = value;
                 self.fire_interrupts(sys);
@@ -181,6 +347,42 @@ impl Peripheral for Spi {
                     crate::system::audio_capture_push(value as u16);
                     self.rx_buffer = self.generate_i2s_audio();
                 } else {
+                    // CRCNEXT (CR1 bit 12): this transfer carries the CRC
+                    // word, not data — compare the received word against
+                    // the computed RX CRC and latch CRCERR on mismatch
+                    // (silicon checks the peer's CRC here). CRCNEXT
+                    // self-clears after the transfer.
+                    if self.cr1 & (1 << 12) != 0 {
+                        let device = self.active_device(sys);
+                        let rx = if let Some(ref d) = device {
+                            let mut d = d.borrow_mut();
+                            if self.is_16bits() {
+                                d.write(sys, (), (value >> 8) as u8);
+                                let hi = d.read(sys, ()) as u32;
+                                d.write(sys, (), value as u8);
+                                (hi << 8) | d.read(sys, ()) as u32
+                            } else {
+                                d.write(sys, (), value as u8);
+                                d.read(sys, ()) as u32
+                            }
+                        } else {
+                            0xFF
+                        };
+                        let mask = if self.is_16bits() { 0xFFFF } else { 0xFF };
+                        if (rx & mask) != (self.crc_rx as u32 & mask) {
+                            self.crc_err_latched = true;
+                        }
+                        self.rx_buffer = rx;
+                        self.cr1 &= !(1 << 12); // CRCNEXT self-clears
+                        // NOTE: no SR→DR clear here (unlike the data path):
+                        // the firmware must observe CRCERR with an SR read
+                        // AFTER this transfer, and the transfer itself was
+                        // a DR write — clearing here would wipe the flag
+                        // before any SR read could arm. The next SR→DR
+                        // sequence clears it normally.
+                        return;
+                    }
+                    let had_unread = self.rx_buffer != 0;
                     let device = self.active_device(sys);
                     if let Some(ref d) = device {
                         let mut d = d.borrow_mut();
@@ -197,11 +399,37 @@ impl Peripheral for Spi {
                     } else {
                         self.rx_buffer = 0xFF;
                     }
+                    // OVR: the previous byte was never drained. (rx_buffer
+                    // is 0 both reset and after a DR read, so any nonzero
+                    // residue means unread data — 0x00 data reads as no-OVR,
+                    // the one honest blind spot, documented.)
+                    if had_unread {
+                        self.ovr_latched = true;
+                    }
+                    // FRE: TI-mode header desync substitute.
+                    if self.cr2 & (1 << 4) != 0 {
+                        self.fre_latched = true;
+                    }
+                    // CRC advances over the transferred TX/RX pair.
+                    self.crc_advance(value, self.rx_buffer);
+                    // The transfer is now in flight (BSY) until drained.
+                    self.bsy_flight = true;
+                    // A DR write also completes the SR→DR sequence.
+                    if self.sr_seen {
+                        self.ovr_latched = false;
+                        self.fre_latched = false;
+                        self.crc_err_latched = false;
+                        if self.modf_latched {
+                            self.modf_latched = false;
+                            self.cr1 &= !((1 << 2) | (1 << 6));
+                        }
+                        self.sr_seen = false;
+                    }
                 }
             }
-             0x0010 => self.dr = value,
-             0x0014 => self.rxcrcr = value,
-             0x0018 => self.txcrcr = value,
+             0x0010 => self.crcpr = value & 0xFFFF,
+             0x0014 => self.rxcrcr = value & 0xFFFF,
+             0x0018 => self.txcrcr = value & 0xFFFF,
              0x001C => self.i2scfgr = value & 0xFFF,
              0x0020 => self.i2spr = value & 0x3FF,
             _ => {}

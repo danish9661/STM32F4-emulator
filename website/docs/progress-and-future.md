@@ -6,19 +6,25 @@ description: What works today, known limitations, and the implementation roadmap
 
 # Progress and future work
 
-Status as of 2026-08-09. The authoritative living log is AGENTS.md; this
-document is the readable summary.
+Status as of 2026-09-16. The authoritative living log is AGENTS.md; this
+document is the readable summary. Since AGENTS.md §23 the Rust Thumb-2
+core is the sole backend (Unicorn 2.1.4 removed after bit-identical parity
+was proven) — Unicorn-era mechanisms below (hooks, ISR pump, wedge,
+`maxBatch`, `?cpu=`) are marked as archaeology where they appear.
 
 ## What works today
 
 ### Emulator core
-- Full Cortex-M4 Thumb-2 execution via Unicorn 2.1.4 (WASM) — the same
+- Full Cortex-M4 Thumb-2 execution via the Rust WASM-native interpreter
+  (`stm32-periph-wasm/src/cpu/`, sole backend since §23) — the same
   firmware binaries run here and on real silicon, for **logic**; timing
   is instruction-count driven, not wall-clock (see Known limitations #4).
-- 33 peripheral modules, 28 detailed (see [peripherals.md](peripherals.md)).
+- 41 peripheral modules, 41 Detailed (see [peripherals.md](peripherals.md)).
 - Deterministic instruction-count clock (timers, ADC, RNG, RTC, watchdogs).
-- NVIC interrupt model with an opt-in guest-IRQ pump for interrupt-driven
-  firmware (UART RX + crypto firmwares verified in Node and in a browser).
+- NVIC interrupt model with exact inline exception entry/return, gated by
+  `deliver_irqs` (`enable_irqs` / `irq_eth` / `freertos` / `lowpower` opts).
+  The old opt-in guest-IRQ pump is gone (§23); polling firmware runs with
+  delivery off, IRQ firmware owns its flags through the real handler.
 - Register map from the vendor SVD; bit-banding support.
 
 ### Networking (the flagship feature)
@@ -64,17 +70,19 @@ document is the readable summary.
   the browser's F-key codes (engine `KEY_F1..F12 = 0xBB..0xC6`; the
   old 0x80..0x8B mapping made F2/F3/F6/F9 dead keys) and passed raw
   ASCII letters through for the save-name entry and 'y' confirms.
-  Details + gotchas in AGENTS.md §16.- **Unicorn 40k-instruction wedge**: one `emu_start` running ~40k+
+  Details + gotchas in AGENTS.md §16.
+- **Unicorn 40k-instruction wedge (archaeology, §23)**: one `emu_start` running ~40k+
   instructions without a stop condition permanently wedges this WASM build
-  (broken timeout path, `qemu_thread_create: Not supported`). Fix:
-  `maxBatch` capped at 20000 (`MAX_BATCH` env). After the cap: 604 TCP
-  connected / 0 fail / 0 timeouts in 47.9 s (~12.6 rounds/s).
+  (broken timeout path, `qemu_thread_create: Not supported`). Historical
+  fix was a `maxBatch` cap; the whole mechanism is gone with the backend.
 - **UART RX buffer cap**: 16-byte model buffer silently dropped the 16th
   byte (a trailing `\n`), breaking browser RX smoke tests with exactly-16-
   byte sends. Cap raised to 64; verified 3-byte, 16-byte, and split sends
   in headless Chrome.
-- **XPSR restore** in the interrupt pump (condition flags must survive the
-  fake-ISR abort) — eliminated a ~1-in-2 `TCP fail` flake.
+- **XPSR restore** in the old interrupt pump (archaeology, §23 — condition
+  flags had to survive the fake-ISR abort) — eliminated a ~1-in-2
+  `TCP fail` flake at the time. The pump no longer exists; the Rust core
+  delivers exceptions inline with exact stacking.
 - **HTTP 000b bug**: consecutive RX injections landed in the same
   `rx_buf[0]`, so a queued second frame was parsed with a stale length.
   Fix: rotate the injection index across RX descriptor slots.
@@ -102,34 +110,25 @@ document is the readable summary.
 - **FLASH program/erase** (new): `spi_flash_test`'s flash region now
   programs (PG) and sector-erases (SER) the backing buffer via the JS
   flash-command driver; `flash_test` 11/11 PASS.
-- **Hardware-accurate NVIC** (new): `set_intr_pending` no longer
-  auto-enables IRQs. Pending is set regardless of ISER; delivery (pump)
-  happens only when the firmware sets the enable bit — a disabled pending
-  IRQ stays pending until taken or cleared via ICPR, exactly like real
-  hardware. `has_pending`/`get_pending_vector` now report only deliverable
-  pending, and ICSR VECTPENDING returns the exception vector number (was
-  returning the 0-based IRQ number). All interrupt-driven firmwares
-  (rx_interrupt, rx_crypto, exti, eth_http/dhcp/test) set ISER explicitly
-  and pass unchanged; 20M-inst soak: 121 TCP connected, 0 TCP fail.
+- **Hardware-accurate NVIC**: `set_intr_pending` no longer auto-enables
+  IRQs. Pending is set regardless of ISER; inline delivery happens only
+  when the firmware sets the enable bit — a disabled pending IRQ stays
+  pending until taken or cleared via ICPR, exactly like real hardware.
+  `has_pending` reports only deliverable pending, and ICSR VECTPENDING
+  returns the exception vector number (was returning the 0-based IRQ
+  number). All interrupt-driven firmwares (rx_interrupt, rx_crypto, exti,
+  eth_http/dhcp/test) set ISER explicitly and pass unchanged.
 
 ## Known limitations
 
-1. ~~**Unicorn WASM wedge**~~ — **resolved 2026-08-10**: does not
-   reproduce on Node 22.22 (V8); fresh characterization with count-based
-   `emu_start` at n=1000..1,000,000, and 150M-instruction cli.mjs soaks at
-   `MAX_BATCH=500000`, ran wedge-free (AGENTS.md §7). Ruling: the original
-   wedge was build/environment-specific to an older Node/V8 WASM engine,
-   not the vendored Unicorn build itself. `cli.mjs`'s `maxBatch` (default
-   200000, `MAX_BATCH` env override) remains, but as a throughput/
-   responsiveness knob — the driver still needs periodic `emu_start`
-   returns to service DMA/ETH polling and interrupts regardless of any
-   wedge — not a workaround for a bug. One unrelated, still-reproducible
-   instance killer: passing the `timeout` argument to `emu_start` aborts
-   the instance (`qemu_thread_create: Not supported`); nothing in this
-   repo passes it.
-2. **Guest-IRQ pump vs ETH firmware**: the pump must stay disabled for ETH
-   firmware (an emulated ETH_IRQHandler re-scans `rx_desc` and stomps the
-   driver's frame bookkeeping).
+1. ~~**Unicorn WASM wedge**~~ — **retired with the backend (§23)**:
+   resolved 2026-08-10 (did not reproduce on Node 22.22), then mooted
+   entirely when Unicorn 2.1.4 was removed after bit-identical parity was
+   proven. Archaeology preserved in AGENTS.md §7.
+2. **Inline IRQ delivery vs polling ETH firmware**: delivery stays off for
+   polling ETH firmware (`deliver_irqs` false — an emulated ETH_IRQHandler
+   would re-scan `rx_desc` and stomp the driver's frame bookkeeping).
+   IRQ firmware (`irq_eth`) owns its flags through the real handler.
 3. **Hardware paths not modeled**: DCMI has no pixel source (CAN now has
    a real two-node bus with arbitration; I2S/SAI have a WAV-backed DMA
    capture path; LTDC has real scanout + a browser sink). USB OTG is
@@ -141,17 +140,12 @@ document is the readable summary.
 ## Roadmap / future implementation
 
 ### Priority 1 — emulator robustness
-- [x] Unicorn WASM wedge: not reproducible on Node 22.22 (2026-08-10 —
-      count-based `emu_start` returns cleanly at any budget, 500k batches
-      × thousands of rounds; the vendored build IS the current unicorn.js
-      v2.1.4 arm release). `cli.mjs` default `MAX_BATCH` raised 20k →
-      200k (~2.96–3.2 MIPS vs ~2.1). Remaining known landmine: the
-      `timeout` argument to `emu_start` aborts the instance
-      (`qemu_thread_create: Not supported`) — nothing in the repo passes
-      it; a native Node addon or V8-upgrade would fully retire this.
-- [ ] Hardware-accurate NVIC: don't auto-enable IRQs in
-      `set_intr_pending`; make the pump deliver pending interrupts only
-      when ISER bits are set by firmware.
+- [x] Unicorn WASM wedge — **retired with the backend (§23)**. Was not
+      reproducible on Node 22.22 (2026-08-10); the hooks/pump/`maxBatch`
+      machinery is gone with Unicorn itself.
+- [x] Hardware-accurate NVIC: `set_intr_pending` doesn't auto-enable IRQs;
+      inline delivery fires pending interrupts only when ISER bits are set
+      by firmware.
 - [x] EXTI ↔ GPIO edge-trigger wiring (GPIO config drives EXTI pends).
 - [x] FLASH program/erase emulation (write to the flash backing buffer),
       needed for DFU-style and bootloader firmwares.
@@ -159,7 +153,7 @@ document is the readable summary.
       `dma_periph_write`): one WASM call per transfer instead of size/4
       per-chunk calls from JS; also fixed M2P which previously wrote
       peripheral bytes back into guest RAM. RAM-to-RAM copies stay in
-      JS (Unicorn owns guest memory).
+      JS (pre-§23 wording — the core owns guest memory now).
 
 ### Priority 2 — peripheral depth
 - [x] **DOOM audio "only crackling" — FIXED 2026-08-14. The root cause was
@@ -261,12 +255,13 @@ document is the readable summary.
       "drive the emulator from your editor" use case — see above.)
 - [ ] Waveform/DMA trace view in the browser console.
 - [x] Interrupt-driven ETH driver (`eth_irq_test`): NVIC ETH IRQ 61 +
-      DMAIER, the pump runs `ETH_IRQHandler` which reads DMASR TS/RS,
+      DMAIER, the Rust core delivers `ETH_IRQHandler` inline, which reads
+      DMASR TS/RS,
       scans/re-arms RX descriptors; the driver only signals the model
       (`irq_eth` mode — no SRAM flag writes). Also fixed the RX descriptor
       format: FS/LS marker bits at 28/27 corrupted the frame-length window
       [29:16] (`len<<16` only, like real F407).
-- [x] **FreeRTOS port (`freertos_test`)** — verifies the interrupt pump's
+- [x] **FreeRTOS port (`freertos_test`)** — verifies the inline
       context-switch path end-to-end: TIM3 ISR → `xSemaphoreGiveFromISR(xTimSem)`
       → `portYIELD_FROM_ISR` (PendSV) → scheduler context-switches to the
       higher-priority `vHighTask`, which pends on the semaphore. `vHighTask`
@@ -274,8 +269,9 @@ document is the readable summary.
       regression test (wired into `npm test`); the probe is intentionally
       quiet (final summary + `PROBE PASS`/`PROBE FAIL`). This was the
       regression test that caught (and now guards) the mid-`str`
-      exception-return PC bug fixed in `site/emulator.js` `processInterrupts`
-      (see AGENTS.md §9).
+      exception-return PC bug (see AGENTS.md §9 — fixed in the old
+      `processInterrupts` pump, now covered by inline delivery;
+      `cpu/tests.rs::freertos_tasks_run` covers it natively).
   - **Deeper FreeRTOS coverage — DEFERRED (not needed).** The probe already
     exercises all three yield types (task / ISR / SysTick) plus preemption
     and a binary-semaphore give-from-ISR, which fully guards the
@@ -283,8 +279,8 @@ document is the readable summary.
     task deletion, and a second concurrent live ISR (e.g. UART RX) would
     mostly test *guest* FreeRTOS library code, not new emulator behavior,
     and add maintenance cost for marginal protection. Revisit only if
-    `processInterrupts` is reworked or a real FreeRTOS app using those
-    primitives is targeted.
+    inline delivery is reworked
+    or a real FreeRTOS app using those primitives is targeted.
  - [ ] USB CDC echo.
 
 ### Delivered 2026-08-22 (CLI / DX pass)
@@ -316,11 +312,10 @@ document is the readable summary.
        add only when a new bug class appears.
  - [ ] **Website / docs polish** — landing-page copy, diagrams, more in-page
        help. Cosmetic; do alongside the next public-facing push.
- - [ ] **Performance work** — the MIPS ceiling is the Unicorn 2.1.4 WASM core
-       (≈20–23 MIPS headless; DOOM runs ~22–24 fps). Already optimized
-       (per-block hook, noCountHook path, minimalPolls). No further easy
-       headroom without a different CPU core; revisit only if a faster Unicorn
-       build or a native (non-WASM) binding becomes available.
+ - [x] **Performance work** — the old MIPS ceiling was the Unicorn 2.1.4
+       WASM core (≈20–23 MIPS headless; DOOM ran ~22–24 fps). Retired with
+       the backend: the Rust core delivers ~65 MIPS and DOOM holds 35/35
+       (AGENTS.md §22).
 
 
 ## Verification checklist (regression)
@@ -328,7 +323,7 @@ document is the readable summary.
 ```bash
 npm test                                    # flow + blinky + rx-interrupt + 5 component tests
 npm run test:mcp                            # MCP protocol round-trip (needs npm install)
-scripts/verify_ethernet.sh 10000000         # 3 firmwares through gateway
+scripts/verify_ethernet.sh 20000000         # 6 checks (eth_http/dhcp/test × f407/f429) through gateway
 node site/probe_firmwares.mjs               # every preset boots to a banner
 node site/test_rx_interrupt.mjs             # interrupt-driven UART/CRC
 node site/test_flash.mjs                    # FLASH program/erase (11/11)
@@ -337,7 +332,6 @@ node site/test_exti.mjs                     # EXTI GPIO edges (3/3)
 node site/test_can.mjs                      # CAN loopback + 2-node arbitration
 node site/test_audio.mjs                    # I2S DMA WAV replay + TX capture
 node site/test_ltdc.mjs                     # LTDC scanout + framebuffer pixels
-(cd stm32-periph-wasm && cargo test --lib)  # native unit + integration tests
-SOAK_STATS=1 node cli.mjs ../eth_http/eth_http.bin 200000000 \
-  --gateway --config=../../eth_http/config.yaml   # long soak (≈15 min)
+(cd stm32-periph-wasm && cargo test --release) # native unit + integration tests (use -- --test-threads=1 if parallel flakes)
+node site/test_board_matrix.mjs              # full board matrix (156 presets)
 ```

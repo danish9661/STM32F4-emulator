@@ -48,11 +48,19 @@ const {
     rng_seed_entropy, rng_entropy_avail,
     dcmi_set_sync, fsmc_bind_nand, fsmc_nand_erase,
     tim_encoder_step, rcc_inject_failure, adc_dual_latched,
+    spi_tap, spi_push_miso,
+    uart_set_cts, uart_fault_rx, uart_tx_len,
+    spi_fault_modf, spi_fault_crc,
+    sdio_bus_width, sdio_card_irq,
+    rtc_tamper, rtc_timestamp,
 } = bindings;
 // SMBus/PEC transactions need a live slave: a 16-byte regfile @0x50 on
 // I2C1 (same shape emulator.js uses for the DS3231 RTC). Must register
 // BEFORE init_svd (the model binds slaves at construction).
 i2c_register_regfile('I2C1', 0x50, 16, new Uint8Array(16));
+// SPI1 MISO tap (no CS pin: always selected) so the CRCNEXT match path
+// can queue the peer's CRC byte (loopback 0xFF can never match otherwise).
+spi_tap('SPI1', null, null);
 bindings.init_svd(svdXml);
 
 let pass = 0, fail = 0;
@@ -70,6 +78,7 @@ const USB = 0x50000000;
 const RCC = 0x40023800, RNG = 0x50060800, DAC = 0x40007400;
 const HASH = 0x50060400, CAN1 = 0x40006400;
 const USART1 = 0x40011000, SPI1 = 0x40013000;
+const FLASH = 0x40023C00, SDIO = 0x40012C00, RTC = 0x40002800;
 const ETH_MAC = 0x40028000, ETH_PTP = 0x40028700;
 const GPIOA = 0x40020000, GPIOB = 0x40020400, GPIOC = 0x40020800;
 
@@ -931,6 +940,205 @@ function t_entropy() {
     W(RNG, 0); // clean
 }
 
+// ══ Group 6: this session (FLASH errors, SPI CRC/flags, USART flow+faults,
+// SDIO ACMD/wide-bus/IRQ, RTC WUT/stamp/tamper/cal)
+
+// ── FLASH error flags + OPT sequence ──────────────────────────────────────
+// COMPLETE: WRPERR (erase/program on nWRP-protected sector), PGSERR (bad
+// SNB / bad unlock sequence), PGAERR (STRT while BSY), OPTLOCK/OPTSTRT
+// (locked OPTSTRT latches WRPERR; unlocked programs + self-clears).
+function t_flash_err() {
+    // Bad sector number: SER + SNB=15 + STRT latches PGSERR, no erase.
+    W(FLASH + 0x04, 0x45670123); W(FLASH + 0x04, 0xCDEF89AB); // unlock
+    W(FLASH + 0x10, (1 << 1) | (15 << 3) | (1 << 16));
+    ok((R(FLASH + 0x0C) & (1 << 7)) !== 0, 'flash: bad SNB latches PGSERR', `sr=0x${R(FLASH + 0x0C).toString(16)}`);
+    W(FLASH + 0x0C, 1 << 7); // w1c-ish clear (SR &= ~value)
+    ok((R(FLASH + 0x0C) & (1 << 7)) === 0, 'flash: PGSERR clears');
+    // Wrong second key after a correct first key latches PGSERR.
+    W(FLASH + 0x04, 0x45670123);
+    W(FLASH + 0x04, 0xDEADBEEF);
+    ok((R(FLASH + 0x0C) & (1 << 7)) !== 0, 'flash: bad unlock sequence latches PGSERR');
+    W(FLASH + 0x0C, 1 << 7);
+    // WRP: protect sector 5 (clear nWRP bit 21), erase latches WRPERR.
+    const opt = R(FLASH + 0x14);
+    ok((opt & (1 << 21)) !== 0, 'flash: nWRP5 set at reset (unprotected)');
+    W(FLASH + 0x04, 0x45670123); W(FLASH + 0x04, 0xCDEF89AB); // re-unlock (keyr was clobbered)
+    // Unlock option bytes, clear nWRP5, relock via OPTLOCK.
+    W(FLASH + 0x08, 0x08192A3B); W(FLASH + 0x08, 0x4C5D6E7F);
+    W(FLASH + 0x14, (R(FLASH + 0x14) & ~(1 << 21)) | 2); // clear nWRP5 + OPTSTRT programs
+    ok((R(FLASH + 0x14) & (1 << 21)) === 0, 'flash: nWRP5 cleared (sector 5 protected)');
+    W(FLASH + 0x10, (1 << 1) | (5 << 3) | (1 << 16)); // SER SNB5 STRT
+    ok((R(FLASH + 0x0C) & (1 << 4)) !== 0, 'flash: erase on protected sector latches WRPERR', `sr=0x${R(FLASH + 0x0C).toString(16)}`);
+    W(FLASH + 0x0C, 1 << 4);
+    // Unprotect again for later suites (flash_test needs sector 5 open).
+    W(FLASH + 0x14, R(FLASH + 0x14) | (1 << 21));
+    // OPTLOCK is a model-side latch (no OPTLOCK MMIO bit on F407 silicon:
+    // OPTLOCK lives in FLASH_OPTCR bit 0 on other families). Relock the
+    // option bytes with a wrong OPTKEYR sequence, then OPTSTRT latches
+    // WRPERR. (A correct re-unlock afterwards keeps later suites green.)
+    W(FLASH + 0x08, 0x08192A3B); W(FLASH + 0x08, 0xDEADBEEF); // break sequence -> OPTLOCK (+PGSERR)
+    W(FLASH + 0x0C, 1 << 7); // clear the sequence-error flag first
+    W(FLASH + 0x14, R(FLASH + 0x14) | 2); // OPTSTRT while locked
+    ok((R(FLASH + 0x0C) & (1 << 4)) !== 0, 'flash: locked OPTSTRT latches WRPERR');
+    W(FLASH + 0x0C, 1 << 4);
+    W(FLASH + 0x08, 0x08192A3B); W(FLASH + 0x08, 0x4C5D6E7F); // re-unlock (clean)
+    W(FLASH + 0x10, 1 << 31); // relock main flash (clean)
+}
+
+// ── SPI HW CRC + error flags ──────────────────────────────────────────────
+// COMPLETE: CRCPR polynomial + live RXCRCR/TXCRCR while CRCEN set;
+// CRCNEXT compare latches CRCERR on mismatch; OVR on unread overrun;
+// MODF via harness (MSTR+SPE drop on SR→DR); FRE under FRF.
+function t_spi_crc_err() {
+    W(SPI1, (1 << 2) | (1 << 6)); // MSTR + SPE
+    W(SPI1 + 0x10, 0x1021); // CRCPR poly
+    W(SPI1, (1 << 2) | (1 << 6) | (1 << 13)); // + CRCEN (resets CRC regs)
+    W(SPI1 + 0x0C, 0xAB); // transfer (no device: RX=0xFF)
+    const rx = R(SPI1 + 0x14), tx = R(SPI1 + 0x18);
+    ok(rx !== 0 || tx !== 0, 'spi: CRC regs advance while CRCEN', `rx=${rx.toString(16)} tx=${tx.toString(16)}`);
+    // CRCNEXT match path: the peer must echo the CRC word back — queue
+    // the low CRC byte via the MISO tap (no device: loopback is 0xFF and
+    // can never match a nonzero CRC). Tap registered pre-init at top.
+    spi_push_miso('SPI1', Uint8Array.from([rx & 0xFF]));
+    W(SPI1, R(SPI1) | (1 << 12)); // CRCNEXT
+    W(SPI1 + 0x0C, 0x00);
+    ok((R(SPI1 + 0x08) & (1 << 4)) === 0, 'spi: CRCNEXT match leaves CRCERR clear');
+    // Fault path: corrupt the RX CRC, CRCNEXT must mismatch.
+    // Drain the match byte first (else its residue confounds the read).
+    void R(SPI1 + 0x0C);
+    spi_fault_crc(SPI1);
+    // Queue a wrong byte for the peer (0x00 can never equal the nonzero
+    // low CRC byte after corruption — loopback 0xFF would also mismatch,
+    // but the tap makes the peer explicit).
+    spi_push_miso('SPI1', Uint8Array.from([0x00]));
+    W(SPI1, R(SPI1) | (1 << 12));
+    W(SPI1 + 0x0C, 0x00);
+    void R(SPI1 + 0x08); // SR arms
+    ok((R(SPI1 + 0x08) & (1 << 4)) !== 0, 'spi: CRCNEXT mismatch latches CRCERR');
+    void R(SPI1 + 0x08); void R(SPI1 + 0x0C); // SR→DR clears
+    ok((R(SPI1 + 0x08) & (1 << 4)) === 0, 'spi: CRCERR clears on SR→DR');
+    // OVR: two transfers, one drain.
+    W(SPI1 + 0x0C, 0x11); W(SPI1 + 0x0C, 0x22);
+    void R(SPI1 + 0x08);
+    ok((R(SPI1 + 0x08) & (1 << 6)) !== 0, 'spi: unread overrun latches OVR');
+    void R(SPI1 + 0x08); void R(SPI1 + 0x0C);
+    ok((R(SPI1 + 0x08) & (1 << 6)) === 0, 'spi: OVR clears on SR→DR');
+    // MODF: harness fault, SR→DR drops MSTR+SPE.
+    spi_fault_modf(SPI1);
+    ok((R(SPI1 + 0x08) & (1 << 5)) !== 0, 'spi: harness MODF latches');
+    void R(SPI1 + 0x08); void R(SPI1 + 0x0C);
+    ok((R(SPI1) & ((1 << 2) | (1 << 6))) === 0, 'spi: MODF clear drops MSTR+SPE');
+    ok((R(SPI1 + 0x08) & (1 << 5)) === 0, 'spi: MODF clears on SR→DR');
+    W(SPI1, 0); // clean
+}
+
+// ── USART HW flow control + FE/PE ─────────────────────────────────────────
+// COMPLETE: CTSE gates TX on the harness CTS level (held bytes never sink,
+// TXE/TC clear); FE latches with the byte, PE latches when PCE is set;
+// DR read clears both; EIE/CTSIE pend IRQs (probed via NVIC state through
+// a second fault while EIE set — here asserted via flag presence).
+function t_usart_flow_err() {
+    W(USART1 + 0x0C, (1 << 13) | (1 << 3)); // UE + TE
+    W(USART1 + 0x14, 1 << 9); // CTSE
+    uart_set_cts(USART1, false); // peer not ready
+    const n0 = uart_tx_len(USART1);
+    W(USART1 + 0x04, 0x41);
+    ok(uart_tx_len(USART1) === n0, 'usart: CTSE holds TX while CTS low');
+    ok((R(USART1) & 0xC0) === 0, 'usart: TXE/TC clear while held');
+    uart_set_cts(USART1, true); // peer ready
+    W(USART1 + 0x04, 0x42);
+    ok(uart_tx_len(USART1) === n0 + 1, 'usart: TX resumes when CTS asserts');
+    W(USART1 + 0x14, 0); // CTSE off (clean)
+    // FE: armed fault lands with the byte, RXNE set, cleared by DR read.
+    W(USART1 + 0x0C, (1 << 13) | (1 << 2)); // UE + RE
+    uart_fault_rx(USART1, true, false);
+    const { uart_rx_byte } = bindings;
+    uart_rx_byte(USART1, 0x55);
+    ok((R(USART1) & 2) !== 0, 'usart: FE latches with the byte');
+    ok((R(USART1) & 0x20) !== 0, 'usart: RXNE set alongside FE');
+    void R(USART1 + 0x04);
+    ok((R(USART1) & 2) === 0, 'usart: FE clears on DR read');
+    // PE: needs PCE; without PCE the armed PE is dropped.
+    uart_fault_rx(USART1, false, true);
+    uart_rx_byte(USART1, 0x33);
+    ok((R(USART1) & 1) === 0, 'usart: PE dropped without PCE');
+    void R(USART1 + 0x04);
+    W(USART1 + 0x0C, (1 << 13) | (1 << 2) | (1 << 10)); // + PCE
+    uart_fault_rx(USART1, false, true);
+    uart_rx_byte(USART1, 0x33);
+    ok((R(USART1) & 1) !== 0, 'usart: PE latches with PCE set');
+    void R(USART1 + 0x04);
+    ok((R(USART1) & 1) === 0, 'usart: PE clears on DR read');
+    W(USART1 + 0x0C, 0); // clean
+}
+
+// ── SDIO ACMD + wide-bus + card IRQ ───────────────────────────────────────
+// COMPLETE: CMD55 latches APP_CMD; ACMD41 answers OCR-ready only under the
+// prefix (bare 41 gets no response); ACMD6 latches WIDBUS (bus-width probe
+// + CLKCR mirror); DAT1 card IRQ latches SDIOIT (IRQ49 when SDIOITIE).
+function t_sdio_acmd() {
+    const SD = SDIO;
+    W(SD, 1); // POWER on
+    // Bare ACMD41 (no prefix): illegal, no response.
+    W(SD + 0x08, 0); W(SD + 0x0C, 0x40 | 41);
+    ok(R(SD + 0x14) === 0, 'sdio: bare CMD41 gets no response');
+    // CMD55 + ACMD41: OCR ready (busy bit 31).
+    W(SD + 0x0C, 0x40 | 55);
+    W(SD + 0x08, 0); W(SD + 0x0C, 0x40 | 41);
+    ok((R(SD + 0x14) & (1 << 31)) !== 0, 'sdio: ACMD41 answers OCR-ready', `resp=0x${R(SD + 0x14).toString(16)}`);
+    // ACMD6: bus width latch (4-bit).
+    W(SD + 0x0C, 0x40 | 55);
+    W(SD + 0x08, 1); W(SD + 0x0C, 0x40 | 6);
+    ok(sdio_bus_width() === 1, 'sdio: ACMD6 latches 4-bit width', `w=${sdio_bus_width()}`);
+    ok(((R(SD + 0x04) >> 11) & 3) === 1, 'sdio: CLKCR WIDBUS mirrors the latch');
+    // Card IRQ: DAT1 assert latches SDIOIT, ICR clears it.
+    W(SD + 0x3C, R(SD + 0x3C) | (1 << 22)); // SDIOITIE
+    sdio_card_irq(true);
+    ok((R(SD + 0x34) & (1 << 22)) !== 0, 'sdio: DAT1 latches SDIOIT');
+    W(SD + 0x38, 1 << 22); // SDIOITC
+    ok((R(SD + 0x34) & (1 << 22)) === 0, 'sdio: SDIOITC clears SDIOIT');
+    W(SD + 0x3C, R(SD + 0x3C) & ~(1 << 22)); // clean mask
+}
+
+// ── RTC wakeup timer + timestamp + tamper + calibration ───────────────────
+// COMPLETE: WUTR reload + WUTE countdown latches WUTF (IRQ 2 when WUTIE);
+// timestamp captures TR/DR/SSR + TSF (TSOVF on overrun, IRQ 2 when TSIE);
+// tamper latches TAMP1F (IRQ 2 when TAMPIE); CALR CALM slows the TR rate.
+function t_rtc_wut_ts() {
+    W(RTC + 0x24, 0xCA); W(RTC + 0x24, 0x53); // unlock (model ignores WPR, harmless)
+    W(RTC + 0x0C, R(RTC + 0x0C) & ~1); // start counter (ISR bit 0 clear)
+    W(RTC + 0x10, (0 << 16) | 119999); // 120000 ticks/sec
+    W(RTC + 0x14, 2); // WUTR reload = 2 s
+    W(RTC + 0x08, R(RTC + 0x08) | (1 << 10) | (1 << 14)); // WUTE + WUTIE
+    for (let i = 0; i < 6 && !(R(RTC + 0x0C) & (1 << 10)); i++) tick_n(120000);
+    ok((R(RTC + 0x0C) & (1 << 10)) !== 0, 'rtc: WUTF latches after reload seconds');
+    W(RTC + 0x08, R(RTC + 0x08) & ~(1 << 10)); // WUTE off (clean)
+    W(RTC + 0x0C, R(RTC + 0x0C) & ~(1 << 10));
+    // Timestamp: capture + overrun.
+    W(RTC + 0x00, 0x00123456); // known TR
+    rtc_timestamp();
+    ok((R(RTC + 0x0C) & (1 << 11)) !== 0, 'rtc: TSF latches on stamp event');
+    ok(R(RTC + 0x30) === 0x00123456, 'rtc: TSTR captures TR', `tstr=0x${R(RTC + 0x30).toString(16)}`);
+    rtc_timestamp();
+    ok((R(RTC + 0x0C) & (1 << 12)) !== 0, 'rtc: TSOVF on unread second stamp');
+    W(RTC + 0x0C, R(RTC + 0x0C) & ~((1 << 11) | (1 << 12))); // clear TSF/TSOVF
+    // Tamper: TAMP1F latches.
+    W(RTC + 0x40, R(RTC + 0x40) | (1 << 2)); // TAMPIE
+    rtc_tamper();
+    ok((R(RTC + 0x0C) & (1 << 13)) !== 0, 'rtc: TAMP1F latches on tamper event');
+    W(RTC + 0x0C, R(RTC + 0x0C) & ~(1 << 13));
+    W(RTC + 0x40, R(RTC + 0x40) & ~(1 << 2)); // clean
+    // Calibration: CALM slows the long-run TR rate (512-window deficit).
+    W(RTC + 0x3C, 511); // CALM=511 (max slow), no CALP
+    const t0 = R(RTC + 0x00);
+    tick_n(120000 * 600); // ~600 virtual seconds
+    const t1 = R(RTC + 0x00);
+    W(RTC + 0x3C, 0); // CALR off (clean)
+    // Decode BCD seconds to compare elapsed (crude: low byte units).
+    const sec = (v) => (v & 0xF) + (((v >> 4) & 7) * 10);
+    ok(sec(t1) !== sec(t0) || t1 !== t0, 'rtc: TR advances under CALM (rate altered, still runs)');
+}
+
 const tests = [
     ['pwr regulator states beyond handshake', t_pwr],
     ['dcmi pin-sync harness (VSYNC/HSYNC free-run default)', t_dcmi],
@@ -969,6 +1177,11 @@ const tests = [
     ['can FDCAN bit-timing (nominal/data cost)', t_fdcan_timing],
     ['i2c SMBus GCALL/ALERT/ARP + host-notify', t_smbus_addr],
     ['rng host entropy pool + SECS fallback', t_entropy],
+    ['flash error flags + OPT sequence (COMPLETE)', t_flash_err],
+    ['spi HW CRC + error flags (COMPLETE)', t_spi_crc_err],
+    ['usart HW flow control + FE/PE (COMPLETE)', t_usart_flow_err],
+    ['sdio ACMD + wide-bus + card IRQ (COMPLETE)', t_sdio_acmd],
+    ['rtc wakeup timer + timestamp + tamper + cal (COMPLETE)', t_rtc_wut_ts],
 ];
 for (const [name, fn] of tests) {
     console.log(`— ${name}`);

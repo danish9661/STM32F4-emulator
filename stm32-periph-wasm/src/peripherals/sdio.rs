@@ -11,6 +11,18 @@ pub struct Sdio {
     resp: [u32; 4], dtimer: u32, dlen: u32, dctrl: u32, dcount: u32,
     sta: u32, icr: u32, mask: u32, fifocnt: u32, fifo: u32,
     sd_state: SdState, rca: u16, data_xfer_active: bool,
+    /// APP_CMD latch (CMD55 completed, next command is ACMD<n>).
+    app_pending: bool,
+    /// Wide-bus select (CLKCR WIDBUS bits 12:11, latched from the last
+    /// ACMD6): 0 = 1-bit, 1 = 4-bit, 2 = 8-bit. Stored + readable via a
+    /// scope probe; the data path is width-agnostic (same bytes), so this
+    /// is the observable contract, not a timing change.
+    wide_bus: u8,
+    /// SDIO interrupt latch (STA SDIOIT bit 22): set by the harness via
+    /// `sdio_card_irq` (card asserts the DAT1 interrupt outside a transfer),
+    /// cleared by ICR SDIOITC (bit 22). Gated on MASK SDIOITIE like the
+    /// other flags for IRQ49.
+    sdio_it: bool,
 }
 
 impl Sdio {
@@ -34,7 +46,40 @@ impl Default for Sdio {
             resp: [0; 4], dtimer: 0, dlen: 0, dctrl: 0, dcount: 0,
             sta: 0, icr: 0, mask: 0, fifocnt: 0, fifo: 0,
             sd_state: SdState::Idle, rca: 0, data_xfer_active: false,
+            app_pending: false,
+            wide_bus: 0, sdio_it: false,
         }
+    }
+}
+
+impl Sdio {
+    /// Current bus width select (CLKCR WIDBUS via ACMD6): 0 = 1-bit,
+    /// 1 = 4-bit, 2 = 8-bit. Scope probe for the wide-bus contract.
+    pub fn bus_width(&self) -> u8 {
+        self.wide_bus
+    }
+
+    /// Harness = the card's DAT1 interrupt line: latch SDIOIT (STA bit 22).
+    /// Fires IRQ49 when MASK SDIOITIE is set, like every other flag.
+    /// Cleared by writing ICR SDIOITC (bit 22).
+    pub fn card_irq(&mut self, sys: &System, set: bool) {
+        self.sdio_it = set;
+        if set {
+            self.sta |= 1 << 22; // SDIOIT
+            self.fire_interrupts(sys);
+        } else {
+            self.sta &= !(1 << 22);
+        }
+    }
+}
+
+impl Sdio {
+    /// Application-command prefix state: set by CMD55 (APP_CMD), consumed
+    /// by the next command (ACMD<n>). Tracked explicitly: `app_pending`
+    /// latches on a completed CMD55 and clears on the following command
+    /// (real cards hold APP_CMD only until the next command arrives).
+    fn app_cmd_pending(&self) -> bool {
+        self.app_pending
     }
 }
 
@@ -76,6 +121,11 @@ impl Peripheral for Sdio {
                     let wait_type = (value >> 6) & 3;
                     self.respcmd = cmd_index as u32;
                     self.resp = [0; 4];
+                    // ACMD prefix: this command arrived under APP_CMD.
+                    let acmd = self.app_pending;
+                    // The prefix is consumed by whatever comes next
+                    // (ACMD or plain command alike — silicon clears it).
+                    self.app_pending = false;
 
                     match (self.sd_state, cmd_index) {
                         (SdState::Idle, 0)  => { self.resp[0] = 0x00FF_FF80; }
@@ -102,6 +152,46 @@ impl Peripheral for Sdio {
                         (SdState::Tran, 55) => { self.resp[0] = 0x1D0_0000; }
                         (_, 8) => { self.resp[0] = 0x1AA; }
                         _ => {}
+                    }
+                    // ACMD handling (application-specific commands, only
+                    // valid under the CMD55 prefix):
+                    // - ACMD41 (SD_SEND_OP_COND): OCR busy bit follows the
+                    //   voltage window — report ready (bit 31) with the
+                    //   canned OCR; without the prefix it is an illegal
+                    //   command (no response, like silicon).
+                    // - ACMD6 (SET_BUS_WIDTH): ARG[1:0] latches WIDBUS
+                    //   (1 = 4-bit, 2 = 8-bit); the data path is
+                    //   width-agnostic, so the latch IS the contract.
+                    // - ACMD13 (SD_STATUS): 512-bit status, canned ready.
+                    // - ACMD51 (SEND_SCR): configuration register, canned.
+                    if acmd {
+                        match cmd_index {
+                            41 => { self.resp[0] = 0x80FF_8000; }
+                            6 => {
+                                self.wide_bus = (self.arg & 3) as u8;
+                                self.clkcr = (self.clkcr & !(3 << 11))
+                                    | (((self.arg & 3) as u32) << 11);
+                                self.resp[0] = 0x100;
+                            }
+                            13 => { self.resp[0] = 0x100; }
+                            51 => { self.resp[0] = 0x100; }
+                            _ => {}
+                        }
+                    } else if cmd_index == 41 || cmd_index == 51 {
+                        // Bare ACMD without prefix: illegal (silicon sends
+                        // no response). Clear the decode above.
+                        if (self.sd_state, cmd_index) == (SdState::Ready, 41)
+                            || (self.sd_state, cmd_index) == (SdState::Idle, 41)
+                        {
+                            self.resp = [0; 4];
+                        }
+                        if cmd_index == 51 {
+                            self.resp = [0; 4];
+                        }
+                    }
+                    // CMD55 latches the prefix for the NEXT command.
+                    if cmd_index == 55 {
+                        self.app_pending = true;
                     }
 
                     self.sta |= 1 << 6;
@@ -132,6 +222,10 @@ impl Peripheral for Sdio {
             }
             0x38 => {
                 self.sta &= !value;
+                // SDIOITC (bit 22) clears the card-interrupt latch too.
+                if value & (1 << 22) != 0 {
+                    self.sdio_it = false;
+                }
             }
             0x3C => {
                 self.mask = value & 0x7FFF_FFFF;

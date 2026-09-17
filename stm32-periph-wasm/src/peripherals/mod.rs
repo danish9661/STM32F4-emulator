@@ -150,6 +150,101 @@ impl Peripherals {
         self.with_i2c(base, |u| u.arm_arb_loss());
     }
 
+    /// Run a closure on the SPI peripheral with the given base address.
+    fn with_spi<R>(&self, base: u32, f: impl FnOnce(&mut crate::peripherals::spi::Spi) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if slot.start == base {
+                if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::spi::Spi>() {
+                    return Some(f(u));
+                }
+                break;
+            }
+        }
+        None
+    }
+
+    /// Harness = the NSS pin fault: latch MODF on the SPI block at `base`.
+    pub fn spi_fault_modf(&self, base: u32) {
+        self.with_spi(base, |u| u.fault_modf());
+    }
+
+    /// Harness = the faulty peer: corrupt the RX CRC so the next CRCNEXT
+    /// compare on the SPI block at `base` mismatches (latches CRCERR).
+    pub fn spi_fault_crc(&self, base: u32) {
+        self.with_spi(base, |u| u.fault_crc());
+    }
+
+    /// Run a closure on the USART peripheral with the given base address.
+    fn with_usart<R>(&self, base: u32, f: impl FnOnce(&mut crate::peripherals::usart::Usart) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if slot.start == base {
+                if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::usart::Usart>() {
+                    return Some(f(u));
+                }
+                break;
+            }
+        }
+        None
+    }
+
+    /// Harness = the CTS peer: drive the CTS input of the USART at `base`.
+    pub fn uart_set_cts(&self, base: u32, asserted: bool) {
+        self.with_usart(base, |u| u.set_cts(asserted));
+    }
+
+    /// Harness = the noisy wire: arm FE/PE on the next received byte of
+    /// the USART at `base`.
+    pub fn uart_fault_rx(&self, base: u32, fe: bool, pe: bool) {
+        self.with_usart(base, |u| u.fault_rx(fe, pe));
+    }
+
+    /// Queued TX length of the USART at `base` (scope probe for CTSE-hold).
+    pub fn uart_tx_len(&self, base: u32) -> usize {
+        self.with_usart(base, |u| u.tx_len()).unwrap_or(0)
+    }
+
+    /// Run a closure on the SDIO controller (single instance per map).
+    fn with_sdio<R>(&self, f: impl FnOnce(&mut crate::peripherals::sdio::Sdio) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::sdio::Sdio>() {
+                return Some(f(u));
+            }
+        }
+        None
+    }
+
+    /// Current bus-width select of the SDIO card (0 = 1-bit, 1 = 4-bit,
+    /// 2 = 8-bit; latched from ACMD6). Scope probe for the wide-bus path.
+    pub fn sdio_bus_width(&self) -> u8 {
+        self.with_sdio(|u| u.bus_width()).unwrap_or(0)
+    }
+
+    /// Harness = the card's DAT1 interrupt line: latch/clear SDIOIT.
+    pub fn sdio_card_irq(&self, sys: &System, set: bool) {
+        self.with_sdio(|u| u.card_irq(sys, set));
+    }
+
+    /// Run a closure on the RTC (single instance per map).
+    fn with_rtc<R>(&self, f: impl FnOnce(&mut crate::peripherals::rtc::Rtc) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::rtc::Rtc>() {
+                return Some(f(u));
+            }
+        }
+        None
+    }
+
+    /// Harness = the tamper pin: latch TAMP1F (fires IRQ 2 when TAMPIE).
+    pub fn rtc_tamper(&self, sys: &System) {
+        self.with_rtc(|u| u.tamper(sys));
+    }
+
+    /// Harness = the timestamp pin event: capture TR/DR/SSR, latch TSF
+    /// (TSOVF on overrun; IRQ 2 when TSIE).
+    pub fn rtc_timestamp(&self, sys: &System) {
+        self.with_rtc(|u| u.timestamp(sys));
+    }
+
     /// Harness = the SMBus alerting device: arm the address returned in DR
     /// on the next Alert-Response-Address read of the block at `base`.
     pub fn i2c_arm_smbus_alert(&self, base: u32, addr: u8) {
@@ -221,6 +316,25 @@ impl Peripherals {
     /// 128x11 recessive bits (bus recovery, counters + LEC cleared).
     pub fn can_note_error(&self, sys: &System, base: u32, lec: u8, recover: bool) {
         self.with_can(base, |u| u.note_error(sys, lec, recover));
+    }
+
+    /// Run a closure on the internal FLASH controller (single instance).
+    fn with_flash<R>(&self, f: impl FnOnce(&mut crate::peripherals::flash::Flash) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::flash::Flash>() {
+                return Some(f(u));
+            }
+        }
+        None
+    }
+
+    /// Program-sequence error check for a guest flash store: latches
+    /// PGSERR and reports true when the store must be dropped (wrong
+    /// width for PSIZE, or address outside the flash array). Called from
+    /// the core memory path with the access width, so halfword/byte
+    /// programs fault exactly like silicon.
+    pub fn flash_program_error(&self, addr: u32, width: u8) -> bool {
+        self.with_flash(|u| u.program_error(addr, width)).unwrap_or(false)
     }
     /// Run a closure on the ITM stimulus console (multi-port trace drain).
     fn with_itm<R>(&self, f: impl FnOnce(&mut Itm) -> R) -> Option<R> {

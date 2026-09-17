@@ -29,6 +29,15 @@ pub struct Usart {
     tx_data: Vec<u8>,
     rx_buf: Vec<u8>,
     irq_num: i32,
+    /// CTS input level from the harness (true = asserted, peer ready).
+    /// Default asserted: with hardware flow control off it is never
+    /// sampled, and `uart_cts` starts asserted so enabling CTSE never
+    /// spuriously blocks TX.
+    cts_asserted: bool,
+    /// Framing/parity fault injection for the next received byte
+    /// (harness = the noisy wire; see `uart_fault_rx`). Bit 0 = FE,
+    /// bit 1 = PE. Consumed by the next rx_byte().
+    rx_fault: u8,
 }
 
 impl Usart {
@@ -40,6 +49,8 @@ impl Usart {
                 tx_data: Vec::new(),
                 rx_buf: Vec::new(),
                 irq_num: irq,
+                cts_asserted: true,
+                rx_fault: 0,
             }) as Box<dyn Peripheral>
         })
     }
@@ -70,15 +81,46 @@ impl Usart {
         if self.cr1 & (1 << 6) != 0 && self.sr & (1 << 6) != 0 { pending = true; } // TCIE + TC
         if self.cr1 & (1 << 7) != 0 && self.sr & (1 << 7) != 0 { pending = true; } // TXEIE + TXE
         if self.cr1 & (1 << 5) != 0 && self.sr & (1 << 5) != 0 { pending = true; } // RXNEIE + RXNE
+        // EIE (CR3 bit 0): framing/overrun/noise faults pend the IRQ.
+        if self.cr3 & 1 != 0
+            && self.sr & ((1 << 0) | (1 << 1) | (1 << 2) | (1 << 3)) != 0
+        {
+            pending = true; // PE/FE/NE/ORE + EIE
+        }
+        // CTSIE (CR3 bit 10): CTS edge pends the IRQ.
+        if self.cr3 & (1 << 10) != 0 && self.sr & (1 << 10) != 0 {
+            pending = true; // CTSIF + CTSIE
+        }
         if pending {
             sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
         }
     }
 
-    fn read_sr(&mut self) -> u32 {
-        let sr = self.sr;
-        self.sr |= 0x00C0; // TXE and TC stay set after reading SR
-        sr
+    /// CTS input level for hardware flow control (CR3 CTSE bit 9 gates
+    /// TX, RTSE bit 8 drives RTS — see write_dr). Harness = the peer.
+    pub fn set_cts(&mut self, asserted: bool) {
+        self.cts_asserted = asserted;
+    }
+
+    /// Live CTS flag (SR bit 9, CTSF): the sampled CTS input level.
+    /// Set on a CTS edge (cleared by writing it 0 — silicon clears CTSF
+    /// by software sequence; here any SR write of the bit clears it and
+    /// re-arms the edge detector). Read-only live level otherwise.
+    fn cts_flag(&self) -> bool {
+        self.sr & (1 << 10) != 0
+    }
+
+    /// Arm a framing (FE, SR bit 1) and/or parity (PE, SR bit 0) fault on
+    /// the next received byte (harness = the noisy wire). The byte still
+    /// lands in DR with RXNE set (silicon delivers data + flags); PE only
+    /// latches when PCE (CR1 bit 10) is enabled.
+    pub fn fault_rx(&mut self, fe: bool, pe: bool) {
+        if fe {
+            self.rx_fault |= 1;
+        }
+        if pe {
+            self.rx_fault |= 2;
+        }
     }
 
     fn read_dr(&mut self, sys: &System) -> u32 {
@@ -90,17 +132,37 @@ impl Usart {
         if self.rx_buf.is_empty() {
             self.sr &= !(1 << 5); // Clear RXNE only when buffer empty
         }
+        // A DR read clears latched PE/FE/NE (silicon: read SR then DR;
+        // the SR read is implied here — single-call model, same contract
+        // as the SPI SR→DR sequence but consumed at once).
+        self.sr &= !((1 << 0) | (1 << 1) | (1 << 2));
         self.sr |= 0x00C0; // TXE, TC
         self.update_interrupt(sys);
         dr
     }
 
-    fn write_dr(&mut self, value: u32, sys: &System) {
+    /// CTS-gated transmit: with CTSE (CR3 bit 9) set and CTS deasserted
+    /// the byte is held (not sunk to the console, TXE/TC stay clear) —
+    /// silicon blocks the shifter while CTS is high. Returns true when
+    /// the byte was accepted.
+    fn write_dr(&mut self, value: u32, sys: &System) -> bool {
+        if self.cr3 & (1 << 9) != 0 && !self.cts_asserted {
+            // Held: TXE/TC clear so firmware polls correctly.
+            self.sr &= !0x00C0;
+            return false;
+        }
         let ch = (value & 0xFF) as u8;
         self.tx_data.push(ch);
         get_uart_output().lock().unwrap().push(ch as char);
         self.sr |= 0x00C0; // TXE=1, TC=1
         self.update_interrupt(sys);
+        true
+    }
+
+    /// Queued TX length (harness scope probe: how many bytes the guest
+    /// emitted — lets a test assert CTSE held bytes back, then released).
+    pub fn tx_len(&self) -> usize {
+        self.tx_data.len()
     }
 }
 
@@ -108,7 +170,18 @@ impl Peripheral for Usart {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
-            0x00 => self.read_sr(),
+            // SR: live CTS flag (bit 9) reflects the harness CTS level;
+            // PE/FE/NE/ORE are latched fault bits (cleared on DR read).
+            0x00 => {
+                let mut sr = self.sr;
+                if self.cts_asserted {
+                    sr |= 1 << 9; // CTSF: CTS asserted
+                } else {
+                    sr &= !(1 << 9);
+                }
+                self.sr |= 0x00C0; // TXE and TC stay set after reading SR
+                sr
+            }
             0x04 => self.read_dr(sys),
             0x08 => self.brr,
             0x0C => self.cr1,
@@ -121,8 +194,16 @@ impl Peripheral for Usart {
 
     fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
-            0x00 => {} // SR writes only clear some bits via read
-            0x04 => self.write_dr(value, sys),
+            0x00 => {
+                // SR is w1c for CTSF (bit 9): writing the bit clears the
+                // latched edge flag. Other bits ignore writes.
+                if value & (1 << 9) != 0 {
+                    self.sr &= !(1 << 9);
+                }
+            }
+            0x04 => {
+                self.write_dr(value, sys);
+            }
             0x08 => self.brr = value,
             0x0C => {
                 self.cr1 = value & 0xFFFF;
@@ -135,7 +216,19 @@ impl Peripheral for Usart {
             // CR3: ONEBIT/CTSIE/CTSE/RTSE/DMAT/DMAR/SCEN/NACK/HDSEL/
             // IRLP/IREN/EIE — stored verbatim (Smartcard/IrDA modes are
             // protocols the model does not speak; see sc_active()).
-            0x14 => self.cr3 = value & 0xFFFF,
+            // CTSE (bit 9) gates TX on the harness CTS level; RTSE
+            // (bit 8) is accepted (RTS output has no pin to drive —
+            // firmware observes the stored bit).
+            0x14 => {
+                let old = self.cr3;
+                self.cr3 = value & 0xFFFF;
+                // Releasing CTSE (or CTS asserting) re-arms TXE/TC so a
+                // subsequently unblocked write completes promptly.
+                if old & (1 << 9) != 0 && value & (1 << 9) == 0 {
+                    self.sr |= 0x00C0;
+                }
+                self.update_interrupt(sys);
+            }
             0x18 => self.gtp = value,
             _ => {}
         }
@@ -145,6 +238,15 @@ impl Peripheral for Usart {
         if self.rx_buf.len() < 64 {
             self.rx_buf.push(byte);
             self.sr |= 1 << 5; // RXNE
+            // Injected wire faults land with the byte (silicon latches
+            // FE/PE alongside RXNE; PE needs PCE enabled).
+            if self.rx_fault & 1 != 0 {
+                self.sr |= 1 << 1; // FE
+            }
+            if self.rx_fault & 2 != 0 && self.cr1 & (1 << 10) != 0 {
+                self.sr |= 1 << 0; // PE (PCE-gated)
+            }
+            self.rx_fault = 0;
         } else {
             self.sr |= 1 << 3; // ORE
         }

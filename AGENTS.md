@@ -3961,3 +3961,54 @@ matrix **156/156**, feat 1/1 both maps (greenboard_all4 green).
   authoritative ETH proof; the gateway run needs a quiet box + longer budget
   before it means anything. `pkg/` (nodejs target) rebuilt alongside so both
   artifacts match the same source.
+
+## 35. Gap batch 6: FLASH errors, SPI CRC/flags, USART flow+faults, SDIO ACMD, RTC WUT/stamp (2026-09-17, UNCOMMITTED)
+
+Five "Partial" rows closed to honest live behavior (each with mock pins in
+`site/test_periph_mock_consumer.mjs` Group 6 + native/rust coverage where it
+fits + board-doc row updates, all x3 via sync scripts). Mock 168 → **205
+checks PASS**; cargo **217**; matrix **156/156**; feat 1/1 both maps
+(greenboard_gap6 green); browser standby CDP PASS.
+
+- **FLASH** (`flash.rs` + `cpu/mem.rs`): WRPERR (nWRP-protected sector erase
+  via `wrp_error`, MER-any-protected, locked OPTSTRT)/PGSERR (bad SNB,
+  broken KEYR/OPTKEYR second key)/PGAERR (STRT while BSY); OPTLOCK latch
+  (correct OPTKEYR sequence clears, broken sequence sets + PGSERR) with
+  OPTSTRT self-clear + BSY pulse + EOP; `program_error(addr,width)` gate in
+  the mem.rs flash path (out-of-array PGSERR). Deliberate leniency,
+  documented: width-vs-PSIZE mismatch is NOT faulted (reset PSIZE x8 would
+  fault every working word program — no guest observes the rule).
+- **SPI** (`spi.rs`): HW CRC — CRCPR poly, live RXCRCR/TXCRCR while CRCEN,
+  CRC regs reset on CRCEN/SPE set, per-transfer advance, CRCNEXT compare
+  latches CRCERR on mismatch (self-clears; no SR→DR wipe on the CRCNEXT
+  transfer itself or the flag dies before observation); OVR (unread
+  overrun)/MODF (harness `spi_fault_modf`, drops MSTR+SPE on SR→DR)/FRE
+  (FRF-gated)/BSY (transfer-in-flight latch, NOT bare SPE — the old mirror
+  broke the i2s_sai SR-default check, caught by matrix i2s_sai_test/f429).
+  CRCNEXT match path needs a MISO tap peer (loopback 0xFF can never match)
+  — mock registers `spi_tap('SPI1')` pre-init like the i2c regfile.
+- **USART** (`usart.rs`): CTSE gates TX on harness CTS (`uart_set_cts`;
+  held bytes never sink, TXE/TC clear); FE/PE fault injection
+  (`uart_fault_rx`; PE PCE-gated, both clear on DR read); EIE/CTSIE pend
+  IRQs; SR CTS bit 9 live from harness level + w1c. No TXEIE/TCIE behavior
+  change (all existing UART tests green).
+- **SDIO** (`sdio.rs`): APP_CMD latch (CMD55 arms, consumed by next cmd);
+  ACMD41 answers OCR-ready only under prefix (bare 41 illegal, no
+  response); ACMD6 latches WIDBUS + CLKCR mirror (`sdio_bus_width` probe);
+  ACMD13/51 canned; DAT1 card IRQ (`sdio_card_irq` → SDIOIT + IRQ49,
+  ICR-cleared). Existing CMD55-as-status behavior kept (R1 response still
+  returns alongside the latch).
+- **RTC** (`rtc.rs`): wakeup timer (WUTR reload + WUTE countdown → WUTF +
+  IRQ 2 when WUTIE); timestamp capture (TR/DR/SSR → TSTR/TSDR/TSSSR + TSF,
+  TSOVF on overrun, IRQ 2 when TSIE); tamper (TAMP1F, IRQ 2 when TAMPIE);
+  smooth calibration (CALR CALM/CALP net rate over 512 s windows via a
+  process-global accumulator). Wasm exports: `uart_set_cts`,
+  `uart_fault_rx`, `uart_tx_len`, `spi_fault_modf`, `spi_fault_crc`,
+  `sdio_bus_width`, `sdio_card_irq`, `rtc_tamper`, `rtc_timestamp`.
+- **?v= 35→36** (app.js/doom.js/doom-worker.js vendor literals) +
+  console.html app.js v42→v43 for the rebuilt vendor wasm; `pkg/` (nodejs)
+  rebuilt alongside so both artifacts match.
+- Battery: `.pw-scratch/greenboard_gap6.{log,verdict}` (cargo/mock/matrix/
+  feat407/feat429 all green) + `.pw-scratch/chain_gap6_final.verdict`
+  (same + browser standby PASS). Standby CDP log:
+  `.pw-scratch/standby_gap6.log`.

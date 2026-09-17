@@ -421,6 +421,75 @@ pub fn uart_rx_byte(addr: u32, byte: u8) -> bool {
     sys().p.rx_byte(&*sys(), addr, byte)
 }
 
+/// Harness = the CTS peer: drive the CTS input of the USART at `base`.
+/// With CTSE set, deasserted CTS holds TX (TXE/TC clear, byte dropped).
+#[wasm_bindgen]
+pub fn uart_set_cts(base: u32, asserted: bool) {
+    let sys = crate::sys();
+    sys.p.uart_set_cts(base, asserted);
+}
+
+/// Harness = the noisy wire: arm framing (FE) / parity (PE) faults on the
+/// next received byte of the USART at `base`. PE needs PCE enabled.
+#[wasm_bindgen]
+pub fn uart_fault_rx(base: u32, fe: bool, pe: bool) {
+    let sys = crate::sys();
+    sys.p.uart_fault_rx(base, fe, pe);
+}
+
+/// Queued TX length of the USART at `base` (scope probe for CTSE-hold).
+#[wasm_bindgen]
+pub fn uart_tx_len(base: u32) -> usize {
+    let sys = crate::sys();
+    sys.p.uart_tx_len(base)
+}
+
+/// Harness = the NSS pin fault: latch MODF on the SPI block at `base`.
+#[wasm_bindgen]
+pub fn spi_fault_modf(base: u32) {
+    let sys = crate::sys();
+    sys.p.spi_fault_modf(base);
+}
+
+/// Harness = the faulty peer: corrupt the RX CRC so the next CRCNEXT
+/// compare on the SPI block at `base` mismatches (latches CRCERR).
+#[wasm_bindgen]
+pub fn spi_fault_crc(base: u32) {
+    let sys = crate::sys();
+    sys.p.spi_fault_crc(base);
+}
+
+/// Current SDIO bus-width select (0 = 1-bit, 1 = 4-bit, 2 = 8-bit).
+#[wasm_bindgen]
+pub fn sdio_bus_width() -> u8 {
+    let sys = crate::sys();
+    sys.p.sdio_bus_width()
+}
+
+/// Harness = the card's DAT1 interrupt line: latch/clear SDIOIT.
+#[wasm_bindgen]
+pub fn sdio_card_irq(set: bool) {
+    let sys = crate::sys();
+    let sys2 = crate::sys();
+    sys.p.sdio_card_irq(sys2, set);
+}
+
+/// Harness = the tamper pin: latch RTC TAMP1F (IRQ 2 when TAMPIE).
+#[wasm_bindgen]
+pub fn rtc_tamper() {
+    let sys = crate::sys();
+    let sys2 = crate::sys();
+    sys.p.rtc_tamper(sys2);
+}
+
+/// Harness = the timestamp pin event: capture TR/DR/SSR, latch TSF.
+#[wasm_bindgen]
+pub fn rtc_timestamp() {
+    let sys = crate::sys();
+    let sys2 = crate::sys();
+    sys.p.rtc_timestamp(sys2);
+}
+
 /// Load a WAV file (PCM 16-bit) as the I2S/SAI sample source. DR reads then
 /// consume samples from it. Returns an error string on malformed input.
 #[wasm_bindgen]

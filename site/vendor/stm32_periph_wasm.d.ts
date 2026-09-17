@@ -700,12 +700,43 @@ export function rng_entropy_avail(): number;
 export function rng_seed_entropy(words: Uint32Array): void;
 
 /**
+ * Harness = the tamper pin: latch RTC TAMP1F (IRQ 2 when TAMPIE).
+ */
+export function rtc_tamper(): void;
+
+/**
+ * Harness = the timestamp pin event: capture TR/DR/SSR, latch TSF.
+ */
+export function rtc_timestamp(): void;
+
+/**
+ * Current SDIO bus-width select (0 = 1-bit, 1 = 4-bit, 2 = 8-bit).
+ */
+export function sdio_bus_width(): number;
+
+/**
+ * Harness = the card's DAT1 interrupt line: latch/clear SDIOIT.
+ */
+export function sdio_card_irq(set: boolean): void;
+
+/**
  * Set a pending interrupt in the NVIC. Negative `irq` values select system
  * exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
  * Used by the FreeRTOS path: the Rust core synthesizes these exceptions
  * with exact inline entry/return.
  */
 export function set_intr_pending(irq: number): void;
+
+/**
+ * Harness = the faulty peer: corrupt the RX CRC so the next CRCNEXT
+ * compare on the SPI block at `base` mismatches (latches CRCERR).
+ */
+export function spi_fault_crc(base: number): void;
+
+/**
+ * Harness = the NSS pin fault: latch MODF on the SPI block at `base`.
+ */
+export function spi_fault_modf(base: number): void;
 
 /**
  * Debug: flash state summary [wel, status1, cs_state, dummy_pending, pending_program_len]
@@ -764,10 +795,27 @@ export function tim_encoder_step(name: string, ti: number, rising: boolean): voi
 export function tim_inject_capture(name: string, ch: number): void;
 
 /**
+ * Harness = the noisy wire: arm framing (FE) / parity (PE) faults on the
+ * next received byte of the USART at `base`. PE needs PCE enabled.
+ */
+export function uart_fault_rx(base: number, fe: boolean, pe: boolean): void;
+
+/**
  * Inject a received byte into the UART at the given peripheral base address.
  * Returns true if a peripheral was found at that address.
  */
 export function uart_rx_byte(addr: number, byte: number): boolean;
+
+/**
+ * Harness = the CTS peer: drive the CTS input of the USART at `base`.
+ * With CTSE set, deasserted CTS holds TX (TXE/TC clear, byte dropped).
+ */
+export function uart_set_cts(base: number, asserted: boolean): void;
+
+/**
+ * Queued TX length of the USART at `base` (scope probe for CTSE-hold).
+ */
+export function uart_tx_len(base: number): number;
 
 /**
  * Internal-DMA progress on the FS block: [in_bytes, out_bytes] moved
@@ -1010,7 +1058,13 @@ export interface InitOutput {
     readonly reset_state: () => void;
     readonly rng_entropy_avail: () => number;
     readonly rng_seed_entropy: (a: number, b: number) => void;
+    readonly rtc_tamper: () => void;
+    readonly rtc_timestamp: () => void;
+    readonly sdio_bus_width: () => number;
+    readonly sdio_card_irq: (a: number) => void;
     readonly set_intr_pending: (a: number) => void;
+    readonly spi_fault_crc: (a: number) => void;
+    readonly spi_fault_modf: (a: number) => void;
     readonly spi_flash_debug: (a: number, b: number, c: number) => void;
     readonly spi_push_miso: (a: number, b: number, c: number, d: number) => void;
     readonly spi_take_events: (a: number, b: number, c: number) => void;
@@ -1020,7 +1074,10 @@ export interface InitOutput {
     readonly tick_peripherals: () => void;
     readonly tim_encoder_step: (a: number, b: number, c: number, d: number) => void;
     readonly tim_inject_capture: (a: number, b: number, c: number) => void;
+    readonly uart_fault_rx: (a: number, b: number, c: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;
+    readonly uart_set_cts: (a: number, b: number) => void;
+    readonly uart_tx_len: (a: number) => number;
     readonly usb_dma_progress: (a: number, b: number) => void;
     readonly usb_enumerated: () => void;
     readonly usb_hs_dma_progress: (a: number, b: number) => void;
