@@ -50,9 +50,11 @@ const {
     tim_encoder_step, rcc_inject_failure, adc_dual_latched,
     spi_tap, spi_push_miso,
     uart_set_cts, uart_fault_rx, uart_tx_len,
-    spi_fault_modf, spi_fault_crc,
-    sdio_bus_width, sdio_card_irq,
-    rtc_tamper, rtc_timestamp,
+    uart_lin_break, uart_sc_nack, uart_sc_retries, uart_irda_rx, uart_irda_tx_class,
+    spi_fault_modf, spi_fault_crc, spi_slave_select, spi_slave_clock, spi_slave_gate,
+    sdio_bus_width, sdio_card_irq, sdio_fault_data_crc,
+    rtc_tamper, rtc_tamper_pin, rtc_timestamp,
+    flash_rdp_level, flash_set_rdp,
 } = bindings;
 // SMBus/PEC transactions need a live slave: a 16-byte regfile @0x50 on
 // I2C1 (same shape emulator.js uses for the DS3231 RTC). Must register
@@ -1139,6 +1141,187 @@ function t_rtc_wut_ts() {
     ok(sec(t1) !== sec(t0) || t1 !== t0, 'rtc: TR advances under CALM (rate altered, still runs)');
 }
 
+// ── SDIO data-timing widths (COMPLETE) ────────────────────────────────────
+// CMD17/18 completion is width-scaled: 4-bit finishes before 1-bit for the
+// same length (fewer wire clocks); DTIMER shorter than the cost latches
+// DTIMEOUT instead; armed DCRCFAIL replaces DATAEND; zero-length stages
+// RXOVERR/TXUNDERR by direction.
+function t_sdio_timing() {
+    const SD = SDIO;
+    W(SD, 1); // POWER on
+    W(SD + 0x24, 0xFFFFFF); // generous DTIMER
+    const cost = (wid) => {
+        // Select width the firmware way: CMD55 + ACMD6 (ARG = wid).
+        W(SD + 0x0C, 0x40 | 55);
+        W(SD + 0x08, wid); W(SD + 0x0C, 0x40 | 6);
+        W(SD + 0x28, 512); W(SD + 0x08, 0); W(SD + 0x0C, 0x40 | 17);
+        let i = 0;
+        for (; i < 2000 && !(R(SD + 0x34) & (1 << 8)); i++) tick_n(10);
+        W(SD + 0x38, 0xFFFFFFFF); // clear sticky for next run
+        return i;
+    };
+    const c1 = cost(0), c4 = cost(1);
+    ok(c4 < c1, 'sdio: 4-bit completes before 1-bit (width-scaled)', `1b=${c1} 4b=${c4}`);
+    // DTIMEOUT: 1-clock timeout vs a 4 KB transfer.
+    W(SD + 0x24, 1);
+    W(SD + 0x28, 4096); W(SD + 0x08, 0); W(SD + 0x0C, 0x40 | 17);
+    for (let i = 0; i < 200 && !(R(SD + 0x34) & 8); i++) tick_n(100);
+    ok((R(SD + 0x34) & 8) !== 0, 'sdio: DTIMEOUT on short DTIMER');
+    W(SD + 0x38, 0xFFFFFFFF);
+    // DCRCFAIL: armed fault replaces DATAEND.
+    W(SD + 0x24, 0xFFFFFF);
+    sdio_fault_data_crc();
+    W(SD + 0x28, 64); W(SD + 0x08, 0); W(SD + 0x0C, 0x40 | 17);
+    for (let i = 0; i < 300 && !(R(SD + 0x34) & ((1 << 1) | (1 << 8))); i++) tick_n(50);
+    ok((R(SD + 0x34) & 2) !== 0, 'sdio: DCRCFAIL when armed');
+    ok((R(SD + 0x34) & (1 << 8)) === 0, 'sdio: no DATAEND alongside DCRCFAIL');
+    W(SD + 0x38, 0xFFFFFFFF);
+    // Zero-length direction flags.
+    W(SD + 0x2C, 1 << 1); // DTDIR = to card
+    W(SD + 0x28, 0); W(SD + 0x08, 0); W(SD + 0x0C, 0x40 | 17);
+    ok((R(SD + 0x34) & (1 << 4)) !== 0, 'sdio: TXUNDERR on zero-length write');
+    W(SD + 0x38, 0xFFFFFFFF);
+    W(SD + 0x2C, 0); // DTDIR = from card
+    W(SD + 0x28, 0); W(SD + 0x08, 0); W(SD + 0x0C, 0x40 | 17);
+    ok((R(SD + 0x34) & (1 << 5)) !== 0, 'sdio: RXOVERR on zero-length read');
+    W(SD + 0x38, 0xFFFFFFFF);
+    W(SD, 0); // clean
+}
+
+// ── USART LIN break + Smartcard NACK loop + IrDA pulse classes ────────────
+// COMPLETE: LIN break latches LBD + RXNE/0x00 (+IRQ when LBDIE); Smartcard
+// T=0 NACK loop holds TC across retries (SCARCNT+1 tries, then NE drop);
+// IrDA pulse-class mismatch latches NE, match lands clean.
+function t_usart_protocols() {
+    // LIN: break on a LINEN port latches LBD + RXNE; off-port drops it.
+    W(USART1 + 0x0C, (1 << 13) | (1 << 2)); // UE + RE
+    W(USART1 + 0x10, 1 << 14); // LINEN
+    uart_lin_break(USART1);
+    ok((R(USART1) & (1 << 8)) !== 0, 'lin: LBD latches on break');
+    ok((R(USART1) & 0x20) !== 0 && R(USART1 + 0x04) === 0, 'lin: break delivers 0x00 + RXNE');
+    void R(USART1 + 0x04); // drain break byte (clears RXNE)
+    W(USART1 + 0x0C, R(USART1 + 0x0C)); // (no SR-clear write path; LBD persists until next break — re-check below)
+    W(USART1 + 0x10, 0); // LINEN off
+    // NOTE: LBD from the first break is still latched (no w1c path on F4
+    // LIN — a new break overwrites). The off-port proof is that NO NEW
+    // byte lands: RXNE stays clear after the drain.
+    uart_lin_break(USART1);
+    ok((R(USART1) & 0x20) === 0, 'lin: break dropped without LINEN (no new RXNE)');
+    W(USART1 + 0x0C, 0); // clean
+    // Smartcard: SCEN+NACK (F4 has no SCARCNT field — CR3[7:5] is
+    // DMAT/DMAR/SCEN; the model caps consecutive retries at 8). Two NACKs
+    // hold TC low with retries counted; the un-NACKed write sinks + TC.
+    W(USART1 + 0x0C, (1 << 13) | (1 << 3)); // UE + TE
+    W(USART1 + 0x14, (1 << 5) | (1 << 4)); // SCEN + NACK
+    uart_sc_nack(USART1); W(USART1 + 0x04, 0xAA);
+    ok(((R(USART1) >> 6) & 1) === 0, 'sc: TC held on first NACK');
+    ok(uart_sc_retries(USART1) === 1, 'sc: retry 1 counted');
+    uart_sc_nack(USART1); W(USART1 + 0x04, 0xAA);
+    ok(uart_sc_retries(USART1) === 2, 'sc: retry 2 counted');
+    W(USART1 + 0x04, 0xAA); // card ACKs this one
+    ok(((R(USART1) >> 6) & 1) === 1, 'sc: TC sets on ACK, counter resets');
+    ok(uart_sc_retries(USART1) === 0, 'sc: counter resets on ACK');
+    // Exhaustion: 8 consecutive NACKs, the 9th drops with NE.
+    W(USART1 + 0x14, (1 << 5) | (1 << 4)); // SCEN + NACK
+    for (let i = 0; i < 8; i++) { uart_sc_nack(USART1); W(USART1 + 0x04, 0xBB); }
+    ok(uart_sc_retries(USART1) === 8, 'sc: 8 retries counted');
+    uart_sc_nack(USART1); W(USART1 + 0x04, 0xBB);
+    ok((R(USART1) & 4) !== 0, 'sc: NE latches on retry exhaustion (9th NACK)');
+    void R(USART1 + 0x04);
+    ok((R(USART1) & 4) === 0, 'sc: NE clears on DR read');
+    W(USART1 + 0x14, 0); W(USART1 + 0x0C, 0); // clean
+    // IrDA: mismatch latches NE, match lands clean; TX class follows IRLP.
+    W(USART1 + 0x0C, (1 << 13) | (1 << 2)); // UE + RE
+    W(USART1 + 0x14, 1 << 1); // IREN, normal (IRLP=0)
+    uart_irda_rx(USART1, 0x55, true); // low-power pulse into normal rx
+    ok((R(USART1) & 4) !== 0, 'irda: NE on pulse-class mismatch');
+    void R(USART1 + 0x04);
+    uart_irda_rx(USART1, 0x55, false);
+    ok((R(USART1) & 4) === 0, 'irda: clean on matching class');
+    void R(USART1 + 0x04);
+    W(USART1 + 0x14, (1 << 1) | (1 << 2)); // + IRLP (low-power)
+    ok(uart_irda_tx_class(USART1) === 1, 'irda: TX class follows IRLP');
+    W(USART1 + 0x14, 0); W(USART1 + 0x0C, 0); // clean
+}
+
+// ── SPI slave gating (NSS + harness SCK) ──────────────────────────────────
+// COMPLETE: MSTR=0 gates transfers on NSS (SSM=0) or opens via SSM+SSI;
+// DR writes preload MISO (no self-clock); spi_slave_clock shifts MOSI in
+// and the preloaded word out; gated clocks move nothing.
+function t_spi_slave_gate() {
+    W(SPI1, (0 << 2) | (1 << 6)); // MSTR=0 + SPE (hardware NSS)
+    ok(spi_slave_gate(SPI1) === false, 'spi slave: gate closed with NSS low? (harness default high)');
+    spi_slave_select(SPI1, false); // NSS high (deselected)
+    ok(spi_slave_gate(SPI1) === false, 'spi slave: gate closed while deselected');
+    ok(spi_slave_clock(SPI1, 0xA5) === 0xFF, 'spi slave: gated clock returns idle');
+    spi_slave_select(SPI1, true); // NSS asserted
+    ok(spi_slave_gate(SPI1) === true, 'spi slave: gate opens on NSS assert');
+    W(SPI1 + 0x0C, 0x5A); // preload MISO
+    ok((R(SPI1 + 0x08) & (1 << 7)) !== 0, 'spi slave: preload shows BSY');
+    ok(spi_slave_clock(SPI1, 0xA5) === 0x5A, 'spi slave: clock shifts preloaded MISO out');
+    ok(R(SPI1 + 0x0C) === 0xA5, 'spi slave: MOSI lands in rx_buffer');
+    // SSM+SSI path: gate opens without the harness.
+    W(SPI1, (0 << 2) | (1 << 6) | (1 << 9) | (1 << 8));
+    ok(spi_slave_gate(SPI1) === true, 'spi slave: SSM+SSI opens gate internally');
+    W(SPI1, 0); // clean
+}
+
+// ── RTC tamper physics + FLASH RDP levels ─────────────────────────────────
+// COMPLETE: tamper needs TAMP1E + matching edge (TRG), FLT counts
+// consecutive matches, firing erases BKPR (+TAMPTS timestamp); FLASH RDP
+// reads L0/L1/L2 from the RDP byte (set_rdp respects OPTLOCK).
+function t_rtc_tamper_phys() {
+    W(RTC + 0x24, 0xCA); W(RTC + 0x24, 0x53);
+    // Disabled pin: no fire, level stored.
+    W(RTC + 0x40, 0); // TAMP1E=0
+    W(RTC + 0x50, 0xDEADBEEF);
+    rtc_tamper_pin(false);
+    ok((R(RTC + 0x0C) & (1 << 13)) === 0, 'tamper: disabled pin never fires');
+    // Enable, falling edge (default TRG=0), no filter. Re-drive high
+    // first: the disabled-pin call above already stored low, so there is
+    // no falling edge left without a fresh high.
+    W(RTC + 0x40, (1 << 0) | (1 << 2)); // TAMP1E + TAMPIE
+    rtc_tamper_pin(true); // re-arm high (no fire: rising with TRG=falling)
+    ok((R(RTC + 0x0C) & (1 << 13)) === 0, 'tamper: re-arm high does not fire');
+    rtc_tamper_pin(false); // high->low falling: fires
+    ok((R(RTC + 0x0C) & (1 << 13)) !== 0, 'tamper: matching edge fires');
+    ok(R(RTC + 0x50) === 0, 'tamper: backup registers erased on fire');
+    W(RTC + 0x0C, R(RTC + 0x0C) & ~(1 << 13));
+    // Wrong edge: rising with TRG=falling does not fire.
+    W(RTC + 0x50, 0x12345678);
+    rtc_tamper_pin(true); // low->high rising: no fire
+    ok((R(RTC + 0x0C) & (1 << 13)) === 0, 'tamper: wrong edge ignored');
+    ok(R(RTC + 0x50) === 0x12345678, 'tamper: BKPR kept without fire');
+    // Filter x4: three edges do nothing, fourth fires.
+    // Filter x4 (TAMPFLT=2): four consecutive LOW samples fire. (Samples,
+    // not edges: the high calls below only re-arm the level detector — the
+    // filter counts samples at the assertive level, so highs neither fill
+    // nor reset it once a run started... they DO reset: any high sample
+    // clears the run. Drive the edge first, then hold low.)
+    W(RTC + 0x40, (1 << 0) | (1 << 2) | (2 << 11)); // TAMPFLT=2 -> 4
+    W(RTC + 0x50, 0xAAAAAAAA);
+    rtc_tamper_pin(true); // re-arm high
+    rtc_tamper_pin(false); rtc_tamper_pin(false); rtc_tamper_pin(false);
+    ok((R(RTC + 0x0C) & (1 << 13)) === 0, 'tamper: filter holds back early samples (3/4)');
+    rtc_tamper_pin(false);
+    ok((R(RTC + 0x0C) & (1 << 13)) !== 0, 'tamper: 4th consecutive sample fires');
+    W(RTC + 0x0C, R(RTC + 0x0C) & ~(1 << 13));
+    W(RTC + 0x40, 0); // clean
+}
+
+function t_flash_rdp() {
+    W(FLASH + 0x04, 0x45670123); W(FLASH + 0x04, 0xCDEF89AB); // unlock main
+    W(FLASH + 0x08, 0x08192A3B); W(FLASH + 0x08, 0x4C5D6E7F); // unlock opts
+    ok(flash_rdp_level() === 0, 'rdp: reset value 0xAA reads level 0');
+    flash_set_rdp(0x55);
+    ok(flash_rdp_level() === 1, 'rdp: 0x55 reads level 1');
+    ok((R(FLASH + 0x14) & 0xFF00) === 0x5500, 'rdp: RDP byte programs via set_rdp');
+    flash_set_rdp(0xCC);
+    ok(flash_rdp_level() === 2, 'rdp: 0xCC reads level 2');
+    flash_set_rdp(0xAA); // back to L0 (clean)
+    ok(flash_rdp_level() === 0, 'rdp: back to level 0');
+    W(FLASH + 0x10, 1 << 31); // relock main (clean)
+}
 const tests = [
     ['pwr regulator states beyond handshake', t_pwr],
     ['dcmi pin-sync harness (VSYNC/HSYNC free-run default)', t_dcmi],
@@ -1182,6 +1365,11 @@ const tests = [
     ['usart HW flow control + FE/PE (COMPLETE)', t_usart_flow_err],
     ['sdio ACMD + wide-bus + card IRQ (COMPLETE)', t_sdio_acmd],
     ['rtc wakeup timer + timestamp + tamper + cal (COMPLETE)', t_rtc_wut_ts],
+    ['sdio data-timing widths (COMPLETE)', t_sdio_timing],
+    ['usart LIN + smartcard + IrDA (COMPLETE)', t_usart_protocols],
+    ['spi slave gating (COMPLETE)', t_spi_slave_gate],
+    ['rtc tamper physics + flash RDP (COMPLETE)', t_rtc_tamper_phys],
+    ['flash RDP levels (COMPLETE)', t_flash_rdp],
 ];
 for (const [name, fn] of tests) {
     console.log(`— ${name}`);

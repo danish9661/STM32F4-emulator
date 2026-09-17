@@ -4012,3 +4012,53 @@ checks PASS**; cargo **217**; matrix **156/156**; feat 1/1 both maps
   feat407/feat429 all green) + `.pw-scratch/chain_gap6_final.verdict`
   (same + browser standby PASS). Standby CDP log:
   `.pw-scratch/standby_gap6.log`.
+
+## 36. Gap batch 7: SDIO timing, USART protocols, SPI slave, tamper physics, RDP (2026-09-17, UNCOMMITTED)
+
+Second gap batch (each with mock pins in `site/test_periph_mock_consumer.mjs`
+Group 7 + board-doc row updates, all x3 via sync scripts). Mock 205 → **246
+checks PASS**; cargo **217 single-threaded** (parallel 24-flake is the known
+shared-INSTRUCTION_COUNT race, same class as §31 note); matrix **156/156**;
+feat 1/1 both maps (greenboard_gap7 green); browser standby CDP PASS.
+
+- **SDIO data timing** (`sdio.rs`): CMD17/18 completion is width-scaled
+  (`data_cost`: bytes×8/lines×divider + overhead; 4-bit beats 1-bit) with
+  DATAEND/DBCKEND latched at `data_done_at` (not instantly) via STA-read +
+  tick polling; DTIMER shorter than the cost latches DTIMEOUT; armed
+  `sdio_fault_data_crc` latches DCRCFAIL instead; zero-length stages
+  RXOVERR/TXUNDERR by DTDIR; FIFO words drain DCOUNT. Gotcha: the mock must
+  select width via ACMD6 (direct CLKCR writes never reach the `wide_bus`
+  latch — first cut compared equal costs and "proved" nothing).
+- **USART protocols** (`usart.rs`): LIN break (`uart_lin_break`: LBD + RXNE/
+  0x00 + IRQ when LBDIE, LINEN-gated — off-port drops; LBD has no F4 w1c
+  path so the mock drains RXNE and asserts no NEW byte); Smartcard T=0 NACK
+  loop (`uart_sc_nack`: TC held across retries, `uart_sc_retries` probe;
+  F4 has NO SCARCNT field — CR3[7:5] is DMAT/DMAR/SCEN, caught by reading
+  the SVD, so the model caps at fixed 8 with NE on exhaustion); IrDA pulse
+  envelope (`uart_irda_rx` byte+class, NE on class-vs-IRLP mismatch;
+  `uart_irda_tx_class` probe). GTPR stored, guard delay untimed (no baud
+  domain — documented).
+- **SPI slave gating** (`spi.rs`): MSTR=0 gates on NSS (`spi_slave_select`;
+  SSM+SSI opens internally); DR writes preload MISO (no self-clock);
+  `spi_slave_clock(mosi)` shifts MOSI in + preloaded word out (+RXNE/CRC/
+  OVR semantics); gated clocks return idle, move nothing. Exports:
+  `spi_slave_select/clock/gate`.
+- **RTC tamper physics** (`rtc.rs`): TAMP1E/TRG-gated, TAMPFLT counts
+  consecutive SAMPLES at the assertive level (not edges — an edge counter
+  resets every other sample so x4/x8 could never fire, caught by the mock);
+  firing erases all 20 BKPR + optional TAMPTS timestamp first. Export:
+  `rtc_tamper_pin(level)` (legacy `rtc_tamper` kept).
+- **FLASH RDP** (`flash.rs`): `rdp_level()` L0/L1/L2 from the OPTCR RDP byte
+  (0xAA/0xCC/other) + `flash_set_rdp()` harness (OPTLOCK-respecting);
+  MER holds BSY across a width-scaled tick window (`mer_ticks_left`,
+  in-model completion so polling firmware terminates without JS confirm).
+  Exports: `flash_rdp_level/set_rdp`, `sdio_fault_data_crc`,
+  `uart_lin_break/sc_nack/sc_retries/irda_rx/irda_tx_class`.
+- **?v= 36→37** (app.js/doom.js/doom-worker.js vendor literals) +
+  console.html app.js v43→v44 for the rebuilt vendor wasm; `pkg/` (nodejs)
+  rebuilt alongside so both artifacts match.
+- Battery: `.pw-scratch/greenboard_gap7.{log,verdict}` (cargo-st/mock/
+  matrix/feat407/feat429 all green — note the verdict file's cargo lines
+  show the PARALLEL run (193/24-flake, the known shared-INSTRUCTION_COUNT
+  race also noted in §31); the chained single-threaded re-run is 217/217)
+  + `.pw-scratch/chain_gap7_final.verdict` (same + browser standby PASS).

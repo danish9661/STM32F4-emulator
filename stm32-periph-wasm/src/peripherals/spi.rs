@@ -49,6 +49,15 @@ pub struct Spi {
     /// OVR/MODF/FRE (silicon: read SR then access DR). Tracked per access
     /// so a lone DR access without a preceding SR read does NOT clear.
     sr_seen: bool,
+    /// Slave-select state (harness = the master NSS pin, see
+    /// `slave_select`): true = NSS asserted (low). Meaningful only with
+    /// MSTR=0 + SSM=0; otherwise stored and ignored.
+    slave_nss_asserted: bool,
+    /// Slave TX preload (silicon TX buffer): a DR write while the slave
+    /// gate is closed preloads the next MISO word instead of clocking the
+    /// bus (no SCK from the slave side). Shipped out by `slave_clock`.
+    slave_tx: u32,
+    slave_tx_valid: bool,
 }
 
 impl Spi {
@@ -72,10 +81,65 @@ impl Spi {
     pub fn is_16bits(&self) -> bool { self.cr1 & (1 << 11) != 0 }
     fn is_i2s(&self) -> bool { self.i2scfgr & 1 != 0 } // I2SMOD
 
-    /// Slave mode selected (CR1 MSTR bit 2 clear): stored-only flag —
-    /// transfers still run the master path (no external SCK driver
-    /// exists to gate on). Harness scope probe for the slave substitute.
+    /// Slave mode selected (CR1 MSTR bit 2 clear): when set, transfers
+    /// are NSS-gated (see `slave_gate_open`) and SCK comes from the
+    /// harness (`spi_slave_clock`), not from DR writes alone.
     pub fn slave_selected(&self) -> bool { self.cr1 & (1 << 2) == 0 }
+
+    /// Slave gate state: true when a slave transfer may proceed — MSTR=0
+    /// (slave) AND NSS asserted (harness `spi_slave_select`) AND the
+    /// peripheral enabled (SPE). With SSM=1 + SSI=1 the internal NSS is
+    /// high (software slave management) and the gate is open without the
+    /// harness (silicon: SSI drives NSS internally). Otherwise the harness
+    /// NSS level decides (no pin layer exists to pull it).
+    pub fn slave_gate_open(&self) -> bool {
+        if self.cr1 & (1 << 2) != 0 {
+            return true; // master: no gate
+        }
+        if self.cr1 & (1 << 9) != 0 && self.cr1 & (1 << 8) != 0 {
+            return true; // SSM+SSI: internally selected
+        }
+        self.slave_nss_asserted
+    }
+
+    /// Harness = the SPI master: drive the slave's NSS level (true =
+    /// asserted/low). Only meaningful with MSTR=0 and SSM=0 (hardware
+    /// slave management); elsewhere it is stored and ignored.
+    pub fn slave_select(&mut self, asserted: bool) {
+        self.slave_nss_asserted = asserted;
+    }
+
+    /// Harness = the SPI master clock: shift one frame through the slave.
+    /// `mosi` is the byte/word the master clocks in; returns the MISO
+    /// byte/word the slave shifts out (the preloaded slave TX word — set
+    /// by a DR write while the gate is closed, like silicon's TX buffer;
+    /// 0xFF when nothing was preloaded). The received word lands in
+    /// rx_buffer + RXNE semantics + CRC advance, exactly like a master
+    /// transfer. No-op (returns 0xFF/0xFFFF, flags untouched) when the
+    /// gate is closed or the peripheral is in master mode — clocking a
+    /// deselected slave moves no bits, like silicon.
+    pub fn slave_clock(&mut self, sys: &System, mosi: u32) -> u32 {
+        if self.cr1 & (1 << 2) != 0 || !self.slave_gate_open() {
+            return if self.is_16bits() { 0xFFFF } else { 0xFF };
+        }
+        let miso = if self.slave_tx_valid {
+            self.slave_tx_valid = false;
+            self.slave_tx
+        } else {
+            0xFF
+        };
+        let had_unread = self.rx_buffer != 0;
+        self.rx_buffer = mosi & if self.is_16bits() { 0xFFFF } else { 0xFF };
+        if had_unread {
+            self.ovr_latched = true;
+        }
+        if self.cr2 & (1 << 4) != 0 {
+            self.fre_latched = true;
+        }
+        self.crc_advance(mosi, self.rx_buffer);
+        self.bsy_flight = true;
+        miso
+    }
 
     /// CRC-16 step with the CRCPR polynomial (MSB-first, no reflection —
     /// the STM32 SPI CRC block). `crc` is the running register, `data`
@@ -346,6 +410,28 @@ impl Peripheral for Spi {
                     // comes from the generator.
                     crate::system::audio_capture_push(value as u16);
                     self.rx_buffer = self.generate_i2s_audio();
+                } else if self.cr1 & (1 << 2) == 0 {
+                    // Slave mode (MSTR=0): DR writes PRELOAD the slave TX
+                    // buffer when the gate is closed (no SCK from the slave
+                    // side — silicon buffers for the master's clock). When
+                    // the gate is open (SSM+SSI software select), the write
+                    // still preloads (a slave never self-clocks); the byte
+                    // ships on the next `slave_clock`. RXNE/BSY follow the
+                    // preload so firmware polls correctly.
+                    self.slave_tx = value & if self.is_16bits() { 0xFFFF } else { 0xFF };
+                    self.slave_tx_valid = true;
+                    self.bsy_flight = true;
+                    // A DR write also completes the SR→DR sequence.
+                    if self.sr_seen {
+                        self.ovr_latched = false;
+                        self.fre_latched = false;
+                        self.crc_err_latched = false;
+                        if self.modf_latched {
+                            self.modf_latched = false;
+                            self.cr1 &= !((1 << 2) | (1 << 6));
+                        }
+                        self.sr_seen = false;
+                    }
                 } else {
                     // CRCNEXT (CR1 bit 12): this transfer carries the CRC
                     // word, not data — compare the received word against

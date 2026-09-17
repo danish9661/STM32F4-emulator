@@ -485,6 +485,17 @@ export function flash_erase_applied(): void;
 export function flash_is_programming(): boolean;
 
 /**
+ * FLASH readout-protection level from OPTCR RDP (0/1/2).
+ */
+export function flash_rdp_level(): number;
+
+/**
+ * Harness = the option-byte programmer: set the RDP byte (respects
+ * OPTLOCK like the register path).
+ */
+export function flash_set_rdp(level_byte: number): void;
+
+/**
  * Consume a completed erase request (start, len) the JS driver must apply
  * to guest memory (all bytes 0xFF). Empty vec = nothing pending.
  */
@@ -705,6 +716,12 @@ export function rng_seed_entropy(words: Uint32Array): void;
 export function rtc_tamper(): void;
 
 /**
+ * Harness = the tamper pin with physics (TAMP1E/TRG/FLT-gated, erases
+ * backup registers, optional timestamp via TAMPTS).
+ */
+export function rtc_tamper_pin(level: boolean): void;
+
+/**
  * Harness = the timestamp pin event: capture TR/DR/SSR, latch TSF.
  */
 export function rtc_timestamp(): void;
@@ -718,6 +735,11 @@ export function sdio_bus_width(): number;
  * Harness = the card's DAT1 interrupt line: latch/clear SDIOIT.
  */
 export function sdio_card_irq(set: boolean): void;
+
+/**
+ * Harness = the bad card: next CMD17/18 completion latches DCRCFAIL.
+ */
+export function sdio_fault_data_crc(): void;
 
 /**
  * Set a pending interrupt in the NVIC. Negative `irq` values select system
@@ -747,6 +769,22 @@ export function spi_flash_debug(peripheral: string): Uint32Array;
  * Push bytes the JS device answers on the MISO line (read transactions).
  */
 export function spi_push_miso(peripheral: string, bytes: Uint8Array): void;
+
+/**
+ * Harness = the SPI master clock: shift one frame through the slave at
+ * `base` (returns the MISO word). No-op when the gate is closed.
+ */
+export function spi_slave_clock(base: number, mosi: number): number;
+
+/**
+ * Slave gate state of the SPI block at `base` (scope probe).
+ */
+export function spi_slave_gate(base: number): boolean;
+
+/**
+ * Harness = the SPI master: drive the slave's NSS level (true = asserted).
+ */
+export function spi_slave_select(base: number, asserted: boolean): void;
 
 /**
  * Drain all SPI tap events for a peripheral since the last call.
@@ -801,10 +839,36 @@ export function tim_inject_capture(name: string, ch: number): void;
 export function uart_fault_rx(base: number, fe: boolean, pe: boolean): void;
 
 /**
+ * Harness = the IR transmitter: inject a byte with a pulse class
+ * (low_power selects the 1.6µs class, else the 3/16 class).
+ */
+export function uart_irda_rx(base: number, byte: number, low_power: boolean): void;
+
+/**
+ * Pulse class of the last TX byte (scope probe for IrDA mode).
+ */
+export function uart_irda_tx_class(base: number): number;
+
+/**
+ * Harness = the LIN master: deliver a break frame to the USART at `base`.
+ */
+export function uart_lin_break(base: number): void;
+
+/**
  * Inject a received byte into the UART at the given peripheral base address.
  * Returns true if a peripheral was found at that address.
  */
 export function uart_rx_byte(addr: number, byte: number): boolean;
+
+/**
+ * Harness = the smartcard: NACK the next transmitted byte.
+ */
+export function uart_sc_nack(base: number): void;
+
+/**
+ * Smartcard retry counter of the USART at `base` (scope probe).
+ */
+export function uart_sc_retries(base: number): number;
 
 /**
  * Harness = the CTS peer: drive the CTS input of the USART at `base`.
@@ -1019,6 +1083,8 @@ export interface InitOutput {
     readonly eth_tx_wire_busy: (a: number) => void;
     readonly flash_erase_applied: () => void;
     readonly flash_is_programming: () => number;
+    readonly flash_rdp_level: () => number;
+    readonly flash_set_rdp: (a: number) => void;
     readonly flash_take_erase: (a: number) => void;
     readonly fsmc_bind_nand: (a: number, b: number) => void;
     readonly fsmc_nand_erase: (a: number, b: number, c: number) => void;
@@ -1059,14 +1125,19 @@ export interface InitOutput {
     readonly rng_entropy_avail: () => number;
     readonly rng_seed_entropy: (a: number, b: number) => void;
     readonly rtc_tamper: () => void;
+    readonly rtc_tamper_pin: (a: number) => void;
     readonly rtc_timestamp: () => void;
     readonly sdio_bus_width: () => number;
     readonly sdio_card_irq: (a: number) => void;
+    readonly sdio_fault_data_crc: () => void;
     readonly set_intr_pending: (a: number) => void;
     readonly spi_fault_crc: (a: number) => void;
     readonly spi_fault_modf: (a: number) => void;
     readonly spi_flash_debug: (a: number, b: number, c: number) => void;
     readonly spi_push_miso: (a: number, b: number, c: number, d: number) => void;
+    readonly spi_slave_clock: (a: number, b: number) => number;
+    readonly spi_slave_gate: (a: number) => number;
+    readonly spi_slave_select: (a: number, b: number) => void;
     readonly spi_take_events: (a: number, b: number, c: number) => void;
     readonly spi_tap: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly tick: () => void;
@@ -1075,7 +1146,12 @@ export interface InitOutput {
     readonly tim_encoder_step: (a: number, b: number, c: number, d: number) => void;
     readonly tim_inject_capture: (a: number, b: number, c: number) => void;
     readonly uart_fault_rx: (a: number, b: number, c: number) => void;
+    readonly uart_irda_rx: (a: number, b: number, c: number) => void;
+    readonly uart_irda_tx_class: (a: number) => number;
+    readonly uart_lin_break: (a: number) => void;
     readonly uart_rx_byte: (a: number, b: number) => number;
+    readonly uart_sc_nack: (a: number) => void;
+    readonly uart_sc_retries: (a: number) => number;
     readonly uart_set_cts: (a: number, b: number) => void;
     readonly uart_tx_len: (a: number) => number;
     readonly usb_dma_progress: (a: number, b: number) => void;

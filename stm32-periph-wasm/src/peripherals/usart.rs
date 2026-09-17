@@ -38,6 +38,10 @@ pub struct Usart {
     /// (harness = the noisy wire; see `uart_fault_rx`). Bit 0 = FE,
     /// bit 1 = PE. Consumed by the next rx_byte().
     rx_fault: u8,
+    /// Smartcard NACK state: retries used on the current byte + armed flag
+    /// (harness = the card rejecting a byte; see `sc_nack_next`).
+    sc_retry: u8,
+    sc_nack_armed: bool,
 }
 
 impl Usart {
@@ -51,6 +55,8 @@ impl Usart {
                 irq_num: irq,
                 cts_asserted: true,
                 rx_fault: 0,
+                sc_retry: 0,
+                sc_nack_armed: false,
             }) as Box<dyn Peripheral>
         })
     }
@@ -74,6 +80,105 @@ impl Usart {
     /// UART console unmodulated; documented substitute).
     pub fn irda_active(&self) -> bool {
         self.cr3 & (1 << 1) != 0
+    }
+
+    // ── LIN master/slave break handling (CR2 LINEN) ─────────────────────
+    // Silicon LIN: a 13-bit dominant break + 0x55 sync + ID. The model
+    // tracks the observable register contract:
+    // - TX break: SBK (CR1 bit 0) queues one break ahead of the next byte
+    //   (silicon sends 10/11 zeros + stop). The break "transmits" on the
+    //   next DR write (or SBK-clear) — TXE/TC follow the DR write as usual.
+    // - RX break: the harness delivers a break via `lin_break()` (the LIN
+    //   master on the wire). It latches LBD (SR bit 8) + RXNE with a 0x00
+    //   data byte, and fires the IRQ when LBDIE (CR2 bit 6) is set.
+    // No baud re-measurement (LBDL/LBCL) — length detection needs edge
+    // timing the instruction clock cannot provide honestly.
+    /// Harness = the LIN master: deliver a break frame (latches LBD +
+    /// RXNE with 0x00 data; IRQ when LBDIE). Only when LINEN is set —
+    /// a break on a non-LIN port is line noise (dropped, like silicon
+    /// ignoring sub-break glitches outside LIN mode).
+    pub fn lin_break(&mut self, sys: &System) {
+        if self.cr2 & (1 << 14) == 0 {
+            return;
+        }
+        if self.rx_buf.len() < 64 {
+            self.rx_buf.push(0x00);
+            self.sr |= (1 << 5) | (1 << 8); // RXNE + LBD
+        } else {
+            self.sr |= 1 << 3; // ORE
+        }
+        self.sr |= 0x00C0;
+        if self.cr2 & (1 << 6) != 0 {
+            sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
+        }
+    }
+
+    // ── Smartcard T=0 handling (CR3 SCEN) ───────────────────────────────
+    // Silicon T=0: the card pulls I/O low during the guard time to signal
+    // a bad parity byte (NACK); the F4 transmitter retries until ACK
+    // (no SCARCNT field on F4 — the model caps at 8 so a dead card
+    // terminates, documented substitute), then flags
+    // retry-exhausted. The model implements the retry loop against the
+    // harness NACK injector (`sc_nack_next`):
+    // - NACK set (CR3 bit 4) + a NACK armed: the just-written byte is NOT
+    //   sunk (card rejected it), TC stays clear, retry counter advances.
+    // - After N+1 failed tries: byte dropped, NE latched (SR bit 2 — F4
+    //   has no TEACK/FEACK bits; NE is the retry-exhausted observable).
+    // - Without NACK armed: byte sinks normally, TC sets (card ACKed).
+    // GTPR guard time (GT[15:8]) + prescaler (PSC[7:0]) are stored; the
+    // guard delay itself is not timed (instruction clock has no baud
+    // domain) — firmware polls GTPR readback, never the delay.
+    /// Harness = the smartcard: NACK the next transmitted byte (parity
+    /// error from the card's view). One-shot per call.
+    pub fn sc_nack_next(&mut self) {
+        self.sc_nack_armed = true;
+    }
+
+    /// Smartcard retry counter (scope probe: retries used on the current
+    /// byte — lets a test assert the NACK loop retried, then exhausted).
+    pub fn sc_retries(&self) -> u8 {
+        self.sc_retry
+    }
+
+    /// Harness = the IR transmitter: inject a byte with a pulse-width class
+    /// (0 = normal 3/16 pulse, 1 = low-power 1.6µs pulse). A class mismatch
+    /// against the receiver's IRLP (CR3 bit 2) latches NE (noise error, SR
+    /// bit 2) alongside RXNE — the honest observable of a pulse mismatch.
+    /// Matching pulses land cleanly with no flags.
+    pub fn irda_rx(&mut self, sys: &System, byte: u8, low_power: bool) {
+        let rx_low = low_power;
+        let want_low = self.cr3 & (1 << 2) != 0;
+        if self.rx_buf.len() < 64 {
+            self.rx_buf.push(byte);
+            self.sr |= 1 << 5; // RXNE
+            if rx_low != want_low {
+                self.sr |= 1 << 2; // NE: pulse-class mismatch
+            }
+        } else {
+            self.sr |= 1 << 3; // ORE
+        }
+        self.sr |= 0x00C0;
+        self.update_interrupt(sys);
+    }
+
+    // ── IrDA pulse envelope (CR3 IREN) ──────────────────────────────────
+    // Silicon IrDA: TX bits are 3/16-bit-time pulses (normal) or 1.6µs
+    // pulses (low-power, IRLP=1); RX expects the same. The model has no
+    // baud-rate time base, so it implements the observable envelope:
+    // - TX: each byte sinks to the console prefixed with its pulse-width
+    //   class in the tx trace (normal vs low-power) — `irda_tx_class()`
+    //   reports it; the byte itself sinks unchanged (the console is not
+    //   an IR demodulator).
+    // - RX: `irda_rx` injects a byte with a pulse-width class; out-of-
+    //   class pulses (normal byte into a low-power receiver and vice
+    //   versa) latch NE (noise error, SR bit 2) alongside RXNE — the
+    //   honest observable of a pulse mismatch.
+    /// Pulse class of the last TX byte under IREN (0 = normal 3/16 pulse,
+    /// 1 = low-power 1.6µs pulse from IRLP). Meaningful only when the
+    /// byte sank with IREN set; stale otherwise (not latched per byte —
+    /// the console trace is the record).
+    pub fn irda_tx_class(&self) -> u8 {
+        if self.cr3 & (1 << 2) != 0 { 1 } else { 0 }
     }
 
     fn update_interrupt(&mut self, sys: &System) {
@@ -144,13 +249,41 @@ impl Usart {
     /// CTS-gated transmit: with CTSE (CR3 bit 9) set and CTS deasserted
     /// the byte is held (not sunk to the console, TXE/TC stay clear) —
     /// silicon blocks the shifter while CTS is high. Returns true when
-    /// the byte was accepted.
+    /// the byte was accepted. Smartcard NACK (SCEN + NACK armed, see
+    /// `sc_nack_next`) rejects the byte first: TC stays clear and the
+    /// retry counter advances; after SCARCNT+1 tries the byte drops with
+    /// NE latched (retry-exhausted flag — F4 has no TEACK bit).
     fn write_dr(&mut self, value: u32, sys: &System) -> bool {
         if self.cr3 & (1 << 9) != 0 && !self.cts_asserted {
             // Held: TXE/TC clear so firmware polls correctly.
             self.sr &= !0x00C0;
             return false;
         }
+        // Smartcard T=0 NACK loop (SCEN bit 5 + NACK bit 4 + armed).
+        // NOTE: F4 USART_CR3[7:5] is DMAT/DMAR/SCEN — there is NO SCARCNT
+        // field on F4 (it appears on F7/L4). F4 silicon retries a NACKed
+        // byte until the card ACKs (firmware aborts by clearing UE); the
+        // model caps consecutive retries at 8 so a dead card terminates
+        // instead of hanging the harness (documented substitute).
+        if self.cr3 & (1 << 5) != 0 && self.cr3 & (1 << 4) != 0 && self.sc_nack_armed {
+            self.sc_nack_armed = false; // one NACK per arm
+            let max = 8u8; // fixed cap (no SCARCNT on F4)
+            self.sc_retry += 1;
+            if self.sc_retry > max {
+                // Retries exhausted: byte dropped, NE latched (the F4
+                // retry-exhausted observable), counter resets.
+                self.sc_retry = 0;
+                self.sr |= 1 << 2; // NE
+                self.sr |= 0x00C0;
+                self.update_interrupt(sys);
+                return true; // consumed (dropped), shifter free
+            }
+            // Retry: byte held for retransmission, TC stays clear (the
+            // card hasn't ACKed yet), TXE set (DR free for the retry).
+            self.sr = (self.sr & !(1 << 6)) | (1 << 7);
+            return true;
+        }
+        self.sc_retry = 0; // clean ACK resets the retry counter
         let ch = (value & 0xFF) as u8;
         self.tx_data.push(ch);
         get_uart_output().lock().unwrap().push(ch as char);

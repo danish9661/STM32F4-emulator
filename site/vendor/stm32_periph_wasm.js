@@ -1131,6 +1131,24 @@ export function flash_is_programming() {
 }
 
 /**
+ * FLASH readout-protection level from OPTCR RDP (0/1/2).
+ * @returns {number}
+ */
+export function flash_rdp_level() {
+    const ret = wasm.flash_rdp_level();
+    return ret;
+}
+
+/**
+ * Harness = the option-byte programmer: set the RDP byte (respects
+ * OPTLOCK like the register path).
+ * @param {number} level_byte
+ */
+export function flash_set_rdp(level_byte) {
+    wasm.flash_set_rdp(level_byte);
+}
+
+/**
  * Consume a completed erase request (start, len) the JS driver must apply
  * to guest memory (all bytes 0xFF). Empty vec = nothing pending.
  * @returns {Uint32Array}
@@ -1604,6 +1622,15 @@ export function rtc_tamper() {
 }
 
 /**
+ * Harness = the tamper pin with physics (TAMP1E/TRG/FLT-gated, erases
+ * backup registers, optional timestamp via TAMPTS).
+ * @param {boolean} level
+ */
+export function rtc_tamper_pin(level) {
+    wasm.rtc_tamper_pin(level);
+}
+
+/**
  * Harness = the timestamp pin event: capture TR/DR/SSR, latch TSF.
  */
 export function rtc_timestamp() {
@@ -1625,6 +1652,13 @@ export function sdio_bus_width() {
  */
 export function sdio_card_irq(set) {
     wasm.sdio_card_irq(set);
+}
+
+/**
+ * Harness = the bad card: next CMD17/18 completion latches DCRCFAIL.
+ */
+export function sdio_fault_data_crc() {
+    wasm.sdio_fault_data_crc();
 }
 
 /**
@@ -1687,6 +1721,37 @@ export function spi_push_miso(peripheral, bytes) {
     const ptr1 = passArray8ToWasm0(bytes, wasm.__wbindgen_export2);
     const len1 = WASM_VECTOR_LEN;
     wasm.spi_push_miso(ptr0, len0, ptr1, len1);
+}
+
+/**
+ * Harness = the SPI master clock: shift one frame through the slave at
+ * `base` (returns the MISO word). No-op when the gate is closed.
+ * @param {number} base
+ * @param {number} mosi
+ * @returns {number}
+ */
+export function spi_slave_clock(base, mosi) {
+    const ret = wasm.spi_slave_clock(base, mosi);
+    return ret >>> 0;
+}
+
+/**
+ * Slave gate state of the SPI block at `base` (scope probe).
+ * @param {number} base
+ * @returns {boolean}
+ */
+export function spi_slave_gate(base) {
+    const ret = wasm.spi_slave_gate(base);
+    return ret !== 0;
+}
+
+/**
+ * Harness = the SPI master: drive the slave's NSS level (true = asserted).
+ * @param {number} base
+ * @param {boolean} asserted
+ */
+export function spi_slave_select(base, asserted) {
+    wasm.spi_slave_select(base, asserted);
 }
 
 /**
@@ -1794,6 +1859,35 @@ export function uart_fault_rx(base, fe, pe) {
 }
 
 /**
+ * Harness = the IR transmitter: inject a byte with a pulse class
+ * (low_power selects the 1.6µs class, else the 3/16 class).
+ * @param {number} base
+ * @param {number} byte
+ * @param {boolean} low_power
+ */
+export function uart_irda_rx(base, byte, low_power) {
+    wasm.uart_irda_rx(base, byte, low_power);
+}
+
+/**
+ * Pulse class of the last TX byte (scope probe for IrDA mode).
+ * @param {number} base
+ * @returns {number}
+ */
+export function uart_irda_tx_class(base) {
+    const ret = wasm.uart_irda_tx_class(base);
+    return ret;
+}
+
+/**
+ * Harness = the LIN master: deliver a break frame to the USART at `base`.
+ * @param {number} base
+ */
+export function uart_lin_break(base) {
+    wasm.uart_lin_break(base);
+}
+
+/**
  * Inject a received byte into the UART at the given peripheral base address.
  * Returns true if a peripheral was found at that address.
  * @param {number} addr
@@ -1803,6 +1897,24 @@ export function uart_fault_rx(base, fe, pe) {
 export function uart_rx_byte(addr, byte) {
     const ret = wasm.uart_rx_byte(addr, byte);
     return ret !== 0;
+}
+
+/**
+ * Harness = the smartcard: NACK the next transmitted byte.
+ * @param {number} base
+ */
+export function uart_sc_nack(base) {
+    wasm.uart_sc_nack(base);
+}
+
+/**
+ * Smartcard retry counter of the USART at `base` (scope probe).
+ * @param {number} base
+ * @returns {number}
+ */
+export function uart_sc_retries(base) {
+    const ret = wasm.uart_sc_retries(base);
+    return ret;
 }
 
 /**

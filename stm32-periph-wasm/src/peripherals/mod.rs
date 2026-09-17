@@ -203,6 +203,47 @@ impl Peripherals {
         self.with_usart(base, |u| u.tx_len()).unwrap_or(0)
     }
 
+    /// Harness = the SPI master: drive the slave's NSS level.
+    pub fn spi_slave_select(&self, base: u32, asserted: bool) {
+        self.with_spi(base, |u| u.slave_select(asserted));
+    }
+
+    /// Harness = the SPI master clock: shift one frame through the slave
+    /// at `base` (`mosi` in, MISO word out).
+    pub fn spi_slave_clock(&self, sys: &System, base: u32, mosi: u32) -> u32 {
+        self.with_spi(base, |u| u.slave_clock(sys, mosi)).unwrap_or(0xFF)
+    }
+
+    /// Slave gate state of the SPI block at `base` (scope probe).
+    pub fn spi_slave_gate(&self, base: u32) -> bool {
+        self.with_spi(base, |u| u.slave_gate_open()).unwrap_or(false)
+    }
+
+    /// Harness = the LIN master: deliver a break frame to the USART.
+    pub fn uart_lin_break(&self, sys: &System, base: u32) {
+        self.with_usart(base, |u| u.lin_break(sys));
+    }
+
+    /// Harness = the smartcard: NACK the next transmitted byte.
+    pub fn uart_sc_nack(&self, base: u32) {
+        self.with_usart(base, |u| u.sc_nack_next());
+    }
+
+    /// Smartcard retry counter of the USART at `base` (scope probe).
+    pub fn uart_sc_retries(&self, base: u32) -> u8 {
+        self.with_usart(base, |u| u.sc_retries()).unwrap_or(0)
+    }
+
+    /// Harness = the IR transmitter: inject a byte with a pulse class.
+    pub fn uart_irda_rx(&self, sys: &System, base: u32, byte: u8, low_power: bool) {
+        self.with_usart(base, |u| u.irda_rx(sys, byte, low_power));
+    }
+
+    /// Pulse class of the last TX byte (scope probe for IrDA mode).
+    pub fn uart_irda_tx_class(&self, base: u32) -> u8 {
+        self.with_usart(base, |u| u.irda_tx_class()).unwrap_or(0)
+    }
+
     /// Run a closure on the SDIO controller (single instance per map).
     fn with_sdio<R>(&self, f: impl FnOnce(&mut crate::peripherals::sdio::Sdio) -> R) -> Option<R> {
         for slot in &self.peripherals {
@@ -237,6 +278,29 @@ impl Peripherals {
     /// Harness = the tamper pin: latch TAMP1F (fires IRQ 2 when TAMPIE).
     pub fn rtc_tamper(&self, sys: &System) {
         self.with_rtc(|u| u.tamper(sys));
+    }
+
+    /// Harness = the tamper pin with physics: level transition filtered
+    /// by TAMP1E/TRG/FLT (erases backup registers + optional timestamp).
+    pub fn rtc_tamper_pin(&self, sys: &System, level: bool) {
+        self.with_rtc(|u| u.tamper_pin(sys, level));
+    }
+
+    /// FLASH readout-protection level from OPTCR RDP (0/1/2).
+    pub fn flash_rdp_level(&self) -> u8 {
+        self.with_flash(|u| u.rdp_level()).unwrap_or(0)
+    }
+
+    /// Harness = the option-byte programmer: set the RDP byte (respects
+    /// OPTLOCK like the register path).
+    pub fn flash_set_rdp(&self, level_byte: u8) {
+        self.with_flash(|u| u.set_rdp(level_byte));
+    }
+
+    /// Harness = the SD card with a bad block: next CMD17/18 completion
+    /// latches DCRCFAIL instead of DATAEND.
+    pub fn sdio_fault_data_crc(&self) {
+        self.with_sdio(|u| u.fault_data_crc());
     }
 
     /// Harness = the timestamp pin event: capture TR/DR/SSR, latch TSF

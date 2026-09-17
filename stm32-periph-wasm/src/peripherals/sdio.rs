@@ -23,6 +23,18 @@ pub struct Sdio {
     /// cleared by ICR SDIOITC (bit 22). Gated on MASK SDIOITIE like the
     /// other flags for IRQ49.
     sdio_it: bool,
+    /// Data-path timing state (instruction-count clock):
+    /// - `data_start`: clock value when the current CMD17/18 transfer
+    ///   began (for DTIMER timeout + width-scaled duration).
+    /// - `data_done_at`: clock value when the transfer completes
+    ///   (DATAEND/DBCKEND latch there, not instantly at CMD time).
+    /// - `xfer_len`: latched DLEN snapshot for the in-flight transfer.
+    data_start: u64,
+    data_done_at: u64,
+    xfer_len: u32,
+    /// Data CRC fault injection (harness = the bad card): the next
+    /// CMD17/18 completion latches DCRCFAIL instead of DATAEND.
+    data_crc_fault: bool,
 }
 
 impl Sdio {
@@ -48,6 +60,8 @@ impl Default for Sdio {
             sd_state: SdState::Idle, rca: 0, data_xfer_active: false,
             app_pending: false,
             wide_bus: 0, sdio_it: false,
+            data_start: 0, data_done_at: 0, xfer_len: 0,
+            data_crc_fault: false,
         }
     }
 }
@@ -71,6 +85,34 @@ impl Sdio {
             self.sta &= !(1 << 22);
         }
     }
+
+    /// Harness = the bad card: the next CMD17/18 data completion latches
+    /// DCRCFAIL (STA bit 1) instead of DATAEND/DBCKEND. One-shot (consumed
+    /// by the completion, like a real single bad block).
+    pub fn fault_data_crc(&mut self) {
+        self.data_crc_fault = true;
+    }
+
+    /// Data-path timing: virtual-instruction cost of one CMD17/18 transfer
+    /// of `len` bytes. Scales with the latched bus width (1/4/8 data lines
+    /// move 1/4/8 bits per SDIO clock) and the CLKCR clock divider, on top
+    /// of a fixed command overhead. 1 SDIO clock = 1 virtual instruction
+    /// at CLKDIV=0 (the model's 1:1 instruction clock); the divider scales
+    /// linearly. Documented estimate (not silicon-cycle-exact): the
+    /// observable contract is ordering (DBCKEND/DATAEND after the window,
+    /// DTIMEOUT when DTIMER is shorter) and width-monotonicity.
+    fn data_cost(&self, len: u32) -> u64 {
+        let lines = match self.wide_bus {
+            1 => 4,
+            2 => 8,
+            _ => 1,
+        } as u64;
+        let div = ((self.clkcr & 0xFF) as u64) + 1;
+        // Bits on the wire, spread over `lines` data lines, clocked at
+        // 1/div virtual instructions per SDIO clock, plus 64 clocks of
+        // command/response overhead.
+        (len as u64 * 8 / lines) * div + 64 * div
+    }
 }
 
 impl Sdio {
@@ -81,11 +123,52 @@ impl Sdio {
     fn app_cmd_pending(&self) -> bool {
         self.app_pending
     }
+
+    /// Poll the in-flight data transfer toward completion. Called at CMD
+    /// time (zero-wait fast path when the window is already elapsed, e.g.
+    /// tiny transfers), on every STA read, and from tick(). Latches, in
+    /// order: DTIMEOUT (DTIMER shorter than the cost) else DCRCFAIL (fault
+    /// armed) else DBCKEND + DATAEND. RXOVERR/TXUNDERR stay on the arm
+    /// path (a drained-then-re Fed FIFO is a driver-sequencing artifact,
+    /// not silicon behavior — not modeled).
+    fn poll_data_done(&mut self, sys: &System) {
+        if !self.data_xfer_active {
+            return;
+        }
+        use crate::system::instruction_count;
+        let now = instruction_count();
+        // DTIMER is in SDIO-clock units: timeout when the elapsed window
+        // exceeds DTIMER clocks (scaled like the cost: divider applies).
+        let div = ((self.clkcr & 0xFF) as u64) + 1;
+        let elapsed_clocks = now.wrapping_sub(self.data_start) / div;
+        if elapsed_clocks > self.dtimer as u64 {
+            self.sta |= 1 << 3; // DTIMEOUT
+            self.data_xfer_active = false;
+            self.fifocnt = 0;
+            self.fire_interrupts(sys);
+            return;
+        }
+        if now < self.data_done_at {
+            return; // window still open
+        }
+        // Window elapsed: complete (or CRC-fail when armed).
+        self.data_xfer_active = false;
+        self.dcount = 0;
+        self.fifocnt = 0;
+        self.sta &= !((1 << 12) | (1 << 13)); // TXACT/RXACT clear
+        if self.data_crc_fault {
+            self.data_crc_fault = false;
+            self.sta |= 1 << 1; // DCRCFAIL
+        } else {
+            self.sta |= (1 << 8) | (1 << 10); // DATAEND + DBCKEND
+        }
+        self.fire_interrupts(sys);
+    }
 }
 
 impl Peripheral for Sdio {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-    fn read(&mut self, _sys: &System, offset: u32) -> u32 {
+    fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => self.power,
             0x04 => self.clkcr,
@@ -100,7 +183,10 @@ impl Peripheral for Sdio {
             0x28 => self.dlen,
             0x2C => self.dctrl,
             0x30 => self.dcount,
-            0x34 => self.sta,
+            0x34 => {
+                self.poll_data_done(sys);
+                self.sta
+            }
             0x38 => self.icr,
             0x3C => self.mask,
             0x48 => self.fifocnt,
@@ -198,10 +284,37 @@ impl Peripheral for Sdio {
                     if wait_type != 0 { self.sta |= 1 << 10; }
 
                     if cmd_index == 17 || cmd_index == 18 {
+                        // Data transfer: arm the timed completion (DATAEND/
+                        // DBCKEND latch at data_done_at, not instantly).
+                        // DTIMER timeout: if the programmed data timeout is
+                        // shorter than the width-scaled cost, the transfer
+                        // ends in DTIMEOUT instead (silicon watchdog).
+                        use crate::system::instruction_count;
+                        let now = instruction_count();
+                        let cost = self.data_cost(self.dlen);
+                        self.xfer_len = self.dlen;
+                        self.data_start = now;
+                        self.data_done_at = now.wrapping_add(cost);
                         self.data_xfer_active = true;
                         self.dcount = self.dlen;
+                        // RXACT/TXACT + FIFO level reflect an ARMED transfer
+                        // at once (firmware polls these before DATAEND);
+                        // DBCKEND/DATAEND wait for the window.
                         self.sta |= (1 << 1) | (1 << 3) | (1 << 11);
+                        self.sta |= (1 << 12) | (1 << 13); // TXACT+RXACT
                         self.fifocnt = self.dlen.min(512);
+                        // Overrun/underrun staging: a zero-length transfer
+                        // with the data path enabled is a firmware bug —
+                        // silicon flags RXOVERR (read) / TXUNDERR (write)
+                        // by direction. Latched now (not timed).
+                        if self.dlen == 0 {
+                            if self.dctrl & (1 << 1) != 0 {
+                                self.sta |= 1 << 4; // TXUNDERR (to card)
+                            } else {
+                                self.sta |= 1 << 5; // RXOVERR (from card)
+                            }
+                        }
+                        self.poll_data_done(sys);
                     }
 
                     self.fire_interrupts(sys);
@@ -231,8 +344,21 @@ impl Peripheral for Sdio {
                 self.mask = value & 0x7FFF_FFFF;
                 self.fire_interrupts(sys);
             }
-            0x80 => self.fifo = value,
+            0x80 => {
+                // FIFO port: a CPU-side data word drains the in-flight
+                // transfer (DCOUNT/FIFOCNT follow down). Reads behave the
+                // same (firmware drains via reads); the value stored is
+                // the last word (canned data path — bytes are identical).
+                if self.data_xfer_active && self.dcount > 0 {
+                    self.dcount = self.dcount.saturating_sub(4);
+                    self.fifocnt = self.dcount.min(512);
+                }
+                self.fifo = value;
+            }
             _ => {}
         }
+    }
+    fn tick(&mut self, sys: &System) {
+        self.poll_data_done(sys);
     }
 }

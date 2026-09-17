@@ -29,6 +29,12 @@ pub struct Flash {
     opt_locked: bool,
     cr_psize: u32,
     erase_pending: bool,
+    /// Mass-erase-in-progress countdown (MER + STRT latches BSY for a
+    /// width-scaled window, not instantly: a 1 MB array erases slower
+    /// than a 16 KB sector — the observable contract is BSY-then-EOP
+    /// with MER taking longer than SER). Ticked down by `tick()`;
+    /// `flash_erase_applied` (JS confirm) still completes it early.
+    mer_ticks_left: u32,
 }
 
 impl Default for Flash {
@@ -36,6 +42,7 @@ impl Default for Flash {
         Self {
             acr: 0, keyr: 0, optkeyr: 0, sr: 0, cr: 0, optcr: 0x0FFF_AAED, optcr1: 0,
             flash_locked: true, opt_locked: true, cr_psize: 0, erase_pending: false,
+            mer_ticks_left: 0,
         }
     }
 }
@@ -88,12 +95,62 @@ impl Flash {
             sector_range(snb)
         } else { None };
         if let Some((start, len)) = range {
+            let is_mer = self.cr & (1 << 2) != 0;
             self.erase_pending = true;
             self.sr |= 1 << 16; // BSY held until JS confirms the erase
             crate::system::queue_flash_erase(start, len);
             self.cr &= !(1 << 16); // clear STRT
+            if is_mer {
+                // Mass erase takes ~64x a 16 KB sector erase (1 MB / 16 KB):
+                // hold BSY across ticks even if the JS confirm races ahead
+                // (the confirm still wins — this only stretches a polled
+                // BSY, the documented timing contract).
+                self.mer_ticks_left = 640;
+            }
             self.refresh_programming();
         }
+    }
+
+    /// Tick the MER window down. When it reaches zero with no JS confirm
+    /// yet, complete the erase in-model (BSY clear + EOP) so a polling
+    /// firmware always terminates even if the driver never confirms.
+    /// SER path is unaffected (JS confirm owns it, as before).
+    fn tick_inner(&mut self) {
+        if self.mer_ticks_left > 0 {
+            self.mer_ticks_left -= 1;
+            if self.mer_ticks_left == 0 && self.erase_pending {
+                self.erase_pending = false;
+                self.sr &= !(1 << 16); // !BSY
+                self.sr |= 1 << 0;     // EOP
+                self.refresh_programming();
+            }
+        }
+    }
+
+    /// Readout protection level from OPTCR RDP (bits 15:8):
+    /// - 0xAA = level 0 (no protection, reset-adjacent default),
+    /// - 0xCC = level 2 (chip protection, irreversible),
+    /// - anything else = level 1 (protected: debug readout disabled).
+    /// Scope probe for the RDP contract (see `flash_rdp_level`).
+    pub fn rdp_level(&self) -> u8 {
+        match (self.optcr >> 8) & 0xFF {
+            0xAA => 0,
+            0xCC => 2,
+            _ => 1,
+        }
+    }
+
+    /// Harness = the option-byte programmer: set the RDP byte (OPTCR
+    /// bits 15:8) as an unlocked OPTSTRT program would (respects OPTLOCK
+    /// like the register path; latches WRPERR when locked). Lets a test
+    /// reach levels 1/2 without hand-driving the full OPTSTRT sequence.
+    pub fn set_rdp(&mut self, level_byte: u8) {
+        if self.opt_locked {
+            self.sr |= 1 << 4; // WRPERR
+            return;
+        }
+        self.optcr = (self.optcr & !(0xFF << 8)) | ((level_byte as u32) << 8);
+        self.sr |= 1 << 0; // EOP
     }
 
     /// Program-sequence error check for a guest flash store at `addr`.
@@ -143,6 +200,9 @@ impl Flash {
 
 impl Peripheral for Flash {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn tick(&mut self, _sys: &System) {
+        Self::tick_inner(self);
+    }
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => self.acr,

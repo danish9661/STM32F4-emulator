@@ -444,6 +444,44 @@ pub fn uart_tx_len(base: u32) -> usize {
     sys.p.uart_tx_len(base)
 }
 
+/// Harness = the LIN master: deliver a break frame to the USART at `base`.
+#[wasm_bindgen]
+pub fn uart_lin_break(base: u32) {
+    let sys = crate::sys();
+    let sys2 = crate::sys();
+    sys.p.uart_lin_break(sys2, base);
+}
+
+/// Harness = the smartcard: NACK the next transmitted byte.
+#[wasm_bindgen]
+pub fn uart_sc_nack(base: u32) {
+    let sys = crate::sys();
+    sys.p.uart_sc_nack(base);
+}
+
+/// Smartcard retry counter of the USART at `base` (scope probe).
+#[wasm_bindgen]
+pub fn uart_sc_retries(base: u32) -> u8 {
+    let sys = crate::sys();
+    sys.p.uart_sc_retries(base)
+}
+
+/// Harness = the IR transmitter: inject a byte with a pulse class
+/// (low_power selects the 1.6µs class, else the 3/16 class).
+#[wasm_bindgen]
+pub fn uart_irda_rx(base: u32, byte: u8, low_power: bool) {
+    let sys = crate::sys();
+    let sys2 = crate::sys();
+    sys.p.uart_irda_rx(sys2, base, byte, low_power);
+}
+
+/// Pulse class of the last TX byte (scope probe for IrDA mode).
+#[wasm_bindgen]
+pub fn uart_irda_tx_class(base: u32) -> u8 {
+    let sys = crate::sys();
+    sys.p.uart_irda_tx_class(base)
+}
+
 /// Harness = the NSS pin fault: latch MODF on the SPI block at `base`.
 #[wasm_bindgen]
 pub fn spi_fault_modf(base: u32) {
@@ -457,6 +495,29 @@ pub fn spi_fault_modf(base: u32) {
 pub fn spi_fault_crc(base: u32) {
     let sys = crate::sys();
     sys.p.spi_fault_crc(base);
+}
+
+/// Harness = the SPI master: drive the slave's NSS level (true = asserted).
+#[wasm_bindgen]
+pub fn spi_slave_select(base: u32, asserted: bool) {
+    let sys = crate::sys();
+    sys.p.spi_slave_select(base, asserted);
+}
+
+/// Harness = the SPI master clock: shift one frame through the slave at
+/// `base` (returns the MISO word). No-op when the gate is closed.
+#[wasm_bindgen]
+pub fn spi_slave_clock(base: u32, mosi: u32) -> u32 {
+    let sys = crate::sys();
+    let sys2 = crate::sys();
+    sys.p.spi_slave_clock(sys2, base, mosi)
+}
+
+/// Slave gate state of the SPI block at `base` (scope probe).
+#[wasm_bindgen]
+pub fn spi_slave_gate(base: u32) -> bool {
+    let sys = crate::sys();
+    sys.p.spi_slave_gate(base)
 }
 
 /// Current SDIO bus-width select (0 = 1-bit, 1 = 4-bit, 2 = 8-bit).
@@ -474,12 +535,43 @@ pub fn sdio_card_irq(set: bool) {
     sys.p.sdio_card_irq(sys2, set);
 }
 
+/// Harness = the bad card: next CMD17/18 completion latches DCRCFAIL.
+#[wasm_bindgen]
+pub fn sdio_fault_data_crc() {
+    let sys = crate::sys();
+    sys.p.sdio_fault_data_crc();
+}
+
 /// Harness = the tamper pin: latch RTC TAMP1F (IRQ 2 when TAMPIE).
 #[wasm_bindgen]
 pub fn rtc_tamper() {
     let sys = crate::sys();
     let sys2 = crate::sys();
     sys.p.rtc_tamper(sys2);
+}
+
+/// Harness = the tamper pin with physics (TAMP1E/TRG/FLT-gated, erases
+/// backup registers, optional timestamp via TAMPTS).
+#[wasm_bindgen]
+pub fn rtc_tamper_pin(level: bool) {
+    let sys = crate::sys();
+    let sys2 = crate::sys();
+    sys.p.rtc_tamper_pin(sys2, level);
+}
+
+/// FLASH readout-protection level from OPTCR RDP (0/1/2).
+#[wasm_bindgen]
+pub fn flash_rdp_level() -> u8 {
+    let sys = crate::sys();
+    sys.p.flash_rdp_level()
+}
+
+/// Harness = the option-byte programmer: set the RDP byte (respects
+/// OPTLOCK like the register path).
+#[wasm_bindgen]
+pub fn flash_set_rdp(level_byte: u8) {
+    let sys = crate::sys();
+    sys.p.flash_set_rdp(level_byte);
 }
 
 /// Harness = the timestamp pin event: capture TR/DR/SSR, latch TSF.

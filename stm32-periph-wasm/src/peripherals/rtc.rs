@@ -68,6 +68,10 @@ pub struct Rtc {
     wut_reload: u16,
     wut_count: u16,
     wut_armed: bool,
+    /// Tamper-pin physics state: last pin level + consecutive-match filter
+    /// count (see `tamper_pin`). Reset values: pull-up idle high.
+    tamp_level: bool,
+    tamp_filter: u32,
 }
 
 impl Default for Rtc {
@@ -83,6 +87,7 @@ impl Rtc {
                 isr: 0x0000_0007, prer: 0x007F_00FF, ssr: 0x0000_7FFF,
                 tr: 0x0000_2100, dr: 0x0000_2101,
                 last_inst: INSTRUCTION_COUNT.load(Ordering::Relaxed),
+                tamp_level: true,
                 ..Default::default()
             }))
         } else { None }
@@ -96,6 +101,66 @@ impl Rtc {
     /// when TAMPIE (TAFCR bit 2) is set. Cleared by writing ISR bit 13
     /// (firmware's usual clear path).
     pub fn tamper(&mut self, sys: &System) {
+        self.tamper_edge(sys);
+    }
+
+    /// Tamper-pin physics (TAFCR-gated): the pin event only fires when
+    /// TAMP1E (bit 0) is set; TAMP1TRG (bit 1) selects rising (1) vs
+    /// falling (0) edge — the harness `level` is the new pin level and an
+    /// event fires only on the matching transition from the stored level.
+    /// TAMPFLT (bits 12:11) demands N consecutive matching samples
+    /// (0/2/4/8); TAMPPRCH (bits 14:13) + TAMPFREQ (bits 10:8) model the
+    /// precharge/filter clock without timing it (the count of matching
+    /// samples is the contract, not the RTCCLK cycles). A firing event
+    /// clears all 20 backup registers (silicon erases secrets on tamper)
+    /// and, with TAMPTS (bit 7), captures a timestamp first (TSF path —
+    /// TSOVF if a stamp was already pending).
+    pub fn tamper_pin(&mut self, sys: &System, level: bool) {
+        // Disabled pin: store the level, never fire.
+        if self.tafcr & 1 == 0 {
+            self.tamp_level = level;
+            return;
+        }
+        let rising_edge = level && !self.tamp_level;
+        let falling_edge = !level && self.tamp_level;
+        self.tamp_level = level;
+        let want_rising = self.tafcr & (1 << 1) != 0;
+        let edge_ok = if want_rising { rising_edge } else { falling_edge };
+        // Filter (TAMPFLT): N consecutive SAMPLES at the assertive level
+        // (not N edges — alternating high/low calls would reset an edge
+        // counter every other sample and x4/x8 could never fire). The
+        // first matching edge starts the run; subsequent samples at the
+        // assertive level extend it; any sample away resets.
+        let need = match (self.tafcr >> 11) & 3 {
+            0 => 1,
+            1 => 2,
+            2 => 4,
+            _ => 8,
+        };
+        let assertive = if want_rising { level } else { !level };
+        if edge_ok {
+            self.tamp_filter = 1;
+        } else if assertive {
+            self.tamp_filter += 1;
+        } else {
+            self.tamp_filter = 0;
+        }
+        if self.tamp_filter >= need {
+            self.tamp_filter = 0;
+            // Timestamp first when TAMPTS is set (silicon captures the
+            // tamper instant), then erase secrets, then flag.
+            if self.tafcr & (1 << 7) != 0 {
+                self.timestamp(sys);
+            }
+            self.bkp = [0; 20];
+            self.tamper_edge(sys);
+        }
+    }
+
+    /// Raw tamper event (unconditional — the legacy `tamper()` path and
+    /// the filtered `tamper_pin()` path converge here): latch TAMP1F +
+    /// IRQ2 when TAMPIE.
+    fn tamper_edge(&mut self, sys: &System) {
         self.isr |= 1 << 13; // TAMP1F
         if self.tafcr & (1 << 2) != 0 {
             sys.p.nvic.borrow_mut().set_intr_pending(2); // TAMP_STAMP IRQ
