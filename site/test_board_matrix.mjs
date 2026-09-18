@@ -153,6 +153,10 @@ const FEAT_MARKERS = ['PHY link OK', 'PHY AN restart OK', 'PHY force OK', 'PHY m
 // PPS scope probe: 200k inst at 32768 Hz (edge per ~5041 inst) ~= 39.
 const FEAT_PPS_POST = (b) => { const n = b.eth_pps_count(); return (n >= 20 && n <= 60) ? null : ('pps_count=' + n); };
 const IRQETH_LAYOUT = { rxDesc: 0x20000050, rxBuf: 0x2000005c, rxStride: 1536, rxDescs: 1 };
+const IRQETHADV = { enable_irqs: true, irq_eth: true, lowpower: true, eth: { rxDesc: 0x20000c40, rxBuf: 0x2000060c, rxStride: 1536, rxDescs: 1 } };
+const ADV_MARKERS = ['RST OK', 'RTO OK', 'MSS OK', 'WINDOW OK', 'FRAG OK', 'ICMPERR OK', 'DHCPNAK OK', 'DHCPRENEW OK', 'IGMP OK', 'ND OK', 'LLDP OK', 'STP OK', 'ADV Test: done'];
+E.push(['eth_adv', 'disco_f407vg', 'eth_adv/eth_adv.bin', ADV_MARKERS, ['FAIL', 'TIMEOUT'], IRQETHADV, 'netsim', 6000, 20000]);
+E.push(['eth_adv_f429', 'f429', 'eth_adv/eth_adv_f429.bin', ADV_MARKERS, ['FAIL', 'TIMEOUT'], IRQETHADV, 'netsim', 6000, 20000]);
 const IRQETHFEAT = { enable_irqs: true, irq_eth: true, lowpower: true, eth: { rxDesc: 0x20000630, rxBuf: 0x20000668, rxStride: 1536, rxDescs: 1 } };
 E.push(['eth_feat_test', 'disco_f407vg', 'eth_feat_test/eth_feat_test.bin', FEAT_MARKERS, ['FAIL', 'TIMEOUT'], IRQETHFEAT, 'netsim', 6000, 20000, FEAT_PPS_POST]);
 E.push(['eth_feat_test_f429', 'f429', 'eth_feat_test/eth_feat_test_f429.bin', FEAT_MARKERS, ['FAIL', 'TIMEOUT'], IRQETHFEAT, 'netsim', 6000, 20000, FEAT_PPS_POST]);

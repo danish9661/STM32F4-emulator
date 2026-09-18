@@ -7,7 +7,7 @@ import { createEmulator } from './emulator.js?v=2';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
 import { boardsOf, boardForSelection, BOARDS } from './boards.js?v=6';
-import { FIRMWARES } from './firmware.js?v=25';
+import { FIRMWARES } from './firmware.js?v=26';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
 
@@ -46,6 +46,8 @@ const uartAddrFor = (name) => UART4_FIRMWARES.has(name) ? 0x40004C00 : UART2_FIR
 const ETH_RX_MAP = {
     eth_irq_test: { rxDesc: 0x20000050, rxBuf: 0x2000005c },
     eth_irq_test_f429: { rxDesc: 0x20000050, rxBuf: 0x2000005c },
+    eth_adv: { rxDesc: 0x20000c40, rxBuf: 0x2000060c },
+    eth_adv_f429: { rxDesc: 0x20000c40, rxBuf: 0x2000060c },
 };
 
 // Interrupt-driven firmware: the emulator pumps guest IRQ handlers (USART RXNE
@@ -58,7 +60,7 @@ const IRQ_FIRMWARES = new Set(['rx_interrupt_test', 'rx_interrupt_test_f401', 'r
 // Interrupt-driven ETH firmware: the guest ETH_IRQHandler (run by the pump)
 // reads DMASR and scans rx_desc itself, so the driver must not write the
 // SRAM irq_flag/rx_frame_idx globals (irq_eth mode in emulator.js).
-const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test', 'eth_dhcp', 'eth_test', 'eth_irq_test_f429', 'eth_dhcp_f429', 'eth_test_f429', 'eth_feat_test', 'eth_feat_test_f429', 'lwip_demo', 'lwip_demo_f429', 'eth_pins_test', 'eth_pins_test_f429']);
+const IRQ_ETH_FIRMWARES = new Set(['eth_irq_test', 'eth_dhcp', 'eth_test', 'eth_irq_test_f429', 'eth_dhcp_f429', 'eth_test_f429', 'eth_feat_test', 'eth_feat_test_f429', 'lwip_demo', 'lwip_demo_f429', 'eth_pins_test', 'eth_pins_test_f429', 'eth_adv', 'eth_adv_f429']);
 
 // FreeRTOS firmware: SVC/PendSV/SysTick delivery (inline in the Rust core).
 const FREERTOS_FIRMWARES = new Set(['freertos_test', 'freertos_test_f411', 'freertos_test_f429']);

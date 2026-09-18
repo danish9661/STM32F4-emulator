@@ -35,6 +35,7 @@ const DEMOS = {
     eth_http: { fams: ['f429'], srcs: ['startup.c', 'eth_http.ino'] },
     eth_dhcp: { fams: ['f429'], srcs: ['startup.c', 'eth_dhcp.ino'] },
     eth_test: { fams: ['f429'] },
+    eth_adv: { fams: ['f429'] },
     eth_feat_test: { fams: ['f429'] },
     lwip_demo: { fams: ['f429'], srcs: ['startup.c', 'main.c', 'netif_f4.c', 'lwip_sock.c', 'arch/sys_arch.c',
         'lwip/core/init.c', 'lwip/core/mem.c', 'lwip/core/memp.c', 'lwip/core/netif.c',

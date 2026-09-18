@@ -54,6 +54,7 @@ const CASES = [
     // Full feature run incl. STOP/WOL wake; the PPS panel (scope view of
     // the PPS pin) must show accumulated edges by the end.
     { label: 'eth_feat_pps', fw: 'eth_feat_test', markers: ['WOKE BY WOL', 'FEAT Test: done'], failMarkers: ['FAIL', 'TIMEOUT'], domChecks: [{ sel: 'ppsInfo', contains: 'edges' }], timeoutMs: 180000 },
+    { label: 'eth_adv', fw: 'eth_adv', markers: ['ADV Test: done'], failMarkers: ['FAIL', 'TIMEOUT'], timeoutMs: 180000 },
 ];
 
 let failed = 0;

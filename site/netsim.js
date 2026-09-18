@@ -20,6 +20,15 @@ export function createNetSim({ log = () => {} } = {}) {
         'Hello from openhw HTTP server';
 
     let clientMac = CLIENT_MAC.slice();
+    // The dst MAC for unsolicited server frames (FRAG/LLDP/IGMP...).
+    // DHCP learns the real chaddr, but eth_adv never runs DHCP — seed
+    // from any TX frame's source MAC so peers address the guest.
+    const learnMac = (frame) => {
+        if (frame.length >= 12) {
+            const sa = Array.from(frame.subarray(6, 12));
+            if (sa.some((b) => b !== 0)) clientMac = sa;
+        }
+    };
     let srvSeq = 0x10000000; // server ISN
     let clientSeq = 0;       // learned from the client SYN
     let lastMsgType = 0;
@@ -107,6 +116,12 @@ export function createNetSim({ log = () => {} } = {}) {
     // TCP-server-test client role (lwip_demo listens on 7): fixed sport,
     // connects when the firmware sends a UDP trigger to port 5004.
     let cliSport = 5005, cliSeq = 0x30000000, cliSrvIss = 0, cliFwIp = null;
+    let igmpReports = 0; // eth_adv IGMP phase: 1st report -> query, 2nd -> + traffic
+    // eth_adv peers (dedicated server ports 5010-5018): per-port server
+    // ISN + per-port noticed MSS (the guest SYN option is parsed at SYN
+    // time so the SYN-ACK can echo the clamped value back).
+    let advIss = 0x40000000, advMss = 1460;
+    const ADV_PORTS = new Set([5010, 5011, 5012, 5013]);
     const DNS_IP = [93, 184, 216, 34]; // canned A answer (example.com real IP)
 
     // TCP segment builder with explicit ports (echo path; HTTP uses tcpFrame).
@@ -138,6 +153,7 @@ export function createNetSim({ log = () => {} } = {}) {
         stats.tx++;
         const replies = [];
         if (frame.length < 14) return replies;
+        learnMac(frame);
         // FEAT loopback-silence: the feat firmware's loopback phases
         // address their own MAC (02:00:00:00:00:01, SARC or zero SA)
         // with UDP ports 5009+ and expect point-to-point silence — no
@@ -166,7 +182,7 @@ export function createNetSim({ log = () => {} } = {}) {
             return replies;
         const et = (frame[12] << 8) | frame[13];
 
-        if (et === 0x1234) { // eth_irq_test: echo PING -> PONG
+            if (et === 0x1234) { // eth_irq_test: echo PING -> PONG
             if (new TextDecoder().decode(frame.subarray(14, 27)).includes('PING')) {
                 const r = new Uint8Array(60);
                 r.set(frame.subarray(6, 12), 0);  // dst = requester MAC
@@ -177,6 +193,10 @@ export function createNetSim({ log = () => {} } = {}) {
             }
             return replies;
         }
+
+        if (et === 0x86dd) return replies; // IPv6: never answered (no v6 stack)
+        if (et === 0x88cc) return replies; // LLDP: never answered
+        if (frame.length >= 17 && frame[14] === 0x42 && frame[15] === 0x42) return replies; // STP LLC: never answered
 
         if (et === 0x0806) { // ARP: answer requests (any target IP — canned sim
             // claims the requested address with SERVER_MAC so guest ARP never stalls)
@@ -206,6 +226,53 @@ export function createNetSim({ log = () => {} } = {}) {
         const ihl = (frame[14] & 0x0f) * 4;
         const ipStart = 14 + ihl;
 
+        if (proto === 2) { // IGMP: report -> query (+ group traffic on 2nd)
+            const type = frame[ipStart];
+            const grp = [frame[ipStart + 4], frame[ipStart + 5], frame[ipStart + 6], frame[ipStart + 7]];
+            igmpReports++;
+            if (type === 0x16 && grp[0] === 239 && grp[1] === 0 && grp[2] === 0 && grp[3] === 9) {
+                // General query (dst 224.0.0.1, group 0.0.0.0).
+                const q = new Uint8Array(42);
+                q.set([0x01, 0x00, 0x5E, 0x00, 0x00, 0x01], 0); q.set(SERVER_MAC, 6);
+                q[12] = 0x08; q[13] = 0x00;
+                q[14] = 0x45; q[17] = 28; q[22] = 1; q[23] = 2;
+                q.set(SERVER_IP, 26); q.set([224, 0, 0, 1], 30);
+                let s = 0; for (let i = 14; i < 34; i += 2) s += (q[i] << 8) | q[i + 1];
+                while (s >> 16) s = (s & 0xffff) + (s >> 16); s = (~s) & 0xffff;
+                q[24] = s >> 8; q[25] = s & 0xff;
+                q[34] = 0x11; q[35] = 100; // query, max-resp 10s
+                q[36] = 0; q[37] = 0;
+                {
+                    let c = 0;
+                    for (let i = 34; i < 42; i += 2) c += (q[i] << 8) | q[i + 1];
+                    while (c >> 16) c = (c & 0xffff) + (c >> 16); c = (~c) & 0xffff;
+                    q[36] = c >> 8; q[37] = c & 0xff;
+                }
+                replies.push(q);
+                log('IGMP report -> query');
+                if (igmpReports >= 2) { // joined: send the group traffic
+                    const p = new TextEncoder().encode('GROUP9');
+                    const u = new Uint8Array(8 + p.length);
+                    u[0] = 0x13; u[1] = 0x98; u[2] = 0xC0; u[3] = 0x02;
+                    u[4] = (8 + p.length) >> 8; u[5] = (8 + p.length) & 0xff;
+                    u.set(p, 8);
+                    const ipLen = 20 + u.length;
+                    const fr = new Uint8Array(14 + ipLen);
+                    fr.set([0x01, 0x00, 0x5E, 0x00, 0x00, 0x09], 0); fr.set(SERVER_MAC, 6);
+                    fr[12] = 0x08; fr[13] = 0x00;
+                    fr[14] = 0x45; fr[16] = ipLen >> 8; fr[17] = ipLen & 0xff;
+                    fr[22] = 1; fr[23] = 17;
+                    fr.set(SERVER_IP, 26); fr.set([239, 0, 0, 9], 30);
+                    const ck = cksum(fr.subarray(14, 34));
+                    fr[24] = ck >> 8; fr[25] = ck & 0xff;
+                    fr.set(u, 34);
+                    replies.push(fr);
+                    log('IGMP group traffic');
+                }
+            }
+            return replies;
+        }
+
         if (proto === 17) { // UDP -> DHCP
             const sport = (frame[ipStart] << 8) | frame[ipStart + 1];
             const dport = (frame[ipStart + 2] << 8) | frame[ipStart + 3];
@@ -225,10 +292,17 @@ export function createNetSim({ log = () => {} } = {}) {
                     stats.dhcpOffers++;
                     log('DHCP Discover -> Offer (XID=0x' + ((dhcp[4] << 24) | (dhcp[5] << 16) | (dhcp[6] << 8) | dhcp[7]).toString(16).padStart(8, '0') + ')');
                     replies.push(dhcpReply(dhcp, 2));
-                } else if (mt === 3) { // Request -> Ack
-                    stats.dhcpAcks++;
-                    log('DHCP Request -> Ack');
-                    replies.push(dhcpReply(dhcp, 5));
+                } else if (mt === 3) { // Request -> Ack (or NAK for the unknown xid)
+                    const xid = ((dhcp[4] << 24) | (dhcp[5] << 16) | (dhcp[6] << 8) | dhcp[7]) >>> 0;
+                    if (xid === 0xDEADBEEF) { // eth_adv NAK trigger: refuse it
+                        stats.dhcpNaks = (stats.dhcpNaks || 0) + 1;
+                        log('DHCP Request -> NAK');
+                        replies.push(dhcpReply(dhcp, 6));
+                    } else {
+                        stats.dhcpAcks++;
+                        log('DHCP Request -> Ack');
+                        replies.push(dhcpReply(dhcp, 5));
+                    }
                 }
             } else if (dport === 53) { // DNS: canned A answer (any query)
                 // q = DNS message (ipStart already points past the IP
@@ -354,6 +428,131 @@ export function createNetSim({ log = () => {} } = {}) {
                 cliFwIp = [frame[ipStart - 8], frame[ipStart - 7], frame[ipStart - 6], frame[ipStart - 5]];
                 log('TCP client SYN -> :7');
                 replies.push(tcpSeg(cliSport, 7, 0x02, cliSeq, 0, null, cliFwIp));
+            } else if (dport >= 5010 && dport <= 5018) { // eth_adv triggers
+                // One UDP probe to a dedicated server port drives one
+                // canned peer. The probe's sport is echoed where a reply
+                // port matters (ICMP quote, TCP ports below).
+                const advSport = (frame[ipStart] << 8) | frame[ipStart + 1];
+                const advSrcIp = [frame[ipStart - 8], frame[ipStart - 7], frame[ipStart - 6], frame[ipStart - 5]];
+                const advUdpLen = (frame[ipStart + 4] << 8) | frame[ipStart + 5];
+                const advUl = (o, n) => { const u = new Uint8Array(8 + n); u[0] = o >> 8; u[1] = o & 0xff; u[2] = advSport >> 8; u[3] = advSport & 0xff; u[4] = (8 + n) >> 8; u[5] = (8 + n) & 0xff; return u; };
+                if (dport === 5014) { // FRAG: two IP fragments, "FRAGMENT!"
+                    // Real RFC 791 fragmentation of one UDP datagram:
+                    // datagram payload = UDP header (8) + "FRAGMENT!" (9).
+                    // frag0 carries bytes [0..16) (UDP hdr + "FRAGMENT"),
+                    // off=0 MF=1; frag1 carries bytes [16..17) ("!"),
+                    // off=2 (16 bytes) MF=0. Only frag0 has the UDP
+                    // header — frag1 is a raw payload continuation.
+                    const ident = 0x1234;
+                    const full = (() => {
+                        const u = new Uint8Array(8 + 9);
+                        u[0] = 0x13; u[1] = 0x96; u[2] = advSport >> 8; u[3] = advSport & 0xff;
+                        u[4] = 0; u[5] = 17;
+                        u.set(new TextEncoder().encode('FRAGMENT!'), 8);
+                        return u;
+                    })();
+                    const mkfrag = (off8, mf, slice) => {
+                        const ipLen = 20 + slice.length;
+                        const fr = new Uint8Array(14 + ipLen);
+                        // dst = guest MAC (unicast to us, like every other
+                        // server peer — the model has no promiscuous bit
+                        // set, so server-MAC sources never deliver).
+                        fr.set(clientMac, 0); fr.set(SERVER_MAC, 6);
+                        fr[12] = 0x08; fr[13] = 0x00;
+                        fr[14] = 0x45; fr[16] = ipLen >> 8; fr[17] = ipLen & 0xff;
+                        fr[18] = ident >> 8; fr[19] = ident & 0xff;
+                        // FLAGS+FRAGOFF (RFC 791 §3.1): bit 13 (0x2000) =
+                        // MF, low 13 bits = offset in 8-byte units. The
+                        // field is big-endian: high byte carries MF+off[12:8].
+                        fr[20] = (mf ? 0x20 : 0) | ((off8 >> 8) & 0x1F); fr[21] = off8 & 0xff;
+                        fr[22] = 64; fr[23] = 17;
+                        fr.set(SERVER_IP, 26); fr.set(advSrcIp, 30);
+                        const ck = cksum(fr.subarray(14, 34));
+                        fr[24] = ck >> 8; fr[25] = ck & 0xff;
+                        fr.set(slice, 34);
+                        return fr;
+                    };
+                    replies.push(mkfrag(0, true, full.subarray(0, 16)));
+                    replies.push(mkfrag(2, false, full.subarray(16, 17)));
+                    log('FRAG 2 fragments');
+                } else if (dport === 5015) { // ICMPERR: port-unreachable quoting the probe
+                    // Quote the full inner IP datagram (RFC 792: IP header
+                    // + 8 bytes of payload = 28 bytes here). The guest pads
+                    // short triggers to the 60 B wire minimum, but the IP
+                    // total-length field says 32 — quote EXACTLY that many
+                    // bytes (innerTotal), so a strict checker comparing the
+                    // quoted UDP length against the real length passes.
+                    // (Quoting frame.length-ipStart would append 28 bytes
+                    // of zero pad and the quoted UDP length reads 40.)
+                    // L3 HEADER OFFSET (not L4): ipStart points at the UDP
+                    // header (14+ihl); the IP header starts at 14. The old
+                    // code read innerTotal off the UDP sport bytes (C0 01 =
+                    // 49153) and quoted from the UDP header — so the reply
+                    // carried C0 01... where the guest expects 45 00....
+                    const l3 = ipStart - ihl;
+                    const innerTotal = ((frame[l3 + 2] << 8) | frame[l3 + 3]);
+                    const qlen = Math.min(28, innerTotal);
+                    const ic = new Uint8Array(8 + qlen);
+                    ic[0] = 3; ic[1] = 3;
+                    ic.set(frame.subarray(l3, l3 + qlen), 8);
+                    ic[2] = 0; ic[3] = 0;
+                    const ck = cksum(ic);
+                    ic[2] = ck >> 8; ic[3] = ck & 0xff;
+                    const f = buildFrame(advSrcIp, 1, ic);
+                    f.set(frame.subarray(6, 12), 0); f.set(SERVER_MAC, 6);
+                    replies.push(f);
+                    log('ICMP port-unreachable');
+                } else if (dport === 5016) { // ND: IPv6 NS for our link-local
+                    const ns = new Uint8Array(92);
+                    ns.set(frame.subarray(6, 12), 0); ns.set(SERVER_MAC, 6);
+                    ns[12] = 0x86; ns[13] = 0xDD;
+                    ns[14] = 0x60; // version 6
+                    ns[18] = 0; ns[19] = 32; // payload len 32
+                    ns[20] = 58; ns[21] = 64; // ICMPv6, hop 64
+                    ns.set([0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 22); // dst ll
+                    ns.set([0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0x5A, 0x94, 0xFF, 0xFE, 0xE4, 0x0C, 0xDD, 0x02], 38); // src ll
+                    ns[54] = 135; ns[55] = 0; // NS
+                    ns[58] = 0; ns[59] = 0;
+                    ns.set([0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0xFF, 0x0C, 0xDD, 0x02], 62); // target = solicited node
+                    ns[78] = 1; ns[79] = 1; ns.set(SERVER_MAC, 80); // src lladdr option
+                    replies.push(ns);
+                    log('IPv6 NS');
+                } else if (dport === 5017) { // LLDP: chassis MAC TLV
+                    const ll = new Uint8Array(14 + 9 + 9);
+                    ll.set(frame.subarray(6, 12), 0);
+                    ll[0] = 0x01; ll[1] = 0x80; ll[2] = 0xC2; ll[3] = 0x00; ll[4] = 0x00; ll[5] = 0x0E;
+                    ll.set(SERVER_MAC, 6);
+                    ll[12] = 0x88; ll[13] = 0xCC;
+                    ll[14] = 0x02; ll[15] = 0x07; ll[16] = 0x04; ll.set(SERVER_MAC, 17); // chassis MAC
+                    ll[23] = 0x04; ll[24] = 0x04; ll[25] = 0x05; ll.set([0x65, 0x74, 0x68, 0x30], 26); // port "eth0"
+                    ll[30] = 0x00; ll[31] = 0x00; // end TLV
+                    replies.push(ll);
+                    log('LLDP chassis');
+                } else if (dport === 5018) { // STP: config BPDU, root 8000+srv MAC
+                    // 802.3+LLC framing (no ethertype): dst(6) src(6)
+                    // len(2) DSAP/SSAP/CTL(3) then the BPDU. No pad byte —
+                    // an earlier revision inserted one at +17 and shifted
+                    // every BPDU field by one (guest read flags as type).
+                    const st = new Uint8Array(60);
+                    st.set([0x01, 0x80, 0xC2, 0x00, 0x00, 0x00], 0);
+                    st.set(SERVER_MAC, 6);
+                    st[12] = 0x00; st[13] = 0x26; // length 38
+                    st[14] = 0x42; st[15] = 0x42; st[16] = 0x03; // LLC
+                    st[17] = 0x00; st[18] = 0x00; st[19] = 0x00; // proto/version/type=config
+                    st[20] = 0x00; // flags
+                    st[21] = 0x80; st[22] = 0x00; st.set(SERVER_MAC, 23); // root id
+                    st[29] = 0; st[30] = 0; // root path cost
+                    st[31] = 0x80; st[32] = 0x00; st.set(SERVER_MAC, 33); // bridge id
+                    st[39] = 0x80; st[40] = 0x01; // port id
+                    st[43] = 0x01; st[44] = 0x00; // hello time
+                    replies.push(st);
+                    log('STP config BPDU');
+                } else if (dport >= 5010 && dport <= 5013) {
+                    // TCP phases handled below (proto 6 branch owns the
+                    // handshake); UDP probes here are ignored.
+                } else {
+                    void advUl; void advUdpLen;
+                }
             }
             return replies;
         }
@@ -396,6 +595,89 @@ export function createNetSim({ log = () => {} } = {}) {
             const sport = (frame[ipStart] << 8) | frame[ipStart + 1];
             const dport = (frame[ipStart + 2] << 8) | frame[ipStart + 3];
             const srcIp = [frame[ipStart - 8], frame[ipStart - 7], frame[ipStart - 6], frame[ipStart - 5]];
+            if (ADV_PORTS.has(dport)) { // eth_adv: one canned peer per port
+                const seq = (frame[ipStart + 4] << 24) | (frame[ipStart + 5] << 16) | (frame[ipStart + 6] << 8) | frame[ipStart + 7];
+                const fl = frame[ipStart + 13];
+                const th = ((frame[ipStart + 12] >> 4) & 0x0f) * 4;
+                // SYN option parse: remember the guest's MSS so the
+                // SYN-ACK echoes the clamped value (MSS phase).
+                const mssOf = () => {
+                    let m = 1460;
+                    for (let k = 20; k + 3 < th;) {
+                        const kind = frame[ipStart + k];
+                        if (kind === 0) break;
+                        if (kind === 1) { k++; continue; }
+                        const kl = frame[ipStart + k + 1];
+                        if (kind === 2 && kl === 4) { m = (frame[ipStart + k + 2] << 8) | frame[ipStart + k + 3]; break; }
+                        if (kl < 2) break;
+                        k += kl;
+                    }
+                    return m;
+                };
+                // SYN-ACK with the MSS option + a fixed small window.
+                // (WINDOW phase reads win=1000 off any server ACK; the
+                // same value rides here so it holds for the whole flow.)
+                const advSynAck = (ackn) => {
+                    const tcp = new Uint8Array(24);
+                    tcp[0] = dport >> 8; tcp[1] = dport & 0xff;
+                    tcp[2] = sport >> 8; tcp[3] = sport & 0xff;
+                    tcp[4] = advIss >> 24; tcp[5] = advIss >> 16; tcp[6] = advIss >> 8; tcp[7] = advIss & 0xff;
+                    tcp[8] = ackn >> 24; tcp[9] = ackn >> 16; tcp[10] = ackn >> 8; tcp[11] = ackn & 0xff;
+                    tcp[12] = 0x60; tcp[13] = 0x12;
+                    tcp[14] = 1000 >> 8; tcp[15] = 1000 & 0xff; // window
+                    tcp[20] = 2; tcp[21] = 4; tcp[22] = advMss >> 8; tcp[23] = advMss & 0xff;
+                    let sum = 0;
+                    const add = (b, o, n) => { for (let i = 0; i < n; i += 2) sum += (b[o + i] << 8) | (i + 1 < n ? b[o + i + 1] : 0); };
+                    add(SERVER_IP, 0, 4); add(srcIp, 0, 4);
+                    sum += 6 + tcp.length;
+                    add(tcp, 0, tcp.length);
+                    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+                    const ck = (~sum) & 0xffff;
+                    tcp[16] = ck >> 8; tcp[17] = ck & 0xff;
+                    return buildFrame(srcIp, 6, tcp);
+                };
+                if (fl === 0x02) { // SYN
+                    if (dport === 5010) { // RST: abort, no handshake
+                        log('ADV RST');
+                        replies.push(tcpSeg(dport, sport, 0x14, 0, seq + 1, null, srcIp));
+                        return replies;
+                    }
+                    advMss = mssOf();
+                    log('ADV SYN -> SYN-ACK (mss=' + advMss + ')');
+                    replies.push(advSynAck(seq + 1));
+                    advIss = (advIss + 1) >>> 0; // SYN consumes one sequence number
+                    return replies;
+                }
+                // RTO (5011): blackhole — answer nothing, the guest's
+                // wait loop must expire on its own.
+                if (dport === 5011) return replies;
+                // Post-handshake ACKs carry window 1000 (WINDOW phase
+                // reads it off any server ACK after its 1-byte probe).
+                if ((fl & 0x10) && dport >= 5012) {
+                    const ipTot = (frame[16] << 8) | frame[17];
+                    const dlen = Math.max(0, Math.min(frame.length - ipStart - th, ipTot - (ipStart - 14) - th));
+                    const ackn = (seq + dlen) >>> 0;
+                    log('ADV ACK win=1000');
+                    // tcpSeg hardcodes window 0xffff — patch the window
+                    // bytes (L4+14) then repair the TCP checksum in place
+                    // (the IP header covers only itself, untouched).
+                    const f = tcpSeg(dport, sport, 0x10, advIss, ackn, null, srcIp);
+                    const l4 = f.length - 20;
+                    f[l4 + 14] = 1000 >> 8; f[l4 + 15] = 1000 & 0xff;
+                    f[l4 + 16] = 0; f[l4 + 17] = 0;
+                    let s2 = 0;
+                    const a2 = (b, o, n) => { for (let i = 0; i < n; i += 2) s2 += (b[o + i] << 8) | (i + 1 < n ? b[o + i + 1] : 0); };
+                    a2(SERVER_IP, 0, 4); a2(srcIp, 0, 4);
+                    s2 += 6 + 20;
+                    a2(f, l4, 20);
+                    while (s2 >> 16) s2 = (s2 & 0xffff) + (s2 >> 16);
+                    const c2 = (~s2) & 0xffff;
+                    f[l4 + 16] = c2 >> 8; f[l4 + 17] = c2 & 0xff;
+                    replies.push(f);
+                    return replies;
+                }
+                return replies;
+            }
             if (sport === 7 && cliFwIp !== null) {
                 // Server-side frames (firmware listens on 7): drive the
                 // client role — SYN-ACK -> ACK + data, echo-ACK ignored,

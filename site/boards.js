@@ -287,6 +287,8 @@ export const BOARDS_OF_FIRMWARE = {
     gpio_k_test_f429: ['stm32f429'],
     eth_feat_test: ['stm32f407'],
     eth_feat_test_f429: ['stm32f429'],
+    eth_adv: ['stm32f407'],
+    eth_adv_f429: ['stm32f429'],
     lwip_demo: ['stm32f407'],
     lwip_demo_f429: ['stm32f429'],
     eth_pins_test: ['stm32f407'],
