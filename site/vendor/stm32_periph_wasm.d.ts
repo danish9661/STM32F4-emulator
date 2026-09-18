@@ -682,6 +682,14 @@ export function init(): void;
  */
 export function init_svd(svd_xml: string): void;
 
+/**
+ * Initialize from SVD + chip name for per-chip identity (DBGMCU IDCODE
+ * DEV_ID: pass 'stm32f401' | 'stm32f411' | 'stm32f407' | 'stm32f429';
+ * unknown names keep the F407 default). Must be called after adding all
+ * ext devices, like init_svd.
+ */
+export function init_svd_chip(svd_xml: string, chip: string): void;
+
 export function is_watchdog_reset_requested(): boolean;
 
 /**
@@ -1246,6 +1254,7 @@ export interface InitOutput {
     readonly i2c_take_events: (a: number, b: number, c: number) => void;
     readonly init: () => void;
     readonly init_svd: (a: number, b: number) => void;
+    readonly init_svd_chip: (a: number, b: number, c: number, d: number) => void;
     readonly is_watchdog_reset_requested: () => number;
     readonly itm_port_pending: (a: number) => number;
     readonly itm_take_port: (a: number, b: number) => void;

@@ -36,7 +36,7 @@ const DOCS = [
          'description: How the STM32F407 emulator is structured — CPU core, Rust peripheral model, JS drivers, and how they communicate.']],
     ['docs/peripherals.md', 'peripherals.md',
         ['sidebar_position: 5', 'title: Peripherals',
-         'description: Full implementation matrix of all 40 emulated peripherals — register coverage, behavior level, and firmware coverage.']],
+         'description: Full implementation matrix of all 41 emulated peripherals — register coverage, behavior level, and firmware coverage.']],
     ['docs/benchmarks.md', 'benchmarks.md',
         ['sidebar_position: 6', 'title: Benchmarks',
          'description: Performance measurements — throughput, soak results, tuning history, and environment reproducibility.']],

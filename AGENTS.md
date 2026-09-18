@@ -4099,13 +4099,14 @@ node PASS; browser **41/41**.
 - Battery: mock 262 (this session) + cargo-st 217 + matrix 156/156 +
   feat407/feat429 + standby/lowpower node + browser 41/41, all green.
 
-## 38. Gap batch 10: the six "out of scope" walls, knocked down (2026-09-18, UNCOMMITTED)
+## 38. Gap batch 10: the six "out of scope" walls, knocked down (2026-09-18)
 
 The user rejected "wall" as a concept — no `NOT modeled`, no `electrical-only`,
 no `single-master otherwise`, no `would be fake precision`. Every wall below
 got a real mechanism, a native test, a mock pin (`t_gap10`, 262 → **312 checks
-PASS**), and a compiled bare-metal firmware proving it on the guest (6/6 PASS
-on guest + 6/6 in-browser CDP smoke). Battery: cargo **241** single-threaded,
+PASS**, then `t_dbgmcu_idcode` → **317**), and a compiled bare-metal firmware
+proving it on the guest (6/6 PASS on guest + 6/6 in-browser CDP smoke).
+Battery: cargo **242** single-threaded (+2 dbgmcu idcode tests),
 matrix **174/174**, browser **41/41**. `gap10_*/` firmware dirs are new
 (untracked until committed); family builds via `tools/build_family.mjs`.
 
@@ -4164,8 +4165,14 @@ matrix **174/174**, browser **41/41**. `gap10_*/` firmware dirs are new
   worker v50→v51 for the rebuilt vendor wasm; `pkg/` (nodejs) NOT rebuilt
   this round (browser-target web build only — pkg callers use the older
   artifact; rebuild before any Node-side gap10 use).
-- Battery: cargo-st 241 + mock 312 + matrix 174/174 + browser 41/41 +
-  gap10 guest 6/6 + gap10 CDP 6/6, all green. Stale-wasm trap hit again:
+- Battery: cargo-st 242 + mock 317 + matrix 174/174 + browser 41/41 +
+  gap10 guest 6/6 + gap10 CDP 6/6, all green.
+- Follow-up (same session, committed together): per-map DBGMCU IDCODE
+  (`init_svd_chip` export + `Dbgmcu::set_idcode` + emulator.js `svdFile`/
+  `chipHint` plumbing through app.js/boards.js, matrix, and cli.mjs;
+  verified DEV_IDs 0x413/0x423/0x431/0x419) + CR mask 0x1F_0077→0x1F_E0F7
+  (keeps the shipped 0x1F0077 probes green) + dropped a DBGMCU-PWR
+  cross-talk sentence that described hardware that does not exist. Stale-wasm trap hit again:
   the periph SR1 probe read TXE because `site/vendor` predated the Idle
   guard by 90 s — always rebuild + re-probe in the same chain
   (source mtime vs wasm mtime check earns its keep).

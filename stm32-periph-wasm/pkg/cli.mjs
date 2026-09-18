@@ -54,12 +54,14 @@ async function main() {
     // Honor config.cpu.svd (resolved relative to its config file) so board
     // configs can select their own map (e.g. Keil F429 SVD); default monox.
     let svdXml = monoxSvd;
+    let svdFile = 'stm32f407.svd';
     if (config.cpu?.svd) {
         try {
             const cfgDir = configPaths.length
                 ? path.dirname(path.resolve(configPaths[configPaths.length - 1]))
                 : process.cwd();
             svdXml = readFileSync(path.resolve(cfgDir, config.cpu.svd), 'utf8');
+            svdFile = String(config.cpu.svd).split('/').pop();
             console.log(`Using SVD: ${config.cpu.svd}`);
         } catch (e) { console.log(`SVD ${config.cpu.svd} unreadable, using monox (${e.message})`); }
     }
@@ -192,7 +194,7 @@ async function main() {
     const fwName = (configPaths[0] || posArgs[0] || process.env.FIRMWARE || '').toLowerCase();
     const pollingEth = fwName.includes('eth_http');
     const emu = await createEmulator({
-        firmware, bindings, svdXml, wasmInit: wasmBytes,
+        firmware, bindings, svdXml, svdFile, wasmInit: wasmBytes,
         vector_table, ram_size, extra_ram, ext_devices, uart_addr: uartAddr,
         // Interrupt-driven delivery: the guest ETH_IRQHandler owns its SRAM
         // flags (the driver only signals the model + injects frames), exactly

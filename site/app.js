@@ -454,6 +454,7 @@ const boot = async () => {
             firmware: fw,
             bindings,
             svdXml,
+            svdFile: board.svd,
             flash_size: board.flash_size,
             ram_size: board.ram_size,
             wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=40',

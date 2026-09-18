@@ -78,6 +78,35 @@ pub fn init_svd(svd_xml: &str) {
     set_sys(WasmSystem::new_svd(svd_xml));
 }
 
+/// Initialize from SVD + chip name for per-chip identity (DBGMCU IDCODE
+/// DEV_ID: pass 'stm32f401' | 'stm32f411' | 'stm32f407' | 'stm32f429';
+/// unknown names keep the F407 default). Must be called after adding all
+/// ext devices, like init_svd.
+#[wasm_bindgen]
+pub fn init_svd_chip(svd_xml: &str, chip: &str) {
+    console_error_panic_hook::set_once();
+    let sys = WasmSystem::new_svd(svd_xml);
+    let dev: Option<u16> = match chip.to_ascii_lowercase().as_str() {
+        c if c.contains("f401") => Some(0x423),
+        c if c.contains("f411") => Some(0x431),
+        c if c.contains("f429") => Some(0x419),
+        c if c.contains("f407") => Some(0x413),
+        _ => None,
+    };
+    if let Some(dev) = dev {
+        for slot in &sys.p.peripherals {
+            if slot.start == 0xE004_2000 {
+                if let Some(d) = slot.peripheral.borrow_mut().as_any_mut()
+                    .downcast_mut::<crate::peripherals::dbgmcu::Dbgmcu>() {
+                    d.set_idcode(dev);
+                }
+                break;
+            }
+        }
+    }
+    set_sys(sys);
+}
+
 #[wasm_bindgen]
 pub fn periph_read(addr: u32, width: u32) -> u32 {
     sys().p.read(&*sys(), addr, width as u8)

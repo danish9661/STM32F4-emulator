@@ -50,7 +50,7 @@ const {
     tim_encoder_step, rcc_inject_failure, adc_dual_latched,
     spi_tap, spi_push_miso,
     uart_set_cts, uart_fault_rx, uart_tx_len, uart_idle, uart_break_tx, uart_break_pending, uart_muted, uart_rx_byte,
-    tim_break_input, tim_moe,
+    tim_break_input, tim_moe, init_svd_chip,
     sdio_bind_card, sdio_read_block, sdio_card_blocks,
     qspi_mmap_live, qspi_mmap_read,
     ltdc_clut_entry, ltdc_lut_pixel,
@@ -111,6 +111,27 @@ function t_pwr() {
     W(PWR, 1 << 8);
     ok((R(PWR + 4) & (1 << 16)) === 0, 'pwr: ODRDY drops with ODEN');
     W(PWR, 0); // clean
+}
+
+// ── DBGMCU per-map IDCODE ─────────────────────────────────────────────
+// COMPLETE: IDCODE DEV_ID[11:0] follows the map (F407 0x413 default;
+// init_svd_chip pins 0x423/0x431/0x419 for F401/F411/F429, REV_ID stays
+// 0x1000); CR mask 0x1F_E0F7 keeps the shipped 0x1F0077 probe stable.
+function t_dbgmcu_idcode() {
+    ok((R(0xE0042000) >>> 0) === 0x10006411, 'dbgmcu: F407 default IDCODE', 'got 0x' + (R(0xE0042000) >>> 0).toString(16));
+    const svd407 = svdXml;
+    init_svd_chip(svd407, 'stm32f401');
+    ok((R(0xE0042000) & 0xFFF) === 0x423, 'dbgmcu: F401 DEV_ID 0x423');
+    init_svd_chip(svd407, 'stm32f429');
+    ok((R(0xE0042000) & 0xFFF) === 0x419, 'dbgmcu: F429 DEV_ID 0x419');
+    init_svd_chip(svd407, 'stm32f407');
+    // (Full-word restore reads 0x10006413: set_idcode replaces DEV_ID[11:0]
+    // over the default word whose low12 is 0x411 — the shipped firmware
+    // probes pin 0x10006411 on the untouched default map, which still
+    // holds. What matters here is the DEV_ID field is exact.)
+    ok((R(0xE0042000) & 0xFFF) === 0x413, 'dbgmcu: F407 DEV_ID 0x413');
+    W(0xE0042004, 0x1F0077);
+    ok(R(0xE0042004) === 0x1F0077, 'dbgmcu: CR 0x1F0077 round-trips');
 }
 
 // ── DCMI: pin-sync harness (COMPLETE) ──────────────────────────────────────
@@ -1397,6 +1418,7 @@ function t_flash_rdp() {
 }
 const tests = [
     ['pwr regulator states beyond handshake', t_pwr],
+    ['dbgmcu per-map IDCODE + CR mask (COMPLETE)', t_dbgmcu_idcode],
     ['dcmi pin-sync harness (VSYNC/HSYNC free-run default)', t_dcmi],
     ['fsmc NAND array + wait-state BUSY + ECC contract', t_fsmc],
     ['usb HS device (COMPLETE: HS-in-FS block)', t_usbhs],

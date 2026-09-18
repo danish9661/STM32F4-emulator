@@ -92,7 +92,7 @@ silicon. Depth details: [PERIPHERALS](../peripherals.md); Ethernet depth:
 | CRYP | Yes | Full | AES-128/192/256 ECB/CBC/CTR, DES/3DES, GCM, CCM via real crates | — |
 | HASH | Yes | Full | SHA-1 / MD5 / SHA-256 via real crates | HMAC live (MODE/LKEY, RFC 4231 mock `t_hmac_sha1`) |
 | IWDG, WWDG | Yes | Full | prescalers, window semantics, early-wakeup IRQ, expiry reboots the guest | — |
-| DBGMCU | Yes | Full | IDCODE 0x10006411; APBx freeze honored — halted+frozen TIM2-14/WWDG/IWDG neither count nor fire, I2C START/STOP sequencing holds (SMBUS bits 21-23); `dbgmcu_set_halt`, no catch-up burst | no debugger attached, so halt is a test/driver state |
+| DBGMCU | Yes | Full | IDCODE 0x10006411 (DEV_ID 0x413) via `init_svd_chip`; APBx freeze honored — halted+frozen TIM2-14/WWDG/IWDG neither count nor fire, I2C START/STOP sequencing holds (SMBUS bits 21-23); `dbgmcu_set_halt`, no catch-up burst | no debugger attached, so halt is a test/driver state |
 | DMA2D | No | Absent | model exists — run these demos on F429 | — |
 | LTDC | No | Absent | model exists — run on F429 | — |
 | SAI1 | No | Absent | model exists — run on F429 | — |

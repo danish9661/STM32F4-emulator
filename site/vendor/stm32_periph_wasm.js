@@ -1562,6 +1562,22 @@ export function init_svd(svd_xml) {
 }
 
 /**
+ * Initialize from SVD + chip name for per-chip identity (DBGMCU IDCODE
+ * DEV_ID: pass 'stm32f401' | 'stm32f411' | 'stm32f407' | 'stm32f429';
+ * unknown names keep the F407 default). Must be called after adding all
+ * ext devices, like init_svd.
+ * @param {string} svd_xml
+ * @param {string} chip
+ */
+export function init_svd_chip(svd_xml, chip) {
+    const ptr0 = passStringToWasm0(svd_xml, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(chip, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len1 = WASM_VECTOR_LEN;
+    wasm.init_svd_chip(ptr0, len0, ptr1, len1);
+}
+
+/**
  * @returns {boolean}
  */
 export function is_watchdog_reset_requested() {

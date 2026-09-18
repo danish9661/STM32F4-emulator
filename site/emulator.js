@@ -65,7 +65,7 @@ export async function createEmulator(opts) {
         periph_read, periph_write, tick, tick_n, tick_peripherals, get_uart_output,
         dma_get_pending_count, dma_get_pending, dma_set_completed,
         dma_periph_read, dma_periph_write,
-        is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, qspi_register_flash, sdio_bind_card, init_svd,
+        is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, qspi_register_flash, sdio_bind_card, init_svd, init_svd_chip,
         eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll,
         eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
         eth_mac_accept, eth_rx_csum_status, eth_check_wol, eth_tx_wire_busy,
@@ -359,7 +359,21 @@ export async function createEmulator(opts) {
     // SVD-derived peripheral map with the hardcoded one. (It used to be a
     // harmless no-op only because SYS was a OnceLock that ignored the second
     // call — see the SYS comment in stm32-periph-wasm/src/lib.rs.)
-    if (svdXml) init_svd(svdXml);
+    // Per-chip identity (DBGMCU IDCODE DEV_ID): pass the board's SVD
+    // filename as the chip hint when the bundle exports init_svd_chip
+    // (older bundles only have init_svd — same map, F407 IDCODE).
+    // `chipHint` (opts) overrides; default derives from `svdFile` (opts)
+    // which app.js sets to the board's SVD filename (boards.js).
+    if (svdXml) {
+        if (typeof init_svd_chip === 'function') {
+            let hint = '';
+            try {
+                hint = String(opts.chipHint || opts.svdFile || '');
+                hint = hint.split('/').pop().split('.').slice(0, -1).join('.') || hint;
+            } catch {}
+            init_svd_chip(svdXml, hint);
+        } else init_svd(svdXml);
+    }
     else bindings.init();
 
     // SD card image: bind AFTER init (live-model call, not a pre-init

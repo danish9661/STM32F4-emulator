@@ -110,6 +110,7 @@ export const i2c_slave_write: (a: number, b: number) => void;
 export const i2c_take_events: (a: number, b: number, c: number) => void;
 export const init: () => void;
 export const init_svd: (a: number, b: number) => void;
+export const init_svd_chip: (a: number, b: number, c: number, d: number) => void;
 export const is_watchdog_reset_requested: () => number;
 export const itm_port_pending: (a: number) => number;
 export const itm_take_port: (a: number, b: number) => void;

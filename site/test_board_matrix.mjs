@@ -182,7 +182,7 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
     const B = BOARDS[boardKey] || ABOARDS[boardKey];
     const netsim = script === 'netsim' ? createNetSim({}) : null;
     const emu = await createEmulator({
-        firmware: fw, bindings, svdXml: svdFor(B.svd), wasmInit: wasmBytes,
+        firmware: fw, bindings, svdXml: svdFor(B.svd), svdFile: B.svd + '.svd', wasmInit: wasmBytes,
         flash_size: B.flash, ram_size: B.ram, ...opts,
         ...(netsim ? { onTx: (frame) => { for (const r of netsim.onTx(frame)) emu.injectFrame(r); } } : {}),
     });
