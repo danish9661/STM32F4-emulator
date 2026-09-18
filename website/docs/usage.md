@@ -16,8 +16,11 @@ soaks, and CI, and the browser console (`site/`) for interactive demos.
 ### Prerequisites
 
 - Node 22+.
-- The WASM bindings + Unicorn in `stm32-periph-wasm/pkg/` (committed; only
-  rebuild if you change the Rust model — see [Building](#building-from-source)).
+- The WASM bindings in `stm32-periph-wasm/pkg/` (committed Node build; the
+  browser build lives in `site/vendor/`; only rebuild if you change the Rust
+  model — see [Building](#building-from-source)). (The old Unicorn engine
+  that used to sit next to the bindings was removed in AGENTS.md §23; the
+  Rust Thumb-2 core is the sole backend.)
 - For gateway runs: the built gateway `openhw-local-gateway/openhw-gw`
   (build with `cd openhw-local-gateway && go build -mod=vendor -o openhw-gw .`),
   and (for eth_http) an HTTP server at 127.0.0.1:8092 that the firmware
@@ -75,7 +78,7 @@ devices:
 
 | Env | Default | Effect |
 |---|---|---|
-| `MAX_BATCH` | 20000 | instructions per `emu_start` (must stay < ~40k — Unicorn WASM wedge, see progress-and-future.md) |
+| `MAX_BATCH` | 200000 | instructions per `step()` batch (servicing cadence for gateway RX, not a wedge guard — the ~40k Unicorn WASM wedge is archaeology, see progress-and-future.md) |
 | `MAX_INST` | 1M | instruction budget when the positional arg is omitted |
 | `TICK_EVERY` | 5000 | tick_n()/watchdog/interrupt check interval (instructions) |
 | `POLL_EVERY` | 1000 | DMA/ETH poll check interval (instructions) |
@@ -127,16 +130,16 @@ https://danish9661.github.io/stm32F4-emulator/ (GitHub Pages, CI-deployed).
 
 ### What you get
 
-- **Preset dropdown** — 209 bundled firmware builds. Auto-boot with
+- **Preset dropdown** — 215 bundled firmware builds. Auto-boot with
   `console.html?fw=eth_http`, `console.html?fw=blinky`,
   `console.html?fw=crypto_test`, … (or `console.html?fw=<name>`
   for any preset).
 - **UART terminal** — firmware TX scrolls here; the input box sends bytes
-  to the emulated USART (RX works — verified end-to-end). HTML spec strips
-  CR/LF from `<input>`, so newline-terminated RX firmwares
-  (`rx_interrupt_test`, `rx_crypto_test`) need the newline sent via the
-  debug handle: `window.__emu.sendUart([...bytes, 10])` from the devtools
-  console.
+  to the emulated USART (RX works — verified end-to-end). Enter sends the
+  line + `\r` (0x0D), Shift+Enter sends `\n` (0x0A), empty Enter sends a
+  bare `\r` (button renamed "Send RX" → "Send") — so newline-terminated RX
+  firmwares (`rx_interrupt_test`, `rx_crypto_test`) are drivable straight
+  from the UI box.
 - **Custom firmware upload** — `.bin`, Intel `.hex`, `.elf` (RAM segments
   preloaded; symbols from symtab), and `.map` files (symbols only).
 - **Run / Stop / Reset** — Reset sends the gateway `RESET` control message
@@ -147,8 +150,18 @@ https://danish9661.github.io/stm32F4-emulator/ (GitHub Pages, CI-deployed).
   NOTE: GitHub Pages is https, which blocks plain `ws://` — use a locally
   served page for gateway mode.
 - **GPIO pin grid** (banks A–E) — live MODER/ODR/IDR readout; the blinky
-  preset's PA5 toggles visibly.
+  preset's PA5 toggles visibly. Input-mode pins are clickable (drives
+  `exti_test` through both edges); a board selector filters presets per
+  chip (`console.html?board=stm32f401`, `?fw=` auto-selects its board).
 - **Key peripheral registers** — ETH DMASR/MACCR, USART1 SR, RCC AHB1ENR.
+- **Memory Watch panel** — type any hex address (+ label) for a live 32-bit
+  readout each frame, with a per-row poke input (`emu.write32`).
+- **Peripheral device panels** — OLED (128×64 canvas), TFT (240×320),
+  buzzer freq/duty, I2S speaker (WebAudio), DS3231 RTC time/temp, LTDC
+  layer0 canvas, PPS dot; CAN-injection panel (ID + data bytes).
+- **Save log button** — downloads the UART buffer (`uart-<fw>.txt`).
+- **Gateway status counters** — live TX/RX counts in the status label;
+  gateway RX frames appear in the packet viewer.
 - **Packet viewer** — see TX frames the firmware emits.
 
 ### DOOM page (`site/doom.html`)
@@ -156,8 +169,13 @@ https://danish9661.github.io/stm32F4-emulator/ (GitHub Pages, CI-deployed).
 A second page (linked from the console's header/footer) that runs DOOM 1
 shareware on the emulated F407 — `site/doom1.wad` (4.2 MB) is loaded into
 8 MB of `extra_mem` by the driver, and the guest renders the CMAP256
-framebuffer to a 640×400 canvas at ~24 MIPS / ~24 FPS with audio (I2S
-mixer → AudioWorklet, 11025 Hz).
+framebuffer to a 320×200 canvas (CSS-upscaled, `image-rendering:
+pixelated`) at ~65 MIPS / 35 FPS with audio (I2S mixer → AudioWorklet,
+11025 Hz). Emulation runs in `site/doom-worker.js` (a Web Worker driven by
+the page's rAF ticks); `site/doom.js` is the UI shell only. Build stamp:
+`window.__doomVer` (hard-refresh if the console doesn't print the current
+number — worker scripts cache hard, hence the `?v=` on both `doom.js` and
+`doom-worker.js`).
 
 - **Controls**: move W/S/A/D + arrows · strafe Shift · fire Ctrl · use
   Space · menu Enter/Esc · save F2 (menu) / F6 (quick-save) · load F3

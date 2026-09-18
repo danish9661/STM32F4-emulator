@@ -94,11 +94,22 @@ SOAK_STATS=1 node cli.mjs ../eth_http/eth_http.bin 200000000 \
 node site/test_flow.mjs
 ```
 
+## Backend note (post-§23)
+
+The numbers above were measured on the old Unicorn 2.1.4 WASM core
+(~1–2 MIPS, ~12 rounds/s). The Rust Thumb-2 core (sole backend since
+AGENTS.md §23) delivers ~65 MIPS headless and runs the same `eth_http`
+flow an order of magnitude faster per wall second; the tuning history
+below is preserved as archaeology — the mechanisms (JS hooks,
+`maxBatch` wedge cap) no longer exist. Compare runs by rounds/s or wall
+time for a fixed workload, never by the MIPS readout (block-counting
+era meters over-reported ~1.3×; see AGENTS.md §16).
+
 ## Tunables
 
 | Env | Default | Effect |
 |---|---|---|
-| `MAX_BATCH` | 20000 | instructions per `emu_start`; must stay < ~40k (Unicorn WASM wedge) |
+| `MAX_BATCH` | 200000 | instructions per `step()` batch (the ~40k Unicorn WASM wedge is archaeology — the Rust core has no such limit; kept large so gateway RX stays prompt) |
 | `TICK_EVERY` | 5000 | instruction interval for `tick_n()` + watchdog + interrupt checks |
 | `POLL_EVERY` | 1000 | instruction interval for DMA/ETH poll checks |
 | `GW_RESTART` | 0 | 1 = restart gateway per round (legacy, ~10x slower) |

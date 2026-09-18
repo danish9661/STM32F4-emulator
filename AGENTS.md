@@ -3962,7 +3962,7 @@ matrix **156/156**, feat 1/1 both maps (greenboard_all4 green).
   before it means anything. `pkg/` (nodejs target) rebuilt alongside so both
   artifacts match the same source.
 
-## 35. Gap batch 6: FLASH errors, SPI CRC/flags, USART flow+faults, SDIO ACMD, RTC WUT/stamp (2026-09-17, UNCOMMITTED)
+## 35. Gap batch 6: FLASH errors, SPI CRC/flags, USART flow+faults, SDIO ACMD, RTC WUT/stamp (2026-09-17)
 
 Five "Partial" rows closed to honest live behavior (each with mock pins in
 `site/test_periph_mock_consumer.mjs` Group 6 + native/rust coverage where it
@@ -4013,7 +4013,7 @@ checks PASS**; cargo **217**; matrix **156/156**; feat 1/1 both maps
   (same + browser standby PASS). Standby CDP log:
   `.pw-scratch/standby_gap6.log`.
 
-## 36. Gap batch 7: SDIO timing, USART protocols, SPI slave, tamper physics, RDP (2026-09-17, UNCOMMITTED)
+## 36. Gap batch 7: SDIO timing, USART protocols, SPI slave, tamper physics, RDP (2026-09-17)
 
 Second gap batch (each with mock pins in `site/test_periph_mock_consumer.mjs`
 Group 7 + board-doc row updates, all x3 via sync scripts). Mock 205 → **246
@@ -4062,3 +4062,39 @@ feat 1/1 both maps (greenboard_gap7 green); browser standby CDP PASS.
   show the PARALLEL run (193/24-flake, the known shared-INSTRUCTION_COUNT
   race also noted in §31); the chained single-threaded re-run is 217/217)
   + `.pw-scratch/chain_gap7_final.verdict` (same + browser standby PASS).
+
+## 37. Honor pass: ADC OVR + USART IDLE/SBK/PEIE/LBDIE + TIM OPM + GPIO LCKR (2026-09-18)
+
+Uncommitted honor-session work found while wiring the last unpinned model
+behaviors (each with a mock pin in `t_honor_pass` + board-doc row updates,
+all x3 via sync scripts). Mock 246 → **262 checks PASS**; cargo **217
+single-threaded** (parallel flake is the known shared-INSTRUCTION_COUNT
+race, §31/§36); matrix **156/156**; feat 1/1 both maps; standby/lowpower
+node PASS; browser **41/41**.
+
+- **ADC** (`adc.rs`): overrun — a conversion completing with EOC still set
+  latches OVR (SR bit 5); DR read clears the EOC/OVR pair (silicon: the DR
+  read acknowledges both).
+- **USART** (`usart.rs`): IDLE latch (`uart_idle` harness, IDLEIE IRQ,
+  DR-read clear); SBK TX break (queued flag, self-clearing CR1 bit,
+  consumed by the next DR write, `uart_break_pending` probe —
+  `uart_break_tx` export also added); IRQ routing fix — PE moved from EIE
+  to PEIE (silicon: PE is PEIE-gated, EIE covers FE/NE/ORE only); LBDIE
+  IRQ path. Exports: `uart_idle`, `uart_break_tx`, `uart_break_pending`.
+- **TIM** (`tim.rs`): OPM one-pulse — CEN self-clears at the update event
+  in every counting mode (up/down/center).
+- **GPIO** (`gpio.rs`): LCKR key sequence (W(1<<16+LCKk)→W(LCKk)→
+  W(1<<16+LCKk)→R confirms LCKK) + per-pin config freeze of
+  MODER/OTYPER/OSPEEDR/PUPDR/AFRL/AFRH under engaged LCKK. Real bug found
+  by the pin: the OTYPER arm read `value & !self.lck & 0xFFFF` —
+  `&` binds tighter than `===`-style comparisons but the mask mixed the
+  LCKK bit into the value (locked pin1 froze at the wrong value);
+  parenthesized to `(value & !locked) | (otype & locked)`. Mock seeds
+  pin1=00 explicitly (a 0x5 seed sets pin0+pin1 to 01 — re-derive, don't
+  eyeball nibble splits).
+- **?v= 37→38** (app.js/doom.js/doom-worker.js vendor literals) +
+  console.html app.js v44→v45, doom.html doom.js v76→v77 (`__doomVer` 77),
+  worker v48→v49 for the rebuilt vendor wasm; `pkg/` (nodejs) rebuilt
+  alongside so both artifacts match.
+- Battery: mock 262 (this session) + cargo-st 217 + matrix 156/156 +
+  feat407/feat429 + standby/lowpower node + browser 41/41, all green.

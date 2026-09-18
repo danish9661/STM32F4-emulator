@@ -7,6 +7,33 @@ date-based entries rather than strict SemVer until the first published release.
 ## [Unreleased]
 
 ### Added
+- **Peripheral gap batches 6–8** (model + mock pins + board-doc rows, all
+  synced to `site/docs-src/` + `website/docs/`):
+  - Batch 6: FLASH error flags (WRPERR/PGSERR/PGAERR, OPTLOCK/OPTSTRT),
+    SPI HW CRC + OVR/MODF/FRE/BSY, USART CTSE flow control + FE/PE fault
+    injection, SDIO ACMD prefix + wide-bus + DAT1 IRQ, RTC wakeup timer +
+    timestamp + tamper + smooth calibration.
+  - Batch 7: SDIO width-scaled data timing (DTIMEOUT/DCRCFAIL/RXOVERR/
+    TXUNDERR), USART LIN break + Smartcard T=0 NACK loop + IrDA pulse
+    classes, SPI slave gating (NSS/SSM+SSI, DR preload, harness SCK),
+    RTC tamper-pin physics (sample-count filter, BKPR erase), FLASH RDP
+    levels + MER timing window.
+  - Batch 8: ADC overrun (OVR latches, DR read clears the pair), USART
+    IDLE latch + SBK TX break + PEIE/LBDIE IRQ paths (PE moved off EIE),
+    TIM one-pulse mode (CEN self-clears at update), GPIO LCKR key sequence
+    + per-pin config freeze (incl. OTYPER `&`/`===` precedence fix).
+  - Mock-consumer harness: 168 → 262 checks (`t_flash_err`,
+    `t_spi_crc_err`, `t_usart_flow_err`, `t_sdio_acmd`, `t_rtc_wut_ts`,
+    `t_sdio_timing`, `t_usart_protocols`, `t_spi_slave_gate`,
+    `t_rtc_tamper_phys`, `t_flash_rdp`, `t_honor_pass`).
+- **Docs audit pass (2026-09-18)**: rewrote stale `architecture.md` (the
+  Rust core is the sole backend — no hooks/pump/wedge), fixed
+  `MAX_BATCH`/preset-count/UART-RX/device-panel/DOOM-fps staleness in
+  `usage.md`, added the post-§23 backend note to `benchmarks.md`, closed
+  the DCMI/USB/demo-firmware roadmap items in `progress-and-future.md`,
+  and pinned batch-8 mock names into all five board pages.
+
+### Added
 - **`stm32f4-emu` CLI** (`bin`): headless runner that loads a `.bin`/`.elf`/`.hex`
   firmware, boots it, and streams the guest UART to stdout. Supports
   `--inst <N>` (instruction budget), `--format auto|bin|hex|elf`,

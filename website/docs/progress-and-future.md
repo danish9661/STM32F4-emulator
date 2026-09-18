@@ -6,11 +6,19 @@ description: What works today, known limitations, and the implementation roadmap
 
 # Progress and future work
 
-Status as of 2026-09-16. The authoritative living log is AGENTS.md; this
+Status as of 2026-09-18. The authoritative living log is AGENTS.md; this
 document is the readable summary. Since AGENTS.md §23 the Rust Thumb-2
 core is the sole backend (Unicorn 2.1.4 removed after bit-identical parity
 was proven) — Unicorn-era mechanisms below (hooks, ISR pump, wedge,
 `maxBatch`, `?cpu=`) are marked as archaeology where they appear.
+Peripheral-model gap batches 6-8 (FLASH errors, SPI CRC/flags, USART
+flow+faults, SDIO ACMD/timing, USART LIN/Smartcard/IrDA, SPI slave,
+RTC tamper physics, RDP, ADC overrun, USART IDLE/SBK, TIM OPM, GPIO
+LCKR) are covered in AGENTS.md §§35–36 plus the batch-8 commit; the
+mock-consumer harness pins them (`t_flash_err`, `t_spi_crc_err`,
+`t_usart_flow_err`, `t_sdio_acmd`, `t_rtc_wut_ts`, `t_sdio_timing`,
+`t_usart_protocols`, `t_spi_slave_gate`, `t_rtc_tamper_phys`,
+`t_flash_rdp`, `t_honor_pass` — 262 checks).
 
 ## What works today
 
@@ -129,10 +137,16 @@ was proven) — Unicorn-era mechanisms below (hooks, ISR pump, wedge,
    polling ETH firmware (`deliver_irqs` false — an emulated ETH_IRQHandler
    would re-scan `rx_desc` and stomp the driver's frame bookkeeping).
    IRQ firmware (`irq_eth`) owns its flags through the real handler.
-3. **Hardware paths not modeled**: DCMI has no pixel source (CAN now has
-   a real two-node bus with arbitration; I2S/SAI have a WAV-backed DMA
-   capture path; LTDC has real scanout + a browser sink). USB OTG is
-   **explicitly out of scope**, not a to-do — see roadmap note below.
+3. **Hardware paths not modeled**: no analog sensor behind DCMI (frames
+    come from the JS feed), no analog pin layer behind DAC (DOR readback IS
+    the sink), no true-entropy RNG source (deterministic LCG unless the
+    harness seeds the pool), single-master I2C otherwise (bus always won),
+    no USB isochronous/host/SOF-suspend-VBUS paths, no packet-rate model
+    behind the ULPI rate report, no baud domain behind USART GTPR/guard
+    delays, vendor-proprietary matrices behind FSMC ECC, CAN has a real
+    two-node bus with arbitration, I2S/SAI have a WAV-backed DMA capture
+    path, LTDC has real scanout + a browser sink. Each substitute is pinned
+    by mock asserts so the docs can't drift from the model.
 4. **Timers are instruction-count driven**, not wall-clock driven — a
    `delay_ms(100)` is ~2.4M emulated instructions, so real-time blink
    rates don't hold (documented in AGENTS.md §11).
@@ -196,14 +210,16 @@ was proven) — Unicorn-era mechanisms below (hooks, ISR pump, wedge,
       JS driver's `dma_set_completed` (via `dma_check_completion` in the
       LISR/HISR read path) and stay set until the guest clears them through
       IFCR — real-w1c semantics.
-- [ ] DCMI real pixel source.
-- [x] USB OTG — **deferred, not planned**: none of this repo's firmware
-      targets or intended use cases (networking demos, DOOM, breadboard-
-      style peripheral simulation) exercise USB, and a browser sandbox has
-      no real USB host to enumerate against without WebUSB passthrough to
-      physical hardware — which isn't emulation. Revisit only if a
-      concrete firmware need appears (a lighter USB CDC echo sample is a
-      much smaller ask, see Priority 3).
+- [x] DCMI pixel source — JS camera feed (`dcmi_feed_frame`) with
+      pin-sync harness gating (VSYNC-arm, HSYNC blanking, PCLK divider);
+      there is deliberately no analog sensor behind it (documented
+      substitute, pinned by mock `t_dcmi`).
+- [x] USB OTG device — FS + HS-in-FS-mode CDC-ACM (`usb_cdc_test`,
+      byte-exact echo + STALL handshake, IRQ67/77, SOF/microframes, ULPI
+      rate report, VBUS sense, internal-DMA accounting). Deliberately out
+      of scope: isochronous/host, suspend-resume IRQ path beyond RWUSIG,
+      packet-rate simulation (see the USB row in
+      [peripherals.md](peripherals.md)).
 - [ ] EtherCAT / timers in PWM servo mode for the printer heritage
       firmwares.
 - [x] CAN bus peer / arbitration between CAN1 and CAN2 on a shared bus:
@@ -281,7 +297,7 @@ was proven) — Unicorn-era mechanisms below (hooks, ISR pump, wedge,
     and add maintenance cost for marginal protection. Revisit only if
     inline delivery is reworked
     or a real FreeRTOS app using those primitives is targeted.
- - [ ] USB CDC echo.
+ - [x] USB CDC echo (`usb_cdc_test` + `test_usb.mjs` + browser `usbhost.js`).
 
 ### Delivered 2026-08-22 (CLI / DX pass)
  - [x] **`stm32f4-emu` headless CLI** (`cli.mjs`, registered as the `stm32f4-emu`
@@ -299,13 +315,14 @@ was proven) — Unicorn-era mechanisms below (hooks, ISR pump, wedge,
        components) so TypeScript consumers get types.
 
 ### Deferred / low-priority (tracked, not scheduled)
- - [ ] **More demo firmwares** — a CAN-bus demo (exercising the two-node
-       arbitration model already in `can.rs`) and a deep-sleep / low-power
-       (STOP/WFI + RTC wakeup) demo. Useful for showcasing, but the peripheral
-       models they need are already verified by existing `can_test` /
-       `rtc_test`; the marginal emulator value is a new firmware + test
-       harness each. Revisit when a showcase gap is identified.
- - [ ] **Wider edge-case test coverage** ("236/236" style) — the current suite
+ - [x] **More demo firmwares** — done: `can_demo` (two-node arbitration
+      showcase), `deep_sleep_demo` (STOP + RTC wakeup) + `standby_demo`
+      (STANDBY + SBF), `can_host_rx` (host CAN injection), `tim_capture_demo`
+      (input capture), `qspi_test`, `dma2d_test`, `lwip_demo` (real LwIP
+      sockets), `eth_feat_test` (9-phase Ethernet depth), `eth_pins_test`
+      (MII/RMII mirrors), `gpio_k_test` (GPIOK), `wwdg_demo` /
+      `wwdg_window_demo`, `watchdog_demo`, `usb_cdc_test`.
+- [ ] **Wider edge-case test coverage** ("236/236" style) — the current suite
        already guards every emulator-specific defect (FreeRTOS context switch,
        ETH RX/TX, DMA, I2C/SPI taps, LTDC, audio, RTC). Extra cases would mostly
        re-test *guest* library code. Low value relative to maintenance cost;
