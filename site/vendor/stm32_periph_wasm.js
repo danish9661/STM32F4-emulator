@@ -2085,6 +2085,33 @@ export function tim_moe(name) {
 }
 
 /**
+ * Output-compare mode of channel `ch` (0-3) on timer `name` (6/7 = PWM).
+ * @param {string} name
+ * @param {number} ch
+ * @returns {number}
+ */
+export function tim_oc_mode(name, ch) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.tim_oc_mode(ptr0, len0, ch);
+    return ret >>> 0;
+}
+
+/**
+ * Live PWM pulse width in microseconds for channel `ch` on timer `name`.
+ * @param {string} name
+ * @param {number} ch
+ * @param {number} clock_hz
+ * @returns {number}
+ */
+export function tim_pwm_pulse_us(name, ch, clock_hz) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.tim_pwm_pulse_us(ptr0, len0, ch, clock_hz);
+    return ret;
+}
+
+/**
  * Whether a TX break is queued on the USART at `base` (scope probe).
  * @param {number} base
  * @returns {boolean}

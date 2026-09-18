@@ -853,6 +853,21 @@ canvas {
       </div>
     </div>
     <div class="panel" style="margin-bottom:12px;">
+      <h2>Trace (waveform)</h2>
+      <div class="sec">
+        <label for="traceAddr">Address (hex, e.g. GPIOA ODR 0x40020014)</label>
+        <input type="text" id="traceAddr" placeholder="0x40020014" spellcheck="false">
+        <label for="traceLabel">Label (optional)</label>
+        <input type="text" id="traceLabel" placeholder="e.g. PA5 ODR" spellcheck="false">
+        <div class="row">
+          <button id="btnTraceAdd" class="primary">Add trace</button>
+          <button id="btnTraceClear">Clear</button>
+        </div>
+        <canvas id="traceCanvas" width="520" height="220" style="width:100%;height:auto;background:#02060f;border:1px solid var(--line);border-radius:8px;margin-top:8px"></canvas>
+        <p style="color:var(--dim);font-size:11px;margin:6px 0 0;">Samples the address once per frame (up to 4 channels, 256 points each). DMA activity shows as a per-frame pending-count bar row. Digital channels render bit 0 by default — append <code>:bN</code> to the address (e.g. <code>0x40020014:b5</code>) to plot bit N.</p>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:12px;">
       <h2>ETH PPS pin</h2>
       <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
         <span id="ppsDot">○</span> <span id="ppsInfo">no PTP firmware</span>

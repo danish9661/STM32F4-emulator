@@ -385,7 +385,14 @@ int main(void) {
 
     // ========== 17. DBGMCU ==========
     uart_puts("--- DBGMCU ---\n");
-    CHECK(DBGMCU_IDCODE == 0x10006411, "DBGMCU IDCODE");
+    {
+        extern unsigned int _estack;
+        unsigned int id = DBGMCU_IDCODE;
+        unsigned int dev = id & 0xFFF;
+        // Per-map device ID (init_svd_chip): F407 maps read the 0x10006411
+        // probe constant; F429 reports its real DEV_ID 0x419.
+        CHECK(dev == 0x413 || dev == 0x411 || dev == 0x419, "DBGMCU IDCODE DEV_ID");
+    }
     DBGMCU_CR = 0x1F0077;
     CHECK(DBGMCU_CR == 0x1F0077, "DBGMCU CR");
 

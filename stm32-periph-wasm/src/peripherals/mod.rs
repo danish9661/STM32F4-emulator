@@ -321,6 +321,18 @@ impl Peripherals {
         self.with_tim(name, |u| u.moe()).unwrap_or(false)
     }
 
+    /// Output-compare mode of channel `ch` (0-3) on timer `name`
+    /// (scope probe for the PWM-vs-toggle contract).
+    pub fn tim_oc_mode(&self, name: &str, ch: u32) -> u32 {
+        self.with_tim(name, |u| u.oc_mode(ch as usize)).unwrap_or(0)
+    }
+
+    /// Live PWM pulse width in microseconds for channel `ch` on timer
+    /// `name` at `clock_hz` (scope probe backing the Servo component).
+    pub fn tim_pwm_pulse_us(&self, name: &str, ch: u32, clock_hz: f64) -> f64 {
+        self.with_tim(name, |u| u.pwm_pulse_us(ch as usize, clock_hz)).unwrap_or(0.0)
+    }
+
     /// Whether the USART receiver at `base` is muted (RWU set).
     pub fn uart_muted(&self, base: u32) -> bool {
         self.with_usart(base, |u| u.muted()).unwrap_or(false)

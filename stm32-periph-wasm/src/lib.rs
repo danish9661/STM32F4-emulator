@@ -305,6 +305,20 @@ pub fn tim_moe(name: String) -> bool {
     sys.p.tim_moe(&name)
 }
 
+/// Output-compare mode of channel `ch` (0-3) on timer `name` (6/7 = PWM).
+#[wasm_bindgen]
+pub fn tim_oc_mode(name: String, ch: u32) -> u32 {
+    let sys = crate::sys();
+    sys.p.tim_oc_mode(&name, ch)
+}
+
+/// Live PWM pulse width in microseconds for channel `ch` on timer `name`.
+#[wasm_bindgen]
+pub fn tim_pwm_pulse_us(name: String, ch: u32, clock_hz: f64) -> f64 {
+    let sys = crate::sys();
+    sys.p.tim_pwm_pulse_us(&name, ch, clock_hz)
+}
+
 /// Whether the USART receiver at `base` is muted (RWU set — scope probe
 /// for the mute-mode path).
 #[wasm_bindgen]

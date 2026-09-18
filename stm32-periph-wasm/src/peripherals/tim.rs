@@ -310,6 +310,43 @@ impl Timer {
         }
     }
 
+    /// Output-compare mode of channel `ch` (OCxM 3-bit field from
+    /// CCMR1/CCMR2: 0 frozen, 1 active-on-match, 2 inactive-on-match,
+    /// 3 toggle, 4 force-inactive, 5 force-active, 6/7 PWM mode 1/2).
+    /// Servo/printer firmware lives in PWM mode 1/2; toggle/force modes
+    /// are the stepper-pulse shapes. Scope probe for the mode contract.
+    pub fn oc_mode(&self, ch: usize) -> u32 {
+        if ch > 3 {
+            return 0;
+        }
+        let ccmr = if ch < 2 { self.ccmr1 } else { self.ccmr2 };
+        let shift = if ch % 2 == 0 { 4 } else { 12 };
+        (ccmr >> shift) & 7
+    }
+
+    /// Live PWM pulse width in microseconds for channel `ch` at a
+    /// `clock_hz` timer clock (servo convention: 1–2 ms pulse in a
+    /// 20 ms frame = 0–180°). Returns 0 unless the channel is enabled
+    /// (CCxE), the counter runs (CEN), and the mode is PWM 1/2 — a
+    /// toggle/force-mode channel has no pulse width to report (silicon
+    /// drives levels, not pulses, there). f64 math: 168 MHz × 20000 ARR
+    /// overflows u64 numerators, so divide first.
+    pub fn pwm_pulse_us(&self, ch: usize, clock_hz: f64) -> f64 {
+        if ch > 3 || clock_hz <= 0.0 {
+            return 0.0;
+        }
+        let mode = self.oc_mode(ch);
+        if mode != 6 && mode != 7 {
+            return 0.0;
+        }
+        if self.cr1 & 1 == 0 || self.ccer & (1 << (ch * 4)) == 0 || self.arr == 0 {
+            return 0.0;
+        }
+        let period_s = ((self.psc as f64) + 1.0) * ((self.arr as f64) + 1.0) / clock_hz;
+        let frac = (self.ccr[ch] as f64) / ((self.arr as f64) + 1.0);
+        period_s * frac * 1e6
+    }
+
     /// Whether this timer has the advanced feature set (BDTR/MOE,
     /// repetition counter, complementary outputs): TIM1/TIM8 only.
     fn is_advanced(&self) -> bool {
@@ -941,5 +978,35 @@ mod advanced_tests {
         assert_ne!(sr & (1 << 5), 0, "COMIF via COMG");
         assert!(sys.p.nvic.borrow().irq_pending(29), "TIM3 IRQ pends");
         assert_eq!(t.read(&sys, 0x14), 0, "EGR reads 0");
+    }
+}
+
+#[cfg(test)]
+mod servo_tests {
+    use super::*;
+
+    // OC mode decodes the CCMR field per channel; pulse width is live
+    // from PSC/ARR/CCR at the given clock, PWM modes only.
+    #[test]
+    fn oc_mode_and_servo_pulse() {
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Timer::new("TIM2").unwrap();
+        let t = boxed.as_any_mut().downcast_mut::<Timer>().unwrap();
+        // PWM mode 1 on CH1: OC1M=110 at CCMR1 bits 6:4.
+        t.write(&sys, 0x18, 6 << 4);
+        assert_eq!(t.oc_mode(0), 6, "CH1 PWM1");
+        assert_eq!(t.oc_mode(1), 0, "CH2 frozen");
+        // 50 Hz servo frame at 84 MHz: PSC=83 (1 MHz tick), ARR=19999.
+        t.write(&sys, 0x28, 83);
+        t.write(&sys, 0x2C, 19999);
+        t.write(&sys, 0x34, 1500); // CCR1 = 1.5 ms pulse
+        t.write(&sys, 0x20, 0x01); // CC1E
+        t.write(&sys, 0x00, 1); // CEN
+        let us = t.pwm_pulse_us(0, 84e6);
+        assert!((us - 1500.0).abs() < 1.0, "1.5 ms pulse, got {us}");
+        // Toggle mode has no pulse width.
+        t.write(&sys, 0x18, 3 << 4);
+        assert_eq!(t.oc_mode(0), 3, "CH1 toggle");
+        assert_eq!(t.pwm_pulse_us(0, 84e6), 0.0, "toggle reports no pulse");
     }
 }

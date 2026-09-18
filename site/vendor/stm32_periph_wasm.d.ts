@@ -948,6 +948,16 @@ export function tim_inject_capture(name: string, ch: number): void;
 export function tim_moe(name: string): boolean;
 
 /**
+ * Output-compare mode of channel `ch` (0-3) on timer `name` (6/7 = PWM).
+ */
+export function tim_oc_mode(name: string, ch: number): number;
+
+/**
+ * Live PWM pulse width in microseconds for channel `ch` on timer `name`.
+ */
+export function tim_pwm_pulse_us(name: string, ch: number, clock_hz: number): number;
+
+/**
  * Whether a TX break is queued on the USART at `base` (scope probe).
  */
 export function uart_break_pending(base: number): boolean;
@@ -1301,6 +1311,8 @@ export interface InitOutput {
     readonly tim_encoder_step: (a: number, b: number, c: number, d: number) => void;
     readonly tim_inject_capture: (a: number, b: number, c: number) => void;
     readonly tim_moe: (a: number, b: number) => number;
+    readonly tim_oc_mode: (a: number, b: number, c: number) => number;
+    readonly tim_pwm_pulse_us: (a: number, b: number, c: number, d: number) => number;
     readonly uart_break_pending: (a: number) => number;
     readonly uart_break_tx: (a: number) => void;
     readonly uart_fault_rx: (a: number, b: number, c: number) => void;

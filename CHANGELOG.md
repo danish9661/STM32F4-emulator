@@ -6,6 +6,36 @@ date-based entries rather than strict SemVer until the first published release.
 
 ## [Unreleased]
 
+### Session: pkg parity + trace view + servo + IDCODE follow-ups
+- `stm32-periph-wasm/pkg` (nodejs) rebuilt to byte-identical parity with
+  `site/vendor` (`cmp` clean); all 9 gap-10/IDCODE wasm exports verified
+  from the packaged glue. AGENTS §38 stale "pkg NOT rebuilt" note fixed.
+- Trace (waveform) view in the browser console: per-frame sampling of up
+  to 4 MMIO addresses (analog auto-scale, `:bN` bit plots) + a DMA
+  pending-count strip, painted on `#traceCanvas` (verified headless:
+  9767 non-bg pixels on a PA5 `:b5` trace).
+- Servo support (printer heritage, no EtherCAT silicon on F4 — the honest
+  close of that roadmap item): model `tim_oc_mode`/`tim_pwm_pulse_us`
+  probes + `Pwm.mode`/`modeName` + `Servo` component (pulse→angle) +
+  `test_component_servo.mjs` (mode=6, 1500 us, 90.0° PASS).
+- `comprehensive_test` IDCODE check made per-map aware (F429 reports
+  DEV_ID 0x419 now): rebuilt stock + family bins, `firmware.js` regen.
+- AGENTS.md stale 2026-09-11 UNCOMMITTED headers cleared (all landed).
+
+### npm 1.1.0 release prep (verified, NOT published)
+- `npm pack` verified: 29 files, 1.7 MB tarball / 9.8 MB unpacked, `files`
+  allowlist covers `index.mjs`, `cli.mjs`, the MCP server, all of `site/`
+  (console, emulator, vendor WASM+SVDs, firmware bundle) and
+  `tools/make_firmware.mjs`. Pack output is gitignored (`*.tgz`).
+- Consumer test (tarball installed into a scratch dir, 2026-09-18): blinky
+  boots over the packaged `index.mjs` API (banner + `tick 0`), and all 9
+  gap-10/IDCODE wasm exports resolve as functions from the packaged vendor
+  glue. EXIT 0, no publish performed (`npm publish` remains a maintainer
+  decision — package name `stm32f4-emu` unclaimed check + provenance left
+  for release day).
+- Version bumped 1.0.1 → 1.1.0 (new peripherals surface: SDIO CMD24, QSPI
+  mmap, LTDC CLUT, I2C slave, DMA FCR/DBM, DAC DMAUDR, per-map IDCODE).
+
 ### Added
 - **Peripheral gap batches 6–8** (model + mock pins + board-doc rows, all
   synced to `site/docs-src/` + `website/docs/`):

@@ -3237,7 +3237,7 @@ GPIO pins get a `drivable` class (pointer cursor + hover ring, toggled in
 Verified by headless-Chrome screenshots (`.pw-scratch/ui_*.png`, deleted
 after) with the dropdown open and `?fw=blinky` running.
 
-### site/ unification (2026-09-11, UNCOMMITTED — do not commit till asked)
+### site/ unification (2026-09-11)
 One command serves everything: `python3 -m http.server 8123 --directory
 site` (aka `npm run serve`). `site/index.html` is now the LANDING page
 (static launcher: Console / DOOM / bring-firmware cards + try-now deep
@@ -3250,7 +3250,7 @@ Code updated: `cdp_smoke.mjs` navigate, `test_bridge_cdp.mjs` URL,
 `about.html` nav + serve line. Docs updated: README `?fw=`/`?bridge=`
 examples, `usage.md` (serve + 67-preset count).
 
-### Landing redirect + boards doc (2026-09-11, UNCOMMITTED)
+### Landing redirect + boards doc (2026-09-11)
 Single-landing policy: `website/src/pages/index.js` is now a redirect to
 `/stm32F4-emulator/console/` (meta refresh + JS replace + manual link;
 docs unaffected) — the site/ launcher is the one landing. Deployed,
@@ -3264,7 +3264,7 @@ cross-checked vs `test_arduino_boards.mjs`), implemented list, gaps
 M0+ out of scope), add-a-board recipe. The earlier full landing rebuild
 (index.js content + module.css sections) was reverted as superseded.
 
-### All-boards port, everything except ETH (2026-09-11, UNCOMMITTED)~125 new presets (193 firmwares in the bundle): every portable demo on
+### All-boards port, everything except ETH (2026-09-11) — ~125 new presets (193 firmwares in the bundle): every portable demo on
 every compatible map. Method: `tools/build_family.mjs` (bare-metal: same
 sources, family link script + `-DSTACK_TOP`/`-DEXPECT_SP`) + Arduino FQBN
 matrix (`.pw-scratch/build_arduino_matrix.sh`, 80/88 compile — only
@@ -3311,7 +3311,7 @@ define `BOARDS_OF_FIRMWARE`; F407 builds additionally blanket `ve`
   false-positives on zero-count summaries (use `'FAIL '`); mpu/fpu_irq
   family presets need IRQ delivery like their F407 originals.
 
-### cpu_bug #11 + leftovers + DMA2D (2026-09-11, UNCOMMITTED)
+### cpu_bug #11 + leftovers + DMA2D (2026-09-11)
 - **#11 nested-SP (verified shared, fixed)**: F4 entry already stacked
   at live r13, but return unstacked from the MSP bank, which goes stale
   whenever a handler moves SP (handler-mode bank sync skipped by design).
@@ -3348,7 +3348,7 @@ define `BOARDS_OF_FIRMWARE`; F407 builds additionally blanket `ve`
   firmware can complete them — matrix expect-fails + no presets encode
   it. SAI-on-F401 re-verified absent (no silicon, not just SVD).
 
-### F429 Ethernet, all protocols (2026-09-12, UNCOMMITTED)
+### F429 Ethernet, all protocols (2026-09-12)
 Same sources + family link/SP (`STACK_TOP`, byte-identical stock
 rebuilds) for eth_http/dhcp/test/irq_test; SRAM layouts nm-verified
 IDENTICAL to F407 (the polling driver's hardcoded E addrs keep working).
@@ -3372,7 +3372,7 @@ existed but dead); 4× `config_f429.yaml` (Keil SVD, 256K RAM).
   match covers `eth_http_f429` automatically.
 - VENDOR unchanged (no Rust this round); app 25, boards 5, firmware 16.
 
-### Landing page rebuild (2026-09-11, UNCOMMITTED — do not commit till asked)
+### Landing page rebuild (2026-09-11)
 `website/src/pages/index.js` + sections of `index.module.css` + config
 tagline. The old page described the pre-§23 tree (Unicorn CPU card,
 `unicorn_arm.cjs`, MMIO-hook driver, 33 peripherals, 44 demos, npm-install
@@ -4162,9 +4162,9 @@ matrix **174/174**, browser **41/41**. `gap10_*/` firmware dirs are new
   Firmware `gap10_dac/` (register contract; trigger path host-side).
 - **?v= 39→40** (app.js/doom.js/doom-worker.js vendor literals) +
   console.html app.js v46→v47, doom.html doom.js v78→v79 (`__doomVer` 79),
-  worker v50→v51 for the rebuilt vendor wasm; `pkg/` (nodejs) NOT rebuilt
-  this round (browser-target web build only — pkg callers use the older
-  artifact; rebuild before any Node-side gap10 use).
+  worker v50→v51 for the rebuilt vendor wasm; `pkg/` (nodejs) rebuilt
+  to byte-identical parity with `site/vendor` right after (verified with
+  `cmp` + a 9-export `typeof` check — import from either path).
 - Battery: cargo-st 242 + mock 317 + matrix 174/174 + browser 41/41 +
   gap10 guest 6/6 + gap10 CDP 6/6, all green.
 - Follow-up (same session, committed together): per-map DBGMCU IDCODE

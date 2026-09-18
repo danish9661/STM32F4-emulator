@@ -376,7 +376,7 @@ const boot = async () => {
     $('btnRun').textContent = 'Run';
     setStatus('booting…', 'stop');
     if (emu) { try { emu.close(); } catch (e) {} emu = null; }
-    oledCacheKey = ''; tftCacheKey = ''; buzzerCacheKey = ''; rtcCacheKey = ''; ppsCacheKey = '';
+    oledCacheKey = ''; tftCacheKey = ''; buzzerCacheKey = ''; rtcCacheKey = ''; ppsCacheKey = ''; TRACES.length = 0; { const cv = traceCanvas(); if (cv) cv._dma = []; } renderTraces();
     if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; audioQueued = 0; }
     gpioDrivenHigh.clear();
 
@@ -717,6 +717,106 @@ $('btnWatchAdd').addEventListener('click', addWatch);
 $('watchAddr').addEventListener('keydown', (e) => { if (e.key === 'Enter') addWatch(); });
 $('btnWatchClear').addEventListener('click', clearWatch);
 
+// ── trace (waveform) ───────────────────────────────────────────────────────
+// Samples up to 4 MMIO addresses once per frame into 256-point ring buffers
+// and paints them on #traceCanvas: analog channels auto-scale, `:bN`
+// suffix plots bit N digital. A 5th strip shows DMA pending-count per
+// frame (the JS-visible half of every DMA transfer) so DMA bursts are
+// visible even when the data itself moves inside the model.
+const TRACE_N = 256;
+const TRACES = [];
+const traceCanvas = () => $('traceCanvas');
+const parseTraceAddr = (s) => {
+    const m = String(s).trim().match(/^(0x[0-9a-fA-F]+|\d+)\s*(?::\s*[bB]\s*(\d{1,2}))?$/);
+    if (!m) return null;
+    const addr = m[1].startsWith('0x') || m[1].startsWith('0X') ? parseInt(m[1], 16) >>> 0 : parseInt(m[1], 10) >>> 0;
+    if (!Number.isFinite(addr)) return null;
+    const bit = m[2] === undefined ? null : parseInt(m[2], 10);
+    if (bit !== null && (bit < 0 || bit > 31)) return null;
+    return { addr, bit };
+};
+const sampleTraces = async () => {
+    if (!emu) return;
+    let dma = 0;
+    try {
+        if (bindings && typeof bindings.dma_get_pending_count === 'function') dma = bindings.dma_get_pending_count() >>> 0;
+    } catch {}
+    for (const t of TRACES) {
+        try {
+            const v = (await emu.read32(t.addr)) >>> 0;
+            t.buf.push(t.bit === null ? v : ((v >>> t.bit) & 1));
+            if (t.buf.length > TRACE_N) t.buf.shift();
+        } catch {}
+    }
+    const cv = traceCanvas();
+    if (cv) {
+        if (!cv._dma) cv._dma = [];
+        cv._dma.push(dma);
+        if (cv._dma.length > TRACE_N) cv._dma.shift();
+    }
+};
+const renderTraces = () => {
+    const cv = traceCanvas();
+    if (!cv) return;
+    const ctx = cv.getContext('2d');
+    const W = cv.width, H = cv.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#02060f';
+    ctx.fillRect(0, 0, W, H);
+    const lanes = TRACES.length;
+    const dmaH = 22;
+    const top = H - dmaH - 6;
+    const laneH = lanes ? Math.floor(top / lanes) : top;
+    const colors = ['#22d3ee', '#34d399', '#fbbf24', '#818cf8'];
+    TRACES.forEach((t, li) => {
+        const y0 = li * laneH + 4, y1 = (li + 1) * laneH - 4;
+        ctx.strokeStyle = 'rgba(56,75,120,0.3)';
+        ctx.strokeRect(0.5, y0 + 0.5, W - 1, laneH - 8);
+        ctx.fillStyle = '#7b8ba5';
+        ctx.font = '10px monospace';
+        const lbl = t.label || ('0x' + t.addr.toString(16));
+        ctx.fillText((t.bit === null ? lbl : lbl + ':b' + t.bit) + (t.buf.length ? ' = ' + (t.bit === null ? '0x' + (t.buf[t.buf.length - 1] >>> 0).toString(16) : t.buf[t.buf.length - 1]) : ''), 6, y0 + 11);
+        if (t.buf.length > 1) {
+            let mn = Math.min(...t.buf), mx = Math.max(...t.buf);
+            if (mn === mx) { mn -= 1; mx += 1; }
+            ctx.strokeStyle = colors[li % colors.length];
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            t.buf.forEach((v, i) => {
+                const x = (i / (TRACE_N - 1)) * (W - 8) + 4;
+                const y = y1 - ((v - mn) / (mx - mn)) * (y1 - y0 - 16) - 4;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+        }
+    });
+    // DMA strip: pending-count bars per frame.
+    const dma = cv._dma || [];
+    ctx.fillStyle = '#7b8ba5';
+    ctx.font = '10px monospace';
+    ctx.fillText('DMA pending', 6, H - 8);
+    const peak = Math.max(1, ...dma);
+    ctx.fillStyle = '#f472b6';
+    dma.forEach((d, i) => {
+        const x = (i / (TRACE_N - 1)) * (W - 8) + 4;
+        const h = Math.max(d > 0 ? 2 : 0, (d / peak) * (dmaH - 8));
+        ctx.fillRect(x, H - 4 - h, 2, h);
+    });
+};
+const addTrace = () => {
+    const parsed = parseTraceAddr($('traceAddr').value);
+    if (!parsed) { setStatus('trace: invalid address (try 0x40020014 or 0x40020014:b5)', 'err'); return; }
+    if (TRACES.length >= 4) { setStatus('trace: at most 4 channels', 'err'); return; }
+    const label = $('traceLabel').value.trim() || ('0x' + parsed.addr.toString(16));
+    TRACES.push({ addr: parsed.addr, bit: parsed.bit, label, buf: [] });
+    $('traceAddr').value = ''; $('traceLabel').value = '';
+    renderTraces();
+};
+const clearTraces = () => { TRACES.length = 0; const cv = traceCanvas(); if (cv) cv._dma = []; renderTraces(); };
+$('btnTraceAdd').addEventListener('click', addTrace);
+$('traceAddr').addEventListener('keydown', (e) => { if (e.key === 'Enter') addTrace(); });
+$('btnTraceClear').addEventListener('click', clearTraces);
+
 $('btnSaveLog').addEventListener('click', () => {
     if (!uartBuf) return;
     const a = document.createElement('a');
@@ -752,9 +852,11 @@ const refreshStats = async () => {
     await refreshGpio();
     await refreshPeriph();
     await refreshWatch();
+    await sampleTraces();
+    renderTraces();
 };
 
-// ── LTDC display sink ──────────────────────────────────────────────────────
+// ── LTDC display sink ─────────────────────────────────────────────────────
 // Renders layer-0's framebuffer (ARGB8888 / RGB565) into the aside canvas
 // each rAF once the guest enables the controller + layer. Cache-keyed so we
 // only repaint when the framebuffer content actually changes (the model

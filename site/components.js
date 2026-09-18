@@ -103,6 +103,43 @@ export class Pwm {
         if (!(cr1 & 1) || !ccEnabled || arr === 0) return 0;
         return ccr / (arr + 1);
     }
+
+    // Output-compare mode of this channel (OC1M/OC2M 3-bit field from
+    // CCMR1/CCMR2: 0 frozen, 1 active-on-match, 2 inactive-on-match,
+    // 3 toggle, 4 force-inactive, 5 force-active, 6/7 PWM mode 1/2).
+    // Lets servo/motor drivers distinguish PWM from toggle/force modes.
+    get mode() {
+        const off = this.channel <= 2 ? 0x18 : 0x1C;
+        const shift = this.channel % 2 === 1 ? 4 : 12;
+        const ccmr = this.emu.read32(this.base + off);
+        return (ccmr >>> shift) & 7;
+    }
+
+    get modeName() {
+        return ['frozen', 'active', 'inactive', 'toggle', 'force-lo', 'force-hi', 'pwm1', 'pwm2'][this.mode];
+    }
+}
+
+// Hobby-servo driver on top of Pwm: maps a 1–2 ms pulse in a 20 ms frame
+// (50 Hz, the printer/servo convention) to 0–180°. Reads the live timer
+// registers through Pwm, so it tracks guest reprogramming. Pair with the
+// model-side `tim_pwm_pulse_us` probe for headless assertions.
+export class Servo {
+    constructor(emu, timer, channel = 1, opts = {}) {
+        this.pwm = new Pwm(emu, timer, channel, opts);
+        this.minUs = opts.minUs ?? 1000;
+        this.maxUs = opts.maxUs ?? 2000;
+        this.maxAngle = opts.maxAngle ?? 180;
+    }
+
+    get pulseUs() {
+        return this.pwm.duty * 20000;
+    }
+
+    get angle() {
+        const t = (this.pulseUs - this.minUs) / (this.maxUs - this.minUs);
+        return Math.min(this.maxAngle, Math.max(0, t * this.maxAngle));
+    }
 }
 
 // Wraps an I2C register-file device already registered via the
