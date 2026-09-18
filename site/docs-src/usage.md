@@ -180,7 +180,7 @@ number — worker scripts cache hard, hence the `?v=` on both `doom.js` and
   reloads, and `saveMap` is restored at boot so the load menus show them.
 - Terminal: the UART box under the screen shows the guest's boot prints
   and save/load confirmations (`SAVE ok slot=0 bytes=…`, `LOAD ok …`).
-- Node regression: `node site/test_doom.mjs` (boot → menu → E1M1 →
+- Node regression: `node site/test_doom_wasm.mjs` (boot → menu → E1M1 →
   quick-save flow).
 
 ### Browser debug handles

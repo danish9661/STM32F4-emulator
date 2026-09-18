@@ -491,7 +491,7 @@ that board's SVD map:
 
 ## DOOM (2026-08-14)
 
-### test_doom.mjs — DOOM boot → menu → E1M1 gameplay + save/load (doom)
+### test_doom_wasm.mjs — DOOM boot → menu → E1M1 gameplay + save/load (doom)
 Boots the doomgeneric F407 port with the 4.2 MB shareware WAD in
 `extra_mem` (0xB8000000), drives the retail menu sequence (New Game →
 episode → skill 3) with change-gated key taps, holds W + fires + turns in
@@ -519,7 +519,7 @@ save-slot menu → name char 'a' (0x61) + Enter → asserts the firmware's
 |---|---|---|---|
 | test_flow | eth_http | ETH/DMA/USART/TIM | `TCP connected`, `Hello from openhw HTTP server`, `!CONN`, ≥2 rounds |
 | test_eth_irq | eth_irq_test | NVIC/DMA/ETH | `TX done via IRQ`, `ETH IRQ Test: done` |
-| test_doom | doom | ABI ring/EXTRAM/I2S | `SAVE ok slot=0 bytes=…`, fb changes ≥ 20, audio peak > 0 |
+| test_doom_wasm | doom | ABI ring/EXTRAM/I2S | `SAVE ok slot=0 bytes=…`, fb changes ≥ 20, audio peak > 0 |
 | test_rx_interrupt | rx_interrupt_test, rx_crypto_test | USART1/NVIC | `CRC=`, `DONE` |
 | test_blinky | blinky | GPIOA/RCC/USART | `tick 0 LED=ON`, `No ethernet required` |
 | test_exti | exti_test | EXTI/NVIC/GPIO | `EXTI TEST DONE` |

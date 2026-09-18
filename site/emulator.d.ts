@@ -40,6 +40,7 @@ export interface CreateEmulatorOpts {
   enable_irqs?: boolean;
   irq_eth?: boolean;
   freertos?: boolean;
+  lowpower?: boolean;
 }
 
 export interface StepResult {

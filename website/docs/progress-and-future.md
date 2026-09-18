@@ -62,7 +62,7 @@ mock-consumer harness pins them (`t_flash_err`, `t_spi_crc_err`,
   per-block counting hook did help, 22 → 25 fps). Audio is mixed per
   rendered frame, so below 35 fps the worklet rate-matches and plays
   slightly slow/pitched-down rather than breaking up.
-  Verified: `node site/test_doom.mjs` (boot → menu → E1M1 → `SAVE ok
+  Verified: `node site/test_doom_wasm.mjs` (boot → menu → E1M1 → `SAVE ok
   slot=0`) and a headless-Chrome CDP smoke (save → reload-less F9
   quick-load → `LOAD ok`, audio continuous).
 - `stm32f4-emulator` npm package (packed, not published) with a clean

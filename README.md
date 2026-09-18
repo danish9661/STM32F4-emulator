@@ -65,7 +65,7 @@ reloads.
 - Controls: move W/S/A/D + arrows · strafe Shift · fire Ctrl · use
   Space · menu Enter/Esc · save F2/F6 · load F3/F9 · F1/F10/F11/F12.
 - Boot → menu → gameplay verified end-to-end by
-  `node site/test_doom.mjs` (boot markers, menu navigation to E1M1,
+  `node site/test_doom_wasm.mjs` (boot markers, menu navigation to E1M1,
   palette + framebuffer, W-move + turn, audio, **save → `SAVE ok slot=0`
   → load handshake**).
 - `site/doom1.wad` is the 4.2 MB shareware WAD; the firmware never reads
@@ -173,7 +173,7 @@ See AGENTS.md §20 for the full binary protocol reference.
 | `lwip_demo/` | Real LwIP 2.2.1 (DHCP→DNS→TCP echo→TCP server→UDP echo) | `LWIP DEMO DONE` |
 | `eth_pins_test/` | MII/RMII pin-level mirrors (TX_EN/CRS_DV/RXD/COL/MDIO/MDC) | `PINS ALL PASS` |
 | `blinky/` | **No ethernet** — LED blinker on GPIOA PA5 + UART tick counter | `tick N LED=ON/OFF` |
-| `doom/` | **DOOM 1 shareware** (doomgeneric F407 port, browser page `site/doom.html`) | `node site/test_doom.mjs` (boot + menu + gameplay + save/load) |
+| `doom/` | **DOOM 1 shareware** (doomgeneric F407 port, browser page `site/doom.html`) | `node site/test_doom_wasm.mjs` (boot + menu + gameplay + save/load) |
 
 Plus 17 more test binaries (`crypto_test`, `hal_test`, `timer_test`,
 `periph_test`, `echo_test`, `blink_serial`, `rx_interrupt_test`,
@@ -283,7 +283,7 @@ rebuild — delete it so the vendor assets stay tracked/committed.
   process (see docs/components.md). The same suite runs in CI on
   `ubuntu-latest`/`windows-latest`/`macos-latest`
   ([.github/workflows/ci.yml](.github/workflows/ci.yml)) on every push.
-- `node site/test_doom.mjs` — DOOM boot → menu → E1M1 gameplay + save/load
+- `node site/test_doom_wasm.mjs` — DOOM boot → menu → E1M1 gameplay + save/load
   (see the DOOM section above).
 - `scripts/verify_ethernet.sh [max_inst]` — runs all three firmwares through
   the gateway, asserts the success markers and 0 `TCP fail`.
@@ -295,7 +295,7 @@ rebuild — delete it so the vendor assets stay tracked/committed.
 - [site/about.html](site/about.html) — in-repo About page: what it is, architecture, featured firmwares, and how to use it (CLI / browser / Node API / MCP).
 - [docs/architecture.md](docs/architecture.md) — how the emulator is put
   together (CPU, peripheral model, drivers, ETH flow, interrupts).
-- [docs/peripherals.md](docs/peripherals.md) — all 33 peripherals and the
+- [docs/peripherals.md](docs/peripherals.md) — all 41 peripherals and the
   level each is implemented to, plus external devices and known gaps.
 - [docs/usage.md](docs/usage.md) — CLI, browser, and npm-library usage,
   config files, env vars, building.
