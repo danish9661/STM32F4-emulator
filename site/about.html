@@ -78,10 +78,10 @@
     registers, and drive it from scripts, a web UI, or an MCP client.
   </p>
   <p>
-    The two halves are connected by <strong>MMIO memory hooks</strong>: every
-    read/write the firmware makes to a peripheral register is intercepted and
-    answered by the peripheral model, so the guest sees exactly what real
-    silicon would present.
+    The two halves are connected by <strong>direct model calls</strong>:
+    every read/write the firmware makes to a peripheral register calls
+    straight into the peripheral model (one width-correct call per access),
+    so the guest sees exactly what real silicon would present.
   </p>
 
   <h2>Architecture</h2>
@@ -93,15 +93,19 @@
       Reset vector, SP/PC, and NVIC handling follow
       the Cortex-M programming model.</li>
     <li><strong>Peripheral model</strong> — a Rust crate compiled to WASM via
-      <code>wasm-bindgen</code>. ~35 peripheral modules (RCC, GPIO, USART,
+      <code>wasm-bindgen</code>. 41 peripheral modules (RCC, GPIO, USART,
       TIM, NVIC/SysTick/EXTI, ETH+DMA, I2C, SPI/I2S, CAN, LTDC, DCMI, RTC,
       QSPI,
-      ADC, FLASH …) answer <code>periph_read</code>/<code>periph_write</code>.</li>
-    <li><strong>JS driver</strong> — registers the memory hooks, runs
-      <code>emu_start</code> in stepped batches, services ETH TX/RX, the
-      interrupt pump, and virtual devices (displays, sensors, bus taps).</li>
+      ADC, FLASH …) answer <code>periph_read</code>/<code>periph_write</code>
+      — direct width-correct model calls, one per access.</li>
+    <li><strong>JS driver</strong> — steps the Rust core
+      (<code>emu.step(budget)</code>), drains UART, services ETH TX/RX and
+      DMA, and drives virtual devices (displays, sensors, bus taps). Guest
+      IRQs are delivered inline by the core when the firmware opts in
+      (<code>enable_irqs</code>/<code>irq_eth</code>/<code>freertos</code>/
+      <code>lowpower</code>); polling firmware runs with delivery off.</li>
   </ul>
-  <p class="pill">Memory-hook protocol: MMIO range → periph_read/write → model → value written back into guest memory.</p>
+  <p class="pill">Driver protocol: emu.step(budget) → direct model calls per access → UART/DMA/ETH serviced between steps.</p>
   <p>See <a href="docs/architecture.md">docs/architecture.md</a> and
      <a href="docs/peripherals.md">docs/peripherals.md</a> for the full design
      and a per-peripheral implementation matrix.</p>

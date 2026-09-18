@@ -77,11 +77,10 @@ Without an override, channels keep the emulator's synthetic defaults
 
 **Timing note:** a conversion only completes once enough *emulated
 instructions* have elapsed (the ADC model is instruction-count driven).
-The driver batches its instruction-counter updates every `tickEvery`
-instructions (default 5000), so if you're triggering conversions manually
-rather than from firmware, `emu.step()` with a budget above that
-threshold — a smaller budget never advances the counter and the
-conversion never completes. See `site/test_component_adc.mjs`.
+The core publishes executed counts to the model clock in 16-instruction
+chunks, so any `emu.step()` budget advances it — but a conversion still
+needs its sampling window to elapse, so step generously (and see
+`site/test_component_adc.mjs` for the pattern).
 
 ## Pwm and I2C register devices
 
