@@ -53,6 +53,23 @@ pub struct I2c {
     /// Harness-armed SMBus alert source address (host-notify): returned in
     /// DR on an Alert-Response-Address read. 0x00 = none pending.
     smbus_alert_addr: u8,
+    /// Slave-mode receive buffer (harness = the external master): bytes
+    /// the master wrote to OUR address, drained by guest DR reads. When
+    /// OUR address matches (see `own_address_match`), incoming DR writes
+    /// from the harness land here with ADDR+RXNE flagged — silicon's
+    /// slave-receiver path, driven from the other side of the wire.
+    slave_rx: std::collections::VecDeque<u8>,
+    /// Slave-mode transmit queue (guest = the slave transmitter): bytes
+    /// the guest wrote to DR while addressed as slave-transmitter,
+    /// drained by harness DR reads (`i2c_slave_read`).下一位 silicon
+    /// stretches SCL until the guest provides the byte; here the harness
+    /// observes TXE-cleared-while-empty (the observable contract).
+    slave_tx: std::collections::VecDeque<u8>,
+    /// Slave addressed state: None = not addressed; Some(is_read) = the
+    /// external master addressed OUR OAR and the direction bit selected
+    /// receiver (false: master writes → slave receives) or transmitter
+    /// (true: master reads → slave transmits).
+    slave_active: Option<bool>,
 }
 
 impl Default for I2c {
@@ -68,6 +85,9 @@ impl Default for I2c {
             smbus_ticks: 0,
             smbus_gencall: false,
             smbus_alert_addr: 0,
+            slave_rx: std::collections::VecDeque::new(),
+            slave_tx: std::collections::VecDeque::new(),
+            slave_active: None,
         }
     }
 }
@@ -85,6 +105,126 @@ impl I2c {
         self.active_device = None; self.state = I2cState::Idle;
         self.sr1_read_with_addr = false;
         self.smbus_gencall = false;
+        self.slave_active = None;
+    }
+
+    /// Own-address match (slave mode): the 7-bit address programmed in
+    /// OAR1 (bits 7:1; bit 0 ADDMODE selects 10-bit, unmodeled — 7-bit
+    /// only, like every firmware in this repo) or OAR2 (bits 7:1, DUAL
+    /// bit 5 = dual-address enable). Returns true when `addr` selects
+    /// THIS peripheral as a slave. OAR1 reset is 0 (general-call only);
+    /// a zero OAR1 never matches (silicon: address 0x00 is GCALL, not
+    /// the own address — the model answers it via smbus_special_match
+    /// when ENGC is set, never here).
+    fn own_address_match(&self, addr: u8) -> bool {
+        let oar1 = ((self.oar1 >> 1) & 0x7F) as u8;
+        if oar1 != 0 && oar1 == addr {
+            return true;
+        }
+        // OAR2 dual addressing: ENDUAL (bit 0 of the OAR2 high field —
+        // RM0090: OAR2 bit 0 is ENDUAL on F4) gates the OAR2 ADD match.
+        if self.oar2 & 1 != 0 {
+            let oar2 = ((self.oar2 >> 1) & 0x7F) as u8;
+            if oar2 != 0 && oar2 == addr {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Harness = the external master addressing OUR OAR: latch ADDR
+    /// (SR1 bit 1) + the direction-read SR2 view (TRA bit 2 set when the
+    /// master wants to READ from us = slave-transmitter), flag BUSY+MSL
+    /// like a hardware match, and pend the event IRQ. Cleared by the
+    /// SR1→SR2 read sequence (the shared AddrSent path below).
+    /// Returns true when the address was ours (caller stops there).
+    fn slave_address_match(&mut self, sys: &System, addr: u8, is_read: bool) -> bool {
+        if !self.own_address_match(addr) {
+            return false;
+        }
+        self.slave_active = Some(is_read);
+        self.active_device = None;
+        // ADDR + BTF-cleared view: SR1 ADDR, SR2 MSL+BUSY+TRA-on-read.
+        // OR the flag (never assign): a repeated-START re-address must
+        // not wipe pending RXNE/BTF from an already-received byte (the
+        // gap10_i2c TX phase overwrote a live RXNE and the guest hung
+        // in its RXNE wait — caught by firmware, not review).
+        self.sr1 |= 1 << 1; // ADDR
+        self.sr2 = (1 << 0) | (1 << 1) | (if is_read { 1 << 2 } else { 0 });
+        self.state = I2cState::AddrSent { is_read };
+        self.fire_interrupts(sys);
+        true
+    }
+
+    /// Harness = the external master writing a byte TO us (slave-receiver
+    /// path): queue it for guest DR reads, flag RXNE (+BTF when a previous
+    /// byte is still unread — silicon double-buffers DR+shift). No-op
+    /// unless we are addressed as slave-receiver.
+    pub fn slave_write(&mut self, sys: &System, byte: u8) {
+        if self.slave_active != Some(false) {
+            return;
+        }
+        if !self.slave_rx.is_empty() {
+            self.sr1 |= 1 << 7; // BTF: byte still unread
+        }
+        self.slave_rx.push_back(byte);
+        self.dr = byte as u32;
+        self.sr1 |= 1 << 5; // RXNE
+        self.fire_interrupts(sys);
+    }
+
+    /// Harness = the external master reading a byte FROM us
+    /// (slave-transmitter path): pop the guest-staged byte (queued by a
+    /// guest DR write while addressed — see the DR write arm). Empty
+    /// queue reads 0xFF (silicon stretches SCL; the harness observes the
+    /// empty level instead of blocking forever).
+    pub fn slave_read(&mut self, sys: &System) -> u8 {
+        if self.slave_active != Some(true) {
+            return 0xFF;
+        }
+        let b = self.slave_tx.pop_front().unwrap_or(0xFF);
+        if self.slave_tx.is_empty() {
+            self.sr1 |= 1 << 7; // BTF: nothing left to send
+        }
+        self.sr1 |= 1 << 6; // TXE: DR free for the next guest byte
+        self.fire_interrupts(sys);
+        b
+    }
+
+    /// Slave status probe: 0 = idle, 1 = addressed-receiver, 2 =
+    /// addressed-transmitter, 3 = RX bytes pending. Lets the harness
+    /// assert the addressed state without touching flags.
+    pub fn slave_status(&self) -> u8 {
+        match self.slave_active {
+            None => 0,
+            Some(false) => if self.slave_rx.is_empty() { 1 } else { 3 },
+            Some(true) => 2,
+        }
+    }
+
+    /// Harness = the external master putting OUR address on the wire
+    /// (with the R/W direction bit). This is the slave-mode entry point:
+    /// the guest never writes START/ADDR here — it programs OAR1/OAR2,
+    /// enables the peripheral (PE), and waits for ADDR. Beyond the
+    /// address phase the harness drives bytes via `slave_write` (master
+    /// writes → we receive) and drains them via `slave_read` (master
+    /// reads ← we transmit); a STOP (real or harness `slave_stop`)
+    /// releases back to Idle.
+    pub fn slave_address(&mut self, sys: &System, addr: u8, is_read: bool) -> bool {
+        // Only when the peripheral is enabled (PE bit 0); a disabled
+        // block never answers its own address (silicon clocks it off).
+        if self.cr1 & 1 == 0 {
+            return false;
+        }
+        self.slave_address_match(sys, addr, is_read)
+    }
+
+    /// Harness = the external master's STOP condition (releases our
+    /// addressed state back to Idle, like the guest STOP arm does for
+    /// the master path). Also clears ADDR if still latched.
+    pub fn slave_stop(&mut self) {
+        self.slave_active = None;
+        self.sr1 &= !(1 << 1); // ADDR
     }
 
     /// CRC-8/SMBus step (poly 0x07, init 0 — the SMBus PEC polynomial):
@@ -197,6 +337,18 @@ impl Peripheral for I2c {
             0x08 => self.oar1,
             0x0C => self.oar2,
             0x10 => {
+                // Slave-receiver DR read: drain the harness-queued byte
+                // (RXNE clears when the queue empties; BTF clears once the
+                // guest catches up — silicon double-buffer release).
+                if self.slave_active == Some(false) {
+                    let v = self.slave_rx.pop_front().map(|b| b as u32).unwrap_or(self.dr);
+                    if self.slave_rx.is_empty() {
+                        self.sr1 &= !((1 << 5) | (1 << 7)); // RXNE+BTF
+                    }
+                    self.dr = v;
+                    self.fire_interrupts(sys);
+                    return v;
+                }
                 let v = self.dr;
                 self.sr1 &= !(1 << 5);
                 if let Some(idx) = self.active_device {
@@ -351,6 +503,17 @@ impl Peripheral for I2c {
                             return;
                         }
 
+                        // Own-address (slave mode): the EXTERNAL master
+                        // addresses OUR OAR1/OAR2. Checked before the
+                        // attached-device list (our own address wins over
+                        // a same-addressed tap device — silicon answers
+                        // its own address in hardware). Harness-driven
+                        // via i2c_slave_address (no guest START involved:
+                        // the guest IS the slave here).
+                        if found.is_none() && self.slave_address_match(sys, addr, is_read) {
+                            return;
+                        }
+
                         if let Some(idx) = found {
                             self.active_device = Some(idx);
                             self.devices[idx].device.borrow_mut().reset();
@@ -376,7 +539,38 @@ impl Peripheral for I2c {
                         }
                         self.fire_interrupts(sys);
                     }
-                    I2cState::Active { is_read: false } => {
+                    I2cState::Active { .. } | I2cState::AddrSent { .. } | I2cState::Idle => {
+                        // Slave-transmitter DR write: the guest stages the
+                        // next byte FOR the external master (drained by
+                        // slave_read). TXE clears while staged bytes wait
+                        // (silicon: DR full); BTF clears once the harness
+                        // takes one. No-op when not addressed as slave
+                        // (a master-mode DR write below owns that path —
+                        // the two never overlap: slave_active is only set
+                        // by slave_address_match, never by master flow).
+                        // NOTE: match AddrSent too — the guest stages the
+                        // first byte right after ADDR, before the SR1→SR2
+                        // clear sequence moves AddrSent→Active (silicon
+                        // double-buffers exactly this early byte). Match
+                        // Idle too — the guest may stage BEFORE the master
+                        // addresses (pre-loaded DR, silicon holds it for
+                        // the first read); the address phase preserves it
+                        // (slave_tx is never cleared on address). But an
+                        // Idle DR write with NO slave addressing at all is
+                        // meaningless (master never STARTed) — silicon
+                        // ignores it, so return before the master path
+                        // below (which would latch TXE and break the
+                        // periph_test SR1==0-after-reset check).
+                        if self.slave_active == Some(true) {
+                            self.slave_tx.push_back(value as u8);
+                            self.sr1 &= !(1 << 6); // TXE: staged, DR full
+                            self.sr1 &= !(1 << 7); // BTF: bytes waiting
+                            self.fire_interrupts(sys);
+                            return;
+                        }
+                        if matches!(self.state, I2cState::Idle) {
+                            return; // unaddressed Idle DR write: ignored
+                        }
                         // General-call broadcast: no device, bytes sink
                         // (firmware observes GENCALL in SR2, not data).
                         if self.smbus_gencall {
@@ -554,5 +748,74 @@ mod tests {
         assert_ne!(r(&sys, I2C1 + 0x14) & (1 << 14), 0, "TIMEOUT at 32");
         w(&sys, I2C1, 1 | (1 << 1) | (1 << 9)); // STOP clears via reset
         assert_eq!(r(&sys, I2C1 + 0x14) & (1 << 14), 0, "STOP clears TIMEOUT");
+    }
+}
+
+
+#[cfg(test)]
+mod gap10_tests {
+    use super::*;
+    use crate::system::test_dummy_system;
+
+    const B: u32 = 0x4000_5400; // I2C1
+
+    fn w(sys: &std::rc::Rc<crate::system::System>, off: u32, v: u32) {
+        sys.p.write(sys, B + off, 4, v);
+    }
+    fn r(sys: &std::rc::Rc<crate::system::System>, off: u32) -> u32 {
+        sys.p.read(sys, B + off, 4)
+    }
+
+    // Slave-receiver: OAR1 match → ADDR; harness bytes drain in order
+    // via guest DR reads (RXNE while pending); STOP releases to idle.
+    #[test]
+    fn slave_receiver_addrs_and_drains() {
+        let sys = test_dummy_system();
+        w(&sys, 0x08, (0x42 << 1) as u32); // OAR1 = 0x42
+        w(&sys, 0x00, 1); // PE
+        assert!(sys.p.i2c_slave_address(&sys, B, 0x42, false), "OAR1 match");
+        assert_eq!(sys.p.i2c_slave_status(B), 1, "addressed-receiver");
+        assert_ne!(r(&sys, 0x14) & (1 << 1), 0, "ADDR latches");
+        let _ = r(&sys, 0x18); // SR1→SR2 clears ADDR (driver sequence)
+        sys.p.i2c_slave_write(&sys, B, 0xAA);
+        sys.p.i2c_slave_write(&sys, B, 0xBB);
+        assert_eq!(sys.p.i2c_slave_status(B), 3, "RX pending");
+        assert_eq!(r(&sys, 0x10), 0xAA, "guest drains byte 0");
+        assert_eq!(r(&sys, 0x10), 0xBB, "guest drains byte 1");
+        sys.p.i2c_slave_stop(B);
+        assert_eq!(sys.p.i2c_slave_status(B), 0, "STOP releases");
+    }
+
+    // Slave-transmitter: guest stages via DR writes (TXE clears while
+    // staged); harness reads pop in order; empty reads 0xFF.
+    #[test]
+    fn slave_transmitter_stages_and_serves() {
+        let sys = test_dummy_system();
+        w(&sys, 0x08, (0x42 << 1) as u32);
+        w(&sys, 0x00, 1);
+        assert!(sys.p.i2c_slave_address(&sys, B, 0x42, true), "OAR1 match read");
+        assert_eq!(sys.p.i2c_slave_status(B), 2, "addressed-transmitter");
+        let _ = r(&sys, 0x18);
+        w(&sys, 0x10, 0x11); // guest stages byte 0
+        w(&sys, 0x10, 0x22); // guest stages byte 1
+        assert_eq!(sys.p.i2c_slave_read(&sys, B), 0x11, "harness pops staged 0");
+        assert_eq!(sys.p.i2c_slave_read(&sys, B), 0x22, "harness pops staged 1");
+        assert_eq!(sys.p.i2c_slave_read(&sys, B), 0xFF, "empty reads 0xFF");
+        sys.p.i2c_slave_stop(B);
+        assert_eq!(sys.p.i2c_slave_status(B), 0, "STOP releases");
+    }
+
+    // Non-matching address never addresses; disabled peripheral (PE=0)
+    // never answers its own address.
+    #[test]
+    fn slave_ignores_mismatch_and_pe_clear() {
+        let sys = test_dummy_system();
+        w(&sys, 0x08, (0x42 << 1) as u32);
+        w(&sys, 0x00, 1);
+        assert!(!sys.p.i2c_slave_address(&sys, B, 0x43, false), "mismatch ignored");
+        assert_eq!(sys.p.i2c_slave_status(B), 0, "still idle");
+        w(&sys, 0x00, 0); // PE clear
+        assert!(!sys.p.i2c_slave_address(&sys, B, 0x42, false), "PE=0 answers nothing");
+        assert_eq!(sys.p.i2c_slave_status(B), 0, "still idle");
     }
 }

@@ -48,6 +48,34 @@ impl Dac {
     fn wave1(&self) -> u32 { (self.cr >> 8) & 0x3 }
     fn wave2(&self) -> u32 { (self.cr >> 24) & 0x3 }
 
+    /// Trigger-source select (TSEL1 bits 5:3 / TSEL2 bits 21:19):
+    /// 0 = TIM6 TRGO, 1 = TIM8 TRGO, 2 = TIM7 TRGO, 3 = TIM5 TRGO,
+    /// 4 = TIM2 TRGO, 5 = TIM4 TRGO, 6 = EXTI9, 7 = SWTRIG (software).
+    fn tsel1(&self) -> u32 { (self.cr >> 3) & 7 }
+    fn tsel2(&self) -> u32 { (self.cr >> 19) & 7 }
+
+    /// Whether a trigger source fires the channel now: TENx (bit 2/18)
+    /// gates hardware triggers; SWTRIG (SWTRIGR bit 0/1) always fires
+    /// (software trigger ignores TEN — RM0090 §13.5.5). `src` is 0..7
+    /// for TIM6/TIM8/TIM7/TIM5/TIM2/TIM4/EXTI9/SW; only the matching
+    /// TSEL fires when TEN is set.
+    fn trigger_fires(&self, ch: u8, src: u8) -> bool {
+        let (tsel, ten) = if ch == 1 { (self.tsel1(), self.cr & (1 << 2) != 0) }
+                          else { (self.tsel2(), self.cr & (1 << 18) != 0) };
+        if src == 7 {
+            return true; // SWTRIG always fires
+        }
+        ten && tsel == src as u32
+    }
+
+    /// DMA underrun flag (DMAUDR1 bit 13 / DMAUDR2 bit 29): set when a
+    /// DMA-fed trigger arrives with no fresh DHR staged (the DMA engine
+    /// did not keep up — silicon holds DOR and flags it). Cleared by
+    /// writing the bit (w1c-ish: the SR write arm clears on 1).
+    fn flag_underrun(&mut self, ch: u8) {
+        if ch == 1 { self.sr |= 1 << 13; } else { self.sr |= 1 << 29; }
+    }
+
     fn update_dor1(&mut self) {
         if self.cr & 1 != 0 { // EN1
             let raw = self.dhr12r1 & 0xFFF;
@@ -60,6 +88,26 @@ impl Dac {
             let raw = self.dhr12r2 & 0xFFF;
             self.dor2 = raw;
         }
+    }
+
+    /// Hardware trigger arrival on channel `ch` from source `src`
+    /// (0..7 = TIM6/TIM8/TIM7/TIM5/TIM2/TIM4/EXTI9/SW). With DMAENx set
+    /// and no fresh sample staged since the last trigger, latches
+    /// DMAUDR (the underrun contract); otherwise advances the waveform
+    /// (noise/triangle) and loads DOR from DHR ( copied sample).
+    /// `dma_staged` = the DMA engine delivered a fresh DHR since the
+    /// last trigger (harness tracks it via `dac_dma_stage`).
+    pub fn hw_trigger(&mut self, ch: u8, src: u8, dma_staged: bool) {
+        if !self.trigger_fires(ch, src) {
+            return;
+        }
+        let dmaen = if ch == 1 { self.cr & (1 << 12) != 0 } else { self.cr & (1 << 28) != 0 };
+        if dmaen && !dma_staged {
+            self.flag_underrun(ch);
+            return; // DOR holds (no fresh sample — silicon stalls it)
+        }
+        self.advance_waveform(ch);
+        if ch == 1 { self.update_dor1(); } else { self.update_dor2(); }
     }
 
     fn advance_waveform(&mut self, ch: u8) {
@@ -100,6 +148,11 @@ impl Dac {
             2 => if self.cr & (1 << 16) != 0 { Some((self.dor2 & 0xFFF) as u16) } else { None },
             _ => None,
         }
+    }
+
+    /// DMAUDR underrun latched for channel `ch` (scope probe).
+    pub fn underrun(&self, ch: u8) -> bool {
+        if ch == 1 { self.sr & (1 << 13) != 0 } else { self.sr & (1 << 29) != 0 }
     }
 }
 
@@ -143,8 +196,61 @@ impl Peripheral for Dac {
             0x24 => { self.dhr12ld = value; self.update_dor1(); self.update_dor2(); }
             0x28 => { self.dhr8rd = value; self.update_dor1(); self.update_dor2(); }
             0x2C | 0x30 => {} // DOR is read-only
-            0x34 => self.sr = value & 0x3,
+            // SR: DMAUDR1 (bit 13) / DMAUDR2 (bit 29) clear on 1-write
+            // (silicon w1c for the underrun flags; other bits reserved).
+            0x34 => {
+                if value & (1 << 13) != 0 { self.sr &= !(1 << 13); }
+                if value & (1 << 29) != 0 { self.sr &= !(1 << 29); }
+            }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod gap10_tests {
+    use super::*;
+    use crate::system::test_dummy_system;
+
+    // TSEL trigger mux: TEN-gated source match loads DOR; SW always
+    // fires; wrong source with TEN set does not; TEN clear ignores
+    // hardware sources (SW still fires).
+    #[test]
+    fn tsel_mux_gates_triggers() {
+        let _sys = test_dummy_system();
+        let mut d = Dac::default();
+        d.cr = 1 | (4 << 3) | (1 << 2); // EN1 + TSEL1=TIM2(4) + TEN1
+        d.dhr12r1 = 0xABC;
+        d.hw_trigger(1, 4, true); // TIM2: match → DOR loads
+        assert_eq!(d.dor1, 0xABC, "matching TSEL fires");
+        d.dor1 = 0;
+        d.hw_trigger(1, 0, true); // TIM6: mismatch → held
+        assert_eq!(d.dor1, 0, "wrong source held under TEN");
+        d.hw_trigger(1, 7, true); // SW: always fires
+        assert_eq!(d.dor1, 0xABC, "SW fires regardless of TSEL");
+        d.cr &= !(1 << 2); // TEN clear
+        d.dor1 = 0;
+        d.hw_trigger(1, 4, true); // hardware source ignored now
+        assert_eq!(d.dor1, 0, "TEN clear blocks hardware trigger");
+        d.hw_trigger(1, 7, true);
+        assert_eq!(d.dor1, 0xABC, "SW still fires with TEN clear");
+    }
+
+    // DMAUDR: DMAEN + trigger with nothing staged latches the underrun
+    // and holds DOR; a staged sample loads DOR with no flag; w1c clears.
+    #[test]
+    fn dmaudr_latches_without_staged_sample() {
+        let _sys = test_dummy_system();
+        let mut d = Dac::default();
+        d.cr = 1 | (4 << 3) | (1 << 2) | (1 << 12); // EN1+TSEL+TEN1+DMAEN1
+        d.dhr12r1 = 0x123;
+        d.hw_trigger(1, 4, false); // nothing staged → underrun
+        assert!(d.underrun(1), "DMAUDR1 latches");
+        assert_eq!(d.dor1, 0, "DOR holds on underrun");
+        d.hw_trigger(1, 4, true); // staged → loads, flag stays (sticky)
+        assert_eq!(d.dor1, 0x123, "staged sample loads DOR");
+        assert!(d.underrun(1), "DMAUDR sticky until cleared");
+        d.write(&_sys, 0x34, 1 << 13); // w1c clear
+        assert!(!d.underrun(1), "DMAUDR clears on 1-write");
     }
 }

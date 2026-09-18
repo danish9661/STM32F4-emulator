@@ -188,6 +188,18 @@ export function can_note_error(base: number, lec: number, recover: boolean): voi
 export function clear_watchdog_reset_flags(): void;
 
 /**
+ * Harness = a trigger arrival on DAC channel `ch` from source `src`
+ * (0..7 = TIM6/TIM8/TIM7/TIM5/TIM2/TIM4/EXTI9/SW). With DMAEN set and
+ * no fresh sample staged, latches DMAUDR; otherwise loads DOR.
+ */
+export function dac_hw_trigger(ch: number, src: number, dma_staged: boolean): void;
+
+/**
+ * DMAUDR underrun latched for DAC channel `ch` (scope probe).
+ */
+export function dac_underrun(ch: number): boolean;
+
+/**
  * Forget any fed frame (stop the camera).
  */
 export function dcmi_clear(): void;
@@ -251,6 +263,23 @@ export function dma_periph_read(addr: number, size: number, pinc: boolean, psize
 export function dma_periph_write(addr: number, bytes: Uint8Array): void;
 
 export function dma_set_completed(stream_idx: number, success: boolean): void;
+
+/**
+ * CT (current double-buffer target) on DMA stream `stream` of
+ * controller `dma` (scope probe for the DBM flip contract).
+ */
+export function dma_stream_ct(dma: string, stream: number): boolean;
+
+/**
+ * FEIF (FIFO error) on DMA stream `stream` of controller `dma`.
+ */
+export function dma_stream_feif(dma: string, stream: number): boolean;
+
+/**
+ * FCR FIFO threshold in words on DMA stream `stream` of controller
+ * `dma` (1/2/3/4-word contract probe).
+ */
+export function dma_stream_fifo_threshold(dma: string, stream: number): number;
 
 /**
  * Arm a single-node collision for the next TX completion (consumed once;
@@ -607,6 +636,34 @@ export function i2c_register_regfile(peripheral: string, address: number, size: 
 export function i2c_register_slave(peripheral: string, address: number): void;
 
 /**
+ * Harness = the external master putting OUR address on the wire of the
+ * I2C block at `base` (slave-mode entry). Returns true on a match.
+ */
+export function i2c_slave_address(base: number, addr: number, is_read: boolean): boolean;
+
+/**
+ * Harness = the external master reading a byte FROM us
+ * (slave-transmitter): the guest-staged byte (0xFF when empty).
+ */
+export function i2c_slave_read(base: number): number;
+
+/**
+ * Slave status probe (0 idle / 1 rx-addressed / 2 tx-addressed /
+ * 3 RX pending) for the I2C block at `base`.
+ */
+export function i2c_slave_status(base: number): number;
+
+/**
+ * Harness = the external master's STOP (releases slave state).
+ */
+export function i2c_slave_stop(base: number): void;
+
+/**
+ * Harness = the external master writing a byte TO us (slave-receiver).
+ */
+export function i2c_slave_write(base: number, byte: number): void;
+
+/**
  * Drain all events for a tapped I2C slave since the last call. Each entry
  * is a u32: bit31 = START/STOP boundary event (bit30 = 1 START / 0 STOP),
  * otherwise the low byte is one byte the master wrote to the slave.
@@ -642,6 +699,11 @@ export function itm_take_port(port: number): Uint8Array;
 export function iwdg_reset_flag(): boolean;
 
 /**
+ * CLUT entry (scope probe for the LTDC LUT-indexed render path).
+ */
+export function ltdc_clut_entry(layer: number, idx: number): number;
+
+/**
  * Frames completed by the LTDC scanout since enable.
  */
 export function ltdc_get_frame_count(): number;
@@ -650,6 +712,11 @@ export function ltdc_get_frame_count(): number;
  * Current LTDC scanline (0xFFFF when the controller is disabled).
  */
 export function ltdc_get_scanline(): number;
+
+/**
+ * Indexed framebuffer byte → ARGB8888 through the layer CLUT.
+ */
+export function ltdc_lut_pixel(layer: number, pf: number, byte: number): number;
 
 export function periph_read(addr: number, width: number): number;
 
@@ -674,6 +741,16 @@ export function pwr_wakeup(): void;
  * clears it via CR CSBF.
  */
 export function pwr_wakeup_standby(): void;
+
+/**
+ * QSPI memory-mapped window live (scope probe: FMODE=11 switch settled).
+ */
+export function qspi_mmap_live(): boolean;
+
+/**
+ * QSPI memory-mapped window word read (AHB byte offset into the image).
+ */
+export function qspi_mmap_read(offset: number): number;
 
 /**
  * Register an external QSPI flash image for the named QUADSPI peripheral.
@@ -727,9 +804,21 @@ export function rtc_tamper_pin(level: boolean): void;
 export function rtc_timestamp(): void;
 
 /**
+ * Bind an SD-card image of `blocks` 512-byte blocks (erased 0xFF) for
+ * CMD17/18 reads and CMD24 writes. Call before init (mirrors the
+ * QSPI/FSMC image pattern).
+ */
+export function sdio_bind_card(blocks: number): void;
+
+/**
  * Current SDIO bus-width select (0 = 1-bit, 1 = 4-bit, 2 = 8-bit).
  */
 export function sdio_bus_width(): number;
+
+/**
+ * Bound card block count, 0 = unbound (scope probe).
+ */
+export function sdio_card_blocks(): number;
 
 /**
  * Harness = the card's DAT1 interrupt line: latch/clear SDIOIT.
@@ -740,6 +829,11 @@ export function sdio_card_irq(set: boolean): void;
  * Harness = the bad card: next CMD17/18 completion latches DCRCFAIL.
  */
 export function sdio_fault_data_crc(): void;
+
+/**
+ * Read one 512-byte card block (scope probe for the CMD24 round-trip).
+ */
+export function sdio_read_block(block: number): Uint8Array;
 
 /**
  * Set a pending interrupt in the NVIC. Negative `irq` values select system
@@ -817,6 +911,14 @@ export function tick_n(delta: number): void;
 export function tick_peripherals(): void;
 
 /**
+ * Harness = the break input: drive the break line of timer `name`
+ * (`asserted` = active break). With BKE set an active break clears MOE
+ * at once and latches BIF (+ IRQ when BIE is set); with AOE, MOE re-arms
+ * on the next update event. No-op on non-advanced timers / BKE clear.
+ */
+export function tim_break_input(name: string, asserted: boolean): void;
+
+/**
  * Host/JS-driven quadrature step on an encoder-mode timer: one TI edge
  * (`ti` 0 = TI1, 1 = TI2; `rising` = edge polarity). Counts per the
  * SMS/polarity rules; no-op outside encoder modes 1-3.
@@ -831,6 +933,11 @@ export function tim_encoder_step(name: string, ti: number, rising: boolean): voi
  * from the driver. `name` is e.g. "TIM3"; `ch` is 0..3.
  */
 export function tim_inject_capture(name: string, ch: number): void;
+
+/**
+ * MOE (BDTR bit 15) of timer `name` (scope probe for the break path).
+ */
+export function tim_moe(name: string): boolean;
 
 /**
  * Whether a TX break is queued on the USART at `base` (scope probe).
@@ -868,6 +975,12 @@ export function uart_irda_tx_class(base: number): number;
  * Harness = the LIN master: deliver a break frame to the USART at `base`.
  */
 export function uart_lin_break(base: number): void;
+
+/**
+ * Whether the USART receiver at `base` is muted (RWU set — scope probe
+ * for the mute-mode path).
+ */
+export function uart_muted(base: number): boolean;
 
 /**
  * Inject a received byte into the UART at the given peripheral base address.
@@ -1043,6 +1156,8 @@ export interface InitOutput {
     readonly can_inject_fd: (a: number, b: number, c: number, d: number) => void;
     readonly can_note_error: (a: number, b: number, c: number) => void;
     readonly clear_watchdog_reset_flags: () => void;
+    readonly dac_hw_trigger: (a: number, b: number, c: number) => void;
+    readonly dac_underrun: (a: number) => number;
     readonly dcmi_clear: () => void;
     readonly dcmi_feed_frame: (a: number, b: number, c: number, d: number) => void;
     readonly dcmi_set_sync: (a: number, b: number, c: number) => void;
@@ -1055,6 +1170,9 @@ export interface InitOutput {
     readonly dma_periph_read: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly dma_periph_write: (a: number, b: number, c: number) => void;
     readonly dma_set_completed: (a: number, b: number) => void;
+    readonly dma_stream_ct: (a: number, b: number, c: number) => number;
+    readonly dma_stream_feif: (a: number, b: number, c: number) => number;
+    readonly dma_stream_fifo_threshold: (a: number, b: number, c: number) => number;
     readonly eth_arm_collision: () => void;
     readonly eth_check_wol: (a: number, b: number) => number;
     readonly eth_clear_rx_poll: () => void;
@@ -1120,6 +1238,11 @@ export interface InitOutput {
     readonly i2c_regfile_set: (a: number, b: number, c: number, d: number) => void;
     readonly i2c_register_regfile: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly i2c_register_slave: (a: number, b: number, c: number) => void;
+    readonly i2c_slave_address: (a: number, b: number, c: number) => number;
+    readonly i2c_slave_read: (a: number) => number;
+    readonly i2c_slave_status: (a: number) => number;
+    readonly i2c_slave_stop: (a: number) => void;
+    readonly i2c_slave_write: (a: number, b: number) => void;
     readonly i2c_take_events: (a: number, b: number, c: number) => void;
     readonly init: () => void;
     readonly init_svd: (a: number, b: number) => void;
@@ -1127,13 +1250,17 @@ export interface InitOutput {
     readonly itm_port_pending: (a: number) => number;
     readonly itm_take_port: (a: number, b: number) => void;
     readonly iwdg_reset_flag: () => number;
+    readonly ltdc_clut_entry: (a: number, b: number) => number;
     readonly ltdc_get_frame_count: () => number;
     readonly ltdc_get_scanline: () => number;
+    readonly ltdc_lut_pixel: (a: number, b: number, c: number) => number;
     readonly periph_read: (a: number, b: number) => number;
     readonly periph_write: (a: number, b: number, c: number) => void;
     readonly pwr_enter_standby: () => void;
     readonly pwr_wakeup: () => void;
     readonly pwr_wakeup_standby: () => void;
+    readonly qspi_mmap_live: () => number;
+    readonly qspi_mmap_read: (a: number) => number;
     readonly qspi_register_flash: (a: number, b: number, c: number, d: number) => void;
     readonly rcc_inject_failure: (a: number, b: number) => void;
     readonly reset_state: () => void;
@@ -1142,9 +1269,12 @@ export interface InitOutput {
     readonly rtc_tamper: () => void;
     readonly rtc_tamper_pin: (a: number) => void;
     readonly rtc_timestamp: () => void;
+    readonly sdio_bind_card: (a: number) => void;
     readonly sdio_bus_width: () => number;
+    readonly sdio_card_blocks: () => number;
     readonly sdio_card_irq: (a: number) => void;
     readonly sdio_fault_data_crc: () => void;
+    readonly sdio_read_block: (a: number, b: number) => void;
     readonly set_intr_pending: (a: number) => void;
     readonly spi_fault_crc: (a: number) => void;
     readonly spi_fault_modf: (a: number) => void;
@@ -1158,8 +1288,10 @@ export interface InitOutput {
     readonly tick: () => void;
     readonly tick_n: (a: number) => void;
     readonly tick_peripherals: () => void;
+    readonly tim_break_input: (a: number, b: number, c: number) => void;
     readonly tim_encoder_step: (a: number, b: number, c: number, d: number) => void;
     readonly tim_inject_capture: (a: number, b: number, c: number) => void;
+    readonly tim_moe: (a: number, b: number) => number;
     readonly uart_break_pending: (a: number) => number;
     readonly uart_break_tx: (a: number) => void;
     readonly uart_fault_rx: (a: number, b: number, c: number) => void;
@@ -1167,6 +1299,7 @@ export interface InitOutput {
     readonly uart_irda_rx: (a: number, b: number, c: number) => void;
     readonly uart_irda_tx_class: (a: number) => number;
     readonly uart_lin_break: (a: number) => void;
+    readonly uart_muted: (a: number) => number;
     readonly uart_rx_byte: (a: number, b: number) => number;
     readonly uart_sc_nack: (a: number) => void;
     readonly uart_sc_retries: (a: number) => number;

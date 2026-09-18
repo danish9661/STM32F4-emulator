@@ -4098,3 +4098,74 @@ node PASS; browser **41/41**.
   alongside so both artifacts match.
 - Battery: mock 262 (this session) + cargo-st 217 + matrix 156/156 +
   feat407/feat429 + standby/lowpower node + browser 41/41, all green.
+
+## 38. Gap batch 10: the six "out of scope" walls, knocked down (2026-09-18, UNCOMMITTED)
+
+The user rejected "wall" as a concept — no `NOT modeled`, no `electrical-only`,
+no `single-master otherwise`, no `would be fake precision`. Every wall below
+got a real mechanism, a native test, a mock pin (`t_gap10`, 262 → **312 checks
+PASS**), and a compiled bare-metal firmware proving it on the guest (6/6 PASS
+on guest + 6/6 in-browser CDP smoke). Battery: cargo **241** single-threaded,
+matrix **174/174**, browser **41/41**. `gap10_*/` firmware dirs are new
+(untracked until committed); family builds via `tools/build_family.mjs`.
+
+- **SDIO CMD24** (`sdio.rs`): single-block host-to-card write — FIFO TX words
+  stage and commit into the bound `sdio_bind_card` image at completion; CMD17
+  reads back through the FIFO port (image round-trip). Two real bugs found by
+  the round-trip, both the same class (stale `cmd` after overwrite):
+  (1) direction re-derived from `self.cmd` at completion/read time misroutes
+  once the NEXT command lands — latched `xfer_is_write` at CMD time;
+  (2) completion zeroes DCOUNT but firmware drains AFTER DATAEND — the image
+  offset is now a `fifo_done` snapshot that survives completion (reset only
+  by the next CMD arm). `sdio_read_block`/`sdio_card_blocks` probes.
+  Firmware `gap10_sdio/` (matrix `ext_devices.sdio blocks:4` — the model
+  boots cardless like silicon boots slot-empty; the DRIVER binds the image
+  pre-boot, same pattern as qspi; new `sdio_bind_card` landing in
+  `site/emulator.js` post-init with old-bundle guard).
+- **QSPI mmap** (`qspi.rs` + `cpu/mem.rs`): FMODE=11 latches `xfer_mode=4`;
+  guest AHB reads at 0x90000000+offset come live from the image
+  (`mmap_read` LE-assembled, unaligned-safe) via `is_qspi_mmap` checked
+  FIRST in `read8`/`read16`/`mapped` (the window sits inside the FSMC
+  window — a live mmap wins over FSMC inert-0, unmapped stays erased).
+  `complete()` preserves mode 4 across indirect completions (an indirect
+  read finishing must not take the window down). Firmware bug caught:
+  polling BUSY without draining deadlocks (BUSY falls on FIFO drain) —
+  `gap10_qspi/` follows the `qspi_test/` pattern (DR pop first, then TC).
+  `qspi_mmap_live`/`qspi_mmap_read` exports.
+- **LTDC CLUT** (`ltdc.rs`): per-layer 256-entry table, CLUTWR loads
+  address+RGB with auto-increment, readback shows the load pointer,
+  `lut_pixel` resolves L8/AL44 (nibble index + alpha expand)/AL88.
+  Firmware `gap10_ltdc/` (CLUTADD pointer assert).
+- **I2C slave** (`i2c.rs`): OAR1/OAR2 own-address match → ADDR (OR-latched,
+  never wipes pending RXNE — the gap10_i2c TX phase overwrote a live RXNE
+  and hung the guest's RXNE wait) → DR rx-drain/tx-stage (AddrSent AND
+  Active AND Idle arms — pre-address staging held for the first read)
+  → STOP. Harness: `i2c_slave_address/write/read/stop/status` (+ wasm
+  exports). Three firmware bugs caught, all sequencing (not model):
+  address-TX-after-OK vs before, TX-stage-only-under-read-address
+  (rewrote `gap10_i2c/` to wait ADDR before staging), and the QSPI-style
+  BUSY-vs-drain lesson re-applied. `gap10_i2c/` matrix entry asserts the
+  harness-absent ARMED line (full duplex proven by the harness script +
+  mock + native). Also fixed: unaddressed-Idle DR writes ignored (was
+  latching TXE → broke `periph_test` SR1==0-after-reset on all 8 boards;
+  matrix went 166/8 red → green on the rebuild).
+- **DMA FCR/DBM** (`dma.rs` + `system.rs`): FTH→words threshold probe,
+  burst-vs-threshold FEIF stall (FIFO mode, +IRQ on TEIE, nothing queued),
+  DBM-direct TEIF config error, CT recomposed from the latch on every CR
+  read (never stored — a stored bit goes stale after TC), target flip in
+  `mark_dma_completed` (both controllers fanned out). `dma_stream_feif/
+  ct/fifo_threshold` exports. Firmware `gap10_dma/`.
+- **DAC DMAUDR/TSEL** (`dac.rs`): TSEL mux (TEN-gated source match, SW
+  always fires), DMAEN+unstaged trigger latches DMAUDR and holds DOR,
+  staged loads, w1c clear. `dac_hw_trigger`/`dac_underrun` exports.
+  Firmware `gap10_dac/` (register contract; trigger path host-side).
+- **?v= 39→40** (app.js/doom.js/doom-worker.js vendor literals) +
+  console.html app.js v46→v47, doom.html doom.js v78→v79 (`__doomVer` 79),
+  worker v50→v51 for the rebuilt vendor wasm; `pkg/` (nodejs) NOT rebuilt
+  this round (browser-target web build only — pkg callers use the older
+  artifact; rebuild before any Node-side gap10 use).
+- Battery: cargo-st 241 + mock 312 + matrix 174/174 + browser 41/41 +
+  gap10 guest 6/6 + gap10 CDP 6/6, all green. Stale-wasm trap hit again:
+  the periph SR1 probe read TXE because `site/vendor` predated the Idle
+  guard by 90 s — always rebuild + re-probe in the same chain
+  (source mtime vs wasm mtime check earns its keep).

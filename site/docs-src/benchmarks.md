@@ -4,7 +4,27 @@ All runs: Node 22, headless, `eth_http` firmware (DHCP + TCP + HTTP round
 trip), Linux. One "round" = one full DHCP → TCP connect → HTTP body →
 FIN cycle of the firmware. MIPS = emulated instructions / wall time.
 
-## Current headline numbers (2026-08-09, post wedge-fix)
+## Current headline numbers (2026-09-18, Rust core — netsim peer)
+
+Measured this session on the sole Rust Thumb-2 backend (Node 22,
+headless, netsim peer — not the gVisor gateway the old rows used, so
+rounds/s is not comparable across the two peers; MIPS is):
+
+| Run | Budget | Rounds | TCP fail | Time | MIPS | rounds/s |
+|---|---|---|---|---|---|---|
+| eth_http netsim soak | 60M inst | **25** | 0 | 2.5 s | **24.3** | **10.1** |
+| blinky compute ceiling | 100M inst | — | — | 2.6 s | **38.0** | — |
+
+Harness: `.pw-scratch/soak_netsim.mjs` (eth_http + netsim `onTx`, 200k-inst
+batches, rounds counted via `TCP connected`) and
+`.pw-scratch/soak_blinky.mjs` (blinky, 200k-inst batches, UART drained).
+Logs: `.pw-scratch/soak60.log`, `.pw-scratch/soak_blinky.log`. The blinky
+number is the compute ceiling (no ETH traffic); eth_http pays real
+per-access model-call traffic (~642 peripheral calls/round), so its MIPS
+reads lower while doing more work per instruction — rounds/s is the honest
+metric for I/O firmware (see AGENTS.md §16).
+
+## Unicorn-era headline numbers (2026-08-09, post wedge-fix — archaeology)
 
 | Run | Budget | Rounds | TCP fail | Time | MIPS | rounds/s |
 |---|---|---|---|---|---|---|
@@ -16,7 +36,7 @@ FIN cycle of the firmware. MIPS = emulated instructions / wall time.
 restarts (~0.7 s per restart), which is why rounds/s is much lower than the
 100M run above.
 
-Typical run (20M instructions):
+Typical Unicorn-era run (20M instructions):
 
 ```
 real  0m10.138s   user 0m10.569s
@@ -109,11 +129,9 @@ era meters over-reported ~1.3×; see AGENTS.md §16).
 
 | Env | Default | Effect |
 |---|---|---|
-| `MAX_BATCH` | 200000 | instructions per `step()` batch (the ~40k Unicorn WASM wedge is archaeology — the Rust core has no such limit; kept large so gateway RX stays prompt) |
-| `TICK_EVERY` | 5000 | instruction interval for `tick_n()` + watchdog + interrupt checks |
-| `POLL_EVERY` | 1000 | instruction interval for DMA/ETH poll checks |
-| `GW_RESTART` | 0 | 1 = restart gateway per round (legacy, ~10x slower) |
+| `MAX_BATCH` | 200000 | instructions per `step()` batch — live in `cli.mjs` (kept large so gateway RX stays prompt) |
+| `GW_RESTART` | 0 | 1 = restart gateway per round (legacy, ~10x slower) — live in `cli.mjs` |
 | `SOAK_STATS` | — | 1 = emit soak statistics at the end |
 | `DBG_TX`/`DBG_RX` | — | 1 = trace TX/RX frames |
 | `RX_HEX` | — | 1 = dump first 64 B of each injected RX frame |
-| `DBG_FLAG`/`DBG_IRQF`/`DBG_PC`/`DBG_GW`/`DBG_DMA` | — | diagnostic traces (see cli.mjs) |
+| `DBG_GW`/`DBG_RX`/`DBG_TX` | — | live gateway/RX/TX traces in `cli.mjs` (`DBG_FLAG`/`DBG_IRQF`/`DBG_PC`/`DBG_DMA` are Unicorn-era names, no longer read) |

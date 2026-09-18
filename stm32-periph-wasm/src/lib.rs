@@ -259,6 +259,162 @@ pub fn tim_encoder_step(name: String, ti: u32, rising: bool) {
     crate::peripherals::tim::tim_encoder_step(sys(), &name, ti, rising);
 }
 
+/// Harness = the break input: drive the break line of timer `name`
+/// (`asserted` = active break). With BKE set an active break clears MOE
+/// at once and latches BIF (+ IRQ when BIE is set); with AOE, MOE re-arms
+/// on the next update event. No-op on non-advanced timers / BKE clear.
+#[wasm_bindgen]
+pub fn tim_break_input(name: String, asserted: bool) {
+    let sys = crate::sys();
+    sys.p.tim_break_input(sys, &name, asserted);
+}
+
+/// MOE (BDTR bit 15) of timer `name` (scope probe for the break path).
+#[wasm_bindgen]
+pub fn tim_moe(name: String) -> bool {
+    let sys = crate::sys();
+    sys.p.tim_moe(&name)
+}
+
+/// Whether the USART receiver at `base` is muted (RWU set — scope probe
+/// for the mute-mode path).
+#[wasm_bindgen]
+pub fn uart_muted(base: u32) -> bool {
+    let sys = crate::sys();
+    sys.p.uart_muted(base)
+}
+
+/// Bind an SD-card image of `blocks` 512-byte blocks (erased 0xFF) for
+/// CMD17/18 reads and CMD24 writes. Call before init (mirrors the
+/// QSPI/FSMC image pattern).
+#[wasm_bindgen]
+pub fn sdio_bind_card(blocks: u32) {
+    let sys = crate::sys();
+    sys.p.sdio_bind_card(blocks);
+}
+
+/// Read one 512-byte card block (scope probe for the CMD24 round-trip).
+#[wasm_bindgen]
+pub fn sdio_read_block(block: u32) -> Vec<u8> {
+    let sys = crate::sys();
+    sys.p.sdio_read_block(block)
+}
+
+/// Bound card block count, 0 = unbound (scope probe).
+#[wasm_bindgen]
+pub fn sdio_card_blocks() -> u32 {
+    let sys = crate::sys();
+    sys.p.sdio_card_blocks()
+}
+
+/// CLUT entry (scope probe for the LTDC LUT-indexed render path).
+#[wasm_bindgen]
+pub fn ltdc_clut_entry(layer: u32, idx: u8) -> u32 {
+    let sys = crate::sys();
+    sys.p.ltdc_clut_entry(layer, idx)
+}
+
+/// Indexed framebuffer byte → ARGB8888 through the layer CLUT.
+#[wasm_bindgen]
+pub fn ltdc_lut_pixel(layer: u32, pf: u32, byte: u8) -> u32 {
+    let sys = crate::sys();
+    sys.p.ltdc_lut_pixel(layer, pf, byte)
+}
+
+/// FEIF (FIFO error) on DMA stream `stream` of controller `dma`.
+#[wasm_bindgen]
+pub fn dma_stream_feif(dma: String, stream: u32) -> bool {
+    let sys = crate::sys();
+    sys.p.dma_stream_feif(&dma, stream)
+}
+
+/// CT (current double-buffer target) on DMA stream `stream` of
+/// controller `dma` (scope probe for the DBM flip contract).
+#[wasm_bindgen]
+pub fn dma_stream_ct(dma: String, stream: u32) -> bool {
+    let sys = crate::sys();
+    sys.p.dma_stream_ct(&dma, stream)
+}
+
+/// FCR FIFO threshold in words on DMA stream `stream` of controller
+/// `dma` (1/2/3/4-word contract probe).
+#[wasm_bindgen]
+pub fn dma_stream_fifo_threshold(dma: String, stream: u32) -> u32 {
+    let sys = crate::sys();
+    sys.p.dma_stream_fifo_threshold(&dma, stream)
+}
+
+/// Harness = a trigger arrival on DAC channel `ch` from source `src`
+/// (0..7 = TIM6/TIM8/TIM7/TIM5/TIM2/TIM4/EXTI9/SW). With DMAEN set and
+/// no fresh sample staged, latches DMAUDR; otherwise loads DOR.
+#[wasm_bindgen]
+pub fn dac_hw_trigger(ch: u8, src: u8, dma_staged: bool) {
+    let sys = crate::sys();
+    sys.p.dac_hw_trigger(ch, src, dma_staged);
+}
+
+/// DMAUDR underrun latched for DAC channel `ch` (scope probe).
+#[wasm_bindgen]
+pub fn dac_underrun(ch: u8) -> bool {
+    let sys = crate::sys();
+    sys.p.dac_underrun(ch)
+}
+
+/// QSPI memory-mapped window live (scope probe: FMODE=11 switch settled).
+#[wasm_bindgen]
+pub fn qspi_mmap_live() -> bool {
+    let sys = crate::sys();
+    sys.p.qspi_mmap_live()
+}
+
+/// QSPI memory-mapped window word read (AHB byte offset into the image).
+#[wasm_bindgen]
+pub fn qspi_mmap_read(offset: u32) -> u32 {
+    let sys = crate::sys();
+    sys.p.qspi_mmap_read(offset)
+}
+
+/// Harness = the external master putting OUR address on the wire of the
+/// I2C block at `base` (slave-mode entry). Returns true on a match.
+#[wasm_bindgen]
+pub fn i2c_slave_address(base: u32, addr: u8, is_read: bool) -> bool {
+    let sys = crate::sys();
+    let sys2 = crate::sys();
+    sys.p.i2c_slave_address(sys2, base, addr, is_read)
+}
+
+/// Harness = the external master writing a byte TO us (slave-receiver).
+#[wasm_bindgen]
+pub fn i2c_slave_write(base: u32, byte: u8) {
+    let sys = crate::sys();
+    let sys2 = crate::sys();
+    sys.p.i2c_slave_write(sys2, base, byte);
+}
+
+/// Harness = the external master reading a byte FROM us
+/// (slave-transmitter): the guest-staged byte (0xFF when empty).
+#[wasm_bindgen]
+pub fn i2c_slave_read(base: u32) -> u8 {
+    let sys = crate::sys();
+    let sys2 = crate::sys();
+    sys.p.i2c_slave_read(sys2, base)
+}
+
+/// Harness = the external master's STOP (releases slave state).
+#[wasm_bindgen]
+pub fn i2c_slave_stop(base: u32) {
+    let sys = crate::sys();
+    sys.p.i2c_slave_stop(base);
+}
+
+/// Slave status probe (0 idle / 1 rx-addressed / 2 tx-addressed /
+/// 3 RX pending) for the I2C block at `base`.
+#[wasm_bindgen]
+pub fn i2c_slave_status(base: u32) -> u8 {
+    let sys = crate::sys();
+    sys.p.i2c_slave_status(base)
+}
+
 /// Set a pending interrupt in the NVIC. Negative `irq` values select system
 /// exceptions (SVC = -5, PENDSV = -2, SYSTICK = -1) and are always deliverable.
 /// Used by the FreeRTOS path: the Rust core synthesizes these exceptions

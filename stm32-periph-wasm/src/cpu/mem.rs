@@ -24,11 +24,30 @@ pub struct MemRegion {
     pub data: Vec<u8>,
 }
 
+/// QUADSPI memory-mapped window (AHB 0x90000000, DCR FSIZE-sized,
+/// typically 16MB): when the QSPI model reports the window live (last
+/// mode switch was memory-mapped), guest reads come straight from the
+/// bound flash image; otherwise the window reads erased (0xFFFFFFFF).
+fn is_qspi_mmap(addr: u32) -> bool {
+    (addr >= 0x90000000 && addr < 0xA0000000)
+        && crate::sys().p.qspi_mmap_live()
+}
+
+/// Byte read through the QSPI memory-mapped window (LE assembly handled
+/// by the callers; this serves one byte at the flash image offset).
+fn qspi_mmap_byte(addr: u32) -> u8 {
+    let w = crate::sys().p.qspi_mmap_read(addr.wrapping_sub(0x90000000) & !3);
+    ((w >> ((addr & 3) * 8)) & 0xFF) as u8
+}
+
 fn is_periph(addr: u32) -> bool {
     (addr >= 0x40000000 && addr < 0x51000000)
         // Full FSMC window (banks 1-4 every 0x10000000 up to 0xA0000000):
         // untapped banks must reach the model (inert 0), not the bus-fault
         // arms — the fsmc_test BANK4 probe depends on it.
+        // (The QSPI mmap window 0x90000000 sits INSIDE the FSMC window:
+        // it is checked FIRST by the read arms below, so a live mmap
+        // mapping wins over the FSMC inert-0 while unmapped reads stay 0.)
         || (addr >= 0x60000000 && addr < 0xA0000000)
         || (addr >= 0xA0000000 && addr < 0xA2000000)
         || (addr >= 0xE0000000 && addr < 0xE1000000)
@@ -207,7 +226,7 @@ impl FlatMemory {
     /// return earlier; anything else falls to the bus-fault bad-arms.
     #[inline]
     fn mapped(&self, addr: u32) -> bool {
-        is_periph(addr) || self.in_flash(addr) || self.in_ram(addr) || self.extra_idx(addr).is_some()
+        is_qspi_mmap(addr) || is_periph(addr) || self.in_flash(addr) || self.in_ram(addr) || self.extra_idx(addr).is_some()
     }
 
     /// CCR.UNALIGN_TRP gate for multi-byte normal-memory accesses. Skipped
@@ -254,6 +273,14 @@ impl FlatMemory {
 
 impl Memory for FlatMemory {
     fn read8(&self, addr: u32) -> u8 {
+        // QSPI memory-mapped window wins over the FSMC inert-0 inside
+        // 0x90000000..0xA0000000 while the mmap mode is live.
+        if is_qspi_mmap(addr) {
+            if self.mpu_deny(addr, 1, false) {
+                return 0;
+            }
+            return qspi_mmap_byte(addr);
+        }
         if is_periph(addr) {
             // MPU first: a faulting access must not reach model side
             // effects (UART TX, RXNE clears, ...).
@@ -309,6 +336,16 @@ impl Memory for FlatMemory {
         self.mapped(addr)
     }
     fn read16(&self, addr: u32) -> u16 {
+        if is_qspi_mmap(addr) {
+            if self.mpu_deny(addr, 2, false) {
+                return 0;
+            }
+            // Unaligned-safe: assemble from window bytes (no Device-fault
+            // games — the window is Normal-mapped flash image memory).
+            let lo = qspi_mmap_byte(addr) as u16;
+            let hi = qspi_mmap_byte(addr.wrapping_add(1)) as u16;
+            return lo | (hi << 8);
+        }
         if is_periph(addr) {
             if self.mpu_deny(addr, 2, false) {
                 return 0;

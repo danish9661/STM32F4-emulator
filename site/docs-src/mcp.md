@@ -61,7 +61,19 @@ Installed as a package, the `stm32f4-mcp` bin is on `PATH`:
 | Tool | What it does |
 |---|---|
 | `list_firmwares` | List the bundled firmware keys `load_firmware` accepts |
-| `load_firmware` | Boot a firmware (`firmware`, optional `enable_irqs`), replacing any active session |
+| `load_firmware` | Boot a firmware (`firmware`, optional delivery opts), replacing any active session |
+
+Delivery opts (all optional booleans, all default false — the Rust core
+delivers guest ISRs inline only when opted in; polling firmware such as the
+ETH demos must keep them off): `enable_irqs` (generic guest-IRQ delivery),
+`irq_eth` (guest `ETH_IRQHandler` owns its flags — no SRAM flag writes),
+`freertos` (SVC/PendSV inline context switches), `lowpower` (WFI/WFE sleep
+until a wakeup source fires). Note: the current `mcp/server.mjs`
+`load_firmware` tool only exposes `firmware` + `enable_irqs` — `irq_eth` /
+`freertos` / `lowpower` pass through `createSTM32F407`/`createEmulator`
+(they are accepted there today) but have no MCP tool parameters yet; wire
+them through `server.mjs` if an agent needs IRQ-ETH, FreeRTOS, or STOP-mode
+firmware over MCP.
 | `step` | Run up to N instructions; returns PC, instruction count, stopped flag |
 | `read_uart` | Drain UART output printed since the last call |
 | `send_uart` | Send text to the firmware over UART RX |

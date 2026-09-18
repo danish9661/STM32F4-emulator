@@ -105,6 +105,9 @@ impl Usart {
         if self.cr2 & (1 << 14) == 0 {
             return;
         }
+        if self.muted() {
+            return; // muted receiver drops the break silently
+        }
         if self.rx_buf.len() < 64 {
             self.rx_buf.push(0x00);
             self.sr |= (1 << 5) | (1 << 8); // RXNE + LBD
@@ -150,6 +153,9 @@ impl Usart {
     /// bit 2) alongside RXNE — the honest observable of a pulse mismatch.
     /// Matching pulses land cleanly with no flags.
     pub fn irda_rx(&mut self, sys: &System, byte: u8, low_power: bool) {
+        if self.muted() {
+            return; // muted receiver drops the byte silently
+        }
         let rx_low = low_power;
         let want_low = self.cr3 & (1 << 2) != 0;
         if self.rx_buf.len() < 64 {
@@ -215,6 +221,22 @@ impl Usart {
     /// TX, RTSE bit 8 drives RTS — see write_dr). Harness = the peer.
     pub fn set_cts(&mut self, asserted: bool) {
         self.cts_asserted = asserted;
+    }
+
+    // ── Mute mode / receiver wakeup (CR1 RWU bit 1, WAKE bit 11) ───────
+    // Silicon mute: with RWU set the receiver ignores incoming bytes
+    // (no RXNE, no faults — only the address/mute-exit logic watches).
+    // Exit needs a WAKE-selected event: WAKE=0 (idle-line: the harness
+    // `idle_event` clears RWU — the line went idle a full frame); WAKE=1
+    // (address-mark: a received byte with MSB=1 clears RWU and IS
+    // delivered — silicon compares ADD[3:0] when ADDIE... the F4 has no
+    // address-compare engine, so any mark byte wakes; the byte itself is
+    // the observable). While muted, rx_byte() and lin_break()/irda_rx()
+    // deliveries are dropped silently (no flags, no IRQ — the receiver
+    // is deaf, not erroring).
+    /// Whether the receiver is muted (RWU set — scope probe).
+    pub fn muted(&self) -> bool {
+        self.cr1 & (1 << 1) != 0
     }
 
     /// Live CTS flag (SR bit 9, CTSF): the sampled CTS input level.
@@ -316,6 +338,17 @@ impl Usart {
     /// Fires the IRQ when IDLEIE (CR1 bit 4) is set. Cleared on the next
     /// DR read (same SR→DR contract as PE/FE/NE).
     pub fn idle_event(&mut self, sys: &System) {
+        // Idle-line doubles as the WAKE=0 mute exit: the line went idle
+        // a full frame, so a muted receiver wakes (RWU clears) — the
+        // IDLE flag itself still latches only when the receiver can see
+        // the line (unmuted, or the waking edge itself).
+        if self.muted() {
+            if self.cr1 & (1 << 11) == 0 {
+                self.cr1 &= !(1 << 1); // RWU clears: idle-line wakeup
+            } else {
+                return; // WAKE=1 wants an address mark, not idle
+            }
+        }
         self.sr |= 1 << 4; // IDLE
         self.update_interrupt(sys);
     }
@@ -413,6 +446,19 @@ impl Peripheral for Usart {
     }
 
     fn rx_byte(&mut self, sys: &System, byte: u8) {
+        // Mute mode (CR1 RWU): the receiver is deaf — bytes drop with no
+        // flags and no IRQ. WAKE=1 (address-mark) exits on a mark byte
+        // (MSB set): the byte IS delivered and RWU clears. WAKE=0
+        // (idle-line) only exits via idle_event, so bytes keep dropping.
+        if self.muted() {
+            if self.cr1 & (1 << 11) != 0 && byte & 0x80 != 0 {
+                self.cr1 &= !(1 << 1); // RWU clears: mark-byte wakeup
+                // fall through: the waking byte is delivered normally
+            } else {
+                self.rx_fault = 0; // faults drop with the byte
+                return;
+            }
+        }
         if self.rx_buf.len() < 64 {
             self.rx_buf.push(byte);
             self.sr |= 1 << 5; // RXNE
@@ -430,5 +476,52 @@ impl Peripheral for Usart {
         }
         self.sr |= 0x00C0; // TXE, TC
         self.update_interrupt(sys);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usart() -> (std::rc::Rc<System>, Box<dyn Peripheral>) {
+        let sys = crate::system::test_dummy_system();
+        let u = Usart::new("USART1", &crate::ext_devices::ExtDevices::default()).unwrap();
+        (sys, u)
+    }
+
+    // Mute mode: RWU drops bytes silently (no RXNE, no faults); WAKE=0
+    // exits on idle_event (RWU clears, IDLE latches); WAKE=1 ignores idle
+    // and exits on a mark byte (MSB set), which IS delivered.
+    #[test]
+    fn mute_drops_until_wakeup() {
+        let (sys, mut boxed) = usart();
+        let u = boxed.as_any_mut().downcast_mut::<Usart>().unwrap();
+        u.write(&sys, 0x0C, (1 << 13) | (1 << 2) | (1 << 1)); // UE+RE+RWU (WAKE=0)
+        assert!(u.muted());
+        u.rx_byte(&sys, 0x41);
+        assert_eq!(u.sr & (1 << 5), 0, "muted: no RXNE");
+        assert!(u.rx_buf.is_empty(), "muted: byte dropped");
+        u.idle_event(&sys); // idle-line wakeup (WAKE=0)
+        assert!(!u.muted(), "idle clears RWU when WAKE=0");
+        assert_ne!(u.sr & (1 << 4), 0, "IDLE latches on the waking edge");
+        u.rx_byte(&sys, 0x42);
+        assert_ne!(u.sr & (1 << 5), 0, "unmuted: RXNE sets");
+    }
+
+    // WAKE=1: idle does NOT wake; a mark byte wakes AND delivers.
+    #[test]
+    fn mute_mark_wakeup_needs_msb() {
+        let (sys, mut boxed) = usart();
+        let u = boxed.as_any_mut().downcast_mut::<Usart>().unwrap();
+        u.write(&sys, 0x0C, (1 << 13) | (1 << 2) | (1 << 1) | (1 << 11)); // UE+RE+RWU+WAKE
+        u.idle_event(&sys);
+        assert!(u.muted(), "WAKE=1: idle does not wake");
+        assert_eq!(u.sr & (1 << 4), 0, "WAKE=1: idle latches no IDLE while muted");
+        u.rx_byte(&sys, 0x41); // no MSB: drops, stays muted
+        assert!(u.muted(), "non-mark byte keeps mute");
+        assert!(u.rx_buf.is_empty());
+        u.rx_byte(&sys, 0xC1); // mark byte: wakes + delivers
+        assert!(!u.muted(), "mark byte wakes");
+        assert_eq!(u.rx_buf, vec![0xC1], "waking byte delivered");
     }
 }

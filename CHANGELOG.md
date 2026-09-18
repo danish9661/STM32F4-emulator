@@ -22,10 +22,22 @@ date-based entries rather than strict SemVer until the first published release.
     IDLE latch + SBK TX break + PEIE/LBDIE IRQ paths (PE moved off EIE),
     TIM one-pulse mode (CEN self-clears at update), GPIO LCKR key sequence
     + per-pin config freeze (incl. OTYPER `&`/`===` precedence fix).
-  - Mock-consumer harness: 168 → 262 checks (`t_flash_err`,
+  - Mock-consumer harness: 168 → 312 checks (`t_flash_err`,
     `t_spi_crc_err`, `t_usart_flow_err`, `t_sdio_acmd`, `t_rtc_wut_ts`,
     `t_sdio_timing`, `t_usart_protocols`, `t_spi_slave_gate`,
-    `t_rtc_tamper_phys`, `t_flash_rdp`, `t_honor_pass`).
+    `t_rtc_tamper_phys`, `t_flash_rdp`, `t_honor_pass`, `t_gap9`,
+    `t_gap10`).
+  - Batch 9: ADC injected group (JSWSTART/JAUTO, JL/JOFR/JDR/JEOC/JSTRT,
+    ALIGN, CONT, JAWDEN gate), TIM1/TIM8 BDTR/MOE/break + RCR repetition
+    + EGR software events, RTC SHIFTR shift + ALRMASSR MASKSS gate, USART
+    mute mode (RWU/WAKE).
+  - Batch 10 (the six "out of scope" walls, knocked down): SDIO CMD24
+    single-block write (image round-trip), QSPI memory-mapped window
+    (AHB 0x90000000 live reads), LTDC CLUT load + L8/AL44/AL88 resolve,
+    I2C slave mode (OAR match → ADDR → DR rx/tx → STOP), DMA FCR
+    thresholds/FEIF/DBM-direct-TEIF/CT-flip, DAC TSEL mux + DMAUDR
+    underrun — each with native test + mock pin + compiled guest firmware
+    (`gap10_*`, 6/6 on guest + 6/6 in-browser CDP smoke).
 - **Docs audit pass (2026-09-18)**: rewrote stale `architecture.md` (the
   Rust core is the sole backend — no hooks/pump/wedge), fixed
   `MAX_BATCH`/preset-count/UART-RX/device-panel/DOOM-fps staleness in

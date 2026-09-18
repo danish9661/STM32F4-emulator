@@ -72,15 +72,12 @@ devices:
 
 | Env | Default | Effect |
 |---|---|---|
-| `MAX_BATCH` | 200000 | instructions per `step()` batch (servicing cadence for gateway RX, not a wedge guard — the ~40k Unicorn WASM wedge is archaeology, see progress-and-future.md) |
-| `MAX_INST` | 1M | instruction budget when the positional arg is omitted |
-| `TICK_EVERY` | 5000 | tick_n()/watchdog/interrupt check interval (instructions) |
-| `POLL_EVERY` | 1000 | DMA/ETH poll check interval (instructions) |
-| `GW_RESTART` | 0 | 1 = restart gateway per round (legacy) |
-| `GW_PATH` | repo-relative | path to the `openhw-gw` binary |
-| `RX_HEX` | 0 | 1 = dump first 64 B of each injected RX frame |
-| `DBG_TX` / `DBG_RX` | 0 | 1 = trace TX/RX frames |
-| `DBG_FLAG` / `DBG_IRQF` / `DBG_PC` / `DBG_GW` / `DBG_DMA` | 0 | diagnostics (flag writes, ISR state, PC trace, gateway events, DMA regs) |
+| `MAX_BATCH` | 200000 | instructions per `step()` batch — live in `cli.mjs` (the ~40k Unicorn WASM wedge is archaeology, see progress-and-future.md) |
+| `MAX_INST` | 1M | instruction budget when the positional arg is omitted — live in `cli.mjs` |
+| `GW_RESTART` | 0 | 1 = restart gateway per round (legacy) — live in `cli.mjs` |
+| `GW_PATH` | repo-relative | path to the `openhw-gw` binary — live in `cli.mjs` |
+| `RX_HEX` | 0 | 1 = dump first 64 B of each injected RX frame — live in `cli.mjs` |
+| `DBG_TX` / `DBG_RX` / `DBG_GW` | 0 | 1 = trace TX/RX frames / gateway dial events — live in `cli.mjs` (`DBG_FLAG`/`DBG_IRQF`/`DBG_PC`/`DBG_DMA` are Unicorn-era names, no longer read) |
 | `SOAK_STATS` | 0 | 1 = print soak stats at the end |
 | `UART_ADDR` | 0x40011000 | USART base for TX/RX injection |
 | `SHOW_REGS` | 0 | 1 = dump registers |

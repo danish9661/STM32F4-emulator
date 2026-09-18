@@ -131,6 +131,86 @@ impl Peripherals {
             }
         }
     }
+    /// Run a closure on the DAC peripheral (single instance).
+    fn with_dac<R>(&self, f: impl FnOnce(&mut crate::peripherals::dac::Dac) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::dac::Dac>() {
+                return Some(f(u));
+            }
+        }
+        None
+    }
+
+    /// Harness = a DMA-fed trigger arrival on DAC channel `ch` from
+    /// source `src` (0..7, see TSEL): with DMAEN set and no fresh sample
+    /// staged (`dma_staged` false) latches DMAUDR; otherwise loads DOR.
+    pub fn dac_hw_trigger(&self, ch: u8, src: u8, dma_staged: bool) {
+        // NOTE: no &System needed (no IRQ on this path) — pass the only
+        // system handle available via with_dac's caller. DAC takes none,
+        // so call the inherent method directly (no sys borrow games).
+        self.with_dac(|u| u.hw_trigger(ch, src, dma_staged));
+    }
+
+    /// DMAUDR underrun latched for DAC channel `ch` (scope probe).
+    pub fn dac_underrun(&self, ch: u8) -> bool {
+        self.with_dac(|u| u.underrun(ch)).unwrap_or(false)
+    }
+
+    /// Run a closure on the LTDC peripheral (single instance).
+    fn with_ltdc<R>(&self, f: impl FnOnce(&mut crate::peripherals::ltdc::Ltdc) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::ltdc::Ltdc>() {
+                return Some(f(u));
+            }
+        }
+        None
+    }
+
+    /// CLUT entry (scope probe for the LUT-indexed render path).
+    pub fn ltdc_clut_entry(&self, layer: u32, idx: u8) -> u32 {
+        self.with_ltdc(|u| u.clut_entry(layer as usize, idx)).unwrap_or(0)
+    }
+
+    /// Indexed framebuffer byte → ARGB8888 through the layer CLUT.
+    pub fn ltdc_lut_pixel(&self, layer: u32, pf: u32, byte: u8) -> u32 {
+        self.with_ltdc(|u| u.lut_pixel(layer as usize, pf, byte)).unwrap_or(0xFF00_0000)
+    }
+
+    /// Run a closure on the QUADSPI peripheral (single instance).
+    fn with_qspi<R>(&self, f: impl FnOnce(&mut crate::peripherals::qspi::Qspi) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::qspi::Qspi>() {
+                return Some(f(u));
+            }
+        }
+        None
+    }
+
+    /// QSPI memory-mapped window live (scope probe for the mmap path).
+    pub fn qspi_mmap_live(&self) -> bool {
+        self.with_qspi(|u| u.mmap_live()).unwrap_or(false)
+    }
+
+    /// QSPI memory-mapped window word read (AHB offset, byte-addressed).
+    pub fn qspi_mmap_read(&self, offset: u32) -> u32 {
+        self.with_qspi(|u| u.mmap_read(offset)).unwrap_or(0xFFFF_FFFF)
+    }
+
+    /// Bind an SD-card image for CMD17/18/24 (harness = the flash array).
+    pub fn sdio_bind_card(&self, blocks: u32) {
+        self.with_sdio(|u| u.bind_card(blocks));
+    }
+
+    /// Read one 512-byte card block (scope probe for the round-trip).
+    pub fn sdio_read_block(&self, block: u32) -> Vec<u8> {
+        self.with_sdio(|u| u.read_block(block)).unwrap_or(vec![0xFF; 512])
+    }
+
+    /// Bound card block count, 0 = unbound (scope probe).
+    pub fn sdio_card_blocks(&self) -> u32 {
+        self.with_sdio(|u| u.card_blocks()).unwrap_or(0)
+    }
+
     /// Run a closure on the I2C peripheral with the given base address.
     fn with_i2c<R>(&self, base: u32, f: impl FnOnce(&mut crate::peripherals::i2c::I2c) -> R) -> Option<R> {
         for slot in &self.peripherals {
@@ -216,6 +296,63 @@ impl Peripherals {
     /// Whether a TX break is queued on the USART at `base` (scope probe).
     pub fn uart_break_pending(&self, base: u32) -> bool {
         self.with_usart(base, |u| u.break_pending()).unwrap_or(false)
+    }
+
+    /// Run a closure on a named timer (TIM1..TIM14).
+    fn with_tim<R>(&self, name: &str, f: impl FnOnce(&mut crate::peripherals::tim::Timer) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::tim::Timer>() {
+                if u.timer_name() == name {
+                    return Some(f(u));
+                }
+            }
+        }
+        None
+    }
+
+    /// Harness = the break input: drive the break line of timer `name`.
+    /// No-op on non-advanced timers and with BKE clear.
+    pub fn tim_break_input(&self, sys: &System, name: &str, asserted: bool) {
+        self.with_tim(name, |u| u.break_input(sys, asserted));
+    }
+
+    /// MOE (BDTR bit 15) of timer `name` (scope probe; false off-map).
+    pub fn tim_moe(&self, name: &str) -> bool {
+        self.with_tim(name, |u| u.moe()).unwrap_or(false)
+    }
+
+    /// Whether the USART receiver at `base` is muted (RWU set).
+    pub fn uart_muted(&self, base: u32) -> bool {
+        self.with_usart(base, |u| u.muted()).unwrap_or(false)
+    }
+
+    /// Harness = the external master putting OUR address on the wire
+    /// of the I2C block at `base` (slave-mode entry; guest programmed
+    /// OAR1/OAR2 + PE and waits for ADDR). Returns true on a match.
+    pub fn i2c_slave_address(&self, sys: &System, base: u32, addr: u8, is_read: bool) -> bool {
+        self.with_i2c(base, |u| u.slave_address(sys, addr, is_read)).unwrap_or(false)
+    }
+
+    /// Harness = the external master writing a byte TO us (slave-receiver).
+    pub fn i2c_slave_write(&self, sys: &System, base: u32, byte: u8) {
+        self.with_i2c(base, |u| u.slave_write(sys, byte));
+    }
+
+    /// Harness = the external master reading a byte FROM us
+    /// (slave-transmitter): pops the guest-staged byte (0xFF when empty).
+    pub fn i2c_slave_read(&self, sys: &System, base: u32) -> u8 {
+        self.with_i2c(base, |u| u.slave_read(sys)).unwrap_or(0xFF)
+    }
+
+    /// Harness = the external master's STOP (releases slave state).
+    pub fn i2c_slave_stop(&self, base: u32) {
+        self.with_i2c(base, |u| u.slave_stop());
+    }
+
+    /// Slave status probe (0 idle / 1 rx-addressed / 2 tx-addressed /
+    /// 3 RX pending) for the I2C block at `base`.
+    pub fn i2c_slave_status(&self, base: u32) -> u8 {
+        self.with_i2c(base, |u| u.slave_status()).unwrap_or(0)
     }
 
     /// Harness = the SPI master: drive the slave's NSS level.
@@ -648,6 +785,36 @@ impl Peripherals {
                 break;
             }
         }
+    }
+
+    /// Run a closure on the named DMA controller's Dma block.
+    fn with_dma<R>(&self, dma: &str, f: impl FnOnce(&mut crate::peripherals::dma::Dma) -> R) -> Option<R> {
+        for slot in &self.peripherals {
+            if let Some(u) = slot.peripheral.borrow_mut().as_any_mut().downcast_mut::<crate::peripherals::dma::Dma>() {
+                if u.controller_name() == dma {
+                    return Some(f(u));
+                }
+            }
+        }
+        None
+    }
+
+    /// FEIF (FIFO error) on DMA stream `stream` of controller `dma`
+    /// ("DMA1"/"DMA2", scope probe for the FIFO-threshold contract).
+    pub fn dma_stream_feif(&self, dma: &str, stream: u32) -> bool {
+        self.with_dma(dma, |u| u.stream_feif(stream as usize)).unwrap_or(false)
+    }
+
+    /// CT (current double-buffer target) on DMA stream `stream` of
+    /// controller `dma` (scope probe for the DBM flip contract).
+    pub fn dma_stream_ct(&self, dma: &str, stream: u32) -> bool {
+        self.with_dma(dma, |u| u.stream_ct(stream as usize)).unwrap_or(false)
+    }
+
+    /// FCR FIFO threshold in words on DMA stream `stream` of controller
+    /// `dma` (scope probe for the FTH contract: 1/2/3/4 words).
+    pub fn dma_stream_fifo_threshold(&self, dma: &str, stream: u32) -> u32 {
+        self.with_dma(dma, |u| u.stream_fifo_threshold(stream as usize)).unwrap_or(0)
     }
 
     /// Complete the staged DMA2D transfer (called by the JS driver after it

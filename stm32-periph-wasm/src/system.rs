@@ -797,6 +797,15 @@ impl WasmSystem {
 
     pub fn mark_dma_completed(&self, stream_idx: usize, _success: bool) {
         DMA_COMPLETED[stream_idx].store(true, Ordering::Release);
+        // Double-buffer target flip (DBM): silicon swaps M0/M1 at terminal
+        // count, so the CT bit the guest reads after TC points at the NEXT
+        // buffer. Non-DBM streams ignore the flip (CT reads M0).
+        for slot in &self.p.peripherals {
+            let mut b = slot.peripheral.borrow_mut();
+            if let Some(d) = b.as_any_mut().downcast_mut::<crate::peripherals::dma::Dma>() {
+                d.flip_stream_target(stream_idx);
+            }
+        }
         // Fire NVIC interrupt after transfer completes
         if stream_idx < 8 {
             let irq = DMA_STREAM_IRQ[stream_idx].swap(-1, Ordering::Acquire);

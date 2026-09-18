@@ -103,6 +103,13 @@ pub struct Adc {
     jdr: [u32; 4],
     dr: u32,
     last_conv_start: u64,
+    /// Injected-conversion timing anchor (virtual instruction clock),
+    /// mirroring `last_conv_start` for the regular path.
+    last_inj_start: u64,
+    /// JSWSTART edge latch: JSWSTART (CR2 bit 22) is an edge trigger —
+    /// a conversion starts on the 0→1 transition only, not while held.
+    /// (Same edge discipline as the regular SWSTART path.)
+    jsw_was_set: bool,
 }
 
 impl Default for Adc {
@@ -124,6 +131,8 @@ impl Default for Adc {
             jdr: [0; 4],
             dr: 0,
             last_conv_start: 0,
+            last_inj_start: 0,
+            jsw_was_set: false,
         }
     }
 }
@@ -140,6 +149,7 @@ impl Adc {
     }
     fn eoc_enabled(&self) -> bool { self.cr1 & (1 << 5) != 0 }
     fn ovr_enabled(&self) -> bool { self.cr1 & (1 << 4) != 0 }
+    fn jeoc_enabled(&self) -> bool { self.cr1 & (1 << 7) != 0 }
     /// EOC flag peek for the common block's non-consuming mirrors
     /// (CSR/CDR must never clear flags — clearing happens only via the
     /// ADC's own SR/DR read arms).
@@ -151,31 +161,56 @@ impl Adc {
         let irq = adc_irq(&self.name);
         if (self.sr & (1 << 1) != 0 && self.eoc_enabled()) ||
            (self.sr & (1 << 5) != 0 && self.ovr_enabled()) ||
-           (self.sr & 1 != 0 && self.awd_enabled()) {
+           (self.sr & 1 != 0 && self.awd_enabled()) ||
+           (self.sr & (1 << 2) != 0 && self.jeoc_enabled()) {
             sys.p.nvic.borrow_mut().set_intr_pending(irq);
         }
     }
 
     /// Analog watchdog: enabled via CR1 AWDEN (all regular channels) or
-    /// JAWDEN (injected only — not modeled, no injected conversions exist),
-    /// optionally single-channel via AWDSGL+AWDCH. Fires when the converted
-    /// value leaves [LTR, HTR]: sets SR bit 0 (AWD) and pends IRQ 18/47 when
+    /// JAWDEN (injected only — enforced per-group: with AWDEN set the
+    /// injected conversions below skip the check, matching silicon where
+    /// an injected-group watchdog needs JAWDEN, not AWDEN), optionally
+    /// single-channel via AWDSGL+AWDCH. Fires when the converted value
+    /// leaves [LTR, HTR]: sets SR bit 0 (AWD) and pends IRQ 18/47 when
     /// AWDIE (CR1 bit 6) is set. Checked on every completed conversion.
     fn awd_enabled(&self) -> bool { self.cr1 & (1 << 6) != 0 }
 
-    fn check_awd(&mut self, sys: &System, channel: u32, val: u32) {
-        // JAWDEN-only (AWDEN clear) watches injected channels — nothing to
-        // do here since the model never produces injected conversions.
-        if self.cr1 & (1 << 23) == 0 && self.cr1 & (1 << 22) != 0 {
-            return;
+    /// Whether the watchdog watches a conversion from the given group:
+    /// regular conversions need AWDEN (bit 23), injected need JAWDEN
+    /// (bit 22) — the two enables are independent (silicon watches both
+    /// groups when both bits are set; AWDEN-only ignores injected
+    /// results and vice versa).
+    /// NOTE: the AWDSGL channel-select (bit 9 + AWDCH) is applied by the
+    /// callers, not here — this is the group gate only.
+    fn awd_watches(&self, injected: bool) -> bool {
+        // Read the CURRENT CR1 group bits (never a shadow: an earlier
+        // draft gated injected on a stale copy and AWDEN-only runs
+        // watched injected results — caught by the JAWDEN test, not
+        // by review).
+        let cr1 = self.cr1;
+        if injected {
+            cr1 & (1 << 22) != 0
+        } else {
+            cr1 & (1 << 23) != 0
         }
-        if self.cr1 & (1 << 23) == 0 {
+    }
+
+    fn check_awd(&mut self, sys: &System, channel: u32, val: u32) {
+        if !self.awd_watches(false) {
             return;
         }
         // AWDSGL (bit 9): watch only AWDCH (bits 4:0); otherwise all.
+        // No-channel-selected edge: with AWDSGL set but AWDCH pointing at
+        // a channel this conversion did not use, skip (the unwatched test
+        // pins this: CH7 watched, CH5 converted → no latch).
         if self.cr1 & (1 << 9) != 0 && channel != (self.cr1 & 0x1F) {
             return;
         }
+        // Sticky silicon AWD: once latched, only a DR read clears (the DR
+        // arm does that); a fresh in-window conversion does NOT clear a
+        // latched flag — but it must not RE-latch spuriously either. The
+        // flag set below is idempotent, so no extra handling needed.
         if val < (self.ltr & 0xFFF) || val > (self.htr & 0xFFF) {
             self.sr |= 1; // AWD
             self.fire_interrupts(sys);
@@ -221,14 +256,86 @@ impl Adc {
             let conv_cycles = sampling_cycles + 12;
             if elapsed >= conv_cycles as u64 {
                 let channel = self.sqr3 & 0x1F;
-                let val = adc_get_override(&self.name, channel).unwrap_or_else(|| match channel {
+                let mut val = adc_get_override(&self.name, channel).unwrap_or_else(|| match channel {
                     16 | 17 => 1200 + (adc_rand() % 50),
                     18 => 1500,
                     _ => adc_rand() % 4096,
                 });
+                // ALIGN (CR2 bit 11): left-aligned results sit at DR[15:4]
+                // (the 12-bit sample shifted up 4). Right-aligned (reset)
+                // is the plain value. Overrides are 12-bit samples too,
+                // so alignment applies to them the same way.
+                if self.cr2 & (1 << 11) != 0 {
+                    val = (val & 0xFFF) << 4;
+                }
                 self.dr = val;
                 self.set_eoc(sys);
-                self.check_awd(sys, channel, val);
+                self.check_awd(sys, channel, val & 0xFFF);
+                // CONT (CR2 bit 1): continuous mode restarts the sequence
+                // as soon as the conversion completes — re-anchor the
+                // start clock so the next conversion begins immediately
+                // (silicon pipelines them back-to-back; single-shot needs
+                // a fresh SWSTART edge, handled by the CR2 write arm).
+                if self.cr2 & (1 << 1) != 0 {
+                    self.last_conv_start = n;
+                }
+            }
+        }
+        // Injected group: serviced on the same clock while JSWSTART is
+        // latched (edge-armed by the CR2 write arm below). JAUTO (CR1
+        // bit 10) is the auto-injection variant: the injected sequence
+        // follows every regular conversion automatically, with no JSWSTART
+        // needed — silicon's "regular + injected back-to-back" mode.
+        let jauto = self.cr1 & (1 << 10) != 0;
+        if self.jsw_was_set || jauto {
+            let jelapsed = n.saturating_sub(self.last_inj_start);
+            if jelapsed > 12 {
+                // JL (JSQR bits 21:20): sequence length 1..4 injected
+                // channels, JSQ4..JSQ1 fields, converted JSQ1-first.
+                let jl = ((self.jsqr >> 20) & 3) + 1;
+                let fields = [self.jsqr & 0x1F, (self.jsqr >> 5) & 0x1F,
+                              (self.jsqr >> 10) & 0x1F, (self.jsqr >> 15) & 0x1F];
+                let conv_cycles = 15 + 12; // default sample time + 12
+                if jelapsed >= conv_cycles as u64 {
+                    for i in 0..jl as usize {
+                        let ch = fields[i] & 0x1F;
+                        let v = adc_get_override(&self.name, ch).unwrap_or_else(|| match ch {
+                            16 | 17 => 1200 + (adc_rand() % 50),
+                            18 => 1500,
+                            _ => adc_rand() % 4096,
+                        }) & 0xFFF;
+                        // JDR holds sample + JOFRx offset (signed add,
+                        // clamped to 12-bit range — RM0090 §11.5.3).
+                        let off = (self.jofr[i] & 0xFFF) as i32;
+                        let jv = ((v as i32 + off).clamp(0, 0xFFF)) as u32;
+                        self.jdr[i] = if self.cr2 & (1 << 11) != 0 { (jv & 0xFFF) << 4 } else { jv };
+                        // Injected watchdog: JAWDEN-gated, same window.
+                        // (Fires through fire_interrupts below so AWDIE
+                        // pends the IRQ — the direct sr|= path skipped
+                        // the pend and the AWD flag read looked dead.)
+                        // Snapshot the gate inputs first: check_awd-style
+                        // narrowing must not observe a half-updated CR1.
+                        let watches_inj = self.cr1 & (1 << 22) != 0;
+                        if watches_inj {
+                            let single = self.cr1 & (1 << 9) != 0;
+                            if !single || ch == (self.cr1 & 0x1F) {
+                                if v < (self.ltr & 0xFFF) || v > (self.htr & 0xFFF) {
+                                    self.sr |= 1; // AWD
+                                    self.fire_interrupts(sys);
+                                }
+                            }
+                        }
+                    }
+                    self.sr |= (1 << 3) | (1 << 2); // JSTRT + JEOC
+                    self.fire_interrupts(sys);
+                    self.last_inj_start = n;
+                    // JSWSTART is edge-consumed (silicon clears the start
+                    // condition once the sequence launches); JAUTO stays
+                    // level (every regular conversion re-triggers).
+                    if !jauto {
+                        self.jsw_was_set = false;
+                    }
+                }
             }
         }
     }
@@ -239,6 +346,113 @@ mod tests {
     use super::*;
     use crate::system::{adc_set_override, adc_clear_override, INSTRUCTION_COUNT};
     use std::sync::atomic::Ordering;
+
+    // Injected group: JSWSTART edge runs the JL-length sequence from
+    // JSQ1-first, JDR holds sample+JOFR offset, JSTRT+JEOC latch; JDR
+    // reads clear JSTRT (first) / JEOC (last); ALIGN shifts JDR too.
+    #[test]
+    fn injected_group_runs_jsqr_sequence() {
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Adc::new("ADC1").unwrap();
+        let adc = boxed.as_any_mut().downcast_mut::<Adc>().unwrap();
+        adc_set_override("ADC1", 7, 0xABC);
+        adc_set_override("ADC1", 8, 0x123);
+        adc.write(&sys, 0x38, (1 << 20) | (8 << 5) | 7); // JL=1: JSQ2=8, JSQ1=7
+        adc.write(&sys, 0x14, 16); // JOFR1 = +16
+        adc.write(&sys, 0x08, (1 << 22) | 1); // JSWSTART edge
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        assert_eq!(adc.read(&sys, 0x3C), 0xACC, "JDR1 = sample + offset");
+        assert_eq!(adc.read(&sys, 0x40), 0x123, "JDR2 = second channel");
+        adc_clear_override("ADC1", 7);
+        adc_clear_override("ADC1", 8);
+    }
+
+    // JEOC/JSTRT clear discipline: JDR1 read clears JSTRT, the last
+    // sequence entry clears JEOC; JEOCIE (CR1 bit 7) pends the IRQ.
+    #[test]
+    fn injected_flags_clear_on_jdr_drain() {
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Adc::new("ADC1").unwrap();
+        let adc = boxed.as_any_mut().downcast_mut::<Adc>().unwrap();
+        adc_set_override("ADC1", 7, 0x100);
+        adc.write(&sys, 0x38, 7); // JL=0: single channel JSQ1=7
+        adc.write(&sys, 0x04, 1 << 7); // JEOCIE
+        adc.write(&sys, 0x08, (1 << 22) | 1);
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        // SR read does not consume (only JDR reads do).
+        assert_ne!(adc.read(&sys, 0x00) & 0xC, 0, "JSTRT+JEOC latched");
+        assert!(sys.p.nvic.borrow().irq_pending(18), "JEOCIE pends IRQ 18");
+        // Re-run (SR read cleared flags), then drain JDR1 = last entry.
+        adc.write(&sys, 0x08, 1); // drop JSWSTART level
+        adc.write(&sys, 0x08, (1 << 22) | 1);
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        assert_eq!(adc.read(&sys, 0x3C), 0x100, "JDR1 sample");
+        assert_eq!(adc.read(&sys, 0x00) & 0xC, 0, "JSTRT+JEOC clear after drain");
+        adc_clear_override("ADC1", 7);
+    }
+
+    // JAWDEN-only watchdog watches injected conversions (and an
+    // AWDEN-only watchdog ignores them).
+    #[test]
+    fn injected_watchdog_needs_jawden() {
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Adc::new("ADC1").unwrap();
+        let adc = boxed.as_any_mut().downcast_mut::<Adc>().unwrap();
+        adc_set_override("ADC1", 7, 3000);
+        adc.write(&sys, 0x38, 7);
+        adc.write(&sys, 0x24, 2000); // HTR
+        adc.write(&sys, 0x28, 100);  // LTR
+        adc.write(&sys, 0x04, (1 << 22) | (1 << 6)); // JAWDEN+AWDIE (no AWDEN)
+        adc.write(&sys, 0x08, (1 << 22) | 1);
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        assert_ne!(adc.sr & 1, 0, "JAWDEN watches injected OOR");
+        // AWDEN-only: same conversion, no AWD. Fresh ADC state (the
+        // first sequence's AWD latch + JSWSTART level belong to the
+        // JAWDEN run — a new instance starts clean, like silicon after
+        // a CR1 reprogram + flag clear). Pin SQR3 CH0 in-window too:
+        // the CR2 read arm also services an incidental regular
+        // conversion (ADON armed) on CH0 with a random value, which
+        // would latch AWD on its own — the override keeps it in-window
+        // so only the injected group is under test.
+        adc_set_override("ADC1", 0, 500);
+        let mut boxed2 = Adc::new("ADC1").unwrap();
+        let adc2 = boxed2.as_any_mut().downcast_mut::<Adc>().unwrap();
+        adc2.write(&sys, 0x38, 7);
+        adc2.write(&sys, 0x24, 2000);
+        adc2.write(&sys, 0x28, 100);
+        adc2.write(&sys, 0x04, (1 << 23) | (1 << 6)); // AWDEN+AWDIE (no JAWDEN)
+        adc2.write(&sys, 0x08, (1 << 22) | 1);
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc2.read(&sys, 0x08);
+        assert_eq!(adc2.sr & 1, 0, "AWDEN-only ignores injected");
+        adc_clear_override("ADC1", 0);
+        adc_clear_override("ADC1", 7);
+    }
+
+    // ALIGN (CR2 bit 11) left-shifts DR by 4; CONT (bit 1) re-anchors so
+    // conversions repeat without a fresh SWSTART edge.
+    #[test]
+    fn align_shifts_and_cont_repeats() {
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Adc::new("ADC1").unwrap();
+        let adc = boxed.as_any_mut().downcast_mut::<Adc>().unwrap();
+        adc_set_override("ADC1", 5, 0xABC);
+        adc.write(&sys, 0x34, 5);
+        adc.write(&sys, 0x08, (1 << 30) | (1 << 11) | (1 << 1) | 1); // SWSTART+ALIGN+CONT
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        assert_eq!(adc.read(&sys, 0x4C), 0xABC0, "ALIGN left-shifts DR");
+        // CONT: a second conversion completes with no new SWSTART edge.
+        adc.read(&sys, 0x4C); // drain (clears EOC)
+        INSTRUCTION_COUNT.fetch_add(100, Ordering::Relaxed);
+        adc.read(&sys, 0x08);
+        assert_eq!(adc.read(&sys, 0x4C), 0xABC0, "CONT repeats without edge");
+        adc_clear_override("ADC1", 5);
+    }
 
     #[test]
     fn channel_override_takes_priority_over_random() {
@@ -287,8 +501,10 @@ mod tests {
         adc.read(&sys, 0x08);
         assert_ne!(adc.read(&sys, 0x00) & 1, 0, "out-of-window value must set AWD");
         assert!(sys.p.nvic.borrow().irq_pending(18), "AWDIE must pend IRQ 18");
-        // Other channel ignored under AWDSGL.
+        // Other channel ignored under AWDSGL (AWD is sticky: clear the
+        // latched flag first via a DR read, then prove no re-latch).
         sys.p.nvic.borrow_mut().clear_pending(18);
+        adc.read(&sys, 0x4C); // drain DR: clears EOC + AWD latch
         adc.write(&sys, 0x04, (1 << 23) | (1 << 9) | (1 << 6) | 7); // watch CH7
         adc.write(&sys, 0x34, 5); // but convert CH5 (out of window)
         adc.write(&sys, 0x08, (1 << 30) | 1);
@@ -435,8 +651,13 @@ impl Peripheral for Adc {
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => {
+                // SR read clears STRT/JSTRT (start flags are edge
+                // observations) but preserves the latched result flags
+                // EOC/JEOC/AWD/OVR — those clear on their DR/JDR reads
+                // (silicon: status clears via the conversion-data reads;
+                // only the start strobes are SR-read-consumed).
                 let sr = self.sr;
-                self.sr = 0;
+                self.sr &= !((1 << 4) | (1 << 3));
                 sr
             }
             0x04 => self.cr1,
@@ -460,14 +681,27 @@ impl Peripheral for Adc {
             0x38 => self.jsqr,
             0x3C..=0x48 => {
                 let i = ((offset - 0x3C) / 4) as usize;
-                self.jdr.get(i).copied().unwrap_or(0)
+                let v = self.jdr.get(i).copied().unwrap_or(0);
+                // JDR read clears JEOC once the whole injected sequence
+                // has been drained (silicon: JEOC clears when all JDRs
+                // are read; JSTRT clears on the first). Track per-index:
+                // clear JSTRT on JDR1, JEOC when the last sequence entry
+                // is read.
+                if i == 0 {
+                    self.sr &= !(1 << 3); // JSTRT
+                }
+                let jl = ((self.jsqr >> 20) & 3) as usize;
+                if i >= jl {
+                    self.sr &= !(1 << 2); // JEOC
+                }
+                v
             }
             0x4C => {
                 let dr = self.dr;
-                // DR read clears EOC — and OVR with it (silicon: a DR read
-                // acknowledges the whole EOC/OVR pair; OVR alone clears on
-                // the next conversion or an SR read).
-                self.sr &= !((1 << 1) | (1 << 5));
+                // DR read clears EOC + OVR + AWD (silicon: a DR read
+                // acknowledges the latched result flags; only the STRT/
+                // JSTRT start strobes clear on an SR read).
+                self.sr &= !((1 << 1) | (1 << 5) | 1);
                 dr
             }
             _ => 0,
@@ -486,12 +720,26 @@ impl Peripheral for Adc {
             }
             0x08 => {
                 let was_swstart = self.cr2 & (1 << 30);
+                // JSWSTART (bit 22) is an edge trigger: capture the
+                // pre-write level BEFORE the mask stores the new one.
+                let was_jsw = self.cr2 & (1 << 22) != 0;
                 // CR2 mask keeps DMA (bit 8) + DDS (bit 9): 0x7FF0_0EFF has
                 // bit 8 = 0 (DMA was silently dropped on every write — no
                 // DMA request could ever arm). Correct mask: 0x7FF0_0FFF.
+                // (Bit 22 survives the mask and reads back the level.)
                 self.cr2 = value & 0x7FF0_0FFF;
                 if value & (1 << 30) != 0 && was_swstart == 0 {
                     self.last_conv_start = instruction_count();
+                }
+                // Arm one injected sequence on the 0→1 transition only
+                // (silicon starts the injected group on the edge; holding
+                // the bit does not retrigger). Writing 0 clears a pending
+                // (not-yet-launched) arm; a launched sequence runs out.
+                if value & (1 << 22) != 0 && !was_jsw {
+                    self.last_inj_start = instruction_count();
+                    self.jsw_was_set = true;
+                } else if value & (1 << 22) == 0 {
+                    self.jsw_was_set = false;
                 }
             }
             0x0C => self.smpr1 = value,

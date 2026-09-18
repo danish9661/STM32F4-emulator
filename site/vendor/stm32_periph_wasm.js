@@ -550,6 +550,28 @@ export function clear_watchdog_reset_flags() {
 }
 
 /**
+ * Harness = a trigger arrival on DAC channel `ch` from source `src`
+ * (0..7 = TIM6/TIM8/TIM7/TIM5/TIM2/TIM4/EXTI9/SW). With DMAEN set and
+ * no fresh sample staged, latches DMAUDR; otherwise loads DOR.
+ * @param {number} ch
+ * @param {number} src
+ * @param {boolean} dma_staged
+ */
+export function dac_hw_trigger(ch, src, dma_staged) {
+    wasm.dac_hw_trigger(ch, src, dma_staged);
+}
+
+/**
+ * DMAUDR underrun latched for DAC channel `ch` (scope probe).
+ * @param {number} ch
+ * @returns {boolean}
+ */
+export function dac_underrun(ch) {
+    const ret = wasm.dac_underrun(ch);
+    return ret !== 0;
+}
+
+/**
  * Forget any fed frame (stop the camera).
  */
 export function dcmi_clear() {
@@ -737,6 +759,47 @@ export function dma_periph_write(addr, bytes) {
  */
 export function dma_set_completed(stream_idx, success) {
     wasm.dma_set_completed(stream_idx, success);
+}
+
+/**
+ * CT (current double-buffer target) on DMA stream `stream` of
+ * controller `dma` (scope probe for the DBM flip contract).
+ * @param {string} dma
+ * @param {number} stream
+ * @returns {boolean}
+ */
+export function dma_stream_ct(dma, stream) {
+    const ptr0 = passStringToWasm0(dma, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.dma_stream_ct(ptr0, len0, stream);
+    return ret !== 0;
+}
+
+/**
+ * FEIF (FIFO error) on DMA stream `stream` of controller `dma`.
+ * @param {string} dma
+ * @param {number} stream
+ * @returns {boolean}
+ */
+export function dma_stream_feif(dma, stream) {
+    const ptr0 = passStringToWasm0(dma, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.dma_stream_feif(ptr0, len0, stream);
+    return ret !== 0;
+}
+
+/**
+ * FCR FIFO threshold in words on DMA stream `stream` of controller
+ * `dma` (1/2/3/4-word contract probe).
+ * @param {string} dma
+ * @param {number} stream
+ * @returns {number}
+ */
+export function dma_stream_fifo_threshold(dma, stream) {
+    const ptr0 = passStringToWasm0(dma, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.dma_stream_fifo_threshold(ptr0, len0, stream);
+    return ret >>> 0;
 }
 
 /**
@@ -1405,6 +1468,58 @@ export function i2c_register_slave(peripheral, address) {
 }
 
 /**
+ * Harness = the external master putting OUR address on the wire of the
+ * I2C block at `base` (slave-mode entry). Returns true on a match.
+ * @param {number} base
+ * @param {number} addr
+ * @param {boolean} is_read
+ * @returns {boolean}
+ */
+export function i2c_slave_address(base, addr, is_read) {
+    const ret = wasm.i2c_slave_address(base, addr, is_read);
+    return ret !== 0;
+}
+
+/**
+ * Harness = the external master reading a byte FROM us
+ * (slave-transmitter): the guest-staged byte (0xFF when empty).
+ * @param {number} base
+ * @returns {number}
+ */
+export function i2c_slave_read(base) {
+    const ret = wasm.i2c_slave_read(base);
+    return ret;
+}
+
+/**
+ * Slave status probe (0 idle / 1 rx-addressed / 2 tx-addressed /
+ * 3 RX pending) for the I2C block at `base`.
+ * @param {number} base
+ * @returns {number}
+ */
+export function i2c_slave_status(base) {
+    const ret = wasm.i2c_slave_status(base);
+    return ret;
+}
+
+/**
+ * Harness = the external master's STOP (releases slave state).
+ * @param {number} base
+ */
+export function i2c_slave_stop(base) {
+    wasm.i2c_slave_stop(base);
+}
+
+/**
+ * Harness = the external master writing a byte TO us (slave-receiver).
+ * @param {number} base
+ * @param {number} byte
+ */
+export function i2c_slave_write(base, byte) {
+    wasm.i2c_slave_write(base, byte);
+}
+
+/**
  * Drain all events for a tapped I2C slave since the last call. Each entry
  * is a u32: bit31 = START/STOP boundary event (bit30 = 1 START / 0 STOP),
  * otherwise the low byte is one byte the master wrote to the slave.
@@ -1494,6 +1609,17 @@ export function iwdg_reset_flag() {
 }
 
 /**
+ * CLUT entry (scope probe for the LTDC LUT-indexed render path).
+ * @param {number} layer
+ * @param {number} idx
+ * @returns {number}
+ */
+export function ltdc_clut_entry(layer, idx) {
+    const ret = wasm.ltdc_clut_entry(layer, idx);
+    return ret >>> 0;
+}
+
+/**
  * Frames completed by the LTDC scanout since enable.
  * @returns {number}
  */
@@ -1508,6 +1634,18 @@ export function ltdc_get_frame_count() {
  */
 export function ltdc_get_scanline() {
     const ret = wasm.ltdc_get_scanline();
+    return ret >>> 0;
+}
+
+/**
+ * Indexed framebuffer byte → ARGB8888 through the layer CLUT.
+ * @param {number} layer
+ * @param {number} pf
+ * @param {number} byte
+ * @returns {number}
+ */
+export function ltdc_lut_pixel(layer, pf, byte) {
+    const ret = wasm.ltdc_lut_pixel(layer, pf, byte);
     return ret >>> 0;
 }
 
@@ -1554,6 +1692,25 @@ export function pwr_wakeup() {
  */
 export function pwr_wakeup_standby() {
     wasm.pwr_wakeup_standby();
+}
+
+/**
+ * QSPI memory-mapped window live (scope probe: FMODE=11 switch settled).
+ * @returns {boolean}
+ */
+export function qspi_mmap_live() {
+    const ret = wasm.qspi_mmap_live();
+    return ret !== 0;
+}
+
+/**
+ * QSPI memory-mapped window word read (AHB byte offset into the image).
+ * @param {number} offset
+ * @returns {number}
+ */
+export function qspi_mmap_read(offset) {
+    const ret = wasm.qspi_mmap_read(offset);
+    return ret >>> 0;
 }
 
 /**
@@ -1638,12 +1795,31 @@ export function rtc_timestamp() {
 }
 
 /**
+ * Bind an SD-card image of `blocks` 512-byte blocks (erased 0xFF) for
+ * CMD17/18 reads and CMD24 writes. Call before init (mirrors the
+ * QSPI/FSMC image pattern).
+ * @param {number} blocks
+ */
+export function sdio_bind_card(blocks) {
+    wasm.sdio_bind_card(blocks);
+}
+
+/**
  * Current SDIO bus-width select (0 = 1-bit, 1 = 4-bit, 2 = 8-bit).
  * @returns {number}
  */
 export function sdio_bus_width() {
     const ret = wasm.sdio_bus_width();
     return ret;
+}
+
+/**
+ * Bound card block count, 0 = unbound (scope probe).
+ * @returns {number}
+ */
+export function sdio_card_blocks() {
+    const ret = wasm.sdio_card_blocks();
+    return ret >>> 0;
 }
 
 /**
@@ -1659,6 +1835,25 @@ export function sdio_card_irq(set) {
  */
 export function sdio_fault_data_crc() {
     wasm.sdio_fault_data_crc();
+}
+
+/**
+ * Read one 512-byte card block (scope probe for the CMD24 round-trip).
+ * @param {number} block
+ * @returns {Uint8Array}
+ */
+export function sdio_read_block(block) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.sdio_read_block(retptr, block);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
 }
 
 /**
@@ -1819,6 +2014,20 @@ export function tick_peripherals() {
 }
 
 /**
+ * Harness = the break input: drive the break line of timer `name`
+ * (`asserted` = active break). With BKE set an active break clears MOE
+ * at once and latches BIF (+ IRQ when BIE is set); with AOE, MOE re-arms
+ * on the next update event. No-op on non-advanced timers / BKE clear.
+ * @param {string} name
+ * @param {boolean} asserted
+ */
+export function tim_break_input(name, asserted) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.tim_break_input(ptr0, len0, asserted);
+}
+
+/**
  * Host/JS-driven quadrature step on an encoder-mode timer: one TI edge
  * (`ti` 0 = TI1, 1 = TI2; `rising` = edge polarity). Counts per the
  * SMS/polarity rules; no-op outside encoder modes 1-3.
@@ -1845,6 +2054,18 @@ export function tim_inject_capture(name, ch) {
     const ptr0 = passStringToWasm0(name, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     const len0 = WASM_VECTOR_LEN;
     wasm.tim_inject_capture(ptr0, len0, ch);
+}
+
+/**
+ * MOE (BDTR bit 15) of timer `name` (scope probe for the break path).
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function tim_moe(name) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.tim_moe(ptr0, len0);
+    return ret !== 0;
 }
 
 /**
@@ -1911,6 +2132,17 @@ export function uart_irda_tx_class(base) {
  */
 export function uart_lin_break(base) {
     wasm.uart_lin_break(base);
+}
+
+/**
+ * Whether the USART receiver at `base` is muted (RWU set — scope probe
+ * for the mute-mode path).
+ * @param {number} base
+ * @returns {boolean}
+ */
+export function uart_muted(base) {
+    const ret = wasm.uart_muted(base);
+    return ret !== 0;
 }
 
 /**

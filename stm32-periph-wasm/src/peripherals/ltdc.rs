@@ -24,11 +24,29 @@ struct Lx {
     cfbar: u32, cfblr: u32, cfblnr: u32, clutwr: u32,
 }
 
+/// 256-entry color lookup table (one per layer): CLUTWR writes load
+/// address + RGB here (silicon auto-increments CLUTADD after each write
+/// when live; the model tracks the address explicitly). Indexed pixel
+/// formats (L8 pf=5, AL44 pf=6, AL88 pf=7) resolve each framebuffer byte
+/// through this table — without it LUT layers render black.
+#[derive(Clone, Copy)]
+struct Clut {
+    addr: u8,
+    table: [u32; 256],
+}
+
+impl Default for Clut {
+    fn default() -> Self {
+        Self { addr: 0, table: [0; 256] }
+    }
+}
+
 pub struct Ltdc {
     sscr: u32, bpcr: u32, awcr: u32, twcr: u32,
     gcr: u32, srcr: u32, bccr: u32,
     ier: u32, isr: u32, lipcr: u32,
     layers: [Lx; NUM_LAYERS as usize],
+    cluts: [Clut; NUM_LAYERS as usize],
     // Scanout pacing: pixel/line counters advanced per tick while LTDCEN
     // is set. Drives line (LIPCR) and frame-end (F) interrupt flags so the
     // JS display sink can render each frame.
@@ -54,6 +72,7 @@ impl Default for Ltdc {
                 lx[1].bfcr = 0x0607;
                 lx
             },
+            cluts: [Clut::default(); NUM_LAYERS as usize],
             scan_px: 0, scan_line: 0, scan_frame: 0,
             last_tick: crate::system::instruction_count(),
         }
@@ -130,6 +149,32 @@ impl Ltdc {
             sys.p.nvic.borrow_mut().set_intr_pending(LTDC_IRQ);
         }
     }
+
+    /// CLUT entry (scope probe): the 24-bit RGB the indexed formats
+    /// resolve a framebuffer byte through on layer `li`.
+    pub fn clut_entry(&self, li: usize, idx: u8) -> u32 {
+        self.cluts.get(li).map(|c| c.table[idx as usize]).unwrap_or(0)
+    }
+
+    /// Resolve one indexed framebuffer byte to ARGB8888 through the
+    /// layer's CLUT (L8: byte = index; AL44: low nibble = index, high =
+    /// alpha; AL88: byte = index with full alpha). Scope probe for the
+    /// LUT-indexed render path (what the JS sink paints per pixel).
+    pub fn lut_pixel(&self, li: usize, pf: u32, byte: u8) -> u32 {
+        let entry = self.clut_entry(li, match pf {
+            6 => byte & 0x0F, // AL44: low nibble indexes
+            _ => byte,        // L8 (5) / AL88 (7): full byte indexes
+        });
+        let rgb = entry & 0xFFFFFF;
+        match pf {
+            6 => {
+                let a = (byte >> 4) as u32; // high nibble = alpha
+                (a * 0x11 << 24) | rgb // expand 4-bit alpha to 8
+            }
+            7 => 0xFF00_0000 | rgb, // AL88: full alpha
+            _ => 0xFF00_0000 | rgb, // L8: full alpha
+        }
+    }
 }
 
 impl Peripheral for Ltdc {
@@ -151,7 +196,10 @@ impl Peripheral for Ltdc {
                 0x28 => self.layers[_li as usize].cfbar,
                 0x2C => self.layers[_li as usize].cfblr,
                 0x30 => self.layers[_li as usize].cfblnr,
-                0x40 => 0,
+                // CLUTWR readback: current CLUT address in bits 31:24
+                // (silicon reads back the load pointer; the RGB field
+                // is write-only).
+                0x40 => (self.cluts[_li as usize].addr as u32) << 24,
                 _ => 0,
             };
         }
@@ -186,7 +234,16 @@ impl Peripheral for Ltdc {
                 0x28 => self.layers[_li as usize].cfbar = value & 0xFFFF_FFFF,
                 0x2C => self.layers[_li as usize].cfblr = value & 0x1FFF_1FFF,
                 0x30 => self.layers[_li as usize].cfblnr = value & 0x07FF,
-                0x40 => self.layers[_li as usize].clutwr = value & 0xFF_FFFF_FF,
+                // CLUTWR: CLUTADD (bits 31:24) selects the entry, RGB
+                // (bits 23:0) loads it; the address auto-increments
+                // (silicon loads the LUT sequentially without re-addressing).
+                0x40 => {
+                    self.layers[_li as usize].clutwr = value & 0xFF_FFFF_FF;
+                    let clut = &mut self.cluts[_li as usize];
+                    clut.addr = ((value >> 24) & 0xFF) as u8;
+                    clut.table[clut.addr as usize] = value & 0xFFFFFF;
+                    clut.addr = clut.addr.wrapping_add(1);
+                }
                 _ => {}
             }
             return;
@@ -292,5 +349,34 @@ mod tests {
         assert_ne!(l.isr & 1, 0);
         // Pending is set even without ISER (delivery is what needs enable).
         assert!(sys.p.nvic.borrow().irq_pending(LTDC_IRQ));
+    }
+}
+#[cfg(test)]
+mod gap10_tests {
+    use super::*;
+    use crate::system::test_dummy_system;
+
+    // CLUTWR loads entries with auto-increment; readback shows the load
+    // pointer; lut_pixel resolves L8/AL44/AL88 bytes through the table.
+    #[test]
+    fn clut_loads_and_lut_resolves() {
+        let sys = test_dummy_system();
+        let mut l = Ltdc::default();
+        let _ = &sys;
+        // Layer 0 base is 0x84: CLUTWR at 0x84+0x40 = 0xC4.
+        l.write(&sys, 0xC4, (0 << 24) | 0xFF0000); // idx0 = red
+        // Second write carries its own address field (silicon: CLUTADD is
+        // a register field, auto-increment sets it for the NEXT write —
+        // firmware may still address explicitly; both land correctly).
+        l.write(&sys, 0xC4, (1 << 24) | 0x00FF00); // idx1 = green
+        assert_eq!(l.read(&sys, 0xC4) >> 24, 2, "CLUTADD auto-increments");
+        assert_eq!(l.clut_entry(0, 0), 0xFF0000);
+        assert_eq!(l.clut_entry(0, 1), 0x00FF00);
+        assert_eq!(l.lut_pixel(0, 5, 0), 0xFFFF0000, "L8 idx0 = red");
+        assert_eq!(l.lut_pixel(0, 5, 1), 0xFF00FF00, "L8 idx1 = green");
+        // AL44: low nibble indexes, high nibble = alpha*0x11.
+        assert_eq!(l.lut_pixel(0, 6, 0x81), 0x8800FF00, "AL44 a=8 idx1");
+        // AL88: full alpha + table RGB.
+        assert_eq!(l.lut_pixel(0, 7, 0), 0xFFFF0000, "AL88 idx0");
     }
 }

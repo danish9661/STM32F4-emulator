@@ -23,6 +23,26 @@ fn bcd_inc_tr(tr: u32) -> u32 {
     ((tr & 0xFF00_0000) | (new_hr << 16) | (new_min << 8) | new_sec)
 }
 
+/// BCD TR minus one second (SHIFTR borrow path): 00 seconds borrows a
+/// minute, 00:00 borrows an hour (24h wrap). Date fields untouched —
+/// the model's time is second-granularity (see apply_shiftr).
+fn bcd_dec_tr(tr: u32) -> u32 {
+    let sec = (tr >> 0) & 0x7F;
+    let min = (tr >> 8) & 0x7F;
+    let hr = (tr >> 16) & 0x3F;
+    let to_bin = |b: u32| ((b >> 4) * 10) + (b & 0xF);
+    let to_bcd = |v: u32| (((v / 10) << 4) | (v % 10)) & 0x7F;
+    let (s, m, h) = (to_bin(sec), to_bin(min), to_bin(hr & 0x3F));
+    let (ns, nm, nh) = if s > 0 {
+        (s - 1, m, h)
+    } else if m > 0 {
+        (59, m - 1, h)
+    } else {
+        (59, 59, if h > 0 { h - 1 } else { 23 })
+    };
+    ((tr & 0xFF00_0000) | ((to_bcd(nh) & 0x3F) << 16) | (to_bcd(nm) << 8) | to_bcd(ns))
+}
+
 fn bcd_match(tr_bcd: u32, alarm_bcd: u32, mask_bits: u32) -> bool {
     // alarm_bcd has MSB bits per field indicating "don't care"
     let _ = mask_bits;
@@ -68,6 +88,10 @@ pub struct Rtc {
     wut_reload: u16,
     wut_count: u16,
     wut_armed: bool,
+    /// ALRMASSR/ALRMBSSR programmed flags: the sub-second alarm gate
+    /// only applies once firmware writes the register (see ss_match).
+    ssa_set: bool,
+    ssb_set: bool,
     /// Tamper-pin physics state: last pin level + consecutive-match filter
     /// count (see `tamper_pin`). Reset values: pull-up idle high.
     tamp_level: bool,
@@ -95,6 +119,68 @@ impl Rtc {
 
     fn check_alarm(&mut self, sys: &System) {
         self.check_alarm_impl(sys);
+    }
+
+    /// SHIFTR (offset 0x2C) write semantics (RM0090 §26.3.7): the write
+    /// applies atomically once per APB cycle — SUBFS (bits 14:0) seconds-
+    /// fractions are SUBTRACTED from SSR, with borrow into TR when SSR
+    /// underflows (one second less); ADD1S (bit 31) then ADDS one second
+    /// to TR/calendar (applied after the subtract, so ADD1S+SUBFS = net
+    /// shift of 1s − SUBFS fractions). SHPF (ISR bit 3) latches while the
+    /// shift is pending and clears when it completes — the model applies
+    /// the shift synchronously and leaves SHPF clear (no pending window
+    /// is observable on the instruction clock). RSF (ISR bit 5) latches:
+    /// the calendar shadow just changed outside the normal tick.
+    /// No-op when the calendar is initializing (ISR bit 7 INIT set):
+    /// silicon rejects shifts during init mode.
+    fn apply_shiftr(&mut self, sys: &System, value: u32) {
+        self.shiftr = value;
+        if self.isr & (1 << 7) != 0 {
+            return; // init mode: shift rejected
+        }
+        let subfs = value & 0x7FFF;
+        let ssr = self.ssr & 0x7FFF;
+        if subfs != 0 {
+            if subfs <= ssr {
+                self.ssr = (self.ssr & !0x7FFF) | (ssr - subfs);
+            } else {
+                // Borrow: SSR wraps within its PREDIV_S range and the
+                // calendar loses one second (TR decrements by one BCD
+                // second; date borrow is out of scope — seconds field
+                // only, matching the model's second-granularity time).
+                let pred = (self.prer & 0x7FFF) + 1;
+                self.ssr = (self.ssr & !0x7FFF) | ((pred + ssr - subfs) & 0x7FFF);
+                self.tr = bcd_dec_tr(self.tr);
+            }
+        }
+        if value & (1 << 31) != 0 {
+            self.tr = bcd_inc_tr(self.tr);
+        }
+        self.isr &= !(1 << 3); // SHPF: no pending window
+        self.isr |= 1 << 5; // RSF: shadow changed
+        let _ = sys;
+    }
+
+    /// ALRMASSR/ALRMBSSR (offsets 0x44/0x48) sub-second alarm match:
+    /// MASKSS (bits 27:24) selects how many SS field bits (14:0) must
+    /// match SSR for the alarm to fire — 0 = all 15 bits, N = top 15−N
+    /// bits (silicon masks the low N bits). The second-level alarm gate
+    /// (`ss_match`) is ANDed with the TR date match in check_alarm_impl:
+    /// with MASKSS=15 (all masked) the sub-second gate passes always.
+    /// RESET VALUE: ALRMASSR resets to 0 (MASKSS=0, SS=0 — an exact-SS=0
+    /// gate). Firmware that never programs ALRMASSR must NOT be gated by
+    /// a stale SSR: the gate is only enforced once firmware WRITES the
+    /// register (silicon's reset SS field only matters against a running
+    /// sub-second counter; the model's SSR sits at reset 0x7FFF, which
+    /// would spuriously block every never-programmed alarm). Tracked by
+    /// `ssa_set`/`ssb_set`, armed by the write arms below.
+    fn ss_match(alrmassr: u32, ssr: u32) -> bool {
+        let maskss = ((alrmassr >> 24) & 0xF) as u32;
+        if maskss >= 15 {
+            return true;
+        }
+        let mask = !((1u32 << maskss) - 1) & 0x7FFF;
+        ((alrmassr & 0x7FFF) & mask) == ((ssr & 0x7FFF) & mask)
     }
 
     /// Harness = the tamper pin: latch TAMP1F (ISR bit 13). Fires IRQ 2
@@ -185,7 +271,8 @@ impl Rtc {
         }
     }
 
-    fn check_alarm_impl(&mut self, sys: &System) {        let alra_enabled = self.cr & (1 << 8) != 0; // ALRAE
+    fn check_alarm_impl(&mut self, sys: &System) {
+        let alra_enabled = self.cr & (1 << 8) != 0; // ALRAE
         let alrb_enabled = self.cr & (1 << 9) != 0; // ALRBE
         if !alra_enabled && !alrb_enabled { return; }
 
@@ -205,9 +292,17 @@ impl Rtc {
             return;
         }
 
+        // Sub-second gate (ALRMASSR/ALRMBSSR MASKSS): ANDed with the TR
+        // date match below — with MASKSS=15 the gate passes always.
+        // Unprogrammed registers (reset 0) do NOT gate: firmware that
+        // never writes ALRMASSR (deep_sleep_demo, standby_demo) must
+        // fire on the TR match alone.
+        let ssa_ok = if self.ssa_set { Self::ss_match(self.alrmassr, self.ssr) } else { true };
+        let ssb_ok = if self.ssb_set { Self::ss_match(self.alrmbssr, self.ssr) } else { true };
+
         // Compare alarm with current time
         if alra_enabled && !alrb_enabled {
-            if bcd_match(self.tr, self.alrmar, self.alrmar) {
+            if ssa_ok && bcd_match(self.tr, self.alrmar, self.alrmar) {
                 self.isr |= 1 << 8; // ALRAF
                 if self.cr & (1 << 12) != 0 { // ALRAIE
                     sys.p.nvic.borrow_mut().set_intr_pending(irq);
@@ -216,7 +311,7 @@ impl Rtc {
         }
 
         if alrb_enabled && !alra_enabled {
-            if bcd_match(self.tr, self.alrmbr, self.alrmbr) {
+            if ssb_ok && bcd_match(self.tr, self.alrmbr, self.alrmbr) {
                 self.isr |= 1 << 9; // ALRBF
                 if self.cr & (1 << 13) != 0 { // ALRBIE
                     sys.p.nvic.borrow_mut().set_intr_pending(irq);
@@ -225,8 +320,8 @@ impl Rtc {
         }
 
         if alra_enabled && alrb_enabled {
-            let alra_match = bcd_match(self.tr, self.alrmar, self.alrmar);
-            let alrb_match = bcd_match(self.tr, self.alrmbr, self.alrmbr);
+            let alra_match = ssa_ok && bcd_match(self.tr, self.alrmar, self.alrmar);
+            let alrb_match = ssb_ok && bcd_match(self.tr, self.alrmbr, self.alrmbr);
             if alra_match {
                 self.isr |= 1 << 8;
                 if self.cr & (1 << 12) != 0 {
@@ -366,19 +461,79 @@ impl Peripheral for Rtc {
             }
             0x24 => self.wpr = value,
             0x28 => self.ssr = value,
-            0x2C => self.shiftr = value,
+            0x2C => self.apply_shiftr(sys, value),
             0x30 => self.tstr = value,
             0x34 => self.tsdr = value,
             0x38 => self.tsssr = value,
             0x3C => self.calr = value,
             0x40 => self.tafcr = value,
-            0x44 => self.alrmassr = value,
-            0x48 => self.alrmbssr = value,
+            0x44 => {
+                self.alrmassr = value;
+                self.ssa_set = true; // gate now enforced (see ss_match)
+                self.check_alarm(sys);
+            }
+            0x48 => {
+                self.alrmbssr = value;
+                self.ssb_set = true;
+                self.check_alarm(sys);
+            }
             0x50..=0x9C => {
                 let idx = ((offset - 0x50) / 4) as usize;
                 if idx < 20 { self.bkp[idx] = value; }
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system::INSTRUCTION_COUNT;
+    use std::sync::atomic::Ordering;
+
+    // SHIFTR SUBFS borrows one second when SSR underflows; ADD1S adds one.
+    #[test]
+    fn shiftr_subfs_borrows_and_add1s_adds() {
+        let sys = crate::system::test_dummy_system();
+        // Drive through a slot-bound instance instead (the leaked pointer
+        // above is not slot-bound; rebuild properly here).
+        let mut boxed = Rtc::new("RTC").unwrap();
+        let r = boxed.as_any_mut().downcast_mut::<Rtc>().unwrap();
+        r.write(&sys, 0x0C, 0); // exit init (clear INIT bit 7)
+        r.write(&sys, 0x10, (0 << 16) | 999); // PRER: 1000 ticks/sec
+        r.write(&sys, 0x00, 0x0012_3050); // TR 12:30:50
+        r.write(&sys, 0x28, 100); // SSR=100 sub-seconds
+        r.write(&sys, 0x2C, 200); // SUBFS=200 > SSR → borrow
+        assert_eq!(r.tr & 0x7F, 0x49, "borrow: seconds 50→49, got {:#x}", r.tr & 0x7F);
+        assert_eq!(r.isr & (1 << 5), 1 << 5, "RSF latches on shift");
+        r.write(&sys, 0x2C, 1 << 31); // ADD1S
+        assert_eq!(r.tr & 0x7F, 0x50, "ADD1S: seconds back to 50");
+    }
+
+    // ALRMASSR MASKSS gates the alarm on SSR: exact match fires, masked
+    // mismatch blocks, MASKSS=15 passes regardless of SSR.
+    #[test]
+    fn alrmassr_maskss_gates_alarm() {
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Rtc::new("RTC").unwrap();
+        let r = boxed.as_any_mut().downcast_mut::<Rtc>().unwrap();
+        r.write(&sys, 0x0C, 0);
+        r.write(&sys, 0x00, 0x0012_3050);
+        r.write(&sys, 0x28, 0x100); // SSR
+        r.write(&sys, 0x1C, 0x0012_3050 | (1 << 31) | (1 << 23) | (1 << 15) | (1 << 7)); // ALRMAR = TR, date masked
+        r.write(&sys, 0x44, 0x100); // ALRMASSR SS=SSR, MASKSS=0 (all bits)
+        r.write(&sys, 0x08, 1 << 8); // ALRAE
+        assert_ne!(r.isr & (1 << 8), 0, "ALRAF with matching SSR");
+        // Mismatch blocks.
+        r.write(&sys, 0x0C, 0); // (clear ALRAF: ISR write path stores value)
+        r.isr &= !(1 << 8);
+        r.write(&sys, 0x28, 0x101); // SSR drifts by one
+        r.write(&sys, 0x08, 1 << 8); // re-arm check
+        assert_eq!(r.isr & (1 << 8), 0, "ALRAF blocked on SSR mismatch");
+        // MASKSS=15: gate passes regardless.
+        r.write(&sys, 0x44, (15 << 24) | 0);
+        r.write(&sys, 0x08, 1 << 8);
+        assert_ne!(r.isr & (1 << 8), 0, "MASKSS=15 passes any SSR");
     }
 }

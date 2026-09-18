@@ -1,12 +1,13 @@
 # Ethernet / Networking — board support matrix
 
-Status (2026-09-14): the Ethernet **MAC level is fully modeled** on every
+Status (2026-09-18): the Ethernet **MAC level is fully modeled** on every
 board that has the silicon (F407 family + F429), including the register
 positions cross-checked against CMSIS `stm32f407xx.h` (DMASR/DMAIER
 AIS=15/ERS=14/FBES=13/RWTS=9, MACFFR SAF=9/SAIF=8/HPF=10 — all verified,
 see §6). F401/F411 have no Ethernet silicon at all. What is "left" is
 only the physical/pin layer and a few documented simplifications — see
-§4. Details live in `AGENTS.md` §29.
+§4. Details live in `AGENTS.md` §29. Re-verified this session: mock-model
+18/18 + mock-consumer 44/44 green (see §5).
 
 ## 1. Board silicon summary
 
@@ -58,7 +59,7 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 | Socket API (BSD shapes) | software (needs OS threads) | ✅ (`lwip_sock.c` over real lwIP) | `lwip_demo`: same markers + "LWIP SELECT OK" + "LWIP ERR OK" | threads/pthreads/select-writefds | Single-threaded pumploop: blocking calls pump netif+timers; `select()` is level-triggered polling with timeout; real `err_t` codes flow through (misuse probes assert them). Threads genuinely need a scheduler — the only honest gap left here. |
 | MII/RMII pin levels (TX_EN/CRS_DV/RXD/COL/MDIO/MDC) | pins | ✅ | `eth_pins_test` (+`_f429`): AF setup readback, TX/RX/COL/idle levels | nibble data + clocks | ORed into GPIO IDR via pin callbacks when PMC selects the mode (RMII set, MII COL). Nibble data at 25/50 MHz is unobservable by any firmware (Nyquist) — activity levels + COL events are the complete contract; COL stretches across the collided TX (the real pulse is unsampleable). |
 | STOP + WOL wake | power + MAC | ✅ | `eth_feat_test` "WOKE BY WOL" (magic reply queued, STOP via WFI, sleep drain injects, IRQ62 wakes; CYCCNT>50k proves real sleep) | — | WKUP ISR must not ack status on entry (destroys the evidence); thread mode acks after observing. |
-| Half-duplex collisions/backoff, MII/RMII pin modes | yes (PHY/wire) | ➖ | — | not modeled | Needs a pin layer (MII/RMII, CRS/COL); no firmware exercises them. Error reporting (EC/CC) and deferral (DB) above are modeled. |
+| Half-duplex collisions/backoff, MII/RMII pin modes | yes (PHY/wire) | ➖ | — | not modeled | Needs a pin layer (MII/RMII, CRS/COL); no firmware exercises them. Error reporting (EC/CC) and deferral (DB) above are modeled. Pin *levels* (TX_EN/CRS_DV/RXD/COL/MDIO/MDC in GPIO IDR) ARE modeled — see the row above. |
 
 ## 3. Per-board verdict
 
@@ -81,6 +82,7 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 # Mock harnesses (both sides of the driver/model seam, no firmware build):
 npm run test:eth:mock   # mock-model (18 checks, fake bindings + real driver)
                         # + mock-consumer (44 checks, fake firmware + real model)
+                        # + periph mock-consumer (262 checks incl. t_pps/t_nibble ETH pins)
 # Matrix (netsim, includes feat + lwip on F429):
 node site/test_board_matrix.mjs eth_feat_test   # 66 markers + PPS scope assert
 node site/test_board_matrix.mjs lwip_demo

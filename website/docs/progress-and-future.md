@@ -11,14 +11,17 @@ document is the readable summary. Since AGENTS.md §23 the Rust Thumb-2
 core is the sole backend (Unicorn 2.1.4 removed after bit-identical parity
 was proven) — Unicorn-era mechanisms below (hooks, ISR pump, wedge,
 `maxBatch`, `?cpu=`) are marked as archaeology where they appear.
-Peripheral-model gap batches 6-8 (FLASH errors, SPI CRC/flags, USART
-flow+faults, SDIO ACMD/timing, USART LIN/Smartcard/IrDA, SPI slave,
-RTC tamper physics, RDP, ADC overrun, USART IDLE/SBK, TIM OPM, GPIO
-LCKR) are covered in AGENTS.md §§35–36 plus the batch-8 commit; the
+Peripheral-model gap batches 6–10 (batch 6: FLASH errors, SPI CRC/flags,
+USART flow+faults, SDIO ACMD, RTC WUT/stamp; batch 7: SDIO timing, USART
+protocols, SPI slave, tamper physics, RDP; batch 8: ADC OVR, USART
+IDLE/SBK, TIM OPM, GPIO LCKR; batch 9: ADC injected group, TIM advanced,
+RTC shift/SS, USART mute; batch 10: the six "out of scope" walls — SDIO
+CMD24, QSPI mmap, LTDC CLUT, I2C slave, DMA FCR/DBM, DAC DMAUDR) are
+covered in AGENTS.md §§35–38; the
 mock-consumer harness pins them (`t_flash_err`, `t_spi_crc_err`,
 `t_usart_flow_err`, `t_sdio_acmd`, `t_rtc_wut_ts`, `t_sdio_timing`,
 `t_usart_protocols`, `t_spi_slave_gate`, `t_rtc_tamper_phys`,
-`t_flash_rdp`, `t_honor_pass` — 262 checks).
+`t_flash_rdp`, `t_honor_pass`, `t_gap9`, `t_gap10` — 312 checks).
 
 ## What works today
 

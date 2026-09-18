@@ -2,7 +2,7 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=38';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=40';
 import { createEmulator } from './emulator.js?v=2';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
@@ -134,6 +134,8 @@ const DEVICE_FIRMWARES = {
     spi_tft_test_f411: { spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4015, size: 0x200000, cs: 'PB12', data: new Uint8Array(0x200000).fill(0xFF) }] },
     spi_tft_test_f429: { spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4015, size: 0x200000, cs: 'PB12', data: new Uint8Array(0x200000).fill(0xFF) }] },
     qspi_test_f429: { qspi: [{ peripheral: 'QUADSPI', size: 256 }] },
+    gap10_sdio: { sdio: { blocks: 4 } },
+    gap10_qspi: { qspi: [{ peripheral: 'QUADSPI', size: 256 }] },
 };
 
 // audio_test needs the same 64-sample PCM16 WAV the node harness
@@ -432,10 +434,10 @@ const boot = async () => {
         // ── local mode: WASM runs in the browser (default) ──
         // Board variant per firmware preset (SVD + flash/RAM sizes), honoring
         // the board selector when the preset supports the selected board.
-        // NOTE (VENDOR_V): vendor asset versions (?v=38) must be bumped together
+        // NOTE (VENDOR_V): vendor asset versions (?v=40) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
         const { key: boardKey, board } = boardForSelection(image.name, boardSelectEl ? boardSelectEl.value : 'all');
-        const svdXml = await fetch('vendor/' + board.svd + '?v=38').then((r) => r.text());
+        const svdXml = await fetch('vendor/' + board.svd + '?v=40').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
@@ -454,7 +456,7 @@ const boot = async () => {
             svdXml,
             flash_size: board.flash_size,
             ram_size: board.ram_size,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=38',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=40',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),

@@ -65,7 +65,7 @@ export async function createEmulator(opts) {
         periph_read, periph_write, tick, tick_n, tick_peripherals, get_uart_output,
         dma_get_pending_count, dma_get_pending, dma_set_completed,
         dma_periph_read, dma_periph_write,
-        is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, qspi_register_flash, init_svd,
+        is_watchdog_reset_requested, add_spi_flash, add_i2c_eeprom, qspi_register_flash, sdio_bind_card, init_svd,
         eth_is_tx_poll, eth_get_tx_desc_addr, eth_clear_tx_poll,
         eth_is_rx_poll, eth_get_rx_desc_addr, eth_clear_rx_poll, eth_tx_done, eth_rx_done,
         eth_mac_accept, eth_rx_csum_status, eth_check_wol, eth_tx_wire_busy,
@@ -289,6 +289,18 @@ export async function createEmulator(opts) {
     for (const cfg of (ext_devices.qspi || [])) {
         qspi_register_flash(cfg.peripheral || 'QUADSPI', new Uint8Array(cfg.data || new Uint8Array(cfg.size || 256)));
     }
+    // SD card image backend. The SDIO model boots with NO card bound
+    // (card_blocks()==0, reads erased) — real silicon always has a card
+    // in the slot, so the driver binds the image pre-boot (same pattern
+    // as qspi above). `ext_devices.sdio: {blocks: N}` (default 4×512B).
+    // NOTE: sdio_bind_card lands on the live model (not a pre-init
+    // global like qspi_register_flash), so it runs AFTER init_svd below
+    // (see the second sdio block after init); this pre-init loop only
+    // records the request.
+    let sdioBlocks = 0;
+    if (ext_devices.sdio) {
+        sdioBlocks = (ext_devices.sdio.blocks || 4) >>> 0 || 4;
+    }
     // Register-file I2C devices (DS3231 RTC). init is a &[u8] snapshot of the
     // register file: BCD time regs 0x00-0x06, temp MSB/LSB 0x11/0x12. The
     // `rtc` device config is shorthand for a regfile at 0x68 that also
@@ -349,6 +361,12 @@ export async function createEmulator(opts) {
     // call — see the SYS comment in stm32-periph-wasm/src/lib.rs.)
     if (svdXml) init_svd(svdXml);
     else bindings.init();
+
+    // SD card image: bind AFTER init (live-model call, not a pre-init
+    // global). Guarded for older wasm bundles without the export.
+    if (sdioBlocks > 0 && typeof sdio_bind_card === 'function') {
+        try { sdio_bind_card(sdioBlocks); } catch {}
+    }
 
     // ── shared virtual-peripheral devices (moved above the wasm branch
     // so BOTH backends use them; the wasm step() calls processDevices()

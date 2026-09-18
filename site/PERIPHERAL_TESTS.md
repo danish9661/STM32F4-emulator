@@ -537,6 +537,36 @@ save-slot menu → name char 'a' (0x61) + Enter → asserts the firmware's
 | test_fpu | fpu_test | VFPv4-SP/CPACR | `FPU all PASS`, `FMA 28800000 PASS`, `FPU done` |
 | test_fpuirq | fpu_irq_test | VFPv4-SP/SysTick/NVIC | `FPU IRQ all PASS`, `S0 11111111 ok`, `FPSCR 00000000 ok` |
 | test_mpu | mpu_test | MPU/SCB | `MPU all PASS`, `MPU done`, exact MMFSR/MMFAR per probe |
+| test_usb | usb_cdc_test | USB OTG FS | `USB echo OK`, byte-equal echoes, STALL set/clear |
+| test_arduino_boards | arduino_* (8 builds) | GPIO/USART/SysTick | boot banner + `tick 0 LED=ON` + `Arduino done` + ODR toggles, 8/8 |
+| test_board_matrix | 156 board+firmware pairs | all | `MATRIX pass=156 fail=0` |
+| test_qspi_cdp | qspi_test (browser CDP) | QSPI | `QSPI OK` on the page UART |
+| test_browser | 41 console presets (browser CDP) | all | 41 PASS incl. `WOKE FROM STANDBY`, `WOKE BY WOL` |
+| test_wasm (separate script) | blinky/eth/d shown below | CPU/netsim | 7/7 (see `npm run test:wasm`) |
+| test_eth_mock_model | — (model unit) | ETH model | PASS |
+| test_eth_mock_consumer | — (mock consumer) | ETH/netsim | PASS |
+| test_periph_mock_consumer | — (mock consumer) | all peripherals | `MOCK-PERIPH PASS (262 checks)` |
+| test_stm32f4_api | blinky/rtc/buzzer | facade GPIO/USART | PASS |
+| test_stm32f4_periph | — | facade SPI/I2C | PASS |
+| test_ws_bridge | — (in-process) | bridge protocol | 23/23 |
+| test_multi_instance | blinky/rtc/buzzer ×7 | instance hygiene | PASS |
+| test_candemo | can_demo | CAN bus | showcase phases |
+| test_can_inject | can_host_rx | CAN host RX | `RX id=0x00000123 data=HELLO!!!` |
+| test_lowpower | deep_sleep_demo | PWR/RTC/WFI | `WOKE FROM STOP`, WUF |
+| test_standby (script, not in chain) | standby_demo | PWR/RTC/WFI | `WOKE FROM STANDBY`, WUF+SBF |
+| test_edge_cases | — | loaders/MMIO/reset | PASS |
+| test_watchdog / test_wwdg / test_wwdg_window | watchdog_demo / wwdg_demo / wwdg_window_demo | IWDG/WWDG/RCC | `IWDG reset detected` / `WWDG reset detected` |
+| test_tim_capture | tim_capture_demo | TIM3 capture | `cap=N` per injected edge |
+| test_qspi | qspi_test | QUADSPI | `QSPI OK` |
+| test_fsmc / test_dcmi / test_fsmc_dcmi | fsmc_test / dcmi_test | FSMC/DCMI | `FSMC Test: done` / `DCMI Test: done` |
+| probe_freertos | freertos_test | SVC/PendSV/TIM | `PROBE PASS` |
+| test_component_* (5) | led/button/pwm/i2cregfile/adc | components API | PASS each |
+
+The full `npm test` chain is 46 entries (see `package.json` → `scripts.test`);
+the table above names every one. `test_standby` runs via its `test:standby`
+script (and the browser suite); `cargo test --release` (217 lib tests,
+single-threaded — parallel flakes on the shared `INSTRUCTION_COUNT`) and
+`npm run test:wasm` (7/7) run alongside.
 
 Plus the Rust unit suite: `cargo test` (135 tests — CPU/decoder incl. FPU
 encoding/semantics/stacking tests and 36 interrupt/system-fidelity tests

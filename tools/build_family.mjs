@@ -31,6 +31,7 @@ const DEMOS = {
     eth_pins_test: { fams: ['f429'] },
     fsmc_test: { fams: ['f429'] }, dcmi_test: { fams: ['f429'] },
     qspi_test: { fams: ['f429'] }, deep_sleep_demo: {}, standby_demo: {}, ltdc_test: { fams: ['f429'] },
+    gap10_sdio: {}, gap10_qspi: {}, gap10_ltdc: {}, gap10_i2c: {}, gap10_dma: {}, gap10_dac: {},
     eth_http: { fams: ['f429'], srcs: ['startup.c', 'eth_http.ino'] },
     eth_dhcp: { fams: ['f429'], srcs: ['startup.c', 'eth_dhcp.ino'] },
     eth_test: { fams: ['f429'] },

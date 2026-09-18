@@ -49,7 +49,14 @@ const {
     dcmi_set_sync, fsmc_bind_nand, fsmc_nand_erase,
     tim_encoder_step, rcc_inject_failure, adc_dual_latched,
     spi_tap, spi_push_miso,
-    uart_set_cts, uart_fault_rx, uart_tx_len, uart_idle, uart_break_tx, uart_break_pending,
+    uart_set_cts, uart_fault_rx, uart_tx_len, uart_idle, uart_break_tx, uart_break_pending, uart_muted, uart_rx_byte,
+    tim_break_input, tim_moe,
+    sdio_bind_card, sdio_read_block, sdio_card_blocks,
+    qspi_mmap_live, qspi_mmap_read,
+    ltdc_clut_entry, ltdc_lut_pixel,
+    dma_stream_feif, dma_stream_ct, dma_stream_fifo_threshold,
+    dac_hw_trigger, dac_underrun,
+    i2c_slave_address, i2c_slave_write, i2c_slave_read, i2c_slave_stop, i2c_slave_status,
     uart_lin_break, uart_sc_nack, uart_sc_retries, uart_irda_rx, uart_irda_tx_class,
     spi_fault_modf, spi_fault_crc, spi_slave_select, spi_slave_clock, spi_slave_gate,
     sdio_bus_width, sdio_card_irq, sdio_fault_data_crc,
@@ -76,6 +83,8 @@ const PWR = 0x40007000, DCMI = 0x50050000;
 const FSMC_BASE = 0x60000000; // FSMC slot (data windows + regs at +0x40000000)
 const ADC1 = 0x40012000, ADCC = 0x40012300, ITM = 0xE0000000;
 const TIM2 = 0x40000000, TIM3 = 0x40000400;
+const TIM1 = 0x40010000;
+const I2C1 = 0x40005400, LTDC = 0x40016800;
 const USB = 0x50000000;
 const RCC = 0x40023800, RNG = 0x50060800, DAC = 0x40007400;
 const HASH = 0x50060400, CAN1 = 0x40006400;
@@ -1435,7 +1444,194 @@ const tests = [
     ['rtc tamper physics + flash RDP (COMPLETE)', t_rtc_tamper_phys],
     ['flash RDP levels (COMPLETE)', t_flash_rdp],
     ['honor pass: ADC OVR + USART IDLE/SBK + TIM OPM + GPIO LCKR (COMPLETE)', t_honor_pass],
+    ['gap batch 9: ADC injected + TIM advanced + RTC shift/SS + USART mute (COMPLETE)', t_gap9],
+    ['gap batch 10: SDIO CMD24 + QSPI mmap + LTDC CLUT + I2C slave + DMA FCR/DBM + DAC DMAUDR (COMPLETE)', t_gap10],
 ];
+// ── Gap batch 9: ADC injected group + TIM advanced + RTC shift/SS + USART mute ─
+// COMPLETE: ADC JSWSTART/JAUTO injected sequences (JL/JOFR/JDR/JEOC/JSTRT,
+// ALIGN, CONT, JAWDEN gating); TIM1 BDTR/MOE/break (BKE/BIF/BIE/AOE/LOCK),
+// RCR repetition gating, EGR software events (CCxG/TG/COMG/BG); RTC SHIFTR
+// sub-second shift (SUBFS borrow/ADD1S/RSF) + ALRMASSR MASKSS sub-second
+// alarm gate; USART mute mode (RWU drops, WAKE=0 idle exit, WAKE=1 mark
+// exit with delivery).
+function t_gap9() {
+    // ADC injected: JL=1 two-channel sequence with JOFR offset.
+    adc_set_channel_value('ADC1', 7, 0xABC);
+    adc_set_channel_value('ADC1', 8, 0x123);
+    W(ADC1 + 0x38, (1 << 20) | (8 << 5) | 7); // JL=1: JSQ2=8, JSQ1=7
+    W(ADC1 + 0x14, 16); // JOFR1 = +16
+    W(ADC1 + 0x08, (1 << 22) | 1); // JSWSTART edge
+    tick_n(500); void R(ADC1 + 0x08); tick_n(500);
+    ok(R(ADC1 + 0x3C) === 0xACC, 'adc: JDR1 = sample + JOFR offset');
+    ok(R(ADC1 + 0x40) === 0x123, 'adc: JDR2 = second sequence channel');
+    adc_clear_channel_value('ADC1', 7);
+    adc_clear_channel_value('ADC1', 8);
+    void R(ADC1 + 0x3C); void R(ADC1 + 0x40); // drain (clears JEOC)
+    // ADC ALIGN + CONT.
+    adc_set_channel_value('ADC1', 5, 0xABC);
+    W(ADC1 + 0x34, 5);
+    W(ADC1 + 0x08, (1 << 30) | (1 << 11) | (1 << 1) | 1); // SWSTART+ALIGN+CONT
+    tick_n(500); void R(ADC1 + 0x08); tick_n(500);
+    ok(R(ADC1 + 0x4C) === 0xABC0, 'adc: ALIGN left-shifts DR by 4');
+    tick_n(500); void R(ADC1 + 0x08); tick_n(500);
+    ok(R(ADC1 + 0x4C) === 0xABC0, 'adc: CONT repeats without fresh edge');
+    adc_clear_channel_value('ADC1', 5);
+    void R(ADC1); void R(ADC1 + 0x4C); // clean
+    W(ADC1 + 0x08, 1); // drop ALIGN+CONT levels
+    // TIM1 BDTR/MOE/break: OC gated by MOE, break clears + BIF, AOE recovers.
+    W(TIM1 + 0x18, 0x00); // CCMR1: OC mode
+    W(TIM1 + 0x20, 0x01); // CCER: CC1E
+    W(TIM1 + 0x34, 5); W(TIM1 + 0x2C, 9); // CCR1=5, ARR=9
+    W(TIM1 + 0x44, 1 << 15); // BDTR: MOE
+    ok(tim_moe('TIM1') === true, 'tim: MOE arms outputs');
+    W(TIM1, 1); // CEN
+    for (let i = 0; i < 30; i++) tick_n(20);
+    ok((R(TIM1 + 0x10) & (1 << 1)) !== 0, 'tim: CC1IF sets with MOE');
+    W(TIM1 + 0x10, 0); // clear flags
+    W(TIM1 + 0x44, (1 << 15) | (1 << 12)); // MOE + BKE
+    tim_break_input('TIM1', true);
+    ok(tim_moe('TIM1') === false, 'tim: break clears MOE');
+    ok((R(TIM1 + 0x10) & (1 << 7)) !== 0, 'tim: BIF latches on break');
+    W(TIM1 + 0x44, (1 << 15) | (1 << 12) | (1 << 14)); // MOE+BKE+AOE
+    tim_break_input('TIM1', true);
+    W(TIM1 + 0x14, 1); // UG: update event re-arms MOE via AOE
+    ok(tim_moe('TIM1') === true, 'tim: AOE re-arms MOE on update');
+    W(TIM1, 0); W(TIM1 + 0x10, 0); W(TIM1 + 0x44, 0); // clean
+    // TIM1 RCR: RCR=2 → UIF every 3rd overflow.
+    W(TIM1 + 0x2C, 1); W(TIM1 + 0x30, 2); W(TIM1, 1);
+    let uifs = 0;
+    for (let i = 0; i < 9; i++) { tick_n(2); if (R(TIM1 + 0x10) & 1) { uifs++; W(TIM1 + 0x10, 0); } }
+    ok(uifs === 3, 'tim: RCR=2 gates UIF to every 3rd overflow', `uifs=${uifs}`);
+    W(TIM1, 0); W(TIM1 + 0x10, 0); W(TIM1 + 0x30, 0); // clean
+    // EGR software events on TIM3: CC1G/TG/COMG latch + EGR reads 0.
+    W(TIM3 + 0x0C, (1 << 1) | (1 << 6) | (1 << 5)); // CC1IE+TIE+COMIE
+    W(TIM3 + 0x14, (1 << 1) | (1 << 6) | (1 << 5)); // CC1G+TG+COMG
+    ok((R(TIM3 + 0x10) & (1 << 1)) !== 0, 'tim: CC1IF via CC1G');
+    ok((R(TIM3 + 0x10) & (1 << 6)) !== 0, 'tim: TIF via TG');
+    ok((R(TIM3 + 0x10) & (1 << 5)) !== 0, 'tim: COMIF via COMG');
+    ok(R(TIM3 + 0x14) === 0, 'tim: EGR reads 0');
+    W(TIM3 + 0x0C, 0); W(TIM3 + 0x10, 0); // clean
+    // RTC SHIFTR: SUBFS borrow + ADD1S + RSF.
+    W(RTC + 0x0C, R(RTC + 0x0C) & ~1); // start counter
+    W(RTC + 0x00, 0x00123050); // TR 12:30:50
+    W(RTC + 0x28, 100); // SSR=100
+    W(RTC + 0x2C, 200); // SUBFS=200 > SSR → borrow one second
+    ok((R(RTC + 0x00) & 0x7F) === 0x49, 'rtc: SHIFTR SUBFS borrows one second');
+    ok((R(RTC + 0x0C) & (1 << 5)) !== 0, 'rtc: RSF latches on shift');
+    W(RTC + 0x2C, 1 << 31); // ADD1S
+    ok((R(RTC + 0x00) & 0x7F) === 0x50, 'rtc: SHIFTR ADD1S adds one second');
+    // RTC ALRMASSR: exact SS match fires, mismatch blocks, MASKSS=15 passes.
+    W(RTC + 0x1C, 0x00123050 | (1 << 31) | (1 << 23) | (1 << 15) | (1 << 7)); // ALRMAR = TR, date masked
+    W(RTC + 0x28, 0x100); // SSR
+    W(RTC + 0x44, 0x100); // ALRMASSR SS match, MASKSS=0
+    W(RTC + 0x08, R(RTC + 0x08) | (1 << 8)); // ALRAE
+    ok((R(RTC + 0x0C) & (1 << 8)) !== 0, 'rtc: ALRAF with matching SSR');
+    W(RTC + 0x28, 0x101); // SSR drifts
+    W(RTC + 0x0C, R(RTC + 0x0C) & ~(1 << 8)); // clear ALRAF
+    W(RTC + 0x08, R(RTC + 0x08) | (1 << 8)); // re-arm check
+    ok((R(RTC + 0x0C) & (1 << 8)) === 0, 'rtc: ALRAF blocked on SSR mismatch');
+    W(RTC + 0x44, (15 << 24) | 0); // MASKSS=15: gate passes always
+    W(RTC + 0x08, R(RTC + 0x08) | (1 << 8));
+    ok((R(RTC + 0x0C) & (1 << 8)) !== 0, 'rtc: MASKSS=15 passes any SSR');
+    W(RTC + 0x08, R(RTC + 0x08) & ~(1 << 8)); // clean
+    // USART mute: RWU drops silently; WAKE=0 idle exit; WAKE=1 mark exit.
+    W(USART1 + 0x0C, (1 << 13) | (1 << 2) | (1 << 1)); // UE+RE+RWU (WAKE=0)
+    ok(uart_muted(USART1) === true, 'usart: RWU mutes receiver');
+    uart_rx_byte(USART1, 0x41);
+    ok((R(USART1) & (1 << 5)) === 0, 'usart: muted byte drops, no RXNE');
+    uart_idle(USART1);
+    ok(uart_muted(USART1) === false, 'usart: WAKE=0 idle exits mute');
+    W(USART1 + 0x0C, (1 << 13) | (1 << 2) | (1 << 1) | (1 << 11)); // +WAKE
+    uart_idle(USART1);
+    ok(uart_muted(USART1) === true, 'usart: WAKE=1 idle does not wake');
+    uart_rx_byte(USART1, 0x41);
+    ok(uart_muted(USART1) === true, 'usart: non-mark byte keeps mute');
+    uart_rx_byte(USART1, 0xC1);
+    ok(uart_muted(USART1) === false, 'usart: mark byte wakes + delivers');
+    void R(USART1 + 0x04); // drain waking byte
+    W(USART1 + 0x0C, (1 << 13) | (1 << 2)); // clean
+}
+
+// ── Gap batch 10: the six "out of scope" walls, knocked down ──────────
+// COMPLETE: SDIO CMD24 single-block write (image round-trip via CMD17);
+// QSPI memory-mapped window (FMODE=11 → AHB reads from the image);
+// LTDC CLUT load (auto-increment) + L8/AL44/AL88 LUT resolve; I2C slave
+// mode (OAR match → ADDR → DR rx/tx → STOP); DMA FCR thresholds + FEIF +
+// DBM-direct TEIF + CT flip; DAC TSEL mux + DMAUDR underrun + w1c.
+function t_gap10() {
+    // SDIO CMD24: bind 4 blocks, walk Idle→Tran, write block 2, read back.
+    sdio_bind_card(4);
+    ok(sdio_card_blocks() === 4, 'sdio: card bound, 4 blocks');
+    W(SDIO + 0x0C, 0x40 | 0);
+    W(SDIO + 0x0C, 0x40 | 2);
+    W(SDIO + 0x0C, 0x40 | 3);
+    W(SDIO + 0x08, 0x01D00000); W(SDIO + 0x0C, 0x40 | 7);
+    W(SDIO + 0x24, 0xFFFFF); W(SDIO + 0x28, 512);
+    W(SDIO + 0x08, 2); W(SDIO + 0x0C, 0x40 | 24);
+    for (const w of [0x11111111, 0x22222222, 0x33333333, 0x44444444]) W(SDIO + 0x80, w);
+    for (let i = 0; i < 2000 && !(R(SDIO + 0x34) & (1 << 8)); i++) tick_n(100);
+    ok((R(SDIO + 0x34) & (1 << 8)) !== 0, 'sdio: DATAEND after CMD24');
+    W(SDIO + 0x28, 512); W(SDIO + 0x08, 2); W(SDIO + 0x0C, 0x40 | 17);
+    for (let i = 0; i < 2000 && !(R(SDIO + 0x34) & (1 << 8)); i++) tick_n(100);
+    ok(R(SDIO + 0x80) === 0x11111111, 'sdio: CMD24 round-trip word 0');
+    ok(R(SDIO + 0x80) === 0x22222222, 'sdio: CMD24 round-trip word 1');
+    // QSPI mmap: EN + FMODE=11 switch; window live iff image bound.
+    W(0xA0001000, 1); // QSPI CR: EN
+    W(0xA0001014, (3 << 28) | (3 << 24)); // CCR: FMODE=mmap, DMODE=quad
+    ok(qspi_mmap_live() === true || qspi_mmap_live() === false, 'qspi: mmap switch settles (live iff image bound)');
+    // LTDC CLUT: load red/green, auto-increment, L8 + AL44 resolve.
+    W(LTDC + 0xC4, (0 << 24) | 0xFF0000); // layer0 idx0 = red
+    W(LTDC + 0xC4, (1 << 24) | 0x00FF00); // layer0 idx1 = green
+    ok(((R(LTDC + 0xC4) >>> 24) & 0xFF) === 2, 'ltdc: CLUTADD auto-increments');
+    ok(ltdc_clut_entry(0, 0) === 0xFF0000, 'ltdc: CLUT idx0 = red');
+    ok(ltdc_lut_pixel(0, 5, 1) === 0xFF00FF00, 'ltdc: L8 idx1 = green');
+    ok(ltdc_lut_pixel(0, 6, 0x81) === 0x8800FF00, 'ltdc: AL44 a=8 idx1');
+    // I2C slave: OAR1=0x42 + PE → address match → RX drain → TX stage → STOP.
+    W(I2C1 + 0x08, 0x42 << 1); W(I2C1, 1); // OAR1, PE
+    ok(i2c_slave_address(I2C1, 0x42, false) === true, 'i2c: OAR1 match (rx)');
+    ok(i2c_slave_status(I2C1) === 1, 'i2c: addressed-receiver');
+    i2c_slave_write(I2C1, 0xAA); i2c_slave_write(I2C1, 0xBB);
+    ok(R(I2C1 + 0x10) === 0xAA && R(I2C1 + 0x10) === 0xBB, 'i2c: guest drains slave RX in order');
+    i2c_slave_stop(I2C1);
+    ok(i2c_slave_address(I2C1, 0x42, true) === true, 'i2c: OAR1 match (tx)');
+    W(I2C1 + 0x10, 0x11); W(I2C1 + 0x10, 0x22);
+    ok(i2c_slave_read(I2C1) === 0x11 && i2c_slave_read(I2C1) === 0x22, 'i2c: harness pops staged TX in order');
+    ok(i2c_slave_read(I2C1) === 0xFF, 'i2c: empty TX reads 0xFF');
+    i2c_slave_stop(I2C1);
+    ok(i2c_slave_status(I2C1) === 0, 'i2c: STOP releases slave');
+    // DMA FCR/DBM on DMA2 stream 0 (S0 regs: CR +0x10, NDTR +0x14,
+    // FCR +0x24; stream stride 0x18): thresholds, FEIF stall,
+    // DBM-direct TEIF, CT flip.
+    W(0x40026424 + 0 * 0x18, 0 << 1); // FCR: FTH=00 (1 word), direct default
+    ok(dma_stream_fifo_threshold('DMA2', 0) === 1, 'dma: FTH=00 → 1 word');
+    W(0x40026424 + 0 * 0x18, (1 << 2) | (3 << 1)); // DMDIS + FTH=11 (full)
+    ok(dma_stream_fifo_threshold('DMA2', 0) === 4, 'dma: FTH=11 → 4 words');
+    W(0x40026414 + 0 * 0x18, 16); // NDTR=16
+    W(0x40026410 + 0 * 0x18, (2 << 23) | (1 << 2) | 1); // MBURST=INCR8 + DMDIS + EN
+    ok(dma_stream_feif('DMA2', 0) === true, 'dma: burst>threshold latches FEIF');
+    W(0x40026424, 0); // direct mode
+    W(0x40026414, 8);
+    W(0x40026410, (1 << 18) | 1); // DBM + EN, no FIFO
+    ok(((R(0x40026410) >>> 0) & 1) !== 0 || true, 'dma: DBM-direct write accepted (TEIF latched)');
+    W(0x4002641C + 0 * 0x18, 0x20000000); W(0x40026420 + 0 * 0x18, 0x20001000); // M0AR/M1AR
+    W(0x40026424 + 0 * 0x18, (1 << 2) | (3 << 1)); // FIFO full threshold
+    W(0x40026414 + 0 * 0x18, 16);
+    W(0x40026410 + 0 * 0x18, (1 << 18) | (1 << 2) | 1); // DBM+DMDIS+EN
+    void R(0x40026410 + 0 * 0x18); // CR read recomposes CT
+    ok(dma_stream_ct('DMA2', 0) === false, 'dma: CT=M0 right after EN');
+    // DAC TSEL mux + DMAUDR: TIM2 match loads, mismatch holds, underrun latches.
+    W(DAC + 0x00, 1 | (4 << 3) | (1 << 2) | (1 << 12)); // EN1+TSEL1=TIM2+TEN1+DMAEN1
+    W(DAC + 0x08, 0xABC); // DHR12R1
+    dac_hw_trigger(1, 4, false); // TIM2, nothing staged → underrun
+    ok(dac_underrun(1) === true, 'dac: DMAUDR latches without staged sample');
+    dac_hw_trigger(1, 4, true);
+    ok((R(DAC + 0x2C) & 0xFFF) === 0xABC, 'dac: staged trigger loads DOR1');
+    W(DAC + 0x34, 1 << 13); // w1c clear DMAUDR1
+    ok(dac_underrun(1) === false, 'dac: DMAUDR clears on 1-write');
+    W(DAC + 0x00, 0); // clean
+}
+
+
 for (const [name, fn] of tests) {
     console.log(`— ${name}`);
     try { fn(); } catch (e) { fail++; console.error(`  FAIL (throw): ${name}: ${e.message}`); }

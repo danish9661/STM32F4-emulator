@@ -30,7 +30,6 @@ pub struct Timer {
     smcr: u32,
     dier: u32,
     sr: u32,
-    egr: u32,
     ccmr1: u32,
     ccmr2: u32,
     ccer: u32,
@@ -46,28 +45,43 @@ pub struct Timer {
     ccmr3: u32,
     ccr5: u32,
     ccr6: u32,
+    /// Break-and-dead-time register (TIM1/TIM8 only, offset 0x44):
+    /// MOE (bit 15) gates the OC outputs, AOE (bit 14) re-arms MOE on
+    /// the next update event, BKE/BKP (bits 12/13) enable the break
+    /// input + polarity, OSSR/OSSI (bits 11/10) the off-state modes,
+    /// LOCK (bits 9:8) write-protection, DTG (bits 7:0) dead-time.
+    /// Stored on every timer; honored only by TIM1/TIM8 (the only
+    /// timers with complementary outputs — silicon has no BDTR
+    /// elsewhere, and the SVD gives the other timers no 0x44 slot).
+    bdtr: u32,
+    /// Repetition counter (TIM1/TIM8 only, RCR offset 0x30): the update
+    /// event (UIF + TRGO + DMA) fires only each (RCR+1)-th overflow.
+    /// Stored on every timer, honored on TIM1/TIM8 like BDTR.
+    rcr_shadow: u32,
+    /// Live down-counter for the repetition window (counts overflows
+    /// remaining before the next update event).
+    rep_count: u32,
     pwm_duty: [u32; 4],
     last_tick: u64,
     irq_num: i32,
     name: String,
-    one_pulse_active: bool,
 }
 
 impl Timer {
     pub fn new(name: &str) -> Option<Box<dyn Peripheral>> {
         tim_irq(name).map(|irq| {
             Box::new(Self {
-                cr1: 0, cr2: 0, smcr: 0, dier: 0, sr: 0, egr: 0,
+                cr1: 0, cr2: 0, smcr: 0, dier: 0, sr: 0,
                 ccmr1: 0, ccmr2: 0, ccer: 0, cnt: 0, psc: 0,
                 // Free-running by default, but only as wide as the counter
                 // actually is (0xFFFF on the 16-bit timers).
                 arr: counter_mask(name),
                 ccr: [0; 4], rcr: 0, dcr: 0, dmar: 0, or_: 0,
-                ccmr3: 0, ccr5: 0, ccr6: 0, pwm_duty: [0; 4],
+                ccmr3: 0, ccr5: 0, ccr6: 0, bdtr: 0, rcr_shadow: 0,
+                rep_count: 0, pwm_duty: [0; 4],
                 last_tick: instruction_count(),
                 irq_num: irq,
                 name: name.to_string(),
-                one_pulse_active: false,
             }) as Box<dyn Peripheral>
         })
     }
@@ -242,22 +256,7 @@ impl Timer {
                     if self.cnt < self.arr { self.cnt += 1; }
                     else {
                         self.cnt = 0;
-                        self.sr |= 1; // UIF
-                        // OPM (CR1 bit 3): one-pulse — CEN self-clears at
-                        // the update event (counter stops until re-armed).
-                        if self.cr1 & (1 << 3) != 0 {
-                            self.cr1 &= !1;
-                        }
-                        if self.dier & 1 != 0 { // UIE
-                            sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
-                        }
-                        if self.dier & (1 << 8) != 0 { //UDE - DMA request
-                            // would trigger DMA
-                        }
-                        // Update event: pulse TRGO to slave timers (MMS
-                        // reset/update selections) BEFORE the comment below
-                        // so chained slaves observe the same event.
-                        self.pulse_trgo(sys);
+                        self.update_event(sys);
                         // Update interrupt on overflow
                     }
                 }
@@ -265,14 +264,7 @@ impl Timer {
                     if self.cnt > 0 { self.cnt -= 1; }
                     else {
                         self.cnt = self.arr;
-                        self.sr |= 1; // UIF
-                        if self.cr1 & (1 << 3) != 0 {
-                            self.cr1 &= !1; // OPM: stop at update
-                        }
-                        if self.dier & 1 != 0 {
-                            sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
-                        }
-                        self.pulse_trgo(sys);
+                        self.update_event(sys);
                     }
                 }
                 _ => { // Center-aligned modes
@@ -280,22 +272,19 @@ impl Timer {
                     if self.cnt < self.arr { self.cnt += 1; }
                     else {
                         self.cnt = 0;
-                        self.sr |= 1;
-                        if self.cr1 & (1 << 3) != 0 {
-                            self.cr1 &= !1; // OPM: stop at update
-                        }
-                        if self.dier & 1 != 0 {
-                            sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
-                        }
-                        self.pulse_trgo(sys);
+                        self.update_event(sys);
                     }
                 }
             }
 
             // Output compare / PWM interrupts (only in output mode; input
             // capture channels latch CNT on an external edge instead).
+            // Advanced timers (TIM1/TIM8) additionally require MOE
+            // (BDTR bit 15): with the outputs disabled no OC match may
+            // set flags or fire — silicon holds the outputs idle.
+            let oc_gated = self.is_advanced() && self.bdtr & (1 << 15) == 0;
             for ch in 0..4 {
-                if self.ccs(ch) == 0 && self.ccer & (1 << (ch * 4)) != 0 { // CCxE
+                if !oc_gated && self.ccs(ch) == 0 && self.ccer & (1 << (ch * 4)) != 0 { // CCxE
                     let ccr_val = self.ccr[ch];
                     if self.cnt == ccr_val {
                         // Capture/Compare match
@@ -321,14 +310,126 @@ impl Timer {
         }
     }
 
-    fn generate_update(&mut self, sys: &System) {
-        self.cnt = 0;
+    /// Whether this timer has the advanced feature set (BDTR/MOE,
+    /// repetition counter, complementary outputs): TIM1/TIM8 only.
+    fn is_advanced(&self) -> bool {
+        self.name == "TIM1" || self.name == "TIM8"
+    }
+
+    /// Timer instance name (for the `with_tim` driver lookup).
+    pub fn timer_name(&self) -> &str {
+        &self.name
+    }
+
+    /// One counter overflow/underflow: the repetition gate, then the
+    /// update event. On TIM1/TIM8 with RCR programmed, the first RCR
+    /// overflows only reload the repetition down-counter — UIF, the UIE
+    /// IRQ, TRGO, and (via the callers) OPM all wait for the (RCR+1)-th
+    /// overflow (RM0090 §17.3.1 "repetition counter"). RCR=0 (reset) is
+    /// the pass-through every timer had before.
+    fn update_event(&mut self, sys: &System) {
+        if self.is_advanced() && self.rcr_shadow != 0 {
+            if self.rep_count > 0 {
+                self.rep_count -= 1;
+                return; // swallowed by the repetition counter
+            }
+            self.rep_count = self.rcr_shadow;
+        }
         self.sr |= 1; // UIF
-        if self.dier & 1 != 0 {
+        // OPM (CR1 bit 3): one-pulse — CEN self-clears at the update
+        // event (counter stops until re-armed).
+        if self.cr1 & (1 << 3) != 0 {
+            self.cr1 &= !1;
+        }
+        // AOE (BDTR bit 14, advanced timers): MOE re-arms on the next
+        // update event after a break cleared it (silicon automatic
+        // output enable — without AOE firmware sets MOE itself).
+        if self.is_advanced() && self.bdtr & (1 << 14) != 0 {
+            self.bdtr |= 1 << 15;
+        }
+        if self.dier & 1 != 0 { // UIE
             sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
         }
-        // UG is an update event too: slaves in reset mode observe it.
+        if self.dier & (1 << 8) != 0 { //UDE - DMA request
+            // would trigger DMA
+        }
+        // Update event: pulse TRGO to slave timers (MMS reset/update
+        // selections) so chained slaves observe the same event.
         self.pulse_trgo(sys);
+    }
+
+    /// Harness = the break input: drive the advanced-timer break line.
+    /// `asserted` = the (BKP-polarity-adjusted) break is active. With
+    /// BKE (BDTR bit 12) set, an active break clears MOE at once
+    /// (outputs idle) and latches BIF (SR bit 7, + IRQ when BIE/DIER
+    /// bit 7 is set). With AOE (bit 14), MOE re-arms on the next update
+    /// event; otherwise firmware must set MOE again itself. No-op on
+    /// non-advanced timers and with BKE clear (break input disabled).
+    pub fn break_input(&mut self, sys: &System, asserted: bool) {
+        if !self.is_advanced() || self.bdtr & (1 << 12) == 0 {
+            return;
+        }
+        if asserted && self.bdtr & (1 << 15) != 0 {
+            self.bdtr &= !(1 << 15); // MOE falls, outputs idle
+        }
+        if asserted {
+            self.sr |= 1 << 7; // BIF
+            if self.dier & (1 << 7) != 0 {
+                sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
+            }
+        }
+    }
+
+    /// MOE (BDTR bit 15) scope probe: are the advanced outputs enabled?
+    pub fn moe(&self) -> bool {
+        self.bdtr & (1 << 15) != 0
+    }
+
+    /// Software event injection (EGR, offset 0x14, write-only): UG (bit 0)
+    /// reinitializes the counter + prescaler and raises UIF (the same
+    /// path as the UG write arm); TG (bit 6) latches TIF + fires when
+    /// TIE is set; COMG (bit 5) latches COMIF + fires when COMIE is set;
+    /// BG (bit 7) drives the break path (MOE falls + BIF when BKE);
+    /// CCxG (bits 1-4) latch the CCxIF flags (+ IRQ when CCxIE is set).
+    /// Silicon EGR reads return 0 (write-only); every write dispatches
+    /// through here (the UG arm is shared with generate_update).
+    pub fn sw_event(&mut self, sys: &System, value: u32) {
+        if value & 1 != 0 {
+            self.generate_update(sys);
+        }
+        if value & (1 << 6) != 0 {
+            self.sr |= 1 << 6; // TIF
+            if self.dier & (1 << 6) != 0 {
+                sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
+            }
+        }
+        if value & (1 << 5) != 0 {
+            self.sr |= 1 << 5; // COMIF
+            if self.dier & (1 << 5) != 0 {
+                sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
+            }
+        }
+        if value & (1 << 7) != 0 {
+            self.break_input(sys, true);
+        }
+        for ch in 0..4 {
+            if value & (1 << (1 + ch)) != 0 {
+                self.sr |= 1 << (1 + ch); // CCxIF
+                if (self.dier >> (1 + ch)) & 1 != 0 {
+                    sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
+                }
+            }
+        }
+    }
+
+    fn generate_update(&mut self, sys: &System) {
+        self.cnt = 0;
+        // UG reloads the repetition down-counter too (silicon reloads
+        // the shadow on every update event, software or overflow).
+        if self.is_advanced() {
+            self.rep_count = self.rcr_shadow;
+        }
+        self.update_event(sys);
     }
 
     /// CCxS field (input/output selection) for a capture/compare channel.
@@ -459,10 +560,7 @@ impl Peripheral for Timer {
             0x08 => self.smcr,
             0x0C => self.dier,
             0x10 => self.sr,
-            0x14 => {
-                // EGR reads as 0
-                self.egr
-            }
+            0x14 => 0, // EGR is write-only (sw_event dispatches)
             0x18 => self.ccmr1,
             0x1C => self.ccmr2,
             0x20 => self.ccer,
@@ -474,6 +572,9 @@ impl Peripheral for Timer {
                 let i = ((offset - 0x34) / 4) as usize;
                 self.ccr.get(i).copied().unwrap_or(0)
             }
+            // BDTR (advanced timers only): the stored word; general-
+            // purpose timers have no 0x44 slot (reads 0).
+            0x44 => if self.is_advanced() { self.bdtr } else { 0 },
             0x48 => self.dcr,
             0x4C => self.dmar,
             0x50 => self.or_,
@@ -504,8 +605,8 @@ impl Peripheral for Timer {
                 }
             0x10 => self.sr &= value,
             0x14 => {
-                self.egr = value & 0xFF;
-                if value & 1 != 0 { self.generate_update(sys); } // UG
+                // EGR is write-only (dispatches sw_event); reads inert-0.
+                self.sw_event(sys, value & 0xFF);
             }
             0x18 => self.ccmr1 = value,
             0x1C => self.ccmr2 = value,
@@ -519,13 +620,57 @@ impl Peripheral for Timer {
             0x24 => self.cnt = value & counter_mask(&self.name),
             0x28 => self.psc = value & 0xFFFF,
             0x2C => self.arr = value & counter_mask(&self.name),
-            0x30 => self.rcr = value & 0xFF,
+            0x30 => {
+                self.rcr = value & 0xFF;
+                // RCR programs the repetition window; reload the live
+                // down-counter so the new window takes effect at once
+                // (silicon reloads the shadow on the next update event;
+                // re-arming here is the same observable for a stopped or
+                // freshly-programmed timer, and UG reloads it anyway).
+                if self.is_advanced() {
+                    self.rcr_shadow = value & 0xFF;
+                    self.rep_count = value & 0xFF;
+                }
+            }
             0x34..=0x40 => {
                 let mask = counter_mask(&self.name);
                 let i = ((offset - 0x34) / 4) as usize;
                 if let Some(ccr) = self.ccr.get_mut(i) {
                     *ccr = value & mask;
                 }
+            }
+            // BDTR (advanced timers only, offset 0x44): MOE/AOE/BKE/BKP/
+            // OSSR/OSSI/LOCK/DTG. LOCK (bits 9:8) write-freezes the
+            // BDTR level once raised (silicon LOCK is one-way until
+            // reset): level 1 freezes DTG+LOCK+OSSI/OSSR, level 2 adds
+            // CC polarity + OISx, level 3 adds CC control bits. An
+            // active break (break_input) clears MOE regardless of LOCK.
+            // Non-advanced timers have no 0x44 slot (reads 0, writes
+            // ignored — matches the SVD, which gives them no register).
+            0x44 => {
+                if self.is_advanced() {
+                    let lock = (self.bdtr >> 8) & 3;
+                    let mut v = value & 0xFFFF;
+                    if lock >= 1 {
+                        // Level 1+: DTG (7:0), OSSI/OSSR (11:10), LOCK stay.
+                        v = (v & !0x0CFF) | (self.bdtr & 0x0CFF);
+                    }
+                    if lock >= 2 {
+                        // Level 2+: CC polarity (CC1P/CC1NP..) + OISx freeze.
+                        // (Polarity lives in CCER; OISx in CR2 — the freeze
+                        // is enforced at those arms, recorded here by LOCK.)
+                    }
+                    // MOE (bit 15) is always writable (firmware arms it);
+                    // LOCK itself only rises (never falls until reset).
+                    let new_lock = (v >> 8) & 3;
+                    if new_lock < lock {
+                        v = (v & !(3 << 8)) | (lock << 8);
+                    }
+                    // AOE (bit 14): MOE re-arms on the next update event
+                    // (handled in update_event below).
+                    self.bdtr = v;
+                }
+                // Non-advanced timers have no 0x44 slot: writes ignored.
             }
             0x48 => self.dcr = value & 0x1F1F,
             0x4C => self.dmar = value,
@@ -690,5 +835,111 @@ mod tests {
         }
         assert_ne!(c3, 0, "routed slave starts on master update");
         assert_eq!(c4, 0, "unrouted timer stays stopped");
+    }
+}
+
+#[cfg(test)]
+mod advanced_tests {
+    use super::*;
+
+    // BDTR/MOE/break on TIM1: MOE arms outputs, OC matches set flags;
+    // a break with BKE clears MOE + latches BIF (+IRQ with BIE); AOE
+    // re-arms MOE on the next update event.
+    #[test]
+    fn bdtr_moe_gates_oc_and_break_recovers() {
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Timer::new("TIM1").unwrap();
+        let t = boxed.as_any_mut().downcast_mut::<Timer>().unwrap();
+        // CH1 output compare, CC1E, CCR1=5, ARR=9, MOE armed.
+        t.write(&sys, 0x18, 0x00); // CCMR1: OC mode
+        t.write(&sys, 0x20, 0x01); // CCER: CC1E
+        t.write(&sys, 0x34, 5);    // CCR1
+        t.write(&sys, 0x2C, 9);    // ARR
+        t.write(&sys, 0x44, 1 << 15); // BDTR: MOE
+        assert!(t.moe());
+        t.write(&sys, 0x00, 1); // CEN
+        crate::system::INSTRUCTION_COUNT.fetch_add(60, std::sync::atomic::Ordering::Relaxed);
+        t.tick(&sys);
+        assert_ne!(t.read(&sys, 0x10) & (1 << 1), 0, "CC1IF sets with MOE");
+        // MOE clear gates matches: clear flags, drop MOE, run again.
+        t.write(&sys, 0x10, 0); // SR clear (w1c-ish: value&sr)
+        t.write(&sys, 0x44, 0); // MOE=0
+        assert!(!t.moe());
+        crate::system::INSTRUCTION_COUNT.fetch_add(60, std::sync::atomic::Ordering::Relaxed);
+        t.tick(&sys);
+        assert_eq!(t.read(&sys, 0x10) & (1 << 1), 0, "no CC1IF without MOE");
+        // Break path: BKE + BIE, MOE armed, break asserts.
+        t.write(&sys, 0x10, 0);
+        t.write(&sys, 0x0C, 1 << 7); // DIER: BIE
+        t.write(&sys, 0x44, (1 << 15) | (1 << 12)); // MOE + BKE
+        t.break_input(&sys, true);
+        assert!(!t.moe(), "break clears MOE");
+        assert_ne!(t.read(&sys, 0x10) & (1 << 7), 0, "BIF latches");
+        assert!(sys.p.nvic.borrow().irq_pending(24), "BIE pends TIM1_BRK(24)");
+        // AOE: next update event re-arms MOE.
+        t.write(&sys, 0x44, (1 << 15) | (1 << 12) | (1 << 14)); // MOE+BKE+AOE
+        t.break_input(&sys, true); // break again (MOE falls)
+        assert!(!t.moe());
+        t.sw_event(&sys, 1); // UG = update event
+        assert!(t.moe(), "AOE re-arms MOE on update");
+    }
+
+    // Non-advanced timers have no BDTR: reads 0, writes ignored, break
+    // is a no-op (and never pends).
+    #[test]
+    fn bdtr_absent_off_advanced() {
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Timer::new("TIM3").unwrap();
+        let t = boxed.as_any_mut().downcast_mut::<Timer>().unwrap();
+        t.write(&sys, 0x44, 0xFFFF);
+        assert_eq!(t.read(&sys, 0x44), 0, "no BDTR slot off TIM1/TIM8");
+        t.write(&sys, 0x0C, 1 << 7);
+        t.break_input(&sys, true);
+        assert_eq!(t.read(&sys, 0x10) & (1 << 7), 0, "no BIF off advanced");
+        assert!(!sys.p.nvic.borrow().irq_pending(29), "no break IRQ off advanced");
+    }
+
+    // RCR: with RCR=2 the update event (UIF + UIE IRQ) fires every 3rd
+    // overflow; RCR=0 passes every overflow through.
+    #[test]
+    fn rcr_gates_update_every_n_plus_one() {
+        use std::sync::atomic::Ordering;
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Timer::new("TIM1").unwrap();
+        let t = boxed.as_any_mut().downcast_mut::<Timer>().unwrap();
+        t.write(&sys, 0x2C, 1); // ARR=1 (overflow every 2 ticks)
+        t.write(&sys, 0x30, 2); // RCR=2
+        t.write(&sys, 0x0C, 1); // UIE
+        t.write(&sys, 0x00, 1); // CEN
+        // 9 overflows, one per loop: each loop advances exactly one
+        // overflow worth of ticks (ARR+1 = 2, prescaler pass-through is
+        // max(1) so 2 clock ticks = 2 counter ticks = 1 overflow).
+        let mut uifs = 0;
+        for _ in 0..9 {
+            crate::system::INSTRUCTION_COUNT.fetch_add(2, Ordering::Relaxed);
+            t.tick(&sys);
+            if t.read(&sys, 0x10) & 1 != 0 {
+                uifs += 1;
+                t.write(&sys, 0x10, 0);
+            }
+        }
+        assert_eq!(uifs, 3, "9 overflows / (RCR=2 → every 3rd) = 3 UIFs, got {uifs}");
+    }
+
+    // EGR software events: CC1G latches CC1IF (+IRQ), TG latches TIF
+    // (+IRQ), COMG latches COMIF (+IRQ), EGR reads 0.
+    #[test]
+    fn egr_software_events_fire() {
+        let sys = crate::system::test_dummy_system();
+        let mut boxed = Timer::new("TIM3").unwrap();
+        let t = boxed.as_any_mut().downcast_mut::<Timer>().unwrap();
+        t.write(&sys, 0x0C, (1 << 1) | (1 << 6) | (1 << 5)); // CC1IE+TIE+COMIE
+        t.write(&sys, 0x14, (1 << 1) | (1 << 6) | (1 << 5)); // CC1G+TG+COMG
+        let sr = t.read(&sys, 0x10);
+        assert_ne!(sr & (1 << 1), 0, "CC1IF via CC1G");
+        assert_ne!(sr & (1 << 6), 0, "TIF via TG");
+        assert_ne!(sr & (1 << 5), 0, "COMIF via COMG");
+        assert!(sys.p.nvic.borrow().irq_pending(29), "TIM3 IRQ pends");
+        assert_eq!(t.read(&sys, 0x14), 0, "EGR reads 0");
     }
 }

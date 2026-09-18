@@ -149,7 +149,14 @@ impl Qspi {
     fn complete(&mut self) {
         self.sr |= 1 << 1; // TC
         self.sr &= !(1 << 5); // clear BUSY
-        self.xfer_mode = 0;
+        // Preserve a live memory-mapped window across indirect-command
+        // completions (xfer_mode 4): an indirect read/write finishing
+        // must NOT take the AHB window down — silicon keeps mmap live
+        // until the next FMODE switch. Only indirect modes (1/2) and
+        // auto-poll (3) return to idle (0).
+        if self.xfer_mode != 4 {
+            self.xfer_mode = 0;
+        }
         self.xfer_remaining = 0;
         self.fifo.clear();
         self.update_status();
@@ -213,10 +220,46 @@ impl Qspi {
                 self.complete();
             }
             _ => {
-                // mem-mapped mode: not backed by a real memory map here
+                // Memory-mapped mode (FMODE=11): the flash image is
+                // directly addressable through the AHB window
+                // (0x90000000 + offset, DCR FSIZE-sized). There is no
+                // transfer to run — reads are served live from the
+                // image by `mmap_read` (see the cpu/mem.rs window
+                // below); completing here just clears BUSY + latches TC
+                // like silicon does when the mode switch settles.
+                self.xfer_mode = 4; // mmap live (not an indirect xfer)
                 self.complete();
+                self.xfer_mode = 4; // complete() clears it; restore
             }
         }
+    }
+
+    /// Memory-mapped window read (AHB 0x90000000 + byte offset into the
+    /// flash image). Live while the last completed mode switch was
+    /// memory-mapped (xfer_mode == 4); inert 0xFFFFFFFF otherwise (no
+    /// image mapped — silicon reads erased/unmapped as all-ones too).
+    /// Unaligned offsets assemble LE from the image bytes (the AHB
+    /// fabric serves byte/halfword/word accesses alike).
+    pub fn mmap_read(&self, offset: u32) -> u32 {
+        if self.xfer_mode != 4 {
+            return 0xFFFF_FFFF;
+        }
+        match &self.flash {
+            Some(flash) => {
+                let a = offset as usize;
+                let mut b = [0xFFu8; 4];
+                for i in 0..4 {
+                    b[i] = *flash.get(a + i).unwrap_or(&0xFF);
+                }
+                u32::from_le_bytes(b)
+            }
+            None => 0xFFFF_FFFF,
+        }
+    }
+
+    /// Whether the memory-mapped window is live (scope probe).
+    pub fn mmap_live(&self) -> bool {
+        self.xfer_mode == 4
     }
 
     fn read_dr(&mut self) -> u32 {
@@ -227,14 +270,30 @@ impl Qspi {
             if self.xfer_remaining > 0 {
                 self.refill_fifo();
             } else {
+                // Transfer fully drained AND the guest keeps reading:
+                // silicon holds the last word on the bus (no underrun
+                // flag on QSPI) — but the model's complete() already
+                // cleared the FIFO. Return the last word is wrong too
+                // (no shadow kept); the honest answer is completion:
+                // TC already latched, BUSY clear, read 0 past the end.
                 self.complete();
                 return 0;
             }
         }
         let w = self.fifo.pop_front().unwrap_or(0);
         self.update_status();
+        // Completion when the FIFO drains AND nothing remains: TC
+        // latches, BUSY falls — BUT the just-popped word is still the
+        // return value (silicon presents the word WITH the flag, not
+        // after it). complete() here would clear the FIFO (already
+        // empty — harmless) and latch TC alongside the word.
         if self.fifo.is_empty() && self.xfer_remaining == 0 {
-            self.complete();
+            // Latch TC/BUSY-clear WITHOUT clearing anything else (the
+            // word is already popped into `w`).
+            self.sr |= 1 << 1; // TC
+            self.sr &= !(1 << 5); // clear BUSY
+            self.xfer_mode = 0;
+            self.update_status();
         }
         w
     }
@@ -305,6 +364,11 @@ impl Peripheral for Qspi {
             0x10 => self.dlr = value,
             0x14 => {
                 self.ccr = value;
+                // CCR programs AR-sized addressing: silicon latches the
+                // transfer when the CCR is written (AR must be programmed
+                // FIRST — the guest order is AR-then-CCR; a CCR write with
+                // a stale AR targets the previous address, which is why
+                // the firmware sequence matters, not just the values).
                 self.start_xfer();
             }
             0x18 => self.ar = value,
@@ -425,5 +489,27 @@ mod tests {
         let sr = q.read(&sys, 0x08);
         assert!(sr & (1 << 1) != 0, "TC set for command-only transfer");
         assert!(sr & (1 << 5) == 0, "BUSY cleared");
+    }
+}
+
+#[cfg(test)]
+mod gap10_tests {
+    use super::*;
+    use crate::system::test_dummy_system;
+
+    // Memory-mapped mode: FMODE=11 switch latches mmap-live; window reads
+    // come straight from the image; unmapped tail reads erased.
+    #[test]
+    fn mmap_window_reads_image_live() {
+        let sys = test_dummy_system();
+        let mut q = Qspi::with_flash("QUADSPI_MMAP", vec![0x11, 0x22, 0x33, 0x44, 0x55]);
+        assert!(!q.mmap_live(), "mmap off before mode switch");
+        assert_eq!(q.mmap_read(0), 0xFFFF_FFFF, "window inert before switch");
+        q.write(&sys, 0x00, 1); // EN
+        q.write(&sys, 0x14, (3 << 28) | (3 << 24)); // FMODE=mmap, DMODE=quad
+        assert!(q.mmap_live(), "mmap live after FMODE=11");
+        assert_eq!(q.mmap_read(0), 0x44332211, "image word 0 LE");
+        assert_eq!(q.mmap_read(1), 0x55443322, "unaligned window offset");
+        assert_eq!(q.mmap_read(64), 0xFFFF_FFFF, "past-end reads erased");
     }
 }
