@@ -833,10 +833,25 @@ export function tim_encoder_step(name: string, ti: number, rising: boolean): voi
 export function tim_inject_capture(name: string, ch: number): void;
 
 /**
+ * Whether a TX break is queued on the USART at `base` (scope probe).
+ */
+export function uart_break_pending(base: number): boolean;
+
+/**
+ * Harness = queue a TX break on the USART at `base` (SBK semantics).
+ */
+export function uart_break_tx(base: number): void;
+
+/**
  * Harness = the noisy wire: arm framing (FE) / parity (PE) faults on the
  * next received byte of the USART at `base`. PE needs PCE enabled.
  */
 export function uart_fault_rx(base: number, fe: boolean, pe: boolean): void;
+
+/**
+ * Harness = the idle line: latch IDLE on the USART at `base`.
+ */
+export function uart_idle(base: number): void;
 
 /**
  * Harness = the IR transmitter: inject a byte with a pulse class
@@ -1145,7 +1160,10 @@ export interface InitOutput {
     readonly tick_peripherals: () => void;
     readonly tim_encoder_step: (a: number, b: number, c: number, d: number) => void;
     readonly tim_inject_capture: (a: number, b: number, c: number) => void;
+    readonly uart_break_pending: (a: number) => number;
+    readonly uart_break_tx: (a: number) => void;
     readonly uart_fault_rx: (a: number, b: number, c: number) => void;
+    readonly uart_idle: (a: number) => void;
     readonly uart_irda_rx: (a: number, b: number, c: number) => void;
     readonly uart_irda_tx_class: (a: number) => number;
     readonly uart_lin_break: (a: number) => void;

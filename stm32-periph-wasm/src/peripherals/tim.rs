@@ -243,6 +243,11 @@ impl Timer {
                     else {
                         self.cnt = 0;
                         self.sr |= 1; // UIF
+                        // OPM (CR1 bit 3): one-pulse — CEN self-clears at
+                        // the update event (counter stops until re-armed).
+                        if self.cr1 & (1 << 3) != 0 {
+                            self.cr1 &= !1;
+                        }
                         if self.dier & 1 != 0 { // UIE
                             sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
                         }
@@ -261,6 +266,9 @@ impl Timer {
                     else {
                         self.cnt = self.arr;
                         self.sr |= 1; // UIF
+                        if self.cr1 & (1 << 3) != 0 {
+                            self.cr1 &= !1; // OPM: stop at update
+                        }
                         if self.dier & 1 != 0 {
                             sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
                         }
@@ -273,6 +281,9 @@ impl Timer {
                     else {
                         self.cnt = 0;
                         self.sr |= 1;
+                        if self.cr1 & (1 << 3) != 0 {
+                            self.cr1 &= !1; // OPM: stop at update
+                        }
                         if self.dier & 1 != 0 {
                             sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
                         }
@@ -483,6 +494,8 @@ impl Peripheral for Timer {
                     // Enable: reset counter to 0
                     self.cnt = 0;
                 }
+                // OPM (bit 3): when set, CEN self-clears at the next update
+                // event (handled in advance()'s overflow arms below).
             }
             0x04 => self.cr2 = value & 0x3F7F,
             0x08 => self.smcr = value & 0xFFFF,

@@ -38,6 +38,9 @@ pub struct Usart {
     /// (harness = the noisy wire; see `uart_fault_rx`). Bit 0 = FE,
     /// bit 1 = PE. Consumed by the next rx_byte().
     rx_fault: u8,
+    /// Queued TX break (SBK semantics): set by `sbk_request`, consumed by
+    /// the next DR write (silicon transmits the break ahead of the byte).
+    break_queued: bool,
     /// Smartcard NACK state: retries used on the current byte + armed flag
     /// (harness = the card rejecting a byte; see `sc_nack_next`).
     sc_retry: u8,
@@ -55,6 +58,7 @@ impl Usart {
                 irq_num: irq,
                 cts_asserted: true,
                 rx_fault: 0,
+                break_queued: false,
                 sc_retry: 0,
                 sc_nack_armed: false,
             }) as Box<dyn Peripheral>
@@ -186,15 +190,21 @@ impl Usart {
         if self.cr1 & (1 << 6) != 0 && self.sr & (1 << 6) != 0 { pending = true; } // TCIE + TC
         if self.cr1 & (1 << 7) != 0 && self.sr & (1 << 7) != 0 { pending = true; } // TXEIE + TXE
         if self.cr1 & (1 << 5) != 0 && self.sr & (1 << 5) != 0 { pending = true; } // RXNEIE + RXNE
+        if self.cr1 & (1 << 4) != 0 && self.sr & (1 << 4) != 0 { pending = true; } // IDLEIE + IDLE
+        if self.cr1 & (1 << 8) != 0 && self.sr & (1 << 0) != 0 { pending = true; } // PEIE + PE
         // EIE (CR3 bit 0): framing/overrun/noise faults pend the IRQ.
         if self.cr3 & 1 != 0
-            && self.sr & ((1 << 0) | (1 << 1) | (1 << 2) | (1 << 3)) != 0
+            && self.sr & ((1 << 1) | (1 << 2) | (1 << 3)) != 0
         {
-            pending = true; // PE/FE/NE/ORE + EIE
+            pending = true; // FE/NE/ORE + EIE (PE is on PEIE, not EIE)
         }
         // CTSIE (CR3 bit 10): CTS edge pends the IRQ.
         if self.cr3 & (1 << 10) != 0 && self.sr & (1 << 10) != 0 {
             pending = true; // CTSIF + CTSIE
+        }
+        // LBDIE (CR2 bit 6): LIN break detect pends the IRQ.
+        if self.cr2 & (1 << 6) != 0 && self.sr & (1 << 8) != 0 {
+            pending = true; // LBD + LBDIE
         }
         if pending {
             sys.p.nvic.borrow_mut().set_intr_pending(self.irq_num);
@@ -237,10 +247,10 @@ impl Usart {
         if self.rx_buf.is_empty() {
             self.sr &= !(1 << 5); // Clear RXNE only when buffer empty
         }
-        // A DR read clears latched PE/FE/NE (silicon: read SR then DR;
+        // A DR read clears latched PE/FE/NE/IDLE (silicon: read SR then DR;
         // the SR read is implied here — single-call model, same contract
         // as the SPI SR→DR sequence but consumed at once).
-        self.sr &= !((1 << 0) | (1 << 1) | (1 << 2));
+        self.sr &= !((1 << 0) | (1 << 1) | (1 << 2) | (1 << 4));
         self.sr |= 0x00C0; // TXE, TC
         self.update_interrupt(sys);
         dr
@@ -284,6 +294,10 @@ impl Usart {
             return true;
         }
         self.sc_retry = 0; // clean ACK resets the retry counter
+        // SBK break (queued by `sbk_request`): consumed ahead of the byte.
+        // The byte sinks normally; the break is the observable (firmware
+        // polls `break_pending()` or just relies on the wire order).
+        self.break_queued = false;
         let ch = (value & 0xFF) as u8;
         self.tx_data.push(ch);
         get_uart_output().lock().unwrap().push(ch as char);
@@ -296,6 +310,28 @@ impl Usart {
     /// emitted — lets a test assert CTSE held bytes back, then released).
     pub fn tx_len(&self) -> usize {
         self.tx_data.len()
+    }
+
+    /// Harness = the idle line: latch IDLE (SR bit 4, line idle one frame).
+    /// Fires the IRQ when IDLEIE (CR1 bit 4) is set. Cleared on the next
+    /// DR read (same SR→DR contract as PE/FE/NE).
+    pub fn idle_event(&mut self, sys: &System) {
+        self.sr |= 1 << 4; // IDLE
+        self.update_interrupt(sys);
+    }
+
+    /// Harness = queue a TX break: SBK (CR1 bit 0) sends one break ahead of
+    /// the next byte. Silicon transmits 10/11 zeros + stop then sets SBK
+    /// back; the model latches a `break_queued` flag consumed by the next
+    /// DR write (which sinks the byte normally — the break itself is the
+    /// observable: `break_pending()` reports it for the mock).
+    pub fn sbk_request(&mut self) {
+        self.break_queued = true;
+    }
+
+    /// Whether a TX break is queued (SBK semantics scope probe).
+    pub fn break_pending(&self) -> bool {
+        self.break_queued
     }
 }
 
@@ -339,7 +375,16 @@ impl Peripheral for Usart {
             }
             0x08 => self.brr = value,
             0x0C => {
-                self.cr1 = value & 0xFFFF;
+                // SBK (bit 0) set queues a TX break ahead of the next byte
+                // (silicon transmits zeros + stop, then self-clears SBK).
+                // The model latches `break_queued` (consumed by the next DR
+                // write) and clears the CR1 bit at once (write-then-clear
+                // like the silicon self-clear — firmware polls the queued
+                // flag via `break_pending`, never a stuck SBK).
+                if value & 1 != 0 {
+                    self.break_queued = true;
+                }
+                self.cr1 = (value & 0xFFFF) & !1;
                 self.update_interrupt(sys);
             }
             // CR2: LINEN (bit 14), STOP (13:12), CLKEN/CPOL/CPHA/LBCL,

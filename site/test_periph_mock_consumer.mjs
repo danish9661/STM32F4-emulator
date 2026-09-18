@@ -49,7 +49,7 @@ const {
     dcmi_set_sync, fsmc_bind_nand, fsmc_nand_erase,
     tim_encoder_step, rcc_inject_failure, adc_dual_latched,
     spi_tap, spi_push_miso,
-    uart_set_cts, uart_fault_rx, uart_tx_len,
+    uart_set_cts, uart_fault_rx, uart_tx_len, uart_idle, uart_break_tx, uart_break_pending,
     uart_lin_break, uart_sc_nack, uart_sc_retries, uart_irda_rx, uart_irda_tx_class,
     spi_fault_modf, spi_fault_crc, spi_slave_select, spi_slave_clock, spi_slave_gate,
     sdio_bus_width, sdio_card_irq, sdio_fault_data_crc,
@@ -1188,6 +1188,70 @@ function t_sdio_timing() {
     W(SD, 0); // clean
 }
 
+// ── Honor pass: ADC OVR + USART IDLE/SBK/PEIE/LBDIE + TIM OPM + GPIO LCKR ─
+// COMPLETE: ADC overrun (new conversion while EOC set latches OVR, DR read
+// clears EOC+OVR); USART IDLE (harness latch, IDLEIE IRQ, DR-read clear) +
+// SBK TX break (queued flag, self-clearing CR1 bit, consumed by DR write) +
+// PEIE/LBDIE IRQ paths (PE was wrongly on EIE); TIM one-pulse mode (CEN
+// self-clears at update in every counting mode); GPIO LCKR key sequence +
+// config freeze (MODER/OTYPER/OSPEEDR/PUPDR/AFRL/AFRH per-pin under LCKK).
+function t_honor_pass() {
+    // ADC OVR: convert twice with no DR read between.
+    adc_set_channel_value('ADC1', 5, 0xAAA);
+    W(ADC1 + 0x34, 5);
+    W(ADC1 + 0x08, (1 << 30) | 1);
+    tick_n(500); void R(ADC1 + 0x08); tick_n(500);
+    W(ADC1 + 0x08, (1 << 30) | 1);
+    tick_n(500); void R(ADC1 + 0x08); tick_n(500);
+    ok((R(ADC1) & (1 << 5)) !== 0, 'adc: OVR latches on unread overrun');
+    ok(R(ADC1 + 0x4C) === 0xAAA, 'adc: DR still holds the new sample');
+    ok((R(ADC1) & (1 << 5)) === 0, 'adc: OVR clears on DR read');
+    adc_clear_channel_value('ADC1', 5);
+    void R(ADC1); void R(ADC1 + 0x4C); // drain flags/sample (clean)
+    // USART IDLE: harness latch, IDLEIE path, DR-read clear.
+    W(USART1 + 0x0C, (1 << 13) | (1 << 2)); // UE + RE
+    uart_idle(USART1);
+    ok((R(USART1) & (1 << 4)) !== 0, 'usart: IDLE latches');
+    void R(USART1 + 0x04);
+    ok((R(USART1) & (1 << 4)) === 0, 'usart: IDLE clears on DR read');
+    // USART SBK: CR1-bit set queues the break, self-clears, consumed by DR.
+    W(USART1 + 0x0C, (1 << 13) | (1 << 3)); // UE + TE
+    W(USART1 + 0x0C, R(USART1 + 0x0C) | 1); // SBK
+    ok(uart_break_pending(USART1) === true, 'usart: SBK queues break');
+    ok((R(USART1 + 0x0C) & 1) === 0, 'usart: SBK self-clears in CR1');
+    W(USART1 + 0x04, 0x41);
+    ok(uart_break_pending(USART1) === false, 'usart: break consumed by DR write');
+    W(USART1 + 0x0C, 0); // clean
+    // TIM OPM: CEN self-clears at the update event (up + down modes).
+    for (const [cms, dir] of [[0, 0], [0, 1]]) {
+        W(TIM2 + 0x2C, 10);
+        W(TIM2, (cms << 5) | (dir << 4) | (1 << 3) | 1); // CMS/DIR + OPM + CEN
+        for (let i = 0; i < 30; i++) tick_n(20);
+        ok((R(TIM2) & 1) === 0, `tim: OPM stops counter (cms=${cms} dir=${dir})`);
+        ok((R(TIM2 + 0x10) & 1) !== 0, 'tim: OPM still raises UIF');
+        W(TIM2, 0); // clean
+    }
+    // GPIO LCKR: key sequence engages LCKK; locked pins freeze config.
+    // (Lock pin 1 while leaving pin 0 free: pin 0 stays writable, proving
+    // the freeze is per-pin rather than whole-register.)
+    W(GPIOA, 0x00000011); // pin0 + pin2 output-ish seed (pin1 stays 00=input)
+    W(GPIOA + 0x1C, 0x00010002); W(GPIOA + 0x1C, 0x00000002); W(GPIOA + 0x1C, 0x00010002);
+    ok(R(GPIOA + 0x1C) === 0x10002, 'gpio: LCKR key sequence engages LCKK');
+    // (Pin1's 2-bit MODER field was seeded 00 = input; pin0/pin2 were
+    // seeded 01 = output. Writing all-ones sets every unlocked field to
+    // 11 but leaves pin1 at 00 — hence ...F3: pin0=11, pin1=00, pin2=11.
+    // AFRL's pin1 nibble likewise freezes at 0 while pin0 goes to F,
+    // hence ...0F: pin0=F, pin1=0.)
+    W(GPIOA, 0xFFFFFFFF);
+    ok(R(GPIOA) === 0xFFFFFFF3, 'gpio: locked pin1 frozen, pin0 writable');
+    // (OTYPER/AFRL reset to 0, so pin1 reads 0 frozen while all other
+    // pins take the written ones.)
+    W(GPIOA + 0x04, 0xFFFFFFFF);
+    ok(R(GPIOA + 0x04) === 0xFFFFFFFD, 'gpio: locked OTYPER pin1 frozen');
+    W(GPIOA + 0x20, 0xFFFFFFFF);
+    ok(R(GPIOA + 0x20) === 0xFFFFFF0F, 'gpio: locked AFRL pin1 frozen');
+}
+
 // ── USART LIN break + Smartcard NACK loop + IrDA pulse classes ────────────
 // COMPLETE: LIN break latches LBD + RXNE/0x00 (+IRQ when LBDIE); Smartcard
 // T=0 NACK loop holds TC across retries (SCARCNT+1 tries, then NE drop);
@@ -1370,6 +1434,7 @@ const tests = [
     ['spi slave gating (COMPLETE)', t_spi_slave_gate],
     ['rtc tamper physics + flash RDP (COMPLETE)', t_rtc_tamper_phys],
     ['flash RDP levels (COMPLETE)', t_flash_rdp],
+    ['honor pass: ADC OVR + USART IDLE/SBK + TIM OPM + GPIO LCKR (COMPLETE)', t_honor_pass],
 ];
 for (const [name, fn] of tests) {
     console.log(`— ${name}`);

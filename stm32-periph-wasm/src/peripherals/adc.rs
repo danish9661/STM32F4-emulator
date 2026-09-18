@@ -183,6 +183,12 @@ impl Adc {
     }
 
     fn set_eoc(&mut self, sys: &System) {
+        // Overrun: a new conversion completes while EOC is still set (the
+        // previous DR was never read). Silicon latches OVR (SR bit 5) and
+        // — with OVRIE — pends the IRQ; the new sample still lands in DR.
+        if self.sr & (1 << 1) != 0 {
+            self.sr |= 1 << 5; // OVR
+        }
         self.sr |= 1 << 1; // EOC
         self.fire_interrupts(sys);
         // DMA request on EOC when CR2 DMA (bit 8) is set: stage one
@@ -458,7 +464,10 @@ impl Peripheral for Adc {
             }
             0x4C => {
                 let dr = self.dr;
-                self.sr &= !(1 << 1);
+                // DR read clears EOC — and OVR with it (silicon: a DR read
+                // acknowledges the whole EOC/OVR pair; OVR alone clears on
+                // the next conversion or an SR read).
+                self.sr &= !((1 << 1) | (1 << 5));
                 dr
             }
             _ => 0,

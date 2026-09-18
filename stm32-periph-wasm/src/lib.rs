@@ -444,6 +444,28 @@ pub fn uart_tx_len(base: u32) -> usize {
     sys.p.uart_tx_len(base)
 }
 
+/// Harness = the idle line: latch IDLE on the USART at `base`.
+#[wasm_bindgen]
+pub fn uart_idle(base: u32) {
+    let sys = crate::sys();
+    let sys2 = crate::sys();
+    sys.p.uart_idle(sys2, base);
+}
+
+/// Harness = queue a TX break on the USART at `base` (SBK semantics).
+#[wasm_bindgen]
+pub fn uart_break_tx(base: u32) {
+    let sys = crate::sys();
+    sys.p.uart_break_tx(base);
+}
+
+/// Whether a TX break is queued on the USART at `base` (scope probe).
+#[wasm_bindgen]
+pub fn uart_break_pending(base: u32) -> bool {
+    let sys = crate::sys();
+    sys.p.uart_break_pending(base)
+}
+
 /// Harness = the LIN master: deliver a break frame to the USART at `base`.
 #[wasm_bindgen]
 pub fn uart_lin_break(base: u32) {

@@ -192,6 +192,10 @@ pub struct Gpio {
     od: u32,
     id: u32,
     lck: u32,
+    /// LCKR lock-key sequence state (see the 0x1C write arm): 0 = idle,
+    /// 1/2 = steps completed; `lck_pending` holds the step-1 LCKk bits.
+    lck_seq: u8,
+    lck_pending: u32,
     afrl: u32,
     afrh: u32,
     bsrr: u32,
@@ -257,6 +261,19 @@ impl Peripheral for Gpio {
     fn write(&mut self, sys: &System, offset: u32, value: u32) {
         match offset {
             0x00 => {
+                // MODER: locked pins (LCKR LCKk + LCKK engaged) ignore
+                // writes (silicon freezes the whole port config until
+                // reset). Only the unlocked pins take the new mode.
+                let mut value = value;
+                if self.lck & (1 << 16) != 0 {
+                    let locked = self.lck & 0xFFFF;
+                    for pin in 0..16u8 {
+                        if locked & (1 << pin) != 0 {
+                            let mask = 0b11 << (pin * 2);
+                            value = (value & !mask) | (self.mode & mask);
+                        }
+                    }
+                }
                 let old = self.mode;
                 self.mode = value;
                 Self::iter_port_reg_changes(old, value, 2, |pin, new_mode| {
@@ -266,9 +283,40 @@ impl Peripheral for Gpio {
                     }
                 });
             }
-            0x04 => self.otype = value,
-            0x08 => self.ospeed = value,
-            0x0C => self.pupd = value,
+            // OTYPER/OSPEEDR/PUPDR/AFRL/AFRH freeze under an engaged
+            // LCKK for the selected pins (same rule as MODER above).
+            0x04 => {
+                let mut value = value;
+                if self.lck & (1 << 16) != 0 {
+                    let locked = self.lck & 0xFFFF;
+                    value = (value & !locked) | (self.otype & locked);
+                }
+                self.otype = value;
+            }
+            0x08 => {
+                let mut value = value;
+                if self.lck & (1 << 16) != 0 {
+                    for pin in 0..16u8 {
+                        if self.lck & (1 << pin) != 0 {
+                            let mask = 0b11 << (pin * 2);
+                            value = (value & !mask) | (self.ospeed & mask);
+                        }
+                    }
+                }
+                self.ospeed = value;
+            }
+            0x0C => {
+                let mut value = value;
+                if self.lck & (1 << 16) != 0 {
+                    for pin in 0..16u8 {
+                        if self.lck & (1 << pin) != 0 {
+                            let mask = 0b11 << (pin * 2);
+                            value = (value & !mask) | (self.pupd & mask);
+                        }
+                    }
+                }
+                self.pupd = value;
+            }
             0x10 => { /* IDR is read-only */ }
             0x14 => {
                 let old = self.od;
@@ -296,9 +344,63 @@ impl Peripheral for Gpio {
                     }
                 }
             }
-            0x1C => self.lck = value,
-            0x20 => self.afrl = value,
-            0x24 => self.afrh = value,
+            0x1C => {
+                // LCKR: the lock key sequence is W(1<<16|LCKk) → W(LCKk) →
+                // W(1<<16|LCKk) → R(LCKK set confirms). The model tracks
+                // it in three steps: any other write aborts the sequence.
+                // Once LCKK (bit 16) reads set, the selected LCKk pins are
+                // frozen (see MODER/OTYPER/OSPEEDR/PUPDR/AFRL/AFRH arms).
+                const KEY: u32 = 1 << 16;
+                if value & KEY != 0 && self.lck & KEY == 0 && self.lck_seq == 0 {
+                    // Step 1: write LCKK + LCKk bits.
+                    self.lck_seq = 1;
+                    self.lck_pending = value & 0xFFFF;
+                } else if value & KEY == 0 && self.lck_seq == 1 {
+                    // Step 2: write LCKk alone — must match step 1.
+                    if value & 0xFFFF == self.lck_pending {
+                        self.lck_seq = 2;
+                    } else {
+                        self.lck_seq = 0;
+                    }
+                } else if value & KEY != 0 && self.lck_seq == 2 {
+                    // Step 3: write LCKK + LCKk again — must match: engage.
+                    if value & 0xFFFF == self.lck_pending {
+                        self.lck = KEY | self.lck_pending;
+                    }
+                    self.lck_seq = 0;
+                } else {
+                    // Any other write aborts (but a plain LCKK read still
+                    // reports the engaged state).
+                    self.lck_seq = 0;
+                    if self.lck & KEY == 0 {
+                        self.lck = value & 0x1FFFF;
+                    }
+                }
+            }
+            0x20 => {
+                let mut value = value;
+                if self.lck & (1 << 16) != 0 {
+                    for pin in 0..8u8 {
+                        if self.lck & (1 << pin) != 0 {
+                            let mask = 0xF << (pin * 4);
+                            value = (value & !mask) | (self.afrl & mask);
+                        }
+                    }
+                }
+                self.afrl = value;
+            }
+            0x24 => {
+                let mut value = value;
+                if self.lck & (1 << 16) != 0 {
+                    for pin in 8..16u8 {
+                        if self.lck & (1 << pin) != 0 {
+                            let mask = 0xF << ((pin - 8) * 4);
+                            value = (value & !mask) | (self.afrh & mask);
+                        }
+                    }
+                }
+                self.afrh = value;
+            }
             _ => {}
         }
     }

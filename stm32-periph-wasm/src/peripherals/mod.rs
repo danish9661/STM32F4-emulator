@@ -203,6 +203,21 @@ impl Peripherals {
         self.with_usart(base, |u| u.tx_len()).unwrap_or(0)
     }
 
+    /// Harness = the idle line: latch IDLE on the USART at `base`.
+    pub fn uart_idle(&self, sys: &System, base: u32) {
+        self.with_usart(base, |u| u.idle_event(sys));
+    }
+
+    /// Harness = queue a TX break on the USART at `base` (SBK semantics).
+    pub fn uart_break_tx(&self, base: u32) {
+        self.with_usart(base, |u| u.sbk_request());
+    }
+
+    /// Whether a TX break is queued on the USART at `base` (scope probe).
+    pub fn uart_break_pending(&self, base: u32) -> bool {
+        self.with_usart(base, |u| u.break_pending()).unwrap_or(false)
+    }
+
     /// Harness = the SPI master: drive the slave's NSS level.
     pub fn spi_slave_select(&self, base: u32, asserted: bool) {
         self.with_spi(base, |u| u.slave_select(asserted));

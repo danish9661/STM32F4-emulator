@@ -1848,6 +1848,24 @@ export function tim_inject_capture(name, ch) {
 }
 
 /**
+ * Whether a TX break is queued on the USART at `base` (scope probe).
+ * @param {number} base
+ * @returns {boolean}
+ */
+export function uart_break_pending(base) {
+    const ret = wasm.uart_break_pending(base);
+    return ret !== 0;
+}
+
+/**
+ * Harness = queue a TX break on the USART at `base` (SBK semantics).
+ * @param {number} base
+ */
+export function uart_break_tx(base) {
+    wasm.uart_break_tx(base);
+}
+
+/**
  * Harness = the noisy wire: arm framing (FE) / parity (PE) faults on the
  * next received byte of the USART at `base`. PE needs PCE enabled.
  * @param {number} base
@@ -1856,6 +1874,14 @@ export function tim_inject_capture(name, ch) {
  */
 export function uart_fault_rx(base, fe, pe) {
     wasm.uart_fault_rx(base, fe, pe);
+}
+
+/**
+ * Harness = the idle line: latch IDLE on the USART at `base`.
+ * @param {number} base
+ */
+export function uart_idle(base) {
+    wasm.uart_idle(base);
 }
 
 /**
