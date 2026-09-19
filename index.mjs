@@ -40,3 +40,4 @@ export async function createSTM32F407(opts = {}) {
 }
 
 export { createEmulator, createNetSim, FIRMWARES, bindings, svdXml, LED, Button, Pwm, I2cRegisterDevice, Potentiometer, STM32F4, GPIOPin, USART, DMAStream };
+export { boardLed, BOARD_LED, BOARD_LED_ALIASES } from './site/boards.js';

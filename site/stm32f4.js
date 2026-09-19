@@ -273,4 +273,48 @@ export class STM32F4 {
     stop() { return this._emu.stop(); }
     reset() { return this._emu.reset(); }
     close() { return this._emu.close(); }
+    // Host reset/boot control (real-device Reset button semantics — see
+    // emulator.js): resetCpu() re-runs the vector table with peripherals
+    // kept; setNrst(true/false) holds/releases the NRST line (steps become
+    // clock-only no-ops while held); bootPreset({flash, extraMem}) reloads
+    // the image then resets. All degrade gracefully on older handles.
+    resetCpu() {
+        if (typeof this._emu.resetCpu === 'function') return this._emu.resetCpu();
+        return this._emu.reset();
+    }
+    setNrst(asserted) {
+        if (typeof this._emu.setNrst === 'function') return this._emu.setNrst(asserted);
+        return false;
+    }
+    isNrstAsserted() {
+        if (typeof this._emu.isNrstAsserted === 'function') return this._emu.isNrstAsserted();
+        return false;
+    }
+    bootPreset(image) {
+        if (typeof this._emu.bootPreset === 'function') return this._emu.bootPreset(image);
+        return this._emu.loadImage(image);
+    }
+    // Board LED readout: { bank, pin, label, on, moder } for the board's
+    // on-board LED (boards.js BOARD_LED + aliases; fwName routes Nucleo).
+    // `on` is the guest-driven ODR level; `output` is whether MODER has the
+    // pin as output (false before the firmware configures it).
+    ledStatus(fwName, boardKey) {
+        const led = this._ledFor(fwName, boardKey);
+        const moder = this._emu.read32(0x40020000 + led.bank * 0x400) >>> 0;
+        const odr = this._emu.read32(0x40020000 + led.bank * 0x400 + 0x14) >>> 0;
+        const mode = (moder >>> (led.pin * 2)) & 3;
+        return { bank: led.bank, pin: led.pin, label: led.label, on: ((odr >>> led.pin) & 1) !== 0, output: mode === 1, moder };
+    }
+    _ledFor(fwName, boardKey) {
+        const aliases = { blinky_nucleo_f401: { bank: 0, pin: 5, label: 'PA5' }, blinky_nucleo_f411: { bank: 0, pin: 5, label: 'PA5' } };
+        if (fwName && aliases[fwName]) return aliases[fwName];
+        const map = {
+            stm32f401: { bank: 2, pin: 13, label: 'PC13' },
+            stm32f411: { bank: 2, pin: 13, label: 'PC13' },
+            stm32f407: { bank: 3, pin: 12, label: 'PD12' },
+            stm32f407ve: { bank: 0, pin: 6, label: 'PA6' },
+            stm32f429: { bank: 6, pin: 13, label: 'PG13' },
+        };
+        return map[boardKey] || map.stm32f407;
+    }
 }

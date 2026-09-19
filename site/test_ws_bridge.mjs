@@ -18,12 +18,14 @@ const wasmBytes = new Uint8Array(readFileSync(resolve(__dirname, 'vendor/stm32_p
 // ── inline bridge logic (same as ws-bridge.mjs but in-process) ──────────────
 const MSG = {
     STEP: 0x01, STOP: 0x02, RESET: 0x03, LOAD_IMAGE: 0x04,
+    RESET_CPU: 0x05, SET_NRST: 0x06,
     READ32: 0x10, WRITE32: 0x11, GET_REGS: 0x12, GET_FPREGS: 0x13, SET_FPREG: 0x14,
     ETH_RX: 0x20, CAN_RX: 0x21, UART_TX: 0x22,
     PUSH_UART: 0x80, PUSH_ETH: 0x81, PUSH_GPIO: 0x82,
     STOPPED: 0x8A,
     STEP_RESP: 0x90, READ32_RESP: 0x91, WRITE32_OK: 0x92,
     LOAD_OK: 0x93, REGS_RESP: 0x94, FPREGS_RESP: 0x95, SET_FPREG_OK: 0x96, ERROR: 0xA0,
+    RESET_CPU_OK: 0x97, NRST_OK: 0x98,
 };
 
 function u32LE(buf, off) {
@@ -176,6 +178,28 @@ async function runTest() {
                     if (emu) emu.stop();
                     break;
                 }
+                case MSG.RESET_CPU: {
+                    if (!emu) break;
+                    if (typeof emu.resetCpu === 'function') emu.resetCpu();
+                    else emu.reset();
+                    const resp = new Uint8Array(5);
+                    resp[0] = MSG.RESET_CPU_OK;
+                    new DataView(resp.buffer).setUint32(1, id, true);
+                    ws.send(resp);
+                    break;
+                }
+                case MSG.SET_NRST: {
+                    if (!emu) break;
+                    const level = buf.length >= 6 ? buf[5] : 2;
+                    if (level === 0 || level === 1) emu.setNrst(level === 1);
+                    const state = typeof emu.isNrstAsserted === 'function' ? emu.isNrstAsserted() : level === 1;
+                    const resp = new Uint8Array(6);
+                    resp[0] = MSG.NRST_OK;
+                    new DataView(resp.buffer).setUint32(1, id, true);
+                    resp[5] = state ? 1 : 0;
+                    ws.send(resp);
+                    break;
+                }
             }
         });
     });
@@ -291,6 +315,19 @@ async function runTest() {
     const rst2 = await remote.getFpuState();
     assert(rst2.s[5] === 0xDEADBEEF, 'adapter: S5 round-trips');
     assert(rst2.fpscr === 0xE0000000, 'adapter: FPSCR round-trips');
+
+    // Host reset/boot control over the bridge (RESET_CPU / SET_NRST).
+    console.log('\n9. remote-emu adapter resetCpu / setNrst');
+    await remote.step(100000);
+    await remote.step(100000);
+    await remote.resetCpu();
+    const regsAfterReset = await remote.getRegisters();
+    assert(regsAfterReset.PC === 0x800004d, `adapter: resetCpu lands on vector 0x800004d (got 0x${(regsAfterReset.PC >>> 0).toString(16)})`);
+    assert(await remote.setNrst(true) === true, 'adapter: setNrst(true) asserts');
+    const s1 = await remote.step(100000);
+    const s2 = await remote.step(100000);
+    assert(s1.instCount === s2.instCount, `adapter: held steps advance nothing (${s1.instCount} == ${s2.instCount})`);
+    assert(await remote.setNrst(false) === false, 'adapter: setNrst(false) releases');
     await remote.close();
 
     // ── cleanup ─────────────────────────────────────────────────────────

@@ -74,6 +74,14 @@ export interface EmulatorHandle {
   read8(addr: number): number;
   write8(addr: number, val: number): void;
   close(): void;
+  /** CPU back to the vector-table SP/PC; peripherals keep state (NRST pulse). */
+  resetCpu(): void;
+  /** Hold (true) / release (false) the NRST line; steps go clock-only while held. */
+  setNrst(asserted: boolean): boolean;
+  /** Whether NRST is currently held. */
+  isNrstAsserted(): boolean;
+  /** Reload flash (+extraMem) and reset to the (possibly new) vector table. */
+  bootPreset(image: { flash?: Uint8Array; extraMem?: ExtraMemSegment[] }): void;
   // The handle exposes additional device/tap methods; kept open for forward
   // compatibility without forcing every addition into this file.
   [key: string]: any;

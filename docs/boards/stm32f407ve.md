@@ -9,9 +9,9 @@ peripherals), 512K flash package, 192K RAM. Everything on
 - Black F407VE — LED **PA6**, `Serial` = **USART1**
 - Black F407ZE — LED **PF10**, `Serial` = **USART1**
 
-## Demos on this chip (66 presets)
+## Demos on this chip (73 presets)
 
-The 64 shared F407 presets (see [STM32F407](stm32f407.md)) that fit 512K,
+The 72 shared F407 presets (see [STM32F407](stm32f407.md)) that fit 512K,
 plus the VE/ZE builds: `blinky_f407ve`, `blinky_f407ze`,
 `arduino_black_f407ve`, `arduino_black_f407ze`,
 `arduino_test_black_f407ve`, `arduino_test_black_f407ze`,
@@ -36,7 +36,7 @@ plus the VE/ZE builds: `blinky_f407ve`, `blinky_f407ze`,
 ## Verification
 
 - `node site/test_arduino_boards.mjs` — VE + ZE builds PASS
-- `node site/test_board_matrix.mjs` — all 66 entries green
+- `node site/test_board_matrix.mjs` — all 73 entries green
 
 ## Feature matrix (silicon vs emulator)
 

@@ -6,7 +6,7 @@ import * as bindings from './vendor/stm32_periph_wasm.js?v=40';
 import { createEmulator } from './emulator.js?v=2';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
-import { boardsOf, boardForSelection, BOARDS } from './boards.js?v=6';
+import { boardsOf, boardForSelection, BOARDS, boardLed } from './boards.js?v=7';
 import { FIRMWARES } from './firmware.js?v=26';
 import { parseIntelHex, parseElf, parseMap } from './loaders.js';
 import { createRemoteEmulator } from './remote-emu.js';
@@ -30,6 +30,22 @@ let session = 0;
 let emu = null, netsim = null, usbhost = null, running = false, featHooks = null;
 let uartBuf = '', totalInst = 0, t0 = performance.now(), lastInst = 0, lastT = t0;
 let stepsDone = 0;
+// Board LED state for the LED status readout (boards.js BOARD_LED +
+// aliases): sampled in refreshStats, rendered into #ledInfo.
+let ledCacheKey = '';
+// Network counters for the up/down speed readout + pcap capture. TX bytes
+// accumulate in every onTx path (gateway + netsim + loopback-blind TX);
+// RX bytes accumulate for every frame delivered to the guest (gateway,
+// netsim reply, or loopback). Both feed the wall-clock rate in
+// refreshStats and the emulated-time rate (bytes per virtual instruction).
+let netTxBytes = 0, netRxBytes = 0, netTxFrames = 0, netRxFrames = 0;
+let netLastWall = 0, netLastTx = 0, netLastRx = 0, netUpBps = 0, netDownBps = 0;
+// PCAP capture: every TX frame the guest emits + every RX frame delivered
+// to the guest, with { dir, us, len, data }. Timestamps are wall-clock
+// microseconds (Wireshark-compatible); the emulated instruction count is
+// kept alongside for the emulated-time speed readout.
+let pcapFrames = [], pcapCap = 0;
+const PCAP_MAX_FRAMES = 20000;
 let dcmiFed = { big2: false, big3: false };
 let image = null;          // { flash, ram, extraMem, entry, symbols, name, uartAddr }
 
@@ -201,7 +217,92 @@ const appendUart = (chunk) => {
     if (wasAtBottom && $('chkAuto').checked) uartEl.scrollTop = uartEl.scrollHeight;
 };
 
-// ── packets ────────────────────────────────────────────────────────────────
+// ── network capture + counters (pcap download, up/down speed) ─────────────
+// One funnel for every frame crossing the virtual wire, in both directions:
+// TX = guest emits (all onTx paths), RX = delivered to the guest (gateway,
+// netsim reply, loopback via netsim). Counters feed the speed readout;
+// pcapFrames feeds the downloadable capture.
+const netNowUs = () => Math.floor(performance.now() * 1000);
+const netRecordTx = (pkt) => {
+    const n = pkt ? pkt.length : 0;
+    netTxBytes += n; netTxFrames++;
+    if (pcapCap > 0 && pcapFrames.length < PCAP_MAX_FRAMES) {
+        pcapFrames.push({ dir: 'tx', us: netNowUs(), inst: totalInst, data: pkt.slice() });
+    }
+};
+const netRecordRx = (frame) => {
+    const n = frame ? frame.length : 0;
+    netRxBytes += n; netRxFrames++;
+    if (pcapCap > 0 && pcapFrames.length < PCAP_MAX_FRAMES) {
+        pcapFrames.push({ dir: 'rx', us: netNowUs(), inst: totalInst, data: frame.slice() });
+    }
+};
+// Speed readout: wall-clock B/s (EWMA over the refreshStats interval)
+// plus emulated-time B/s (bytes per virtual instruction × board clock).
+// Both directions, both bases — the user asked for both.
+const refreshNetSpeed = (board) => {
+    const now = performance.now();
+    const dt = (now - (netLastWall || now)) / 1000;
+    if (dt > 0.25) {
+        const up = (netTxBytes - netLastTx) / dt, down = (netRxBytes - netLastRx) / dt;
+        // EWMA so the number doesn't jump per frame; init on first sample.
+        netUpBps = netUpBps ? netUpBps * 0.6 + up * 0.4 : up;
+        netDownBps = netDownBps ? netDownBps * 0.6 + down * 0.4 : down;
+        netLastWall = now; netLastTx = netTxBytes; netLastRx = netRxBytes;
+    }
+    const mhz = (board && board.maxClockMHz) || 168;
+    const emuUp = totalInst > 0 ? (netTxBytes / totalInst) * mhz * 1e6 : 0;
+    const emuDown = totalInst > 0 ? (netRxBytes / totalInst) * mhz * 1e6 : 0;
+    return { up: netUpBps, down: netDownBps, emuUp, emuDown };
+};
+const fmtBps = (v) => {
+    if (!(v >= 0)) return '—';
+    if (v < 1000) return v.toFixed(0) + ' B/s';
+    if (v < 1e6) return (v / 1000).toFixed(1) + ' kB/s';
+    return (v / 1e6).toFixed(2) + ' MB/s';
+};
+// PCAP download (Wireshark-compatible): global header (magic a1b2c304,
+// version 2.4, Ethernet linktype 1) + per-frame headers (ts_sec/usec,
+// incl_len/orig_len) + raw frame bytes. Records every TX frame the guest
+// emitted and every RX frame delivered to it, in capture order, with
+// wall-clock microsecond timestamps. Open in Wireshark/tcpdump directly.
+const pcapGlobalHeader = () => {
+    const h = new Uint8Array(24);
+    const dv = new DataView(h.buffer);
+    dv.setUint32(0, 0xa1b2c304, true); // magic (LE)
+    dv.setUint16(4, 2, true); dv.setUint16(6, 4, true);
+    dv.setInt32(8, 0, true); dv.setUint32(12, 0, true);
+    dv.setUint32(16, 65535, true); dv.setUint32(20, 1, true); // Ethernet
+    return h;
+};
+const pcapBytes = () => {
+    const parts = [pcapGlobalHeader()];
+    let total = 24;
+    for (const f of pcapFrames) {
+        const h = new Uint8Array(16);
+        const dv = new DataView(h.buffer);
+        dv.setUint32(0, Math.floor(f.us / 1e6), true);
+        dv.setUint32(4, f.us % 1e6, true);
+        dv.setUint32(8, f.data.length, true);
+        dv.setUint32(12, f.data.length, true);
+        parts.push(h, f.data);
+        total += 16 + f.data.length;
+    }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) { out.set(p, off); off += p.length; }
+    return out;
+};
+const pcapDownload = () => {
+    if (!pcapFrames.length) { setStatus('pcap: no frames captured yet', 'err'); return; }
+    const blob = new Blob([pcapBytes()], { type: 'application/vnd.tcpdump.pcap' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'net-' + (image ? image.name : 'capture') + '.pcap';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    setStatus(`pcap: ${pcapFrames.length} frames downloaded`, 'run');
+};
 const addFrame = (dir, pkt) => {
     const meta = describeFrame(dir, pkt);
     const div = document.createElement('div');
@@ -269,6 +370,7 @@ const connectGateway = () => {
         gw.rx++;
         refreshGwLabel();
         addFrame('rx', buf);
+        netRecordRx(buf);
         if (emu) emu.injectFrame(buf);
     };
     ws.onclose = () => {
@@ -387,6 +489,12 @@ const boot = async () => {
     framesEl.textContent = '';
     totalInst = 0; stepsDone = 0;
     t0 = lastT = performance.now(); lastInst = 0;
+    // Fresh network session per boot: counters restart, capture restarts
+    // iff recording (pcapCap>0 keeps capturing across boots like a tap).
+    netTxBytes = 0; netRxBytes = 0; netTxFrames = 0; netRxFrames = 0;
+    netLastWall = 0; netLastTx = 0; netLastRx = 0; netUpBps = 0; netDownBps = 0;
+    if (pcapCap > 0) pcapFrames = [];
+    ledCacheKey = '';
     $('stFw').textContent = image.name;
 
     if (bridgeUrl) {
@@ -398,6 +506,7 @@ const boot = async () => {
             emu = await createRemoteEmulator(bridgeUrl, {
                 onTx: (pkt) => {
                     addFrame('tx', pkt);
+                    netRecordTx(pkt);
                     if (gw.connected && gw.ws) {
                         gw.tx++;
                         refreshGwLabel();
@@ -405,6 +514,7 @@ const boot = async () => {
                     } else if (netsim) {
                         for (const reply of netsim.onTx(pkt)) {
                             addFrame('rx', reply);
+                            netRecordRx(reply);
                             emu.injectFrame(reply);
                         }
                     }
@@ -470,6 +580,7 @@ const boot = async () => {
             ext_devices: DEVICE_FIRMWARES[image.name],
             onTx: (pkt) => {
                 addFrame('tx', pkt);
+                netRecordTx(pkt);
                 if (gw.connected && gw.ws) {
                     gw.tx++;
                     refreshGwLabel();
@@ -477,6 +588,7 @@ const boot = async () => {
                 } else if (netsim) {
                     for (const reply of netsim.onTx(pkt)) {
                         addFrame('rx', reply);
+                        netRecordRx(reply);
                         emu.injectFrame(reply);
                     }
                 }
@@ -522,10 +634,14 @@ const loop = async (id) => {
     while (session === id) {
         if (!running) { await raf(); continue; }
         try {
-            // eth_feat_test runs at 20k-inst steps: its wire-rate bands
-            // and race windows are calibrated for fine steps (the node
-            // matrix uses 5k); 100k steps would overshoot every band.
-            const res = await emu.step(image && image.name.startsWith('eth_feat_test') ? 20000 : undefined);
+            // eth_feat_test/eth_adv run at 20k-inst steps: their wire-rate
+            // bands and race windows are calibrated for fine steps (the
+            // node matrix uses 5k-20k); 100k steps would overshoot every
+            // band (observed: eth_adv FRAG FAILs at 100k — both fragments
+            // consumed before the reassembly loop polls — while 20k passes
+            // 13/13; the node matrix runs both at 20k).
+            const fineSteps = image && (image.name.startsWith('eth_feat_test') || image.name.startsWith('eth_adv'));
+            const res = await emu.step(fineSteps ? 20000 : undefined);
             totalInst = res.instCount;
             stepsDone++;
         } catch (e) {
@@ -591,12 +707,77 @@ $('btnStop').addEventListener('click', () => {
     $('btnRun').textContent = 'Run';
     setStatus('stopped', 'stop');
 });
-$('btnReset').addEventListener('click', () => {
+$('btnReset').addEventListener('click', async () => {
     if (gw.connected && gw.ws) {
         try { gw.ws.send('RESET'); } catch (e) {}
     }
     if (image) boot();
 });
+// Host reset/boot callable from automation (CDP drivers, tests) and the
+// new Reset/Boot buttons below: resetEmu() = CPU back to vector table
+// (peripherals kept, like a real NRST pulse); bootEmu() = full reboot.
+// nrstEmu(asserted) holds/releases the NRST line (steps go clock-only
+// while held). All degrade gracefully when no emulator is booted.
+const resetEmu = async () => {
+    if (!emu) { setStatus('reset: nothing booted', 'err'); return false; }
+    try {
+        const r = emu.resetCpu ? emu.resetCpu() : emu.reset();
+        if (r instanceof Promise) await r;
+        uartBuf = uartChunks.join('');
+        setStatus('reset — cpu back at vector table', 'run');
+        return true;
+    } catch (e) { setStatus('reset failed: ' + e.message, 'err'); return false; }
+};
+const bootEmu = async () => {
+    if (!image) { setStatus('boot: no firmware loaded', 'err'); return false; }
+    await boot();
+    return true;
+};
+const nrstEmu = async (asserted) => {
+    if (!emu) { setStatus('nrst: nothing booted', 'err'); return null; }
+    try {
+        if (typeof emu.setNrst !== 'function') { setStatus('nrst: not supported by this backend', 'err'); return null; }
+        const r = emu.setNrst(asserted);
+        const s = r instanceof Promise ? await r : r;
+        setStatus(s ? 'nrst asserted — core held in reset' : 'nrst released', s ? 'stop' : 'run');
+        return !!s;
+    } catch (e) { setStatus('nrst failed: ' + e.message, 'err'); return null; }
+};
+window.__resetEmu = resetEmu;
+window.__bootEmu = bootEmu;
+window.__nrstEmu = nrstEmu;
+window.__ledStatus = () => getLedStatus();
+window.__netStats = () => {
+    let board = null;
+    try {
+        const sel = boardSelectEl ? boardSelectEl.value : 'all';
+        const compat = boardsOf(image.name);
+        board = BOARDS[(sel && sel !== 'all' && compat.includes(sel)) ? sel : compat[0]];
+    } catch {}
+    return {
+        txBytes: netTxBytes, rxBytes: netRxBytes, txFrames: netTxFrames, rxFrames: netRxFrames,
+        ...refreshNetSpeed(board), pcapFrames: pcapFrames.length, pcapRecording: pcapCap > 0,
+    };
+};
+window.__pcapStart = (cap) => { pcapFrames = []; pcapCap = cap || 0; return true; };
+window.__pcapStop = () => { pcapCap = 0; return pcapFrames.length; };
+window.__pcapBytes = () => pcapBytes();
+const btnResetHold = $('btnResetHold'), btnBootEmu = $('btnBootEmu'), btnNrstRelease = $('btnNrstRelease');
+if (btnResetHold) btnResetHold.addEventListener('click', () => resetEmu());
+if (btnBootEmu) btnBootEmu.addEventListener('click', () => bootEmu());
+if (btnNrstRelease) btnNrstRelease.addEventListener('click', () => nrstEmu(false));
+const btnNrstHold = $('btnNrstHold');
+if (btnNrstHold) btnNrstHold.addEventListener('click', () => nrstEmu(true));
+const btnPcapStart = $('btnPcapStart'), btnPcapStop = $('btnPcapStop'), btnPcapDl = $('btnPcapDl');
+if (btnPcapStart) btnPcapStart.addEventListener('click', () => {
+    pcapFrames = []; pcapCap = 1;
+    setStatus('pcap: recording…', 'run');
+});
+if (btnPcapStop) btnPcapStop.addEventListener('click', () => {
+    pcapCap = 0;
+    setStatus(`pcap: stopped — ${pcapFrames.length} frames buffered`, 'stop');
+});
+if (btnPcapDl) btnPcapDl.addEventListener('click', () => pcapDownload());
 $('btnClear').addEventListener('click', () => { uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0; });
 $('btnGw').addEventListener('click', connectGateway);
 
@@ -851,7 +1032,29 @@ const refreshStats = async () => {
     $('stPc').textContent = regs ? hex32(regs.PC) : '—';
     $('stSp').textContent = regs ? hex32(regs.SP) : '—';
     $('stXpsr').textContent = regs ? hex32(regs.XPSR) : '—';
+    // Network up/down speed (wall clock + emulated time, both directions).
+    try {
+        let board = null;
+        try {
+            const sel = boardSelectEl ? boardSelectEl.value : 'all';
+            const compat = boardsOf(image.name);
+            board = BOARDS[(sel && sel !== 'all' && compat.includes(sel)) ? sel : compat[0]];
+        } catch {}
+        const sp = refreshNetSpeed(board);
+        const netEl = $('stNet');
+        if (netEl) {
+            netEl.textContent = `▲ ${fmtBps(sp.up)} ▼ ${fmtBps(sp.down)}`;
+            netEl.title = `emulated-time rate @${(board && board.maxClockMHz) || 168}MHz: ▲ ${fmtBps(sp.emuUp)} ▼ ${fmtBps(sp.emuDown)} (${netTxFrames} TX / ${netRxFrames} RX frames, ${netTxBytes} / ${netRxBytes} B)`;
+        }
+        const capEl = $('pcapInfo');
+        if (capEl) {
+            capEl.textContent = pcapCap > 0
+                ? `recording — ${pcapFrames.length} frames`
+                : `${pcapFrames.length} frames buffered`;
+        }
+    } catch {}
     await refreshGpio();
+    await refreshLed();
     await refreshPeriph();
     await refreshWatch();
     await sampleTraces();
@@ -1057,7 +1260,45 @@ const renderPps = () => {
     $('ppsInfo').textContent = `${count} edges`;
 };
 
-// ── GPIO banks A–E ─────────────────────────────────────────────────────────
+// ── board LED status (real-device LED indication) ──────────────────────────
+// Reads the board's on-board LED pin (boards.js BOARD_LED + aliases) from
+// the live GPIO registers: ODR level + whether MODER has it as output.
+// Renders into #ledInfo/#ledDot; callable as getLedStatus() for automation
+// (CDP drivers, tests). Not firmware-name magic beyond the Nucleo alias —
+// the pin comes from the board table, the level from guest ODR.
+const getLedStatus = async () => {
+    if (!emu || !image) return null;
+    let boardKey = 'stm32f407';
+    try {
+        const sel = boardSelectEl ? boardSelectEl.value : 'all';
+        const compat = boardsOf(image.name);
+        boardKey = (sel && sel !== 'all' && compat.includes(sel)) ? sel : compat[0];
+    } catch {}
+    const led = boardLed(image.name, boardKey);
+    try {
+        const base = GPIO_BASE + led.bank * GPIO_STRIDE;
+        const [moder, odr] = await Promise.all([
+            emu.read32(base + 0x00), emu.read32(base + 0x14),
+        ]);
+        const mode = ((moder >>> 0) >>> (led.pin * 2)) & 3;
+        const on = (((odr >>> 0) >>> led.pin) & 1) !== 0;
+        return { ...led, board: boardKey, on, output: mode === 1, moder: moder >>> 0, odr: odr >>> 0 };
+    } catch { return null; }
+};
+const refreshLed = async () => {
+    const el = $('ledInfo'), dot = $('ledDot');
+    if (!el) return;
+    const st = await getLedStatus();
+    if (!st) {
+        if (ledCacheKey !== 'none') { ledCacheKey = 'none'; el.textContent = 'no firmware'; if (dot) dot.textContent = '○'; }
+        return;
+    }
+    const key = `${st.label}:${st.on ? 1 : 0}:${st.output ? 1 : 0}`;
+    if (key === ledCacheKey) return;
+    ledCacheKey = key;
+    if (dot) dot.textContent = st.on ? '●' : '○';
+    el.textContent = `${st.label} ${st.on ? 'ON' : 'OFF'}${st.output ? '' : ' (pin not output yet)'}`;
+};
 const GPIO_BASE = 0x40020000, GPIO_STRIDE = 0x400;
 const BANKS = ['A', 'B', 'C', 'D', 'E'];
 let gpioBuilt = false;

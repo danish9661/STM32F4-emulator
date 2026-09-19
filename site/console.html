@@ -803,6 +803,39 @@ canvas {
         <div class="stat"><b id="stSp">—</b><span>SP</span></div>
         <div class="stat"><b id="stXpsr">—</b><span>XPSR</span></div>
         <div class="stat"><b id="stFw">—</b><span>firmware</span></div>
+        <div class="stat"><b id="stNet">—</b><span>net up/down (wall)</span></div>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:12px;">
+      <h2>Reset / Boot</h2>
+      <div class="sec">
+        <div class="row">
+          <button id="btnResetHold" class="primary" title="CPU back to vector table, peripherals keep state (real NRST pulse)">Reset CPU</button>
+          <button id="btnBootEmu" title="Full reboot: reload flash and reset to vector table">Boot</button>
+        </div>
+        <div class="row" style="margin-top:6px;">
+          <button id="btnNrstHold" title="Hold NRST: steps go clock-only, CPU executes nothing">Hold NRST</button>
+          <button id="btnNrstRelease" title="Release NRST after a hold">Release NRST</button>
+        </div>
+        <p>Reset CPU = real-device NRST pulse (vector table, peripherals kept). Boot = full reboot. Hold NRST pins the core in reset until released — then Reset or Boot for the edge.</p>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:12px;">
+      <h2>Board LED</h2>
+      <div style="padding:6px 10px;font-size:11px;color:var(--dim)">
+        <span id="ledDot">○</span> <span id="ledInfo">no firmware</span>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:12px;">
+      <h2>Packet capture (pcap)</h2>
+      <div class="sec">
+        <div class="row">
+          <button id="btnPcapStart" class="primary">Start capture</button>
+          <button id="btnPcapStop">Stop</button>
+          <button id="btnPcapDl">Download .pcap</button>
+        </div>
+        <p id="pcapInfo" style="color:var(--dim);">0 frames buffered</p>
+        <p>Records every Ethernet frame both ways (guest TX + delivered RX) with microsecond timestamps — opens directly in Wireshark/tcpdump.</p>
       </div>
     </div>
     <div class="panel" style="margin-bottom:12px;">
@@ -924,7 +957,7 @@ canvas {
     · <a href="about.html">About</a>
  </footer>
 
-<script type="module" src="app.js?v=48"></script>
+<script type="module" src="app.js?v=49"></script>
 <script>
 // Custom firmware dropdown (replaces native <select>)
 (() => {

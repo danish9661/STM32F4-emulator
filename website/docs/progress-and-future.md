@@ -21,7 +21,11 @@ covered in AGENTS.md §§35–38; the
 mock-consumer harness pins them (`t_flash_err`, `t_spi_crc_err`,
 `t_usart_flow_err`, `t_sdio_acmd`, `t_rtc_wut_ts`, `t_sdio_timing`,
 `t_usart_protocols`, `t_spi_slave_gate`, `t_rtc_tamper_phys`,
-`t_flash_rdp`, `t_honor_pass`, `t_gap9`, `t_gap10` — 312 checks).
+`t_flash_rdp`, `t_honor_pass`, `t_gap9`, `t_gap10` — 317 checks).
+`eth_adv` (2026-09-18, AGENTS.md §39): 12-phase L3/L4 + link-scope guest
+suite — RST/RTO/MSS/window/frag/ICMP-err/DHCP-NAK/DHCP-renew/IGMP/ND/LLDP/
+STP against dedicated netsim peers (trigger ports 5010–5018), F407 + F429
+builds in the board matrix (176/176) and the browser smoke.
 
 ## What works today
 
@@ -51,7 +55,7 @@ mock-consumer harness pins them (`t_flash_err`, `t_spi_crc_err`,
 
 ### Browser demo + npm package
 - Single-page console (site/): UART terminal with **bidirectional RX**,
-  31 firmware presets, custom `.bin`/`.hex`/`.elf`/`.map` upload, gateway
+  223 firmware presets, custom `.bin`/`.hex`/`.elf`/`.map` upload, gateway
   connection to real gVisor networking, live GPIO grid, peripheral register
   readout, packet viewer. Deployed to GitHub Pages.
 - **DOOM runs in the browser** (`site/doom.html`): the doomgeneric F407
@@ -223,8 +227,11 @@ mock-consumer harness pins them (`t_flash_err`, `t_spi_crc_err`,
       of scope: isochronous/host, suspend-resume IRQ path beyond RWUSIG,
       packet-rate simulation (see the USB row in
       [peripherals.md](peripherals.md)).
-- [ ] EtherCAT / timers in PWM servo mode for the printer heritage
-      firmwares.
+- [x] EtherCAT — CLOSED as wont-do (no F4 silicon has an EtherCAT MAC;
+      honest close, same class as the §38 walls audit). Timers-in-PWM-servo
+      mode is DONE: `Servo` in `site/components.js` (1–2 ms pulse → 0–180°)
+      over the live `Pwm` timer probe + `site/test_component_servo.mjs`
+      (1500 us, 90.0° PASS).
 - [x] CAN bus peer / arbitration between CAN1 and CAN2 on a shared bus:
       TX requests stage frames; each tick arbitrates (lowest arbitration
       ID wins, ties by node then mailbox), the winner's mailbox completes
@@ -272,7 +279,9 @@ mock-consumer harness pins them (`t_flash_err`, `t_spi_crc_err`,
 - [ ] VS Code extension / devcontainer with the full toolchain
       (wasm-pack, arduino-cli, go). (An MCP server now covers part of the
       "drive the emulator from your editor" use case — see above.)
-- [ ] Waveform/DMA trace view in the browser console.
+- [x] Waveform/DMA trace view in the browser console (`#traceCanvas`:
+      4 MMIO channels × 256 points + DMA pending-count strip, per-frame
+      sampling in the rAF loop, `site/app.js` trace section).
 - [x] Interrupt-driven ETH driver (`eth_irq_test`): NVIC ETH IRQ 61 +
       DMAIER, the Rust core delivers `ETH_IRQHandler` inline, which reads
       DMASR TS/RS,

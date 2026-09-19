@@ -101,6 +101,7 @@ function loadFirmware(path) {
 const MSG = {
     // Browser → Node
     STEP: 0x01, STOP: 0x02, RESET: 0x03, LOAD_IMAGE: 0x04,
+    RESET_CPU: 0x05, SET_NRST: 0x06,
     READ32: 0x10, WRITE32: 0x11, GET_REGS: 0x12, GET_FPREGS: 0x13, SET_FPREG: 0x14,
     ETH_RX: 0x20, CAN_RX: 0x21, UART_TX: 0x22,
     SPI_MISO: 0x30, I2C_RX: 0x31, SET_INPUT: 0x40,
@@ -109,6 +110,7 @@ const MSG = {
     STOPPED: 0x8A, PING: 0xFE, PONG: 0xFF,
     STEP_RESP: 0x90, READ32_RESP: 0x91, WRITE32_OK: 0x92,
     LOAD_OK: 0x93, REGS_RESP: 0x94, FPREGS_RESP: 0x95, SET_FPREG_OK: 0x96, ERROR: 0xA0,
+    RESET_CPU_OK: 0x97, NRST_OK: 0x98,
 };
 
 function u8(v) { return v & 0xFF; }
@@ -287,6 +289,39 @@ async function handleConnection(ws) {
                 }
                 case MSG.RESET: {
                     if (emu) emu.reset();
+                    break;
+                }
+                case MSG.RESET_CPU: {
+                    // Host reset button: CPU back to vector table,
+                    // peripherals keep state (emu.reset() is the legacy
+                    // alias for the same path).
+                    if (!emu) { ws.send(encodeError(u32LE(buf, 1), 'no firmware loaded')); break; }
+                    const id = u32LE(buf, 1);
+                    try {
+                        if (typeof emu.resetCpu === 'function') emu.resetCpu();
+                        else emu.reset();
+                        try { ws.send(encodeResp(MSG.RESET_CPU_OK, id, new Uint8Array(0))); } catch {}
+                    } catch (e) {
+                        try { ws.send(encodeError(id, e.message)); } catch {}
+                    }
+                    break;
+                }
+                case MSG.SET_NRST: {
+                    // NRST pin hold: level byte 0 = release, 1 = assert,
+                    // 2 = query. Replies NRST_OK + [state:u8].
+                    if (!emu) { ws.send(encodeError(u32LE(buf, 1), 'no firmware loaded')); break; }
+                    const id = u32LE(buf, 1);
+                    try {
+                        const level = buf.length >= 6 ? buf[5] : 2;
+                        let state = false;
+                        if (typeof emu.setNrst === 'function') {
+                            if (level === 0 || level === 1) emu.setNrst(level === 1);
+                            state = typeof emu.isNrstAsserted === 'function' ? emu.isNrstAsserted() : level === 1;
+                        }
+                        try { ws.send(encodeResp(MSG.NRST_OK, id, new Uint8Array([state ? 1 : 0]))); } catch {}
+                    } catch (e) {
+                        try { ws.send(encodeError(id, e.message)); } catch {}
+                    }
                     break;
                 }
                 case MSG.LOAD_IMAGE: {

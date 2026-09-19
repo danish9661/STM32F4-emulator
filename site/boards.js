@@ -68,6 +68,35 @@ export function boardFor(fwName) {
     return BOARDS[BOARD_OF_FIRMWARE[fwName] || 'stm32f407'];
 }
 
+// Board LED map: the on-board LED each board drives, as [BANK, PIN] with the
+// bank as a 0-based index (A=0) matching gpio_read_output(port, pin) and the
+// emulator pin() API. Sourced from the board docs (docs/boards/*.md) and the
+// blinky firmware sources (blinky*/main.c LED_PIN + GPIO base):
+//   stm32f401 BlackPill PC13 / Nucleo PA5 (both on this map — the map lists
+//     the primary board LED; Nucleo variants share the map, PA5 is an alias),
+//   stm32f407 Discovery PD12, stm32f407ve Black PA6 (ZE PF10 is package-only),
+//   stm32f429 Discovery PG13.
+export const BOARD_LED = {
+    stm32f401: { bank: 2, pin: 13, label: 'PC13' },
+    stm32f411: { bank: 2, pin: 13, label: 'PC13' },
+    stm32f407: { bank: 3, pin: 12, label: 'PD12' },
+    stm32f407ve: { bank: 0, pin: 6, label: 'PA6' },
+    stm32f429: { bank: 6, pin: 13, label: 'PG13' },
+};
+
+// Nucleo-64 variants on the F401/F411 maps drive Arduino D13 = PA5, not the
+// BlackPill PC13 above. Firmware-name-routed alias (the preset name carries
+// the board variant; the map key does not).
+export const BOARD_LED_ALIASES = {
+    blinky_nucleo_f401: { bank: 0, pin: 5, label: 'PA5' },
+    blinky_nucleo_f411: { bank: 0, pin: 5, label: 'PA5' },
+};
+
+export function boardLed(fwName, boardKey) {
+    if (fwName && BOARD_LED_ALIASES[fwName]) return BOARD_LED_ALIASES[fwName];
+    return BOARD_LED[boardKey] || BOARD_LED.stm32f407;
+}
+
 // Firmware preset -> ALL compatible boards (first entry = primary, the board
 // the firmware was built and verified for). Anything absent here runs on
 // stm32f407 only — every pre-boards preset was built for the F407 (ETH, DAC,

@@ -732,6 +732,26 @@ export async function createEmulator(opts) {
         const rxQueue = [];
         let instCount = 0;
         let lastTxLen = 0; // bytes of the last TX frame (wire pacing)
+        // ── reset / boot control (host-driven, like real hardware) ──
+        // resetCpu(): CPU back to the vector-table SP/PC (peripherals keep
+        //   state — same as the watchdog path in step(), which calls
+        //   cpu.reset_cpu(sp0, pc0 | 1)).
+        // nrstAsserted: while true, step() is a no-op that only advances
+        //   the model clock (peripherals held in reset, CPU not executing)
+        //   — the NRST pin-hold half of a real reset button. Release with
+        //   setNrst(false), then resetCpu() (or bootPreset()) for the edge.
+        // bootPreset(image): full reboot path — reload flash + extra_mem,
+        //   then reset to the (possibly new) vector table. Used by the UI
+        //   Boot button and the bridge LOAD_IMAGE path. Defined here (before
+        //   the wasm branch) so it closes over cpu/sp0/pc0/vector_table/
+        //   extra_mem/wread32/instCount declared below — called only after
+        //   construction completes.
+        let nrstAsserted = false;
+        // NOTE: resetCpu/bootPreset bodies live on the returned handle
+        // (they need cpu/sp0/pc0/wread32 from the wasm branch below); the
+        // setNrst flag itself is safe here because step() reads it late.
+        const setNrst = (asserted) => { nrstAsserted = !!asserted; return nrstAsserted; };
+        const isNrstAsserted = () => nrstAsserted;
         // Bound the queue against a hung guest (real NICs tail-drop
         // too): newest frames past 32 are dropped, each counted as a
         // missed frame (MFC + ROS in the model).
@@ -1153,6 +1173,13 @@ export async function createEmulator(opts) {
             setSreg: (i, v) => { cpu.set_sreg(i >>> 0, v >>> 0); },
             setFpscr: (v) => { cpu.set_fpscr(v >>> 0); },
             step: (n = 100000) => {
+                // NRST held: peripherals in reset, CPU not executing. Still
+                // advance the model clock so time-driven state settles, but
+                // run no instructions and service no DMA/ETH/device paths.
+                if (nrstAsserted) {
+                    try { tick_peripherals(); } catch {}
+                    return { instCount, stopped: false, pc: cpu.get_pc() };
+                }
                 // WFI/WFE sleep: advance virtual time (which fires the RTC
                 // alarm etc.), drain any queued RX frames (the wire
                 // delivers even though the guest can't re-arm — this is
@@ -1248,9 +1275,28 @@ export async function createEmulator(opts) {
                 try { cpu.wake(); } catch {}
                 cpu.reset_cpu(sp, pc | 1);
                 instCount = 0;
+                nrstAsserted = false;
             },
             close: () => { try { cpu.free(); } catch {} },
             reset: () => { cpu.reset_cpu(sp0, pc0 | 1); },
+            // Host reset/boot control (real-device Reset button semantics).
+            resetCpu: () => {
+                try { cpu.reset_cpu(sp0, pc0 | 1); } catch {}
+                try { cpu.wake(); } catch {}
+                instCount = 0;
+            },
+            setNrst, isNrstAsserted,
+            bootPreset: (image) => {
+                const flash = (image && image.flash) || new Uint8Array(0);
+                if (flash.length) cpu.load_firmware(flash, vector_table);
+                for (const seg of (image && image.extraMem) || []) cpu.load_firmware(seg.data, seg.addr);
+                const sp = wread32(vector_table);
+                const pc = wread32(vector_table + 4);
+                try { cpu.wake(); } catch {}
+                cpu.reset_cpu(sp, pc | 1);
+                instCount = 0;
+                nrstAsserted = false;
+            },
             faultInfo: () => {
                 const fpc = cpu.fault_pc() >>> 0;
                 if (fpc === 0xFFFFFFFF) return null;

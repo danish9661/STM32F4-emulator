@@ -29,7 +29,7 @@ The browser demo deploys to GitHub Pages:
 **https://danish9661.github.io/stm32F4-emulator/**
 
 A single console page that starts **idle** — nothing runs until you pick a
-firmware: a preset dropdown with 31 bundled binaries (network demos, a
+firmware: a preset dropdown with 223 bundled binaries (network demos, a
 bare-metal LED blinker, peripheral/crypto/UART/SPI test binaries), custom
 firmware upload (`.bin`, Intel `.hex`, `.elf` — with loadable RAM segments
 and symbols — plus `.map` for a symbol table), Run/Stop/Reset, a **gateway

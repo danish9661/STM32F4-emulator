@@ -4176,3 +4176,39 @@ matrix **174/174**, browser **41/41**. `gap10_*/` firmware dirs are new
   the periph SR1 probe read TXE because `site/vendor` predated the Idle
   guard by 90 s — always rebuild + re-probe in the same chain
   (source mtime vs wasm mtime check earns its keep).
+
+## 39. eth_adv: L3/L4 + link-scope protocol suite (2026-09-18)
+
+New guest firmware `eth_adv/` proving the network paths the base `eth_*`
+firmwares never exercise: RST / RTO-blackhole / MSS-echo / window-1000 /
+IP-frag-reassembly / ICMP-port-unreachable / DHCP-NAK / DHCP-renew /
+IGMP-query+group / IPv6-NS / LLDP-chassis / STP-root (12 phases, one
+observable each, `ADV Test: done`). irq_eth + netsim, F407 + F429 builds
+(`tools/build_family.mjs` `eth_adv` entry), matrix entries
+(`IRQETHADV`, `ADV_MARKERS`, 6000x20000), browser wiring (firmware.js 26,
+boards.js compat, ETH_RX_MAP `rxDesc 0x20000c40`, IRQ_ETH set, console.html
+options, test_browser `eth_adv` case).
+
+- **netsim peers** (`site/netsim.js`, trigger ports 5010-5018): RST abort,
+  RTO blackhole (SYN-ACK then silence), MSS-echo SYN-ACK + win-1000 ACKs
+  (window patched post-`tcpSeg` with checksum repair), real RFC 791 frag
+  pair (UDP hdr only in frag0, off=2 `!` tail), ICMP quote of exactly
+  `innerTotal` bytes, DHCP NAK for `0xDEADBEEF`, IGMP query + group traffic
+  on 2nd report, NS/LLDP/STP frames. `learnMac` seeds the dst MAC from TX
+  (eth_adv never runs DHCP, so the canned CLIENT_MAC would misdeliver).
+- **Guest ISR consume-on-entry** (`eth_adv/main.c`): the ISR latches
+  `last_rdes0`, re-arms the head (`0x80000000|1536` + DMARPDR), then sets
+  `rx_flag`; thread mode uses the latch on the flag path and only re-arms
+  on the OWN-fallback path. Without both halves the synchronous delivery
+  races the wait loop (ICMP parsed a re-armed head while the frame sat
+  unconsumed). Matrix `rxDesc` MUST be the nm-verified `rx_desc`
+  (`0x20000c40` — `0x20000c48` is `rx_desc[2]`, reads back a re-armed head
+  and masks every delivery).
+- **Bugs caught by the suite** (each a real wire/guest defect, not test
+  theatre): DHCP fixed-header short by 6 (236-byte RFC 2131 layout);
+  ICMP quote sliced at L4 not L3 (read sport as totlen); frag pair with UDP
+  hdr in both halves; STP pad byte shifting the BPDU; quoted-sport vs
+  dport compare in ICMPERR; IGMP/ND multicast dropped by the stale hash
+  table (needs HM then PM widening); `undefined` netsim `advUl` helper
+  removed.
+- Battery at commit: cargo 243, mock 317, matrix 176/176, eth_adv node 2/2.

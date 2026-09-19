@@ -26,6 +26,7 @@
 
 const MSG = {
     STEP: 0x01, STOP: 0x02, RESET: 0x03, LOAD_IMAGE: 0x04,
+    RESET_CPU: 0x05, SET_NRST: 0x06,
     READ32: 0x10, WRITE32: 0x11, GET_REGS: 0x12, GET_FPREGS: 0x13, SET_FPREG: 0x14,
     ETH_RX: 0x20, CAN_RX: 0x21, UART_TX: 0x22,
     SPI_MISO: 0x30, I2C_RX: 0x31, SET_INPUT: 0x40,
@@ -33,6 +34,7 @@ const MSG = {
     STOPPED: 0x8A, PING: 0xFE, PONG: 0xFF,
     STEP_RESP: 0x90, READ32_RESP: 0x91, WRITE32_OK: 0x92,
     LOAD_OK: 0x93, REGS_RESP: 0x94, FPREGS_RESP: 0x95, SET_FPREG_OK: 0x96, ERROR: 0xA0,
+    RESET_CPU_OK: 0x97, NRST_OK: 0x98,
 };
 
 let nextId = 1;
@@ -156,6 +158,8 @@ export async function createRemoteEmulator(url, opts = {}) {
             case MSG.REGS_RESP:
             case MSG.FPREGS_RESP:
             case MSG.SET_FPREG_OK:
+            case MSG.RESET_CPU_OK:
+            case MSG.NRST_OK:
             case MSG.ERROR: {
                 if (buf.length >= 5) {
                     const id = readU32(buf, 1);
@@ -227,8 +231,15 @@ export async function createRemoteEmulator(url, opts = {}) {
     }
 
     async function connect() {
+        // Browser has a global WebSocket; Node 20 (CI) does not — fall
+        // back to the 'ws' package there. `typeof` is safe when the
+        // global is missing; the dynamic import only ever runs on Node
+        // (browsers always take the first branch, so no 'ws' fetch).
+        const WSImpl = typeof WebSocket !== 'undefined'
+            ? WebSocket
+            : (await import('ws')).WebSocket;
         return new Promise((resolve) => {
-            const newWs = new WebSocket(url);
+            const newWs = new WSImpl(url);
             newWs.binaryType = 'arraybuffer';
 
             const onFirstOpen = () => {
@@ -391,6 +402,24 @@ export async function createRemoteEmulator(url, opts = {}) {
 
         stop() { fire(MSG.STOP); },
         reset() { fire(MSG.RESET); },
+        // Host reset/boot control (real-device Reset button semantics).
+        // resetCpu(): CPU back to vector table, peripherals kept.
+        // setNrst(asserted): hold/release the NRST line (steps go
+        //   clock-only while held); resolves to the asserted state.
+        // bootPreset({flash, extraMem}): reload image + reset vector.
+        resetCpu() { return request(MSG.RESET_CPU).then(() => {}); },
+        setNrst(asserted) {
+            return request(MSG.SET_NRST, new Uint8Array([asserted ? 1 : 0])).then(({ buf }) => buf[5] !== 0);
+        },
+        isNrstAsserted() {
+            return request(MSG.SET_NRST, new Uint8Array([2])).then(({ buf }) => buf[5] !== 0);
+        },
+        bootPreset(image) {
+            const f = (image.flash || new Uint8Array(0));
+            const flash = f instanceof Uint8Array ? f : new Uint8Array(f);
+            lastFirmware = { flash: new Uint8Array(flash) };
+            return request(MSG.LOAD_IMAGE, packU32(flash.length), flash).then(() => {});
+        },
 
         close() {
             alive = false;                // prevent reconnect

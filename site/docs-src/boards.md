@@ -24,18 +24,18 @@ does not vary it per chip.
 Silicon peripheral set vs emulator coverage, wiring, demos and quirks —
 one page per chip:
 
-- [STM32F401](boards/stm32f401.md) — 36 presets, no CAN/ETH/DAC/DCMI/FSMC
-- [STM32F411](boards/stm32f411.md) — 36 presets, F401 + SPI5
-- [STM32F407](boards/stm32f407.md) — 64 presets, reference target
-- [STM32F407VE/ZE](boards/stm32f407ve.md) — 66 presets, 512K flash package
-- [STM32F429](boards/stm32f429.md) — 57 presets, DMA2D/LTDC/Ethernet proofs
+- [STM32F401](boards/stm32f401.md) — 37 presets, no CAN/ETH/DAC/DCMI/FSMC
+- [STM32F411](boards/stm32f411.md) — 37 presets, F401 + SPI5
+- [STM32F407](boards/stm32f407.md) — 72 presets, reference target
+- [STM32F407VE/ZE](boards/stm32f407ve.md) — 73 presets, 512K flash package
+- [STM32F429](boards/stm32f429.md) — 59 presets, DMA2D/LTDC/Ethernet proofs
 
-Counts above are the per-board demo lists (recounted 2026-09-18 against the
-`## Demos on this chip` sections: 36/36/64/66/57). `BOARDS_OF_FIRMWARE` in
+Counts above are the per-board demo lists (recounted 2026-09-19 against the
+`## Demos on this chip` sections: 37/37/72/73/59). `BOARDS_OF_FIRMWARE` in
 `site/boards.js` additionally marks cross-compatible presets, so its
 per-board tallies read one higher (37/37/65/67/58 — e.g. shared entries
-listed under their primary board). `firmware.js` holds 215 builds
-(recounted 2026-09-18); the 4 non-preset entries (`eth_http`, `eth_dhcp`,
+listed under their primary board). `firmware.js` holds 223 builds
+(recounted 2026-09-19); the 4 non-preset entries (`eth_http`, `eth_dhcp`,
 `eth_test`, `doom`) boot via explicit paths, not the preset map.
 
 Preset counts come from inverting `BOARDS_OF_FIRMWARE` in

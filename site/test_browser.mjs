@@ -55,6 +55,10 @@ const CASES = [
     // the PPS pin) must show accumulated edges by the end.
     { label: 'eth_feat_pps', fw: 'eth_feat_test', markers: ['WOKE BY WOL', 'FEAT Test: done'], failMarkers: ['FAIL', 'TIMEOUT'], domChecks: [{ sel: 'ppsInfo', contains: 'edges' }], timeoutMs: 180000 },
     { label: 'eth_adv', fw: 'eth_adv', markers: ['ADV Test: done'], failMarkers: ['FAIL', 'TIMEOUT'], timeoutMs: 180000 },
+    // Reset/Boot + LED + pcap + net-speed panels on the blinky preset:
+    // after boot the LED panel names the board LED, the net stat shows the
+    // wall-clock up/down readout, and the pcap panel buffers frames.
+    { label: 'reset_led_pcap', fw: 'blinky', markers: ['LED=ON'], domChecks: [{ sel: 'ledInfo', contains: 'PD12' }, { sel: 'stNet', contains: '/' }, { sel: 'pcapInfo', contains: 'frames' }], timeoutMs: 60000 },
 ];
 
 let failed = 0;

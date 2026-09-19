@@ -141,6 +141,27 @@ https://danish9661.github.io/stm32F4-emulator/ (GitHub Pages, CI-deployed).
   preloaded; symbols from symtab), and `.map` files (symbols only).
 - **Run / Stop / Reset** — Reset sends the gateway `RESET` control message
   when connected.
+- **Reset / Boot panel** — Reset CPU (real-device NRST pulse: CPU back to
+  the vector table, peripherals keep state), Boot (full reboot: reload
+  flash, reset to vector table), Hold/Release NRST (pins the core in
+  reset — steps go clock-only until released). Callable from automation:
+  `window.__resetEmu()` / `window.__bootEmu()` / `window.__nrstEmu(true|false)`;
+  library: `emu.resetCpu()` / `emu.setNrst()` / `emu.bootPreset()` (also on
+  `STM32F4` facade, the bridge adapter, and the MCP `reset_cpu`/`set_nrst`
+  tools).
+- **Board LED panel** — live on-board LED readout per board
+  (`boards.js BOARD_LED`: PD12 F407, PA6 F407VE, PC13 F401/F411, PG13 F429,
+  PA5 Nucleo aliases): `● ON` / `○ OFF` plus "(pin not output yet)" until
+  the firmware configures MODER. Callable: `window.__ledStatus()`;
+  library: `mcu.ledStatus(fwName, boardKey)`.
+- **Packet capture (pcap) panel** — Start/Stop recording, Download `.pcap`.
+  Records every Ethernet frame both ways (guest TX + delivered RX) with
+  microsecond timestamps in libpcap format (magic `a1b2c304`, v2.4,
+  linktype Ethernet) — opens directly in Wireshark/tcpdump. Window:
+  `window.__pcapStart()` / `window.__pcapStop()` / `window.__pcapBytes()`.
+- **Net up/down speed** — Machine-state `▲/▼` readout: wall-clock B/s
+  (EWMA) with the emulated-time rate in the tooltip (bytes per virtual
+  instruction × board clock, both directions). Window: `window.__netStats()`.
 - **Gateway URL field** — WebSocket to `ws://host:port/api/network-gateway`
   (real gVisor stack). Connected: all TX frames go to the real network and
   RX frames are injected from it. Disconnected: canned `netsim` fallback.

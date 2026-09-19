@@ -46,3 +46,10 @@ export class Potentiometer {
 export class I2cRegisterDevice {
   constructor(emu: any, peripheral: string, opts?: any);
 }
+
+// Board LED map + host reset/boot control (see site/boards.js,
+// site/emulator.js, site/stm32f4.js).
+export interface BoardLed { bank: number; pin: number; label: string; }
+export declare const BOARD_LED: Record<string, BoardLed>;
+export declare const BOARD_LED_ALIASES: Record<string, BoardLed>;
+export declare function boardLed(fwName: string, boardKey: string): BoardLed;

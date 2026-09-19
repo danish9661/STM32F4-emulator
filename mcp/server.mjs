@@ -252,4 +252,27 @@ server.registerTool('reset', {
     return text(`closed session (${was})`);
 });
 
+server.registerTool('reset_cpu', {
+    description: 'Host reset button: CPU back to the vector-table SP/PC, peripherals keep state (like a real NRST pulse without the hold). Prefer over load_firmware when re-running the same image.',
+    inputSchema: {},
+}, async () => {
+    const { emu } = requireSession();
+    if (typeof emu.resetCpu === 'function') emu.resetCpu();
+    else emu.reset();
+    return text('cpu reset to vector table');
+});
+
+server.registerTool('set_nrst', {
+    description: 'Hold (assert=true) or release the NRST line. While held, step() only advances the model clock — the CPU executes nothing, like real hardware in reset. Query with level omitted.',
+    inputSchema: { level: z.boolean().optional().describe('true = assert (hold in reset), false = release; omit to query') },
+}, async ({ level }) => {
+    const { emu } = requireSession();
+    if (level === undefined) {
+        const s = typeof emu.isNrstAsserted === 'function' ? emu.isNrstAsserted() : false;
+        return text({ asserted: !!s });
+    }
+    const s = typeof emu.setNrst === 'function' ? emu.setNrst(level) : false;
+    return text({ asserted: !!s });
+});
+
 await server.connect(new StdioServerTransport());
