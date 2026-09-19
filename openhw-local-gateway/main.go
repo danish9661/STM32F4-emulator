@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -184,6 +186,28 @@ func main() {
 		listenAddr = ":" + PORT
 	}
 
+	// TLS flags: serve the SAME mux over HTTPS/WSS as well, so an https://
+	// page (e.g. GitHub Pages) can connect with wss://. Plain ws:// keeps
+	// working on listenAddr; the TLS listener is additive, never a
+	// replacement. Env mirrors exist for container use (TLS_PORT etc.).
+	tlsPort := os.Getenv("TLS_PORT")
+	tlsCert := os.Getenv("TLS_CERT")
+	tlsKey := os.Getenv("TLS_KEY")
+	var tlsPortFlag, tlsCertFlag, tlsKeyFlag string
+	flag.StringVar(&tlsPortFlag, "tls-port", "", "also serve HTTPS/WSS on this port (e.g. 5071)")
+	flag.StringVar(&tlsCertFlag, "tls-cert", "", "TLS certificate file (PEM) for the WSS listener")
+	flag.StringVar(&tlsKeyFlag, "tls-key", "", "TLS private key file (PEM) for the WSS listener")
+	flag.Parse()
+	if tlsPortFlag != "" {
+		tlsPort = tlsPortFlag
+	}
+	if tlsCertFlag != "" {
+		tlsCert = tlsCertFlag
+	}
+	if tlsKeyFlag != "" {
+		tlsKey = tlsKeyFlag
+	}
+
 	// Start terminal command loop for bridge mode control
 	go startCommandLoop()
 
@@ -191,6 +215,21 @@ func main() {
 	http.HandleFunc("/api/thread-gateway", handleThreadGateway)
 
 	fmt.Printf("[Network Gateway] Server running on ws://%s/api/network-gateway\n", listenAddr)
+	if tlsPort != "" {
+		if tlsCert == "" || tlsKey == "" {
+			fmt.Printf("[Network Gateway] TLS requested (port %s) but TLS_CERT/TLS_KEY (or --tls-cert/--tls-key) missing — WSS disabled\n", tlsPort)
+		} else if _, err := tls.LoadX509KeyPair(tlsCert, tlsKey); err != nil {
+			fmt.Printf("[Network Gateway] WSS disabled: cannot load cert/key (%v)\n", err)
+		} else {
+			tlsAddr := "127.0.0.1:" + tlsPort
+			fmt.Printf("[Network Gateway] Server also running on wss://%s/api/network-gateway\n", tlsAddr)
+			go func() {
+				if err := http.ListenAndServeTLS(tlsAddr, tlsCert, tlsKey, nil); err != nil {
+					fmt.Printf("WSS Server Error: %v\n", err)
+				}
+			}()
+		}
+	}
 	if err := http.ListenAndServe(listenAddr, nil); err != nil {
 		fmt.Printf("Server Error: %v\n", err)
 	}

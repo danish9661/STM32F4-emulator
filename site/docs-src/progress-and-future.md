@@ -348,11 +348,15 @@ re-filed as model work)
       already; a `npm publish` + consumer verification remains). Packaging
       decision, not emulation: the tarball path (`npm pack` → 1.2 MB,
       consumer-tested per AGENTS.md §11) already proves the contents.
-- [ ] GitHub Pages over https (gateway mode needs http:// for plain
-      `ws://`). Deployment topology, not emulation: the browser page
-      already accepts `wss://` URLs (the `^wss?:\/\/` gate in app.js);
-      what is missing is a TLS-terminated gateway endpoint (or a local
-      `wss://` proxy) to point it at — no emulator code changes.
+- [x] GitHub Pages over https (gateway WSS) — DONE 2026-09-19: the
+      gateway serves a TLS listener alongside plain ws
+      (`--tls-port/--tls-cert/--tls-key`, env `TLS_PORT`/`TLS_CERT`/
+      `TLS_KEY`; `gen-local-cert.sh` mints a local SAN cert), the console's
+      Gateway URL field already accepted `wss://`, and the CLI dials any
+      URL via `--gw-url=`/`GW_URL`. Verified: `ws://:5070` + `wss://:5071`
+      DHCP Offer end-to-end (self-signed). Public deployments terminate
+      TLS in front (reverse proxy) — no emulator changes. See
+      [usage.md](usage.md#gateway-tls-wss).
 - [ ] VS Code extension / devcontainer with the full toolchain
       (wasm-pack, arduino-cli, go). Editor packaging, not emulation:
       an MCP server already covers the "drive the emulator from your

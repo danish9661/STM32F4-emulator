@@ -165,8 +165,10 @@ https://danish9661.github.io/stm32F4-emulator/ (GitHub Pages, CI-deployed).
 - **Gateway URL field** — WebSocket to `ws://host:port/api/network-gateway`
   (real gVisor stack). Connected: all TX frames go to the real network and
   RX frames are injected from it. Disconnected: canned `netsim` fallback.
-  NOTE: GitHub Pages is https, which blocks plain `ws://` — use a locally
-  served page for gateway mode.
+  The field already accepts `wss://` (the `^wss?:\/\/` gate in app.js) —
+  for an https page (e.g. GitHub Pages, which blocks plain `ws://`), run
+  the gateway with TLS (see [Gateway TLS](#gateway-tls-wss) below) and
+  paste its `wss://` URL here.
 - **GPIO pin grid** (banks A–E) — live MODER/ODR/IDR readout; the blinky
   preset's PA5 toggles visibly. Input-mode pins are clickable (drives
   `exti_test` through both edges); a board selector filters presets per
@@ -362,6 +364,44 @@ STOPPED (0x8A), PONG (0xFF), STEP_RESP (0x90), READ32_RESP (0x91),
 WRITE32_OK (0x92), LOAD_OK (0x93), REGS_RESP (0x94), ERROR (0xA0).
 
 Full payload specs: AGENTS.md §20.
+
+---
+
+## Gateway TLS (WSS)
+
+The gateway serves plain `ws://` by default (loopback). For an `https://`
+page — GitHub Pages serves https, and browsers block plain `ws://` from a
+secure origin (mixed content) — run the gateway with TLS and paste the
+`wss://` URL into the console's Gateway URL field (it already accepts
+`wss://`). The CLI takes it via `--gw-url=` / `GW_URL` the same way.
+
+```bash
+# 1) one-time local cert (SAN: 127.0.0.1, ::1, localhost)
+./openhw-local-gateway/gen-local-cert.sh        # -> ~/.openhw-gw/gw-cert.pem + gw-key.pem
+
+# 2) serve ws:// on :5070 AND wss:// on :5071 (additive — plain keeps working)
+cd openhw-local-gateway
+./openhw-gw --tls-port 5071 --tls-cert ~/.openhw-gw/gw-cert.pem --tls-key ~/.openhw-gw/gw-key.pem
+# env form: TLS_PORT=5071 TLS_CERT=... TLS_KEY=... ./openhw-gw
+
+# 3) connect: paste wss://127.0.0.1:5071/api/network-gateway into the page,
+#    or: node cli.mjs <fw.bin> <inst> --connect --gw-url=wss://127.0.0.1:5071/api/network-gateway
+```
+
+Notes:
+- Self-signed certs trigger a browser warning: open
+  `https://127.0.0.1:5071/` once, accept the exception, then `wss://`
+  connects. For a public deployment, terminate TLS in front (reverse
+  proxy with a real cert) and point the page at that `wss://` URL —
+  the gateway itself needs no changes.
+- Verified end-to-end (self-signed, 2026-09-19): plain `ws://:5070`
+  DHCP Offer + `wss://:5071` DHCP Offer, same firmware, same run shape.
+
+| Env / flag | Default | Effect |
+|---|---|---|
+| `--gw-url=<url>` / `GW_URL` | `ws://127.0.0.1:5070/api/network-gateway` | gateway URL the CLI dials (`--gateway` spawn + `--connect`) |
+| `--tls-port <N>` / `TLS_PORT` | (off) | also serve HTTPS/WSS on this port |
+| `--tls-cert/--tls-key` / `TLS_CERT`/`TLS_KEY` | (none) | PEM cert + key for the WSS listener |
 
 ---
 

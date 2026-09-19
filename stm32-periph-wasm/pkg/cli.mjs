@@ -32,6 +32,10 @@ async function main() {
     const showRegs = args.includes('--regs') || process.env.SHOW_REGS === '1';
     const useGateway = (args.includes('--gateway') || args.includes('--connect')) || process.env.ETH_GATEWAY === '1';
     const spawnGateway = args.includes('--gateway') && !args.includes('--connect');
+    // Gateway URL: --gw-url= overrides the loopback default (e.g. a wss://
+    // TLS endpoint for https pages, or a remote host). Env GW_URL.
+    const gwUrl = args.find(a => a.startsWith('--gw-url='))?.split('=').slice(1).join('=')
+        || process.env.GW_URL || 'ws://127.0.0.1:5070/api/network-gateway';
     let uartAddr = parseHex(args.find(a => a.startsWith('--uart='))?.split('=')[1] || process.env.UART_ADDR || '0x40011000');
 
     // Load and merge configs
@@ -220,8 +224,8 @@ async function main() {
         let ws;
         let timedOut = false;
         gwDialSeq++;
-        if (process.env.DBG_GW) console.log(`[GW] dial #${gwDialSeq} at ${Date.now()}`);
-        try { ws = new WebSocket('ws://127.0.0.1:5070/api/network-gateway'); }
+        if (process.env.DBG_GW) console.log(`[GW] dial #${gwDialSeq} at ${Date.now()} -> ${gwUrl}`);
+        try { ws = new WebSocket(gwUrl); }
         catch (e) { resolve(null); return; }
         ws.binaryType = 'arraybuffer';
         ws.onclose = (ev) => { if (process.env.DBG_GW) console.log(`[GW] dial #${gwDialSeq} closed code=${ev.code}`); };
