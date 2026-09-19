@@ -187,6 +187,12 @@ impl Peripherals {
     }
 
     /// QSPI memory-mapped window live (scope probe for the mmap path).
+    /// Hot-path note: mem.rs calls this on EVERY fetch whose PC lands in
+    /// 0x90000000..0xA0000000 (range check first — one integer compare).
+    /// The slot scan below runs only for those fetches, i.e. never for
+    /// normal firmware (PC lives in flash 0x080xxxxx). Doom/QSPI guests
+    /// pay it per fetch while executing from the window — correct, since
+    /// the mode bit can flip mid-run via CCR writes.
     pub fn qspi_mmap_live(&self) -> bool {
         self.with_qspi(|u| u.mmap_live()).unwrap_or(false)
     }

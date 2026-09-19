@@ -40,6 +40,12 @@ pub fn trace_stop() {
 pub fn take_trace() -> Vec<u32> {
     std::mem::take(&mut TRACE_BUF.lock().unwrap())
 }
+/// Drain the trace buffer WITHOUT disabling tracing (fresh-instance
+/// hygiene; called by reset_globals so one instance's PCs never leak
+/// into the next instance's trace).
+pub fn clear_trace() {
+    TRACE_BUF.lock().unwrap().clear();
+}
 /// The CPU stopped because of this (unknown instruction, BKPT, branch to
 /// ARM state, ...). `pc` is the faulting instruction address (without thumb
 /// bit); `op1`/`op2` are the raw halfwords; `len` is 2 or 4.

@@ -973,6 +973,27 @@ pub fn reset_globals() {
     if let Some(m) = ADC_DMA_QUEUE.get() { m.lock().unwrap().clear(); }
     if let Some(m) = CAN_STAGED.get() { m.lock().unwrap().clear(); }
     crate::peripherals::rng::rng_clear_entropy();
+    crate::peripherals::qspi::qspi_clear_flash();
+    crate::peripherals::rtc::cal_accum_clear();
+    // Trace harness: stop tracing AND drain the buffer. A test that
+    // enables tracing must not leak PCs (or a live TRACE_ON) into the
+    // next instance — an always-on trace grows TRACE_BUF unboundedly
+    // and pays a lock+push per instruction forever.
+    crate::cpu::trace_stop();
+    crate::cpu::clear_trace();
+    // DCMI camera sync levels back to free-run defaults (true, true, 1):
+    // a harness-driven level (blanking/single-shot test) must not leak
+    // into the next instance's capture. Direct stores (not dcmi_set_sync,
+    // which would edge-deliver into the STALE system still installed).
+    DCMI_SYNC_VSYNC.store(true, Relaxed);
+    DCMI_SYNC_HSYNC.store(true, Relaxed);
+    DCMI_PCLK_DIV.store(1, Relaxed);
+    // Watchdog reset-cause bits are per-boot state: a fresh instance is a
+    // fresh power-on, so stale IWDGRSTF/WWDGRSTF must not survive into it.
+    // (Within one instance they persist until the firmware's RMVF write —
+    // that path is untouched; this only covers instance turnover.)
+    IWDG_RESET_FLAG.store(false, Relaxed);
+    WWDG_RESET_FLAG.store(false, Relaxed);
     if let Some(m) = AUDIO_SOURCE.get() { *m.lock().unwrap() = None; }
     if let Some(m) = AUDIO_CAPTURE.get() { m.lock().unwrap().clear(); }
     if let Some(m) = DCMI_FRAME.get() { *m.lock().unwrap() = None; }

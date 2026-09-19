@@ -55,12 +55,15 @@ fn bcd_match(tr_bcd: u32, alarm_bcd: u32, mask_bits: u32) -> bool {
 
 /// Smooth-calibration accumulator (net pulses over each 512-second
 /// window). Process-global like INSTRUCTION_COUNT: the RTC advances on
-/// the shared virtual clock, so one accumulator is correct.
+/// the shared virtual clock, so one accumulator is correct. Module scope
+/// (not function-local) so reset_globals can drain it between instances.
+use std::sync::OnceLock;
+static CAL_ACC: OnceLock<std::sync::Mutex<i64>> = OnceLock::new();
+fn cal_accum() -> &'static std::sync::Mutex<i64> {
+    CAL_ACC.get_or_init(|| std::sync::Mutex::new(0))
+}
 fn cal_accum_add(net: i64) -> (bool, bool) {
-    use std::sync::OnceLock;
-    static ACC: OnceLock<std::sync::Mutex<i64>> = OnceLock::new();
-    let m = ACC.get_or_init(|| std::sync::Mutex::new(0));
-    let mut acc = m.lock().unwrap();
+    let mut acc = cal_accum().lock().unwrap();
     *acc += net;
     // Returns (add_second, skip_second) for this window edge.
     if *acc >= 512 {
@@ -72,6 +75,13 @@ fn cal_accum_add(net: i64) -> (bool, bool) {
     } else {
         (false, false)
     }
+}
+
+/// Drain the calibration accumulator (fresh-instance hygiene; called by
+/// reset_globals so a partially-filled 512 s window never leaks across
+/// emulator instances).
+pub fn cal_accum_clear() {
+    *cal_accum().lock().unwrap() = 0;
 }
 
 pub struct Rtc {

@@ -24,6 +24,14 @@ pub fn qspi_register_flash(name: &str, data: &[u8]) {
         .insert(name.to_string(), data.to_vec());
 }
 
+/// Drain the flash-image registry (fresh-instance hygiene; called by
+/// reset_globals so a bound image never leaks across emulator instances —
+/// without this, instance N+1's Qspi::new clones instance N's image even
+/// when the new harness registered nothing).
+pub fn qspi_clear_flash() {
+    QSPI_FLASH.lock().unwrap().clear();
+}
+
 pub struct Qspi {
     name: String,
     cr: u32,
