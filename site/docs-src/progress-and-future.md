@@ -1,21 +1,23 @@
 # Progress and future work
 
-Status as of 2026-09-18. The authoritative living log is AGENTS.md; this
+Status as of 2026-09-19. The authoritative living log is AGENTS.md; this
 document is the readable summary. Since AGENTS.md §23 the Rust Thumb-2
 core is the sole backend (Unicorn 2.1.4 removed after bit-identical parity
 was proven) — Unicorn-era mechanisms below (hooks, ISR pump, wedge,
 `maxBatch`, `?cpu=`) are marked as archaeology where they appear.
-Peripheral-model gap batches 6–10 (batch 6: FLASH errors, SPI CRC/flags,
+Peripheral-model gap batches 6–11 (batch 6: FLASH errors, SPI CRC/flags,
 USART flow+faults, SDIO ACMD, RTC WUT/stamp; batch 7: SDIO timing, USART
 protocols, SPI slave, tamper physics, RDP; batch 8: ADC OVR, USART
 IDLE/SBK, TIM OPM, GPIO LCKR; batch 9: ADC injected group, TIM advanced,
 RTC shift/SS, USART mute; batch 10: the six "out of scope" walls — SDIO
-CMD24, QSPI mmap, LTDC CLUT, I2C slave, DMA FCR/DBM, DAC DMAUDR) are
+CMD24, QSPI mmap, LTDC CLUT, I2C slave, DMA FCR/DBM, DAC DMAUDR; batch
+11: Ethernet descriptor layer — DMABMR EDFE, TCH/TER + RCH/RER chain
+walks, RDES4 extended status, deterministic backoff slot probe) are
 covered in AGENTS.md §§35–38; the
 mock-consumer harness pins them (`t_flash_err`, `t_spi_crc_err`,
 `t_usart_flow_err`, `t_sdio_acmd`, `t_rtc_wut_ts`, `t_sdio_timing`,
 `t_usart_protocols`, `t_spi_slave_gate`, `t_rtc_tamper_phys`,
-`t_flash_rdp`, `t_honor_pass`, `t_gap9`, `t_gap10` — 317 checks).
+`t_flash_rdp`, `t_honor_pass`, `t_gap9`, `t_gap10`, `t_gap11` — 336 checks).
 `eth_adv` (2026-09-18, AGENTS.md §39): 12-phase L3/L4 + link-scope guest
 suite — RST/RTO/MSS/window/frag/ICMP-err/DHCP-NAK/DHCP-renew/IGMP/ND/LLDP/
 STP against dedicated netsim peers (trigger ports 5010–5018), F407 + F429
@@ -339,6 +341,24 @@ builds in the board matrix (176/176) and the browser smoke.
        WASM core (≈20–23 MIPS headless; DOOM ran ~22–24 fps). Retired with
        the backend: the Rust core delivers ~65 MIPS and DOOM holds 35/35
        (AGENTS.md §22).
+
+### Product items (not emulator gaps — tracked here so they stop being
+re-filed as model work)
+- [ ] Publish `stm32f4-emu` to npm (README documents `npm pack` flow
+      already; a `npm publish` + consumer verification remains). Packaging
+      decision, not emulation: the tarball path (`npm pack` → 1.2 MB,
+      consumer-tested per AGENTS.md §11) already proves the contents.
+- [ ] GitHub Pages over https (gateway mode needs http:// for plain
+      `ws://`). Deployment topology, not emulation: the browser page
+      already accepts `wss://` URLs (the `^wss?:\/\/` gate in app.js);
+      what is missing is a TLS-terminated gateway endpoint (or a local
+      `wss://` proxy) to point it at — no emulator code changes.
+- [ ] VS Code extension / devcontainer with the full toolchain
+      (wasm-pack, arduino-cli, go). Editor packaging, not emulation:
+      an MCP server already covers the "drive the emulator from your
+      editor" use case (see above), and a working `.devcontainer.json`
+      is a ~30-line file (node:22 + rust + arduino-cli + go toolchains)
+      waiting for someone who wants it — no model work involved.
 
 
 ## Verification checklist (regression)

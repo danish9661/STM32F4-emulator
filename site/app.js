@@ -2,7 +2,7 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=40';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=41';
 import { createEmulator } from './emulator.js?v=2';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
@@ -261,7 +261,7 @@ const fmtBps = (v) => {
     if (v < 1e6) return (v / 1000).toFixed(1) + ' kB/s';
     return (v / 1e6).toFixed(2) + ' MB/s';
 };
-// PCAP download (Wireshark-compatible): global header (magic a1b2c304,
+// PCAP download (Wireshark-compatible): global header (magic a1b2c3d4,
 // version 2.4, Ethernet linktype 1) + per-frame headers (ts_sec/usec,
 // incl_len/orig_len) + raw frame bytes. Records every TX frame the guest
 // emitted and every RX frame delivered to it, in capture order, with
@@ -269,7 +269,7 @@ const fmtBps = (v) => {
 const pcapGlobalHeader = () => {
     const h = new Uint8Array(24);
     const dv = new DataView(h.buffer);
-    dv.setUint32(0, 0xa1b2c304, true); // magic (LE)
+    dv.setUint32(0, 0xa1b2c3d4, true); // magic (LE: bytes d4 c3 b2 a1)
     dv.setUint16(4, 2, true); dv.setUint16(6, 4, true);
     dv.setInt32(8, 0, true); dv.setUint32(12, 0, true);
     dv.setUint32(16, 65535, true); dv.setUint32(20, 1, true); // Ethernet
@@ -546,10 +546,10 @@ const boot = async () => {
         // ── local mode: WASM runs in the browser (default) ──
         // Board variant per firmware preset (SVD + flash/RAM sizes), honoring
         // the board selector when the preset supports the selected board.
-        // NOTE (VENDOR_V): vendor asset versions (?v=40) must be bumped together
+        // NOTE (VENDOR_V): vendor asset versions (?v=41) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
         const { key: boardKey, board } = boardForSelection(image.name, boardSelectEl ? boardSelectEl.value : 'all');
-        const svdXml = await fetch('vendor/' + board.svd + '?v=40').then((r) => r.text());
+        const svdXml = await fetch('vendor/' + board.svd + '?v=41').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
@@ -569,7 +569,7 @@ const boot = async () => {
             svdFile: board.svd,
             flash_size: board.flash_size,
             ram_size: board.ram_size,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=40',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=41',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),

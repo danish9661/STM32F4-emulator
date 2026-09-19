@@ -288,6 +288,12 @@ export function dma_stream_fifo_threshold(dma: string, stream: number): number;
 export function eth_arm_collision(): void;
 
 /**
+ * Single-node CSMA/CD backoff probe: deterministic slot count for
+ * attempt `n` (1..16) under harness `seed` (truncated binary exponential).
+ */
+export function eth_backoff_slots(attempt: number, seed: number): number;
+
+/**
  * Wake-on-LAN inspection of a received frame. Returns bit 0 on a magic
  * packet (latches MPR when MPE is set, pends IRQ 62 when PMTIM is set).
  * Wakeup-frame CRC matching is not modeled (RWKPR never sets).
@@ -303,6 +309,17 @@ export function eth_clear_rx_poll(): void;
  * Clear the TX poll flag (call after processing descriptors).
  */
 export function eth_clear_tx_poll(): void;
+
+/**
+ * Descriptor-chain step: next address after `desc` (TCH/TER or RCH/RER
+ * in `ctrl`, else desc+stride; ring wraps to `base`).
+ */
+export function eth_desc_next(is_tx: boolean, ctrl: number, desc: number, next_ptr: number, base: number, stride: number): number;
+
+/**
+ * Enhanced-descriptor format enabled (DMABMR EDFE, SVD bit 7)?
+ */
+export function eth_enhanced_desc(): boolean;
 
 /**
  * Forward checksum-bad frames (FEF) or drop-disable (DTCEFD); else drop.
@@ -425,6 +442,11 @@ export function eth_rx_csum_status(frame: Uint8Array): number;
  * Call this after writing received data into RX buffers.
  */
 export function eth_rx_done(): void;
+
+/**
+ * RDES4 extended status word for a delivered frame (HAL ETH_DMAPTPRXDESC_*
+ */
+export function eth_rx_ext_status(frame: Uint8Array): number;
 
 /**
  * Clear a latched RX stall (delivery succeeded).
@@ -1192,9 +1214,12 @@ export interface InitOutput {
     readonly dma_stream_feif: (a: number, b: number, c: number) => number;
     readonly dma_stream_fifo_threshold: (a: number, b: number, c: number) => number;
     readonly eth_arm_collision: () => void;
+    readonly eth_backoff_slots: (a: number, b: number) => number;
     readonly eth_check_wol: (a: number, b: number) => number;
     readonly eth_clear_rx_poll: () => void;
     readonly eth_clear_tx_poll: () => void;
+    readonly eth_desc_next: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+    readonly eth_enhanced_desc: () => number;
     readonly eth_fwd_csum_bad: () => number;
     readonly eth_get_maccr: () => number;
     readonly eth_get_rx_desc_addr: () => number;
@@ -1218,6 +1243,7 @@ export interface InitOutput {
     readonly eth_ptp_tse: () => number;
     readonly eth_rx_csum_status: (a: number, b: number) => number;
     readonly eth_rx_done: () => void;
+    readonly eth_rx_ext_status: (a: number, b: number) => number;
     readonly eth_rx_stall_clear: () => void;
     readonly eth_rx_wire_busy: (a: number) => void;
     readonly eth_set_link: (a: number) => void;

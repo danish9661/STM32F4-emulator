@@ -11,24 +11,28 @@ peripherals), 512K flash package, 192K RAM. Everything on
 
 ## Demos on this chip (73 presets)
 
-The 72 shared F407 presets (see [STM32F407](stm32f407.md)) that fit 512K,
-plus the VE/ZE builds: `blinky_f407ve`, `blinky_f407ze`,
-`arduino_black_f407ve`, `arduino_black_f407ze`,
-`arduino_test_black_f407ve`, `arduino_test_black_f407ze`,
-`crypto_test_black_f407ve`, `crypto_test_black_f407ze`,
-`echo_test_black_f407ve`, `echo_test_black_f407ze`,
-`edge_test_black_f407ve`, `edge_test_black_f407ze`,
-`hal_test_black_f407ve`, `hal_test_black_f407ze`,
-`periph_test_black_f407ve`, `periph_test_black_f407ze`,
-`timer_test_black_f407ve`, `timer_test_black_f407ze`. (Full list:
-`adc_demo`, `arduino_test`, `audio_play_test`, `audio_test`,
-`blink_serial`, `blinky`, `buzzer_test`, `can_demo`, `can_host_rx`,
+59 of the 72 F407 presets (see [STM32F407](stm32f407.md)) run here unchanged —
+13 stay F407-only (9 Discovery/disco builds: 8× `*_disco_f407vg` +
+`blinky_f407g`, plus the 4 large ETH suites `eth_adv`, `eth_feat_test`,
+`eth_pins_test`, `lwip_demo`) — plus 14 VE/ZE-only builds: `arduino_test_black_f407ve`,
+`arduino_test_black_f407ze`, `crypto_test_black_f407ve`,
+`crypto_test_black_f407ze`, `echo_test_black_f407ve`,
+`echo_test_black_f407ze`, `edge_test_black_f407ve`,
+`edge_test_black_f407ze`, `hal_test_black_f407ve`,
+`hal_test_black_f407ze`, `periph_test_black_f407ve`,
+`periph_test_black_f407ze`, `timer_test_black_f407ve`,
+`timer_test_black_f407ze`. (Full list:
+`adc_demo`, `arduino_black_f407ve`, `arduino_black_f407ze`,
+`arduino_test`, `audio_play_test`, `audio_test`,
+`blink_serial`, `blinky`, `blinky_f407ve`, `blinky_f407ze`,
+`buzzer_test`, `can_demo`, `can_host_rx`,
 `can_test`, `comprehensive_test`, `crypto_deep_test`, `crypto_test`,
 `dac_demo`, `dcmi_test`, `deep_periph_test`, `deep_sleep_demo`,
-`echo_test`, `edge_test`, `eth_irq_test`, `exti_test`, `flash_test`,
+`standby_demo`, `echo_test`, `edge_test`, `eth_irq_test`, `exti_test`, `flash_test`,
 `fpu_irq_test`, `fpu_test`, `freertos_test`, `fsmc_test`, `hal_test`,
 `i2s_sai_test`, `ltdc_test`, `mpu_test`, `new_periph_test`, `oled_test`,
-`periph_test`, `pwm_demo`, `qspi_test`, `rtc_test`, `rx_crypto_test`,
+`periph_test`, `pwm_demo`, `qspi_test`, `gap10_sdio`, `gap10_qspi`,
+`gap10_ltdc`, `gap10_i2c`, `gap10_dma`, `gap10_dac`, `rtc_test`, `rx_crypto_test`,
 `rx_interrupt_test`, `spi_flash_test`, `spi_tft_test`, `test_firmware`,
 `tft_test`, `tim_capture_demo`, `timer_test`, `usb_cdc_test`,
 `watchdog_demo`, `wwdg_demo`, `wwdg_window_demo`.)

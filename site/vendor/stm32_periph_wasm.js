@@ -811,6 +811,18 @@ export function eth_arm_collision() {
 }
 
 /**
+ * Single-node CSMA/CD backoff probe: deterministic slot count for
+ * attempt `n` (1..16) under harness `seed` (truncated binary exponential).
+ * @param {number} attempt
+ * @param {number} seed
+ * @returns {number}
+ */
+export function eth_backoff_slots(attempt, seed) {
+    const ret = wasm.eth_backoff_slots(attempt, seed);
+    return ret >>> 0;
+}
+
+/**
  * Wake-on-LAN inspection of a received frame. Returns bit 0 on a magic
  * packet (latches MPR when MPE is set, pends IRQ 62 when PMTIM is set).
  * Wakeup-frame CRC matching is not modeled (RWKPR never sets).
@@ -836,6 +848,31 @@ export function eth_clear_rx_poll() {
  */
 export function eth_clear_tx_poll() {
     wasm.eth_clear_tx_poll();
+}
+
+/**
+ * Descriptor-chain step: next address after `desc` (TCH/TER or RCH/RER
+ * in `ctrl`, else desc+stride; ring wraps to `base`).
+ * @param {boolean} is_tx
+ * @param {number} ctrl
+ * @param {number} desc
+ * @param {number} next_ptr
+ * @param {number} base
+ * @param {number} stride
+ * @returns {number}
+ */
+export function eth_desc_next(is_tx, ctrl, desc, next_ptr, base, stride) {
+    const ret = wasm.eth_desc_next(is_tx, ctrl, desc, next_ptr, base, stride);
+    return ret >>> 0;
+}
+
+/**
+ * Enhanced-descriptor format enabled (DMABMR EDFE, SVD bit 7)?
+ * @returns {boolean}
+ */
+export function eth_enhanced_desc() {
+    const ret = wasm.eth_enhanced_desc();
+    return ret !== 0;
 }
 
 /**
@@ -1053,6 +1090,18 @@ export function eth_rx_csum_status(frame) {
  */
 export function eth_rx_done() {
     wasm.eth_rx_done();
+}
+
+/**
+ * RDES4 extended status word for a delivered frame (HAL ETH_DMAPTPRXDESC_*
+ * @param {Uint8Array} frame
+ * @returns {number}
+ */
+export function eth_rx_ext_status(frame) {
+    const ptr0 = passArray8ToWasm0(frame, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.eth_rx_ext_status(ptr0, len0);
+    return ret >>> 0;
 }
 
 /**

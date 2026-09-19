@@ -38,9 +38,9 @@ one page per chip:
 
 Counts above are the per-board demo lists (recounted 2026-09-19 against the
 `## Demos on this chip` sections: 37/37/72/73/59). `BOARDS_OF_FIRMWARE` in
-`site/boards.js` additionally marks cross-compatible presets, so its
-per-board tallies read one higher (37/37/65/67/58 — e.g. shared entries
-listed under their primary board). `firmware.js` holds 223 builds
+`site/boards.js` inverts to exactly these tallies (37/37/72/73/59 — every
+preset is listed under its primary board; cross-compatible presets appear
+under each board they run on). `firmware.js` holds 223 builds
 (recounted 2026-09-19); the 4 non-preset entries (`eth_http`, `eth_dhcp`,
 `eth_test`, `doom`) boot via explicit paths, not the preset map.
 

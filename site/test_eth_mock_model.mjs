@@ -364,7 +364,10 @@ async function t_gap6_ptp_gate() {
 }
 
 // Gap 6b — RX snapshot path: TSE frame delivered to a 32-byte-stride layout
-// writes RDES6/7; short-stride layout must NOT clobber.
+// writes RDES6/7; short-stride layout must NOT clobber. The snapshot
+// needs stride >= 32 (a real 32-byte descriptor) — the EDFE layout bit
+// only decides what +16..+28 MEAN, not whether they fit (see the
+// snapshot rule in emulator.js; the EDFE half is pinned by t_gap11).
 async function t_gap6b_rx_snapshot_stride() {
     const { emu, st } = await mkwire();
     st.ptpTse = true;
@@ -374,7 +377,9 @@ async function t_gap6b_rx_snapshot_stride() {
     emu.injectFrame(ethIpUdp());
     st.rxPoll = true;
     emu.step(10);
-    // default stride 1536 >= 32: snapshot allowed (driver gates on stride)
+    // default stride 1536 >= 32: snapshot allowed (driver gates on
+    // stride — the fake model has no eth_enhanced_desc export, and
+    // production EDFE-clear firmware takes the same path).
     ok(r32(RXD + 24) === 0x11111111, 'gap6b: RDES6 snapshot on wide stride');
     emu.close();
 }

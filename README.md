@@ -6,6 +6,14 @@
 [![CI](https://github.com/danish9661/stm32F4-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/danish9661/stm32F4-emulator/actions/workflows/ci.yml)
 [![Pages](https://github.com/danish9661/stm32F4-emulator/actions/workflows/pages.yml/badge.svg)](https://github.com/danish9661/stm32F4-emulator/actions/workflows/pages.yml)
 
+> **Status: emulation complete.** All 41 peripheral modules are Detailed
+> (0 Partial), all five board maps verify green (37/37/72/73/59 presets),
+> and the Ethernet descriptor layer (EDFE, TCH/TER + RCH/RER walks, RDES4,
+> backoff probe) plus the Wireshark-validated pcap capture (`a1b2c3d4`,
+> tcpdump-verified DHCP→TCP→HTTP) are in. What remains is product work,
+> not emulation: npm publish, https gateway endpoint, VS Code packaging
+> (see [docs/progress-and-future.md](docs/progress-and-future.md)).
+
 An STM32F407 microcontroller emulator that runs real Cortex-M4 firmware. It
 combines a **Rust CPU core** (a WASM-native Thumb-2 interpreter with exact
 Cortex-M exception entry/return, including the VFPv4-SP FPU) with a

@@ -62,6 +62,7 @@ const {
     sdio_bus_width, sdio_card_irq, sdio_fault_data_crc,
     rtc_tamper, rtc_tamper_pin, rtc_timestamp,
     flash_rdp_level, flash_set_rdp,
+    eth_enhanced_desc, eth_desc_next, eth_rx_ext_status, eth_backoff_slots,
 } = bindings;
 // SMBus/PEC transactions need a live slave: a 16-byte regfile @0x50 on
 // I2C1 (same shape emulator.js uses for the DS3231 RTC). Must register
@@ -90,7 +91,7 @@ const RCC = 0x40023800, RNG = 0x50060800, DAC = 0x40007400;
 const HASH = 0x50060400, CAN1 = 0x40006400;
 const USART1 = 0x40011000, SPI1 = 0x40013000;
 const FLASH = 0x40023C00, SDIO = 0x40012C00, RTC = 0x40002800;
-const ETH_MAC = 0x40028000, ETH_PTP = 0x40028700;
+const ETH_MAC = 0x40028000, ETH_PTP = 0x40028700, ETH_DMA = 0x40029000;
 const GPIOA = 0x40020000, GPIOB = 0x40020400, GPIOC = 0x40020800;
 
 // ── PWR: regulator states beyond the handshake ──────────────────────────
@@ -1468,6 +1469,7 @@ const tests = [
     ['honor pass: ADC OVR + USART IDLE/SBK + TIM OPM + GPIO LCKR (COMPLETE)', t_honor_pass],
     ['gap batch 9: ADC injected + TIM advanced + RTC shift/SS + USART mute (COMPLETE)', t_gap9],
     ['gap batch 10: SDIO CMD24 + QSPI mmap + LTDC CLUT + I2C slave + DMA FCR/DBM + DAC DMAUDR (COMPLETE)', t_gap10],
+    ['gap batch 11: enhanced descs + chain walk + RDES4 + backoff (COMPLETE)', t_gap11],
 ];
 // ── Gap batch 9: ADC injected group + TIM advanced + RTC shift/SS + USART mute ─
 // COMPLETE: ADC JSWSTART/JAUTO injected sequences (JL/JOFR/JDR/JEOC/JSTRT,
@@ -1651,6 +1653,72 @@ function t_gap10() {
     W(DAC + 0x34, 1 << 13); // w1c clear DMAUDR1
     ok(dac_underrun(1) === false, 'dac: DMAUDR clears on 1-write');
     W(DAC + 0x00, 0); // clean
+}
+
+// ── Gap batch 11: enhanced descriptors + chain walk + RDES4 + backoff ─
+// COMPLETE: DMABMR EDFE (SVD bit 7) selects the 32-byte layout (RDES4
+// extended status, RDES6/7 + TDES6/7 snapshots); TCH/TER + RCH/RER
+// chain stepping (CMSIS ETH_DMATXDESC_TER/TCH, ETH_DMARXDESC_RER/RCH);
+// single-node CSMA/CD backoff as a deterministic slot-count probe
+// (truncated binary exponential, harness seed — the wire is always
+// free after the paced frame time, so the COUNT is the observable).
+// NOTE: bit 0 (SR) is the software-reset strobe — writing it resets
+// the whole DMA block (and self-clears), so the EDFE probe sets bit 7
+// WITHOUT bit 0 (0x80, not 0x81): 0x81 would reset first and the
+// assertion would read back the reset default.
+function t_gap11() {
+    // EDFE: DMABMR bit 7 round-trips through the real write arm.
+    const bmr0 = R(ETH_DMA + 0x00);
+    W(ETH_DMA + 0x00, (bmr0 & ~1) | (1 << 7));
+    ok(((R(ETH_DMA + 0x00) >>> 7) & 1) === 1, 'eth: DMABMR EDFE stores');
+    ok(eth_enhanced_desc() === true, 'eth: enhanced layout reports live');
+    W(ETH_DMA + 0x00, (bmr0 & ~1) & ~(1 << 7));
+    ok(eth_enhanced_desc() === false, 'eth: normal layout reports live');
+    W(ETH_DMA + 0x00, bmr0); // restore
+    // Chain walk: TCH/RCH = Desc3 link, TER/RER = ring wrap to base,
+    // neither = linear advance by stride (pure function, CMSIS bits).
+    ok(eth_desc_next(true, 1 << 20, 0x1000, 0x2000, 0x1000, 16) === 0x2000, 'eth: TX TCH chains via Desc3');
+    ok(eth_desc_next(true, 1 << 21, 0x1010, 0x2000, 0x1000, 16) === 0x1000, 'eth: TX TER wraps to base');
+    ok(eth_desc_next(true, 0, 0x1000, 0x2000, 0x1000, 16) === 0x1010, 'eth: TX linear advances by stride');
+    ok(eth_desc_next(false, 1 << 14, 0x3000, 0x4000, 0x3000, 32) === 0x4000, 'eth: RX RCH chains via Desc3');
+    ok(eth_desc_next(false, 1 << 15, 0x3020, 0x4000, 0x3000, 32) === 0x3000, 'eth: RX RER wraps to base');
+    ok(eth_desc_next(false, 0, 0x3000, 0x4000, 0x3000, 32) === 0x3020, 'eth: RX linear advances by stride');
+    // RDES4 extended status: IPv4/UDP frame reports IPV4PR + IPPT_UDP.
+    const f = (() => {
+        const n = 4, fr = new Uint8Array(14 + 20 + 8 + n);
+        fr.set([2, 0, 0, 0, 0, 1], 0); fr.set([2, 0, 0, 0, 0, 1], 6);
+        fr[12] = 8; fr[13] = 0;
+        fr[14] = 0x45; fr[16] = 0; fr[17] = 28 + n; fr[22] = 64; fr[23] = 17;
+        fr.set([192, 168, 4, 1], 26); fr.set([192, 168, 4, 2], 30);
+        let s = 0; for (let i = 0; i < 20; i += 2) s += (fr[14 + i] << 8) | fr[15 + i];
+        while (s >>> 16) s = (s & 0xFFFF) + (s >>> 16);
+        const ck = (~s) & 0xFFFF; fr[24] = ck >> 8; fr[25] = ck & 0xFF;
+        fr[34] = 0; fr[35] = 7; fr[36] = 0; fr[37] = 53; fr[38] = 0; fr[39] = 8 + n;
+        fr.set([1, 2, 3, 4], 42);
+        s = 0;
+        const pl = [0, 17, 0, 8 + n, ...fr.slice(34, 42)];
+        const hdr = [...fr.slice(26, 30), ...fr.slice(30, 34), 0, 17, 0, 8 + n];
+        const all = [...hdr, ...fr.slice(34, 42)];
+        for (let i = 0; i < all.length; i += 2) s += (all[i] << 8) | (all[i + 1] || 0);
+        while (s >>> 16) s = (s & 0xFFFF) + (s >>> 16);
+        const uck = (~s) & 0xFFFF; fr[40] = uck >> 8; fr[41] = uck & 0xFF;
+        return fr;
+    })();
+    const xst = eth_rx_ext_status(f) >>> 0;
+    ok((xst & 0x40) !== 0, 'eth: RDES4 IPV4PR on IPv4 frame', `xst=0x${xst.toString(16)}`);
+    ok((xst & 0x07) === 0x01, 'eth: RDES4 IPPT_UDP on UDP frame', `xst=0x${xst.toString(16)}`);
+    ok((xst & 0x08) === 0, 'eth: RDES4 no IPHE on good header');
+    const bad = Uint8Array.from(f); bad[24] ^= 0xFF;
+    ok((eth_rx_ext_status(bad) & 0x08) !== 0, 'eth: RDES4 IPHE on bad IP checksum');
+    // Backoff: truncated binary exponential under a fixed seed.
+    // k = min(n,10); slot = (seed >> (16-k)) & ((1<<k)-1).
+    // seed 0xABCD = 1010_1011_1100_1101: n=1 -> bit15 = 1; n=2 -> bits15:14 = 10 = 2.
+    ok(eth_backoff_slots(1, 0xABCD) === 1, 'eth: backoff n=1 k=1 (seed bit15)');
+    ok(eth_backoff_slots(2, 0xABCD) === 2, 'eth: backoff n=2 k=2 (seed bits15:14)');
+    ok(eth_backoff_slots(10, 0xFFFF) === 1023, 'eth: backoff n=10 saturates k=10');
+    ok(eth_backoff_slots(16, 0xFFFF) === 1023, 'eth: backoff n=16 capped at k=10');
+    ok(eth_backoff_slots(0, 0xFFFF) === 0, 'eth: backoff n=0 invalid');
+    ok(eth_backoff_slots(17, 0xFFFF) === 0, 'eth: backoff n=17 invalid');
 }
 
 

@@ -17,27 +17,27 @@
  {
   "file": "boards/stm32f401.md",
   "title": "Board: STM32F401",
-  "blurb": "36 presets, no CAN/ETH, BlackPill + Nucleo"
+  "blurb": "37 presets, no CAN/ETH, BlackPill + Nucleo"
  },
  {
   "file": "boards/stm32f411.md",
   "title": "Board: STM32F411",
-  "blurb": "36 presets, F401 + SPI5"
+  "blurb": "37 presets, F401 + SPI5"
  },
  {
   "file": "boards/stm32f407.md",
   "title": "Board: STM32F407",
-  "blurb": "Reference target, 64 presets, feature matrix"
+  "blurb": "Reference target, 72 presets, feature matrix"
  },
  {
   "file": "boards/stm32f407ve.md",
   "title": "Board: F407VE/ZE",
-  "blurb": "512K package, 66 presets"
+  "blurb": "512K package, 73 presets"
  },
  {
   "file": "boards/stm32f429.md",
   "title": "Board: STM32F429",
-  "blurb": "DMA2D/LTDC/Ethernet proofs, 57 presets"
+  "blurb": "DMA2D/LTDC/Ethernet proofs, 59 presets"
  },
  {
   "file": "networking.md",

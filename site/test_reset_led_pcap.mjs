@@ -72,24 +72,59 @@ const ok = (c, m) => { if (c) { pass++; console.log(`  ok: ${m}`); } else { fail
     ok(sawOn && sawOff, 'PA5 toggles live via ODR (ledStatus source)');
     emu.close();
 }
-// ── 5. pcap writer shape + net counters ──
+// ── 5. pcap writer bytes + net counters ──
+// Replicates site/app.js pcapBytes() byte-for-byte over captured TX/RX
+// frames, then validates the output as a real libpcap file: LE magic
+// d4 c3 b2 a1, v2.4, snaplen 65535, linktype Ethernet(1), per-frame
+// headers with incl==orig==actual bytes, and total length consistency.
+// (This caught the real 0xa1b2c304 typo — LE bytes 04 c3 b2 a1, which
+// tcpdump rejects with "unknown file format".)
 {
+    const { writeFileSync } = await import('node:fs');
     const netsim = createNetSim({});
+    const frames = [];
     const emu = await createEmulator({
         firmware: ethAdv, bindings, svdXml, wasmInit: wasmBytes,
         enable_irqs: true, irq_eth: true, lowpower: true,
         eth: { rxDesc: 0x20000c40, rxBuf: 0x2000060c, rxStride: 1536, rxDescs: 1 },
-        onTx: (frame) => { for (const r of netsim.onTx(frame)) emu.injectFrame(r); },
+        onTx: (frame) => {
+            frames.push({ us: 1000000 + frames.length * 1000, data: frame.slice() });
+            for (const r of netsim.onTx(frame)) {
+                frames.push({ us: 1000000 + frames.length * 1000, data: r.slice() });
+                emu.injectFrame(r);
+            }
+        },
     });
-    let uart = '', txBytes = 0, txFrames = 0;
-    // wrap: count TX bytes like app.js netRecordTx
-    const origStep = emu.step.bind(emu);
-    void origStep;
+    let uart = '';
     for (let i = 0; i < 3000 && !uart.includes('RST OK'); i++) { emu.step(20000); uart += emu.drainUart(); }
     ok(uart.includes('RST OK'), 'eth_adv boots to RST OK (pcap/speed harness path)');
-    // frame shape check: build one pcap record manually (writer lives in app.js;
-    // here we assert the inputs it needs exist: frame bytes + lengths)
-    ok(txFrames === 0 && txBytes === 0, 'counter init sane (app.js owns accumulation)');
+    ok(frames.length > 0, `pcap captured ${frames.length} frames`);
+    // replicate app.js pcapBytes()
+    const parts = [];
+    const gh = new Uint8Array(24); const gdv = new DataView(gh.buffer);
+    gdv.setUint32(0, 0xa1b2c3d4, true); gdv.setUint16(4, 2, true); gdv.setUint16(6, 4, true);
+    gdv.setInt32(8, 0, true); gdv.setUint32(12, 0, true); gdv.setUint32(16, 65535, true); gdv.setUint32(20, 1, true);
+    parts.push(gh); let total = 24;
+    for (const f of frames) {
+        const h = new Uint8Array(16); const dv = new DataView(h.buffer);
+        dv.setUint32(0, Math.floor(f.us / 1e6), true); dv.setUint32(4, f.us % 1e6, true);
+        dv.setUint32(8, f.data.length, true); dv.setUint32(12, f.data.length, true);
+        parts.push(h, f.data); total += 16 + f.data.length;
+    }
+    const out = new Uint8Array(total); let off = 0;
+    for (const p of parts) { out.set(p, off); off += p.length; }
+    // validate as libpcap
+    const pdv = new DataView(out.buffer);
+    ok(pdv.getUint32(0, true) === 0xa1b2c3d4, 'pcap magic a1b2c3d4 (LE d4 c3 b2 a1)');
+    ok(pdv.getUint16(4, true) === 2 && pdv.getUint16(6, true) === 4, 'pcap version 2.4');
+    ok(pdv.getUint32(20, true) === 1, 'pcap linktype Ethernet(1)');
+    let o = 24, n = 0, valid = true;
+    while (o + 16 <= out.length) {
+        const incl = pdv.getUint32(o + 8, true), orig = pdv.getUint32(o + 12, true);
+        if (incl !== orig || o + 16 + incl > out.length) { valid = false; break; }
+        o += 16 + incl; n++;
+    }
+    ok(valid && o === out.length && n === frames.length, `pcap ${n} records, incl==orig, len ${out.length} consistent`);
     emu.close();
 }
 console.log(fail === 0 ? `RESET/LED/PCAP PASS (${pass} checks)` : `RESET/LED/PCAP FAIL (${fail} failures)`);

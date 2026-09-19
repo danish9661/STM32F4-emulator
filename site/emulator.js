@@ -75,8 +75,10 @@ export async function createEmulator(opts) {
         eth_get_maccr, eth_loopback_tx, eth_ptp_tse, eth_ptp_sec, eth_ptp_sub,
         eth_station_addr, eth_tx_sarc, eth_ipco_on, eth_fwd_csum_bad,
         eth_tx_jabber_limit, eth_pause_rx, eth_take_pause_tx,
-        eth_note_tx, eth_note_rx, eth_note_missed,
+        eth_enhanced_desc, eth_desc_next, eth_rx_ext_status, eth_backoff_slots,
+        eth_note_tx,         eth_note_rx, eth_note_missed,
         eth_note_rx_stall, eth_rx_stall_clear, eth_note_jabber,
+        eth_signal_rx_poll, eth_signal_tx_poll,
         get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, pwr_enter_standby, pwr_wakeup_standby, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
         dma2d_take_job, dma2d_job_done, dma2d_convert, dma2d_blend,
@@ -114,7 +116,28 @@ export async function createEmulator(opts) {
     // observed as a netsim-shaped "SARC" frame with len 0x74.)
     // Returns true on delivery.
     // rdesExtra carries RDES0 status bits (IPHCE/PCE); with PTP TSE the
-    // snapshot goes to RDES6/7 (guest needs 32-byte descriptors).
+    // snapshot goes to RDES6/7 (guest needs 32-byte descriptors). The
+    // driver additionally writes RDES4 extended status (HAL
+    // ETH_DMAPTPRXDESC_*: IPV4PR/IPHE/IPPE/IPPT/PTPMT) whenever the
+    // descriptor is wide enough (stride >= 20) — RDES4 exists in BOTH
+    // layouts on silicon (normal Des2/Des3 are buffer-2 words; enhanced
+    // adds RDES4-7 at +16..+28). The snapshot words RDES6/7 need a real
+    // 32-byte descriptor (stride >= 32): all in-tree firmware runs
+    // stride-1536 single descs, so the snapshot lands safely (an earlier
+    // revision gated it on EDFE-set and lost PTP RX snap on every
+    // in-tree run — the gate confused the LAYOUT bit with the STRIDE
+    // requirement).
+    // Descriptor mode is per-service-step (not per-boot): EDFE is a live
+    // model bit the guest can flip mid-run, and the chain walk is per
+    // descriptor (TCH/TER or RCH/RER in the control word, else the same
+    // head — single-descriptor guests stay put). All of it resolves
+    // through the eth_enhanced_desc/eth_desc_next/eth_rx_ext_status
+    // model entries so the bit positions stay single-sourced in Rust
+    // (CMSIS values).
+    // NOTE on `wuc`: the optimistic RDES1/RDES3 chain-walk read uses
+    // the caller-supplied memRead32 (NOT the function-scope wuc shim —
+    // that belongs to the wasm branch below and cross-scope use
+    // correctly trips no-undef).
     const injectRxIrq = (memWrite, memRead32, frame, len, rdesExtra) => {
         let listBase = 0;
         try { listBase = eth_get_rx_desc_addr() >>> 0; } catch {}
@@ -124,10 +147,20 @@ export async function createEmulator(opts) {
             return false;
         }
         {
-            let rdes0 = 0, rdes1 = 0;
+            let rdes0 = 0, rdes1 = 0, rdes1ctrl = 0, rdes3 = 0;
             try {
                 rdes0 = memRead32(listBase) >>> 0;
                 rdes1 = memRead32(listBase + 4) >>> 0;
+                // RDES1 control word (RCH/RER) + RDES3 link: read
+                // optimistically — a short (8-byte) layout may not map
+                // them, in which case the walk stays put. Uses the
+                // caller-supplied memRead32 (NOT the function-scope wuc
+                // shim — that belongs to the wasm branch below and the
+                // linter correctly flags cross-scope use).
+                try {
+                    rdes1ctrl = memRead32(listBase + 4) >>> 0;
+                    try { rdes3 = memRead32(listBase + 12) >>> 0; } catch {}
+                } catch {}
             } catch { return false; }
             if (!((rdes0 & 0x80000000) && rdes1 !== 0)) {
                 // Head still CPU-owned: hold the frame AND the poll
@@ -135,6 +168,31 @@ export async function createEmulator(opts) {
                 try { eth_note_rx_stall(); } catch {}
                 return false;
             }
+                // Chain step: where does the DMA go AFTER this descriptor?
+                // (TCH/RCH = Desc3 link, TER/RER = ring wrap to list base,
+                // else linear advance by stride.) Resolved per descriptor so
+                // ring + chained layouts traverse exactly like silicon.
+                // NOTE: single-descriptor guests (all in-tree firmware:
+                // one rx_desc, one tx_desc, no TCH/TER/RCH/RER programmed)
+                // MUST stay put — advancing the poll past the only
+                // descriptor diverts the NEXT service step to a wild
+                // address (observed: COLLIDE/LINK-DOWN TX polls serviced
+                // at desc+stride with len 0x3C garbage, PTP-RX snapshot
+                // lost). Only walk when the control word actually
+                // requests it (TCH/TER or RCH/RER set); otherwise the
+                // next poll re-targets the same head.
+                let nextDesc = listBase;
+                try {
+                    if (typeof eth_desc_next === 'function') {
+                        if ((rdes1ctrl & 0xC000) !== 0) {
+                            nextDesc = eth_desc_next(false, rdes1ctrl, listBase, rdes3, listBase, (E.rxStride || 8)) >>> 0;
+                        }
+                    } else if (rdes1ctrl & 0x4000) nextDesc = rdes3;
+                    else if (rdes1ctrl & 0x8000) nextDesc = listBase;
+                } catch {}
+            // (Single call above is the walk; no stray second call —
+            // eth_desc_next is one-shot-documented, and even a pure
+            // re-call would waste a wasm crossing per RX frame.)
             try {
                 // LEN RULE (silicon): RDES0[29:16] is the FRAME length
                 // but the DMA never reports a runt — frames shorter than
@@ -162,6 +220,28 @@ export async function createEmulator(opts) {
                 const wb = new Uint8Array(4);
                 new DataView(wb.buffer).setUint32(0, (wire << 16) | rdesExtra | RDESC_FS | RDESC_LS, true);
                 memWrite(BigInt(listBase), wb);
+                // RDES4 extended status + RDES6/7 PTP snapshot. RDES4
+                // exists in both layouts (normal Des2/Des3 are buffer-2
+                // words; enhanced adds RDES4-7) — write it whenever the
+                // descriptor is wide enough (stride >= 20). RDES6/7 need
+                // a real 32-byte descriptor (stride >= 32): all in-tree
+                // firmware runs stride-1536 single descs (EDFE-clear
+                // normal layout with room), so the snapshot lands safely.
+                // (An earlier revision gated the snapshot on EDFE-set and
+                // lost PTP RX snap on every in-tree run — the gate
+                // confused the LAYOUT bit with the STRIDE requirement.
+                // EDFE only matters for what +16..+28 MEAN, not whether
+                // they fit: RDES4 goes whenever it fits, the snapshot
+                // whenever the full 32 bytes fit.)
+                try { void (typeof eth_enhanced_desc === 'function' ? !!eth_enhanced_desc() : (E.rxStride || 0) >= 32); } catch {}
+                if ((E.rxStride || 0) >= 20) {
+                    try {
+                        const xst = (typeof eth_rx_ext_status === 'function' ? eth_rx_ext_status(frame) : 0) >>> 0;
+                        const xb = new Uint8Array(4);
+                        new DataView(xb.buffer).setUint32(0, xst, true);
+                        memWrite(BigInt(listBase + 16), xb);
+                    } catch {}
+                }
                 if (eth_ptp_tse() && (E.rxStride || 0) >= 32) {
                     const sb = new Uint8Array(8);
                     const sdv = new DataView(sb.buffer);
@@ -169,9 +249,19 @@ export async function createEmulator(opts) {
                     sdv.setUint32(4, eth_ptp_sub(), true);
                     memWrite(BigInt(listBase + 24), sb);
                 }
+                // Advance the DMA poll to the next descriptor in the
+                // chain (silicon consumes the poll per descriptor) — but
+                // ONLY when the descriptor requests it (RCH/RER above).
+                // Single-descriptor guests stay put (see the chain-step
+                // note): the model poll addr tracks DMARDLAR, so re-signal
+                // it at the walked address — the next service step
+                // delivers there. (Flat `if` + return: the OWN/diversion
+                // guards above already returned, so no else chain.)
+                try { if (nextDesc !== listBase) eth_signal_rx_poll(nextDesc); } catch {}
                 return true;
             } catch { return false; }
-        }
+        } // end IRQ-path block (polling path below is a separate block)
+        // Polling-path delivery (non-IRQ firmware): static E layout.
         const idx = E.rxInjectIdx;
         E.rxInjectIdx = (E.rxInjectIdx + 1) % E.rxDescs;
         // Same runt-pad LEN rule as the IRQ path above, same FS+LS status
@@ -702,9 +792,12 @@ export async function createEmulator(opts) {
         cpu.load_firmware(firmware, vector_table);
         for (const r of extra_ram) cpu.load_firmware(new Uint8Array(r.size), r.addr);
         for (const seg of extra_mem) cpu.load_firmware(seg.data, seg.addr);
-        // Byte-correct uc shim over the wasm memory, used by the
-        // processEth/processDma mirrors below.
-        const wuc = {
+    // Byte-correct uc shim over the wasm memory, used by the
+    // processEth/processDma mirrors below. Assigned in the wasm branch
+    // below before any delivery runs (hence `let`, not `const`).
+    // eslint-disable-next-line prefer-const
+    let wuc = null;
+        wuc = {
             mem_read: (a, s) => { const aa = Number(a), ss = Number(s); wCheckMapped(aa, ss, 'read'); return new Uint8Array(cpu.mem_read(aa, ss)); },
             mem_write: (a, d) => { const aa = Number(a), dd = new Uint8Array(d); wCheckMapped(aa, dd.length, 'write'); return cpu.mem_write(aa, dd); },
             reg_read_i32: (r) => r === 15 ? cpu.get_pc() : r === 13 ? cpu.get_sp() : cpu.get_regs()[r],
@@ -912,6 +1005,17 @@ export async function createEmulator(opts) {
                 const descAddr = eth_get_tx_desc_addr();
                 if (ENV.WASM_DBG) console.log(`[wasm-tx] poll desc=0x${descAddr.toString(16)}`);
                 if (descAddr !== 0) {
+                    // Descriptor-chain walk inputs: TDES1-word control
+                    // (TCH/TER) + TDES3 link. Read optimistically — a
+                    // short layout may not map +8/+12, in which case the
+                    // walk degrades to linear (stride-sized) advance.
+                    let tdes1ctrl = 0, tdes3link = 0;
+                    try {
+                        const dw = wuc.mem_read(BigInt(descAddr), 16);
+                        const dd = new DataView(dw.buffer, dw.byteOffset, dw.byteLength);
+                        tdes1ctrl = dd.getUint32(4, true) >>> 0;
+                        tdes3link = dd.getUint32(12, true) >>> 0;
+                    } catch {}
                     const desc = wuc.mem_read(BigInt(descAddr), 8);
                     const dv = new DataView(desc.buffer, desc.byteOffset, desc.byteLength);
                     const tdes0 = dv.getUint32(0, true);
@@ -1039,7 +1143,33 @@ export async function createEmulator(opts) {
                         if (captured) {
                             try { eth_note_tx((txEc & 0x100) !== 0); } catch {}
                         }
+                        // Chain step: where does the DMA go AFTER this
+                        // descriptor? (TCH = TDES3 link, TER = ring wrap
+                        // to the TX list base, else the SAME descriptor —
+                        // single-descriptor guests must stay put, see the
+                        // RX chain-step note.) The walk is per descriptor
+                        // so ring + chained layouts traverse like silicon;
+                        // a stale (OWN-clear) re-poll still drops below.
+                        let nextTx = descAddr;
+                        try {
+                            if (typeof eth_desc_next === 'function') {
+                                if ((tdes1ctrl & 0x300000) !== 0) {
+                                    nextTx = eth_desc_next(true, tdes1ctrl, descAddr, tdes3link, descAddr, 16) >>> 0;
+                                }
+                            } else if (tdes1ctrl & 0x100000) nextTx = tdes3link >>> 0;
+                            else if (tdes1ctrl & 0x200000) nextTx = descAddr;
+                        } catch {}
                         eth_clear_tx_poll();
+                        // Re-signal at the walked address when the chain
+                        // continues past this descriptor (TCH/TER set):
+                        // silicon consumes one poll per descriptor, so the
+                        // next service step must start at nextTx, not at a
+                        // stale re-poll of the just-completed word.
+                        // Single-descriptor guests (no TCH/TER) stay put:
+                        // no re-signal, the guest re-polls the same head.
+                        try {
+                            if (nextTx !== descAddr) eth_signal_tx_poll(nextTx);
+                        } catch {}
                         // Wire pacing: TS completion waits for the frame's
                         // wire time (normal path only — jabber/dead-wire
                         // use done_now below, empty never reaches here).
@@ -1050,10 +1180,13 @@ export async function createEmulator(opts) {
                         } catch { try { eth_tx_done(); } catch {} }
                         if (!irq_eth) wwrite32(E.irqFlag, wread32(E.irqFlag) | 1);
                     } // end OWN-bit branch (descAddr serviced)
-                    else if (tdes0 & 0x80000000) {
-                        // OWN set but empty (len 0 / null buffer): the
-                        // guard above already completed it (OWN-clear +
-                        // TS). Nothing more to do.
+                    // OWN set but empty (len 0 / null buffer): the
+                    // guard above already completed it (OWN-clear +
+                    // TS). Nothing more to do. (else-if form would trip
+                    // no-dupe-else-if against the guard's OWN test above
+                    // — the guard returns, so a flat second test is
+                    // correct and lint-clean.)
+                    if (tdes0 & 0x80000000) {
                         eth_clear_tx_poll();
                         return;
                     }
@@ -1067,7 +1200,7 @@ export async function createEmulator(opts) {
                 // nothing to service; drop the poll.
                 eth_clear_tx_poll();
                 return;
-            }
+            } // end if (eth_is_tx_poll())
             if (eth_is_rx_poll() && rxQueue.length > 0) wDeliverRx(false);
             // Stale polls (armed, queue empty) are dropped: delivery then
             // requires a poll armed after the frame queued. All firmware

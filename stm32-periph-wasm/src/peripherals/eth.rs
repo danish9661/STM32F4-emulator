@@ -739,6 +739,12 @@ impl Peripheral for EthernetMac {
                         *self = Self::new_default(block);
                         return;
                     }
+                    // Mask keeps every SVD field (SR/DA/DSL/EDFE/PBL/PM/
+                    // FB/RDP/USP/FPM/AAB/MB). EDFE (bit 7) selects the
+                    // enhanced 32-byte descriptor layout (Desc2/3 =
+                    // buffer2-address/word instead of link pointers, RDES4
+                    // extended status; the snapshot words RDES6/7+TDES6/7
+                    // exist ONLY in this layout — see the snapshot arms).
                     self.dmabmr = value & 0x7FE7FFF;
                 }
                 0x04 => {
@@ -1619,6 +1625,134 @@ pub fn eth_tx_deferred(sys: &System) -> bool {
 /// Driver entry: current MACCR (FES/DM/LM/ROD checks).
 pub fn eth_get_maccr(sys: &System) -> u32 {
     with_mac(sys, |m| m.maccr)
+}
+
+/// Driver entry: enhanced-descriptor format enabled (DMABMR EDFE, SVD
+/// bit 7)? Selects the 32-byte descriptor layout: Desc2/3 are
+/// buffer-2 words, RDES4 carries extended status, RDES6/7 + TDES6/7
+/// carry PTP snapshots. With EDFE clear the same frame/word offsets
+/// are link pointers and RDES6/7+TDES6/7 do not exist (the driver
+/// must not write them — see the stride gate in emulator.js).
+pub fn eth_enhanced_desc(sys: &System) -> bool {
+    with_dma_mut_ret(sys, |d| (d.dmabmr >> 7) & 1 != 0, false)
+}
+
+/// Driver entry: descriptor-chain walk for one TX/RX service step.
+/// Reads TDES1/RDES1-word control bits of the descriptor at `desc` in
+/// guest memory (via `rd32`) and returns the next descriptor address:
+/// - TCH/RCH set (bit 20 TX / bit 14 RX): next = Desc3 (chained link).
+/// - TER/RER set (bit 21 TX / bit 15 RX): next = list base (ring wrap).
+/// - Neither: next = desc + stride (linear advance).
+/// Pure function of guest words + base + stride — no model state, so
+/// the driver implements the walk itself; this helper only documents
+/// the addresses. Kept as the single source of truth for the bit
+/// positions (CMSIS ETH_DMATXDESC_TER/TCH, ETH_DMARXDESC_RER/RCH).
+pub fn eth_desc_next(is_tx: bool, ctrl: u32, desc: u32, next_ptr: u32, base: u32, stride: u32) -> u32 {
+    if is_tx {
+        if ctrl & (1 << 20) != 0 {
+            return next_ptr; // TCH: chained via TDES3
+        }
+        if ctrl & (1 << 21) != 0 {
+            return base; // TER: ring wrap
+        }
+    } else {
+        if ctrl & (1 << 14) != 0 {
+            return next_ptr; // RCH: chained via RDES3
+        }
+        if ctrl & (1 << 15) != 0 {
+            return base; // RER: ring wrap
+        }
+    }
+    desc.wrapping_add(stride) // linear advance
+}
+
+/// Driver entry: RDES4 extended status word for a delivered frame.
+/// HAL bit layout (ETH_DMAPTPRXDESC_*): IPV4PR/IPV6PR (bit 6/7),
+/// IPCB/IPPE/IPHE (5/4/3), IPPT (2:0 = UDP/TCP/ICMP), PTP version
+/// (bit 13), PTP frame type (bit 12), PTP message type (11:8, from the
+/// 0x88F7 payload nibble / UDP 319-320 event kind). Valid only in the
+/// enhanced layout (EDFE) — the driver writes RDES4 only then.
+pub fn eth_rx_ext_status(frame: &[u8]) -> u32 {
+    let mut st = 0u32;
+    let Some((l3, is_ip)) = eth_l3(frame) else { return 0 };
+    if !is_ip || frame.len() < l3 + 20 {
+        return 0;
+    }
+    let ihl = ((frame[l3] & 0x0F) as usize) * 4;
+    if ihl < 20 || frame.len() < l3 + ihl {
+        return 0;
+    }
+    st |= 0x40; // IPV4PR
+    let csum = eth_rx_csum_status(frame);
+    if (csum & 1) != 0 && (csum & 2) == 0 {
+        st |= 0x08; // IPHE
+    }
+    let proto = frame[l3 + 9];
+    let l4 = l3 + ihl;
+    match proto {
+        17 => {
+            st |= 0x01; // IPPT_UDP
+            if (csum & 4) != 0 && (csum & 8) == 0 {
+                st |= 0x10; // IPPE
+            }
+        }
+        6 => {
+            st |= 0x02; // IPPT_TCP
+            if (csum & 4) != 0 && (csum & 8) == 0 {
+                st |= 0x10; // IPPE
+            }
+        }
+        1 => {
+            st |= 0x03; // IPPT_ICMP
+            if (csum & 4) != 0 && (csum & 8) == 0 {
+                st |= 0x10; // IPPE
+            }
+        }
+        _ => {}
+    }
+    // PTP event-message annotation (same gate as the snapshot path:
+    // 0x88F7 any-payload, or IPv4/IPv6 UDP dport 319/320).
+    let is_event = if frame.len() >= 14 {
+        let et0 = ((frame[12] as u16) << 8) | frame[13] as u16;
+        if et0 == 0x88F7 {
+            true
+        } else if (et0 == 0x0800 || et0 == 0x86DD) && frame.len() >= l4 + 4 && proto == 17 {
+            let dport = ((frame[l4 + 2] as u16) << 8) | frame[l4 + 3] as u16;
+            dport == 319 || dport == 320
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if is_event {
+        st |= 0x1000; // PTPFT: PTP over Ethernet
+        // PTP message type from the first payload nibble (Sync=0 ...).
+        if frame.len() >= 15 {
+            let mtype = (frame[14] & 0x0F) as u32;
+            st |= (mtype << 8) & 0x0F00; // PTPMT
+        }
+    }
+    st
+}
+
+/// Driver entry: single-node CSMA/CD backoff probe (half-duplex
+/// error-reporting path). Returns the IEEE 802.3 truncated-binary-
+/// exponential slot count for attempt `n` (1..16) with a deterministic
+/// harness seed: `slot = (seed >> (16 - k)) & ((1 << k) - 1)` where
+/// `k = min(n, 10)`. On silicon the slot comes from the PHY's TRNG and
+/// the MAC waits `slot * 512` bit-times; here the MODEL waits nothing
+/// (single node, no contender — the wire is always free after the
+/// paced frame time) and the COUNT is the observable: the driver ORs
+/// the reported CC into the TX writeback. Deterministic so firmware
+/// self-tests can assert exact CC values.
+pub fn eth_backoff_slots(attempt: u32, seed: u32) -> u32 {
+    if attempt == 0 || attempt > 16 {
+        return 0;
+    }
+    let k = attempt.min(10);
+    let mask = if k >= 32 { u32::MAX } else { (1u32 << k) - 1 };
+    (seed >> (16 - k.min(16))) & mask
 }
 
 /// Driver entry: station address (MACA0) packed as u64 (48 bits used).

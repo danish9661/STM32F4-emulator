@@ -150,7 +150,7 @@ https://danish9661.github.io/stm32F4-emulator/ (GitHub Pages, CI-deployed).
   library: `mcu.ledStatus(fwName, boardKey)`.
 - **Packet capture (pcap) panel** — Start/Stop recording, Download `.pcap`.
   Records every Ethernet frame both ways (guest TX + delivered RX) with
-  microsecond timestamps in libpcap format (magic `a1b2c304`, v2.4,
+  microsecond timestamps in libpcap format (magic `a1b2c3d4`, v2.4,
   linktype Ethernet) — opens directly in Wireshark/tcpdump. Window:
   `window.__pcapStart()` / `window.__pcapStop()` / `window.__pcapBytes()`.
 - **Net up/down speed** — Machine-state `▲/▼` readout: wall-clock B/s

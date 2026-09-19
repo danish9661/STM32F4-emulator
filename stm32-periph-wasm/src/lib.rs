@@ -1028,6 +1028,33 @@ pub fn eth_tx_jabber_limit() -> u32 {
     crate::peripherals::eth::eth_tx_jabber_limit(sys())
 }
 
+/// Enhanced-descriptor format enabled (DMABMR EDFE, SVD bit 7)?
+#[wasm_bindgen]
+pub fn eth_enhanced_desc() -> bool {
+    crate::peripherals::eth::eth_enhanced_desc(sys())
+}
+
+/// Descriptor-chain step: next address after `desc` (TCH/TER or RCH/RER
+/// in `ctrl`, else desc+stride; ring wraps to `base`).
+#[wasm_bindgen]
+pub fn eth_desc_next(is_tx: bool, ctrl: u32, desc: u32, next_ptr: u32, base: u32, stride: u32) -> u32 {
+    crate::peripherals::eth::eth_desc_next(is_tx, ctrl, desc, next_ptr, base, stride)
+}
+
+/// RDES4 extended status word for a delivered frame (HAL ETH_DMAPTPRXDESC_*
+// : IPV4PR/IPHE/IPPE/IPPT/PTPMT). Valid in the enhanced layout (EDFE).
+#[wasm_bindgen]
+pub fn eth_rx_ext_status(frame: &[u8]) -> u32 {
+    crate::peripherals::eth::eth_rx_ext_status(frame)
+}
+
+/// Single-node CSMA/CD backoff probe: deterministic slot count for
+/// attempt `n` (1..16) under harness `seed` (truncated binary exponential).
+#[wasm_bindgen]
+pub fn eth_backoff_slots(attempt: u32, seed: u32) -> u32 {
+    crate::peripherals::eth::eth_backoff_slots(attempt, seed)
+}
+
 /// RX flow-control step: true when the frame is a pause frame for us
 /// (arms the stall, terminates the frame — never delivered/counted).
 #[wasm_bindgen]
