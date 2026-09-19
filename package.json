@@ -1,6 +1,6 @@
 {
   "name": "stm32f4-emu",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "STM32F407 emulator: Rust CPU + peripheral model (WASM). Runs real Cortex-M4 firmware in Node or the browser.",
   "type": "module",
   "main": "index.mjs",
@@ -31,6 +31,7 @@
     "site/emulator.js",
     "site/emulator.d.ts",
     "site/stm32f4.js",
+    "site/boards.js",
     "site/components.js",
     "site/netsim.js",
     "site/firmware.js",

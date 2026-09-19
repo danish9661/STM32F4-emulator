@@ -4,7 +4,17 @@ All notable changes to `stm32f4-emu` are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/); this project uses
 date-based entries rather than strict SemVer until the first published release.
 
-## [Unreleased]
+## [1.2.0] — 2026-09-19 (NOT published — release candidate, `npm pack` verified)
+
+New peripheral surface since 1.1.1 (all in the packed tarball, all verified
+by the consumer test below): Ethernet descriptor layer (DMABMR EDFE,
+TCH/TER + RCH/RER chain walks, RDES4 extended status, deterministic backoff
+slot probe), host reset/boot + board-LED + pcap capture + net-speed console
+panel, `eth_adv` 12-phase L3/L4 suite, per-map DBGMCU IDCODE, trace view,
+Servo component. Pack verified this release: 30 files (site/boards.js added
+— index.mjs re-exports boardLed from it), 1.7 MB tarball / 9.9 MB unpacked;
+consumer test boots blinky to `tick 0` over the packaged `index.mjs` API and
+all 12 gap wasm exports resolve as functions. EXIT 0, no publish performed.
 
 ### Session: pkg parity + trace view + servo + IDCODE follow-ups
 - `stm32-periph-wasm/pkg` (nodejs) rebuilt to byte-identical parity with
@@ -36,9 +46,40 @@ date-based entries rather than strict SemVer until the first published release.
 - Version bumped 1.0.1 → 1.1.0 (new peripherals surface: SDIO CMD24, QSPI
   mmap, LTDC CLUT, I2C slave, DMA FCR/DBM, DAC DMAUDR, per-map IDCODE).
 
-### Added
-- **Peripheral gap batches 6–8** (model + mock pins + board-doc rows, all
-  synced to `site/docs-src/` + `website/docs/`):
+### Gap batch 11: Ethernet descriptor layer (this release)
+- DMABMR EDFE (SVD bit 7) selects the 32-byte descriptor layout; TCH/TER +
+  RCH/RER per-descriptor chain walks (ring wrap to list base, chained via
+  Desc3, single-descriptor guests stay put); RDES4 extended status
+  (HAL `ETH_DMAPTPRXDESC_*`: IPV4PR/IPHE/IPPE/IPPT/PTPMT) whenever the
+  descriptor fits; deterministic backoff slot probe (truncated binary
+  exponential under a harness seed). New exports `eth_enhanced_desc`,
+  `eth_desc_next`, `eth_rx_ext_status`, `eth_backoff_slots` (+ mock `t_gap11`,
+  mock-consumer 336 checks).
+- pcap magic fix: `0xa1b2c304` → `0xa1b2c3d4` (LE bytes `d4 c3 b2 a1` —
+  tcpdump rejected every capture with "unknown file format"). Validated by
+  capturing a real DHCP→TCP→HTTP session and parsing it with tcpdump
+  (DHCP Discover/Offer, SYN/SYN-ACK/ACK, HTTP GET + FIN) + a libpcap shape
+  test in `test_reset_led_pcap.mjs` (magic/version/linktype/incl==orig).
+- Host reset/boot + board LED + pcap capture + net-speed console panel
+  (`resetCpu`/`setNrst`/`bootPreset`, `BOARD_LED` map + aliases, pcap
+  record/download, wall + emulated up/down speed; `test_reset_led_pcap.mjs`
+  21 checks).
+- `eth_adv`: 12-phase L3/L4 + link-scope suite (RST/RTO/MSS/window/frag/
+  ICMP-err/DHCP-NAK/DHCP-renew/IGMP/ND/LLDP/STP, F407 + F429 matrix entries).
+- Per-map DBGMCU IDCODE (`init_svd_chip`, DEV_IDs
+  0x413/0x423/0x431/0x419) + CR mask fix.
+- Trace (waveform) view + Servo component (see the session entry above).
+- **Packaging fix: `site/boards.js` added to `files`** — `index.mjs`
+  re-exports `boardLed` from it, so the 1.1.0 tarball's consumer test
+  failed with ERR_MODULE_NOT_FOUND. Caught by the 1.2.0 consumer test.
+
+### Fixed
+- **Synchronous mem-to-mem DMA completion**: polling firmware that checks
+  NDTR/dst/flags on the instructions right after enabling the stream
+  (`edge_test`, `periph_test`) now sees the transfer complete inline (Rust
+  core drains staged mem-copy transfers straight after the guest's EN store;
+  peripheral-side transfers still stage for the JS driver).
+- **Peripheral gap batches 6–8** (model + mock pins + board-doc rows):
   - Batch 6: FLASH error flags (WRPERR/PGSERR/PGAERR, OPTLOCK/OPTSTRT),
     SPI HW CRC + OVR/MODF/FRE/BSY, USART CTSE flow control + FE/PE fault
     injection, SDIO ACMD prefix + wide-bus + DAT1 IRQ, RTC wakeup timer +
@@ -75,7 +116,7 @@ date-based entries rather than strict SemVer until the first published release.
   the DCMI/USB/demo-firmware roadmap items in `progress-and-future.md`,
   and pinned batch-8 mock names into all five board pages.
 
-### Added
+### Added (1.1.x series — post-1.1.1 unless noted)
 - **`stm32f4-emu` CLI** (`bin`): headless runner that loads a `.bin`/`.elf`/`.hex`
   firmware, boots it, and streams the guest UART to stdout. Supports
   `--inst <N>` (instruction budget), `--format auto|bin|hex|elf`,
@@ -89,7 +130,7 @@ date-based entries rather than strict SemVer until the first published release.
   expected format and likely cause.
 - **`stm32f4-mcp --help` / `--version`** for the MCP server bin.
 
-### Removed
+### Removed (1.1.x series)
 - **Unicorn CPU backend**: the vendored Unicorn 2.1.4 engine
   (`site/vendor/unicorn_arm.*`, `stm32-periph-wasm/pkg/unicorn_arm.*`, the
   `stm32-periph-wasm/package/` distribution), the `cpu_backend`/`unicorn`
@@ -100,7 +141,7 @@ date-based entries rather than strict SemVer until the first published release.
   their Rust-core equivalents; `pkg/cli.mjs` was ported onto
   `createEmulator`.
 
-### Fixed
+### Fixed (1.1.x series)
 - **Synchronous mem-to-mem DMA completion**: polling firmware that checks
   NDTR/dst/flags on the instructions right after enabling the stream
   (`edge_test`, `periph_test`) now sees the transfer complete inline. The
