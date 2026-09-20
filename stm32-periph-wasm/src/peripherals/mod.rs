@@ -1127,7 +1127,7 @@ impl Peripherals {
         // every system peripheral (no SCB/MPU/SysTick/FPU). Register whichever
         // bases came up empty, with the same windows new_wasm uses — without
         // this, VTOR reads 0 and every interrupt vectors into the void.
-        // (SVDs that describe them, like monox, hit the skip rule instead.)
+        // (SVDs that describe them, like the F407 vendor file, hit the skip rule instead.)
         peripherals.ensure_core_system_slots();
         // USB OTG FS device block (regs + EP0-3 FIFO strides to 0x50005000).
         // The four SVD OTG_FS_* entries stay dropped (UsbFs::new only
@@ -1343,7 +1343,7 @@ impl Peripherals {
     /// Register core ARM system slots (SysTick/SCB/MPU/FPU) whose bases
     /// came up empty — for SVDs that omit the system block entirely (Keil
     /// DFP family files). Skips any base an SVD entry already claims, so
-    /// fully-described maps (monox) are untouched. Windows mirror new_wasm.
+    /// fully-described maps (F407 vendor SVD) are untouched. Windows mirror new_wasm.
     fn ensure_core_system_slots(&mut self) {
         let want: [(u32, u32, &str); 4] = [
             (0xE000_E010, 0xE000_E020, "SysTick"),

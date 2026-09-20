@@ -26,15 +26,15 @@ soaks, and CI, and the browser console (`site/`) for interactive demos.
 cd stm32-periph-wasm/pkg
 
 # 1) netsim-free quick run: just boots the firmware and runs 10M instructions
-node cli.mjs ../../eth_http/eth_http.bin 10000000
+node cli.mjs ../../firmware/eth_http/eth_http.bin 10000000
 
 # 2) full gateway run (real gVisor network; needs :8092 HTTP server up)
-node cli.mjs ../../eth_http/eth_http.bin 10000000 \
-  --gateway --config=../../eth_http/config.yaml
+node cli.mjs ../../firmware/eth_http/eth_http.bin 10000000 \
+  --gateway --config=../../firmware/eth_http/config.yaml
 
 # 3) connect to an ALREADY RUNNING gateway process (external, no spawn)
-node cli.mjs ../../eth_http/eth_http.bin 10000000 \
-  --connect --config=../../eth_http/config.yaml
+node cli.mjs ../../firmware/eth_http/eth_http.bin 10000000 \
+  --connect --config=../../firmware/eth_http/config.yaml
 ```
 
 ### Arguments
@@ -49,11 +49,11 @@ node cli.mjs ../../eth_http/eth_http.bin 10000000 \
 | `--regs` | dump register state (env `SHOW_REGS=1`) |
 | `--uart=<addr>` | USART base address (default 0x40011000; env `UART_ADDR`) |
 
-### Config file (`eth_http/config.yaml` pattern)
+### Config file (`firmware/eth_http/config.yaml` pattern)
 
 ```yaml
 cpu:
-  svd: ../saturn/stm32f407.svd     # register map
+  svd: ../../site/vendor/stm32f407.svd     # register map
   vector_table: 0x08000000
 regions:
   - name: ROM
@@ -85,9 +85,9 @@ devices:
 ### Other firmwares
 
 ```bash
-node cli.mjs ../../eth_dhcp/eth_dhcp.bin 10000000 --gateway --config=../../eth_dhcp/config.yaml
-node cli.mjs ../../eth_test/eth_test.bin  10000000 --gateway --config=../../eth_test/config.yaml
-node cli.mjs ../../blinky/blinky.bin 10000000
+node cli.mjs ../../firmware/eth_dhcp/eth_dhcp.bin 10000000 --gateway --config=../../firmware/eth_dhcp/config.yaml
+node cli.mjs ../../firmware/eth_test/eth_test.bin  10000000 --gateway --config=../../firmware/eth_test/config.yaml
+node cli.mjs ../../firmware/blinky/blinky.bin 10000000
 ```
 
 Watch for the success markers: `TCP connected` / `=== HTTP <len>b ===`
@@ -251,6 +251,22 @@ emu.close();
 tarball to consume it. The package is **not yet published** to the npm
 registry.
 
+### High-level facade (`STM32F4`, platform integration)
+
+For Wokwi/OpenHW/Velxio-style integration use the `STM32F4` facade
+instead of the raw handle — factories, GPIO/USART/SPI/I2C objects,
+polled event callbacks (`onExtiEdge`/`onCanRx`/…), DMA controller view,
+live display framebuffers (`mcu.display`), SWD/JTAG/power/probe helpers.
+Full surface in [facade.md](facade.md):
+
+```js
+import { STM32F4, decodeFirmware } from 'stm32f4-emu';
+const mcu = await STM32F4.create({ firmware: decodeFirmware('blinky') });
+mcu.gpio.pin('A', 5).on('change', (high) => console.log('PA5', high));
+mcu.onExtiEdge = (line) => console.log('EXTI', line);
+mcu.execute(100_000);
+```
+
 ---
 
 ## WebSocket bridge (headless Node ↔ browser UI)
@@ -263,7 +279,7 @@ is a thin UI. Zero impact on the existing local WASM path.
 
 ```bash
 # 1. Start the bridge in Node (loads firmware, serves emulator over WS)
-node site/ws-bridge.mjs eth_http/eth_http.bin --port 8234
+node site/ws-bridge.mjs firmware/eth_http/eth_http.bin --port 8234
 
 # 2. Open the browser console with the bridge URL param
 npm run serve   # serves site/ on http://127.0.0.1:8123
@@ -273,7 +289,7 @@ npm run serve   # serves site/ on http://127.0.0.1:8123
 Or use the npm script:
 
 ```bash
-npm run bridge -- eth_http/eth_http.bin --port 8234
+npm run bridge -- firmware/eth_http/eth_http.bin --port 8234
 ```
 
 ### What happens
@@ -410,7 +426,7 @@ rm -f ../site/vendor/.gitignore                      # wasm-pack writes '*'
 
 # firmware (bare-metal Makefiles, toolchain from the Arduino core)
 TOOLCHAIN="$HOME/.arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/arm-none-eabi-" \
-  make -C eth_http          # also eth_dhcp, eth_test, blinky, ...
+  make -C firmware/eth_http   # also eth_dhcp, eth_test, blinky, ... (all firmware lives in firmware/)
 
 # gateway
 cd openhw-local-gateway && go build -mod=vendor -o openhw-gw .

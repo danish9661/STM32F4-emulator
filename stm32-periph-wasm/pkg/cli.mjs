@@ -53,11 +53,11 @@ async function main() {
         console.log(`Using config(s): ${configPaths.join(', ')}`);
     }
 
-    const monoxSvd = readFileSync(new URL('../../monox/stm32f407.svd', import.meta.url), 'utf8');
+    const defaultSvd = readFileSync(new URL('../../site/vendor/stm32f407.svd', import.meta.url), 'utf8');
     const wasmBytes = new Uint8Array(readFileSync(new URL('../../site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
     // Honor config.cpu.svd (resolved relative to its config file) so board
-    // configs can select their own map (e.g. Keil F429 SVD); default monox.
-    let svdXml = monoxSvd;
+    // configs can select their own map (e.g. Keil F429 SVD); default F407 vendor SVD.
+    let svdXml = defaultSvd;
     let svdFile = 'stm32f407.svd';
     if (config.cpu?.svd) {
         try {
@@ -67,7 +67,7 @@ async function main() {
             svdXml = readFileSync(path.resolve(cfgDir, config.cpu.svd), 'utf8');
             svdFile = String(config.cpu.svd).split('/').pop();
             console.log(`Using SVD: ${config.cpu.svd}`);
-        } catch (e) { console.log(`SVD ${config.cpu.svd} unreadable, using monox (${e.message})`); }
+        } catch (e) { console.log(`SVD ${config.cpu.svd} unreadable, using default F407 SVD (${e.message})`); }
     }
 
     let firmware;

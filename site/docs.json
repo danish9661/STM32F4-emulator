@@ -60,6 +60,11 @@
   "blurb": "OLED, TFT, buzzer, RTC panels"
  },
  {
+  "file": "facade.md",
+  "title": "Facade platform API",
+  "blurb": "STM32F4 callbacks, DMA, display, debug, power"
+ },
+ {
   "file": "benchmarks.md",
   "title": "Benchmarks",
   "blurb": "MIPS, soak results, gateway throughput"

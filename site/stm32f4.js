@@ -4,6 +4,22 @@
 // the bus taps. CPU execution is the WASM-native Thumb-2 interpreter; the
 // on-chip peripherals are a Rust WASM model.
 //
+// F1-API parity notes (see stm32api.md — F1 lives in a separate repo, this
+// file covers F4 only):
+// - Factories: create/fromBin/fromELF/fromHex + loadBin/loadHex/loadELF.
+// - execute() returns {instCount, stopped}; step() returns {pc, instCount,
+//   stopped} (both drain UART into usart1, like F1's event drain).
+// - gpio.pin() coerces index ports; GPIOPin.on('change') returns unsubscribe.
+// - USART1-6 objects with per-base RX injection; TX is a single shared model
+//   buffer, so onData/output only ever fire on usart1 (usart2-6 send() works,
+//   their onData never fires — model limit, not a bug).
+// - SPI/I2C stay create-time specs (taps snapshot at init — post-create
+//   callback assignment like F1's spi[ch].onTransfer is impossible without a
+//   Rust rescan; a silent no-fire shim would be worse than the explicit opt).
+// - No core event queue on F4 (no drainEvents): F1-style top-level callbacks
+//   (onExtiEdge/onCanTx/...) are intentionally absent. Poll watchPin/read32.
+// - No symbol/SWD/JTAG/pwr/js-peripheral layer on F4 (no model support);
+//   setSymbols/resolveSymbol is a pure-JS map-symbol helper only.
 // Virtual-peripheral API (Wokwi-style): SPI/I2C taps must be registered before
 // the model's init_svd() (the Spi/I2c peripheral snapshots its device list once
 // at construction), so they are declared at create() time via the `spi`/`i2c`
@@ -12,7 +28,7 @@
 // i2c_take_events) and accepts injected reply bytes (spi_push_miso /
 // i2c_push_rx).
 import { createEmulator } from './emulator.js';
-import { parseElf, parseIntelHex } from './loaders.js';
+import { parseElf, parseIntelHex, parseMap } from './loaders.js';
 
 const FLASH_BASE = 0x08000000;
 const FLASH_SIZE = 0x00100000;
@@ -99,8 +115,9 @@ function parseI2c(events, push, spec) {
 }
 
 // A single GPIO pin. `.on('change', cb)` fires with `true`/`false` whenever
-// the MCU drives the output level. Inputs can be driven from the host with
-// `setInputValue`.
+// the MCU drives the output level, and returns an unsubscribe function
+// (F1 `on()` parity — F4 previously returned `this`). Inputs can be driven
+// from the host with `setInputValue`.
 export class GPIOPin {
     constructor(mcu, port, pin) {
         this.mcu = mcu;
@@ -115,47 +132,236 @@ export class GPIOPin {
             if (!this._unwatch) {
                 this._unwatch = this.mcu._emu.watchPin(this.port, this.pin, (v) => {
                     this._state = v;
-                    for (const l of this._listeners) l(!!v);
+                    for (const l of [...this._listeners]) l(!!v);
                 });
             }
             this._listeners.push(cb);
+            return () => {
+                const i = this._listeners.indexOf(cb);
+                if (i >= 0) this._listeners.splice(i, 1);
+                if (this._listeners.length === 0 && this._unwatch) {
+                    this._unwatch();
+                    this._unwatch = null;
+                }
+            };
         }
-        return this;
+        return () => {};
     }
     addListener(cb) { return this.on('change', cb); }
-    setInputValue(high) { this.mcu._emu.pin(this.port, this.pin).write(!!high); }
+    // F1 `read()` returns 0|1; F4 returns bool. Both are truthy/falsy
+    // compatible; keep bool here (existing callers rely on it).
     read() { return !!this.mcu._emu.pin(this.port, this.pin).read(); }
     readInput() { return !!this.mcu._emu.pin(this.port, this.pin).readInput(); }
+    // F1 `setInput(high)` parity (alias of setInputValue).
+    setInput(high) { this.setInputValue(high); }
+    setInputValue(high) { this.mcu._emu.pin(this.port, this.pin).write(!!high); }
+    // F4-only: ADC channel injection has no F1 equivalent (F1's ADC model is
+    // event-based). There is no analog-wire layer, so no setAnalog here.
     detach() {
         if (this._unwatch) { this._unwatch(); this._unwatch = null; this._listeners = []; }
     }
 }
 
-// A USART peripheral. `onData` receives each transmitted byte; `sendData`
-// injects bytes into the guest's RX stream (as if received on the wire).
+// F407 USART base addresses (SVD-verified). The model has one shared UART
+// TX buffer, but RX injection (`uart_rx_byte`) is per-base, so each USART
+// object targets its own peripheral.
+const USART_BASE = {
+    1: 0x40011000, 2: 0x40004400, 3: 0x40004800,
+    4: 0x40004C00, 5: 0x40005000, 6: 0x40011400,
+};
+
+// A USART peripheral. `onData` receives each transmitted byte; `send`/
+// `sendData` injects bytes into the guest's RX stream (as if received on
+// the wire). `output` accumulates this USART's TX bytes (F1 parity).
+// MODEL LIMIT: TX is one shared buffer, so only usart1._emit is ever fed
+// (see execute()). usart2-6.send() injects RX correctly; their onData and
+// output stay empty because the model cannot attribute TX bytes per USART.
 export class USART {
     constructor(mcu, n) {
         this.mcu = mcu;
         this.n = n;
         this.onData = null;
+        this._buf = [];
     }
-    _emit(byte) { if (this.onData) this.onData(byte); }
+    _emit(byte) {
+        this._buf.push(byte & 0xFF);
+        if (this.onData) this.onData(byte);
+    }
+    send(data) { this.sendData(data); }
     sendData(data) {
         const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-        this.mcu._emu.sendUart(bytes);
+        const base = USART_BASE[this.n] || USART_BASE[1];
+        for (const b of bytes) {
+            try { this.mcu._bindings.uart_rx_byte(base, b & 0xFF); }
+            catch { this.mcu._emu.sendUart([b & 0xFF]); break; }
+        }
     }
+    get output() { return String.fromCharCode(...this._buf); }
 }
 
-// A DMA stream. The underlying model exposes a single pending-set counter and
-// a per-stream "completed" latch; `streamIndex` follows the model's stream
-// enumeration (0..N).
+// A DMA stream. `controller` is 1|2 (DMA1/DMA2), `stream` 0-7. The global
+// index follows the model's stream enumeration (controller 1: 0-7,
+// controller 2: 8-15) so dmaSetCompleted lands on the right latch.
+// Prefer mcu.dmaController(1|2).stream(s) over mcu.dma.stream(i): the
+// latter is the legacy flat helper (controller 1 only).
 export class DMAStream {
-    constructor(mcu, streamIndex) {
+    constructor(mcu, streamIndex, controller = 1, stream = null) {
         this.mcu = mcu;
         this.index = streamIndex;
+        this.controller = controller;
+        this.stream = stream === null ? streamIndex : stream;
     }
     pendingCount() { return this.mcu._emu.dmaPendingCount(); }
     setCompleted(success = true) { this.mcu._emu.dmaSetCompleted(this.index, success); }
+    // Live register view for this stream (TCIF/HTIF + CR/NDTR/PAR/MxAR/FCR).
+    tcif() { return this.mcu.dmaController(this.controller).tcif(this.stream); }
+    htif() { return this.mcu.dmaController(this.controller).htif(this.stream); }
+    cr() { return this.mcu.dmaController(this.controller).cr(this.stream); }
+    ndtr() { return this.mcu.dmaController(this.controller).ndtr(this.stream); }
+}
+
+// Full DMA controller view (Wokwi/OpenHW/Velxio integration): LISR/HISR +
+// per-stream CR/NDTR/PAR/M0AR/M1AR/FCR + completion. Controllers 1|2
+// (DMA1 @0x40026000, DMA2 @0x40026400 — SVD-verified); streams 0-7;
+// LISR covers 0-3, HISR 4-7, 6-bit field per stream (bit4 = TCIF).
+// Per-stream regs: CR @+0x10+s*0x18, NDTR @+0x14+s*0x18, PAR @+0x18+s*0x18,
+// M0AR @+0x1C+s*0x18, M1AR @+0x20+s*0x18, FCR @+0x24+s*0x18.
+export class DMAController {
+    constructor(mcu, controller = 1) {
+        this.mcu = mcu;
+        this.controller = controller;
+        this.base = DMA_BASE[controller] || DMA_BASE[1];
+    }
+    _field(s) {
+        const isr = this.mcu._evRead(this.base + (s < 4 ? 0 : 4));
+        return (isr >>> ((s % 4) * 6)) & 0x3F;
+    }
+    _reg(s, off) { return this.mcu._evRead(this.base + 0x10 + s * 0x18 + off); }
+    lisr() { return this.mcu._evRead(this.base); }
+    hisr() { return this.mcu._evRead(this.base + 4); }
+    tcif(s) { return (this._field(s) & (1 << 4)) !== 0; }
+    htif(s) { return (this._field(s) & (1 << 3)) !== 0; }
+    cr(s) { return this._reg(s, 0); }
+    ndtr(s) { return this._reg(s, 4) & 0xFFFF; }
+    par(s) { return this._reg(s, 8); }
+    m0ar(s) { return this._reg(s, 12); }
+    m1ar(s) { return this._reg(s, 16); }
+    fcr(s) { return this._reg(s, 20); }
+    stream(s) { return new DMAStream(this.mcu, this.controller === 2 ? s + 8 : s, this.controller, s); }
+}
+
+// ── Model register map for the polling dispatcher ──────────────────────
+// SVD-verified bases. EXTI PR @+0x14 (w1c — dispatcher clears on dispatch);
+// CAN1/2 TSR @+0x08 (TXOK/RQCP in low 24 bits), RF0R/RF1R @+0x0C/0x10
+// (FMP in low 2 bits); TIMx SR @+0x10 (UIF bit0, CCxIF bits1-4); DMA1/2
+// LISR @+0x00, HISR @+0x04 (TCIF per-stream bit4 of each 6-bit field);
+// USB OTG_FS GOTGINT @+0x04 (SEDET bit2), GINTSTS @+0x14 (USBRST bit12,
+// ENUMDNE bit13, RXFLVL bit4, IEPINT bit18, OEPINT bit19); ITM STIM0-31
+// @0xE0000000+n*4 ( drained, no peek needed — take is non-destructive
+// when empty).
+const EXTI_BASE = 0x40013C00, EXTI_PR = 0x14;
+const CAN_BASE = { 1: 0x40006400, 2: 0x40006800 };
+const TIM_BASE = {
+    1: 0x40010000, 2: 0x40000000, 3: 0x40000400, 4: 0x40000800,
+    5: 0x40000C00, 6: 0x40001000, 7: 0x40001400, 8: 0x40010400,
+    9: 0x40014000, 10: 0x40014400, 11: 0x40014800, 12: 0x40001800,
+    13: 0x40001C00, 14: 0x40002000,
+};
+const DMA_BASE = { 1: 0x40026000, 2: 0x40026400 };
+const USB_FS_BASE = 0x50000000;
+const ITM_STIM0 = 0xE0000000;
+
+// ── Platform display surface ("DRM" — dumb raster manager) ─────────────
+// Wokwi/OpenHW/Velxio render virtual screens from raw framebuffers; the F4
+// model already decodes all three display paths in emulator.js. This class
+// is a thin read-only view over the live `emu` handle — no copies except
+// the returned typed arrays, no canvas/DOM dependency (works headless).
+// - oled: SSD1306 128x64 page-addressed (needs ext_devices.oled at create).
+//   fb is 128*64 bytes of 0/1 pixels, row-major (fb[y*128+x]).
+// - tft: ILI9341 240x320 RGB565 big-endian (needs ext_devices.tft).
+//   fb is 240*320*2 bytes, pixel = (fb[p]<<8)|fb[p+1].
+// - ltdc: LTDC layer0 scanout — read live from guest RAM via the layer
+//   regs (no ext_devices needed; reads zero when the layer is off).
+// All getters return null/0 when the device was not enabled at create.
+export class Display {
+    constructor(mcu) { this._mcu = mcu; }
+    get oled() {
+        const o = this._mcu._emu.oled;
+        if (!o) return null;
+        return { w: 128, h: 64, fb: o.fb, frame: o.frame() };
+    }
+    get tft() {
+        const t = this._mcu._emu.tft;
+        if (!t) return null;
+        return { w: t.w, h: t.h, fb: t.fb, frame: () => t.frame() };
+    }
+    // LTDC layer0: geometry from WHPCR/WVPCR + PFCR/CFBAR/CFBLR, pixels
+    // from guest RAM. Supports pf 0 (ARGB8888) + 2 (RGB565).
+    ltdc() {
+        const R = (a) => { try { return this._mcu._emu.read32(a) >>> 0; } catch { return 0; } };
+        const LTDC = 0x40016800;
+        const gcr = R(LTDC + 0x18), l1cr = R(LTDC + 0x84);
+        if (!(gcr & 1) || !(l1cr & 1)) return null; // LTEN + LEN
+        const pf = R(LTDC + 0x94) & 7;
+        if (pf !== 0 && pf !== 2) return null;
+        const wh = R(LTDC + 0x88), wv = R(LTDC + 0x8C);
+        const w = (wh & 0xFFF) + 1, h = ((wh >>> 16) & 0xFFF) + 1;
+        const cfbar = R(LTDC + 0xAC) >>> 0;
+        const cfblr = R(LTDC + 0xB0) >>> 0;
+        const pitch = (cfblr >>> 16) || (w * (pf === 0 ? 4 : 2));
+        const lineBytes = (cfblr & 0x1FFF) || w * (pf === 0 ? 4 : 2);
+        void wv;
+        const bpp = pf === 0 ? 4 : 2;
+        const fb = new Uint8Array(w * h * bpp);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w * bpp; x++) {
+                const addr = cfbar + y * pitch + x;
+                if (x >= lineBytes) break;
+                try { fb[y * w * bpp + x] = this._mcu._emu.read32(addr & ~3) >>> ((addr & 3) * 8) & 0xFF; }
+                catch { break; }
+            }
+        }
+        return { w, h, pf: pf === 0 ? 'ARGB8888' : 'RGB565', fb, addr: cfbar, pitch };
+    }
+}
+
+// F1 `gpio` object parity: GPIO wraps the mcu so `gpio.pin()` matches the
+export class GPIO {
+    constructor(mcu) { this._mcu = mcu; }
+    pin(port, pin) { return this._mcu.gpio.pin(port, pin); }
+}
+
+// F1 `spi[ch]` parity: per-bus handle with `onTransfer` + `injectMiso`.
+// The underlying F4 tap is create-time (see header): assigning onTransfer
+// post-create only observes the pre-declared spec — pass callbacks in the
+// `spi: [...]` create opt for real wiring. Kept for call-shape compat.
+export class SPI {
+    constructor(mcu, ch) {
+        this._mcu = mcu;
+        this.ch = ch;
+        this.onTransfer = null;
+    }
+    injectMiso(bytes) {
+        const peri = `SPI${this.ch}`;
+        this._mcu.spi.pushMiso(peri, bytes);
+    }
+}
+
+// F1 `i2c[ch]` parity: per-bus handle with onStart/onWrite/onRead/onStop +
+// `injectRx`. Same create-time caveat as SPI above.
+export class I2C {
+    constructor(mcu, ch) {
+        this._mcu = mcu;
+        this.ch = ch;
+        this.onStart = null;
+        this.onWrite = null;
+        this.onRead = null;
+        this.onStop = null;
+    }
+    injectRx(bytes) {
+        const peri = `I2C${this.ch}`;
+        this._mcu.i2c.pushRx(peri, bytes);
+    }
 }
 
 export class STM32F4 {
@@ -164,18 +370,85 @@ export class STM32F4 {
         this._bindings = bindings;
         this._spiSpecs = [];
         this._i2cSpecs = [];
-        this.gpio = {
-            pin: (port, pin) => new GPIOPin(this, port, pin),
+        this._pinListeners = new Map();
+        this._pinUnsub = null;
+        this.gpio = new GPIO(this);
+        // Back-compat: gpio.pin was a bare function before the GPIO class.
+        const _pinFn = (port, pin) => new GPIOPin(this, port, pin);
+        const _origPin = this.gpio.pin.bind(this.gpio);
+        void _origPin;
+        this.gpio.pin = (port, pin) => {
+            const p = typeof port === 'string' ? port.toUpperCase()
+                : String.fromCharCode(65 + (port | 0));
+            return _pinFn(p, pin | 0);
         };
-        this.usart = new USART(this, 1);
-        // The underlying model exposes a single UART channel in this build, so
-        // the common USART aliases all bind to it.
-        this.usart1 = this.usart;
-        this.usart2 = this.usart;
-        this.usart3 = this.usart;
+        // Six USARTs on F407 (1-3 + UART4/5 + USART6). TX is a single shared
+        // model buffer: only usart1._emit is fed (see execute()); RX
+        // injects per-base and works on all six.
+        const mkUsart = (n) => new USART(this, n);
+        this.usart1 = mkUsart(1);
+        this.usart2 = mkUsart(2);
+        this.usart3 = mkUsart(3);
+        this.usart4 = mkUsart(4);
+        this.usart5 = mkUsart(5);
+        this.usart6 = mkUsart(6);
+        // `usart` stays the USART1 alias (existing callers); the indexed
+        // map mirrors F1's `usart: {1,2,3}` shape, extended to 6.
+        this.usart = this.usart1;
+        this.usarts = { 1: this.usart1, 2: this.usart2, 3: this.usart3, 4: this.usart4, 5: this.usart5, 6: this.usart6 };
+        // F1 `uartRx(byte)` / `uartOutput` USART1 shortcuts.
+        // ── Wokwi/OpenHW/Velxio integration callbacks (F1 parity) ──
+        // Set directly, default null. Dispatched once per execute()/step()
+        // from MODEL-READABLE state (no core event queue on F4 — the F1
+        // drainEvents discriminants don't exist here). Each poll is a
+        // bounded set of read32/take calls; with no callback set the poll
+        // is skipped entirely (zero overhead when unused):
+        // - onExtiEdge(line): EXTI PR w1c — read, clear, fire per set bit.
+        // - onCanTx(can): CAN TSR TXOK/RQCP newly set since last poll.
+        // - onCanRx(can,id,len,data): CAN RF0R/RF1R FMP newly arrived;
+        //   frame read from the mailbox regs (11-bit id, 8B data; FD/extended
+        //   frames report via canInject/canInjectFd paths instead).
+        // - onTimUpdate(tim): TIM SR UIF newly set (cleared on dispatch).
+        // - onTimCapture(tim,ch,val): TIM SR CCxIF newly set + CCR latch.
+        // - onDmaTc(controller, stream): DMA LISR/HISR TCIF newly set.
+        // - onWdogReset(which): IWDG(1)/WWDG(2) reset flag newly set
+        //   (1=IWDG, 2=WWDG — F1 `which` parity).
+        // - onUsbIn(ep,data): USB OTG_FS IN-complete (usb_take_in drains).
+        // - onItmByte(port,byte): ITM STIM port drain (printf path).
+        // - onFsmcAccess(bank,off,write,size,val): FSMC bank tap drain
+        //   (requires ext_devices.fsmcDevices at create — same rule as SPI).
+        // Stubs with NO model source stay absent: onAdcDone/onDacWrite/
+        // onCrcResult/onRtcAlarm/onHostTx/onHostRx/onI2cAlert (use read32/
+        // polling or the bus taps; a fake event would be worse than none).
+        this.onExtiEdge = null;
+        this.onCanTx = null;
+        this.onCanRx = null;
+        this.onTimUpdate = null;
+        this.onTimCapture = null;
+        this.onDmaTc = null;
+        this.onWdogReset = null;
+        this.onUsbIn = null;
+        this.onItmByte = null;
+        this.onFsmcAccess = null;
+        this._evLast = {
+            extiPr: 0, canTsr: { 1: 0, 2: 0 }, canFmp: { 1: [0, 0], 2: [0, 0] },
+            timSr: {}, dmaLisr: { 1: 0, 2: 0 },
+            wdog: 0, usbIn: {},
+        };
         this.dma = {
             stream: (index) => new DMAStream(this, index),
+            controller: (ctl) => new DMAController(this, ctl),
         };
+        // F1 `spi1..3` / `i2c1..3` (+ indexed maps) parity — call-shape
+        // compat only (see SPI/I2C classes above for the create-time caveat).
+        this.spi1 = new SPI(this, 1);
+        this.spi2 = new SPI(this, 2);
+        this.spi3 = new SPI(this, 3);
+        this.spiBus = { 1: this.spi1, 2: this.spi2, 3: this.spi3 };
+        this.i2c1 = new I2C(this, 1);
+        this.i2c2 = new I2C(this, 2);
+        this.i2c3 = new I2C(this, 3);
+        this.i2cBus = { 1: this.i2c1, 2: this.i2c2, 3: this.i2c3 };
         this.spi = {
             // specs: array of { peripheral, cs?, dc?, onTransfer?, onByte? }
             specs: this._spiSpecs,
@@ -186,6 +459,9 @@ export class STM32F4 {
                 }
             },
         };
+        // Platform display surface ("DRM"): live OLED/TFT/LTDC framebuffers
+        // for Wokwi/OpenHW/Velxio screen widgets (see the Display class).
+        this.display = new Display(this);
         this.i2c = {
             // specs: array of { peripheral, address, onStart?, onWrite?, onRead?, onStop? }
             specs: this._i2cSpecs,
@@ -237,6 +513,15 @@ export class STM32F4 {
         return mcu;
     }
 
+    // F1 factory parity: fromELF/fromBin/fromHex (firmware image + opts).
+    static async fromELF(buf, opts = {}) { return STM32F4.create({ ...opts, firmware: buf }); }
+    static async fromBin(buf, opts = {}) { return STM32F4.create({ ...opts, firmware: buf }); }
+    static async fromHex(text, opts = {}) {
+        const { flash } = parseIntelHex(text);
+        if (!flash) throw new Error('fromHex: no flash image in HEX text');
+        return STM32F4.create({ ...opts, firmware: flash });
+    }
+
     // ── firmware loading ──
     loadBin(bytes, base = FLASH_BASE) {
         const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -255,21 +540,322 @@ export class STM32F4 {
     }
 
     // ── execution ──
+    // Both step the core, drain UART into usart1, then dispatch the
+    // peripheral-event poll. Returns F1-shaped results.
     execute(cycles = 100000) {
-        this._emu.step(cycles);
+        const r = this._emu.step(cycles);
+        this._drainUartToUsart1();
+        this._pollEvents();
+        return { instCount: r.instCount, stopped: r.stopped };
+    }
+    step(cycles = 100000) {
+        const r = this._emu.step(cycles);
+        this._drainUartToUsart1();
+        this._pollEvents();
+        return { pc: r.pc, instCount: r.instCount, stopped: r.stopped };
+    }
+    _drainUartToUsart1() {
         const out = this._emu.drainUart();
         if (!out) return;
         if (typeof out === 'string') {
-            for (let i = 0; i < out.length; i++) this.usart._emit(out.charCodeAt(i));
+            for (let i = 0; i < out.length; i++) this.usart1._emit(out.charCodeAt(i));
         } else {
-            for (let i = 0; i < out.length; i++) this.usart._emit(out[i]);
+            for (let i = 0; i < out.length; i++) this.usart1._emit(out[i]);
         }
     }
+    // ── peripheral-event dispatch (one bounded poll per execute/step) ──
+    // Safe read: model reads never throw on mapped regs; guard anyway so a
+    // callback can never break stepping.
+    _evRead(addr) {
+        try { return this._emu.read32(addr) >>> 0; } catch { return 0; }
+    }
+    _pollEvents() {
+        const L = this._evLast, B = this._bindings, E = this._emu;
+        // EXTI: PR is w1c — read pending, clear, fire per line.
+        if (this.onExtiEdge) {
+            const pr = this._evRead(EXTI_BASE + EXTI_PR) & 0x7FFFFF;
+            if (pr) {
+                try { E.write32(EXTI_BASE + EXTI_PR, pr); } catch {}
+                for (let line = 0; line < 23; line++) {
+                    if (pr & (1 << line)) {
+                        try { this.onExtiEdge(line); } catch {}
+                    }
+                }
+            }
+        }
+        // CAN TX: TSR TXOK/RQCP bits newly set since last poll.
+        if (this.onCanTx) {
+            for (const can of [1, 2]) {
+                const tsr = this._evRead(CAN_BASE[can] + 0x08);
+                const newly = (tsr & 0x070707) & ~L.canTsr[can];
+                L.canTsr[can] = tsr & 0x070707;
+                if (newly) {
+                    try { this.onCanTx(can); } catch {}
+                }
+            }
+        }
+        // CAN RX: FMP level (not edge) per FIFO; read id/len/data from the
+        // mailbox (slot 0: RIR @+0x1B0, RDTR @+0x1B4, RDLR @+0x1B8,
+        // RDHR @+0x1BC). 11-bit id = RIR>>21; len = RDTR&0xF. Fires while
+        // FMP>0 and the mailbox changed since the last fire (guest may
+        // hold the frame for many polls before RFOM-releasing it).
+        if (this.onCanRx) {
+            for (const can of [1, 2]) {
+                for (let fifo = 0; fifo < 2; fifo++) {
+                    const fmp = this._evRead(CAN_BASE[can] + 0x0C + fifo * 4) & 0x3;
+                    if (fmp === 0) { L.canFmp[can][fifo] = null; continue; }
+                    const slot = fifo === 0 ? 0 : 3;
+                    const base = 0x1B0 + slot * 0x10;
+                    const rir = this._evRead(CAN_BASE[can] + base);
+                    const rdtr = this._evRead(CAN_BASE[can] + base + 4);
+                    const rdlr = this._evRead(CAN_BASE[can] + base + 8);
+                    const rdhr = this._evRead(CAN_BASE[can] + base + 12);
+                    const key = `${rir.toString(16)}:${rdtr.toString(16)}:${rdlr.toString(16)}:${rdhr.toString(16)}`;
+                    if (L.canFmp[can][fifo] === key) continue; // same frame: already fired
+                    L.canFmp[can][fifo] = key;
+                    const id = (rir >>> 21) & 0x7FF;
+                    const len = rdtr & 0xF;
+                    const data = [
+                        rdlr & 0xFF, (rdlr >>> 8) & 0xFF, (rdlr >>> 16) & 0xFF, (rdlr >>> 24) & 0xFF,
+                        rdhr & 0xFF, (rdhr >>> 8) & 0xFF, (rdhr >>> 16) & 0xFF, (rdhr >>> 24) & 0xFF,
+                    ].slice(0, len);
+                    try { this.onCanRx(can, id, len, data); } catch {}
+                }
+            }
+        }
+        // TIM update + capture: SR UIF/CCxIF newly set. UIF/CCxIF are w1c
+        // on silicon — clear on dispatch so each edge fires once.
+        if (this.onTimUpdate || this.onTimCapture) {
+            for (let tim = 1; tim <= 14; tim++) {
+                const base = TIM_BASE[tim];
+                if (base === undefined) continue;
+                const sr = this._evRead(base + 0x10) & 0x1F;
+                const last = L.timSr[tim] || 0;
+                const newly = sr & ~last;
+                L.timSr[tim] = sr;
+                if (newly & 1) {
+                    try { E.write32(base + 0x10, sr & ~1); L.timSr[tim] &= ~1; } catch {}
+                    if (this.onTimUpdate) { try { this.onTimUpdate(tim); } catch {} }
+                }
+                if (this.onTimCapture) {
+                    for (let ch = 0; ch < 4; ch++) {
+                        if (newly & (2 << ch)) {
+                            const ccr = this._evRead(base + 0x34 + ch * 4) & 0xFFFF;
+                            try { E.write32(base + 0x10, (L.timSr[tim] &= ~(2 << ch))); } catch {}
+                            try { this.onTimCapture(tim, ch, ccr); } catch {}
+                        }
+                    }
+                }
+            }
+        }
+        // DMA terminal-count: LISR/HISR TCIF per stream newly set.
+        if (this.onDmaTc) {
+            for (const ctl of [1, 2]) {
+                const lisr = this._evRead(DMA_BASE[ctl]) >>> 0;
+                const hisr = this._evRead(DMA_BASE[ctl] + 4) >>> 0;
+                let cur = 0;
+                for (let s = 0; s < 4; s++) {
+                    if (lisr & (1 << (s * 6 + 4))) cur |= 1 << s;
+                    if (hisr & (1 << (s * 6 + 4))) cur |= 1 << (s + 4);
+                }
+                const prev = L.dmaLisr[ctl] & 0xFF;
+                const fresh = cur & ~prev;
+                L.dmaLisr[ctl] = cur;
+                for (let s = 0; s < 8; s++) {
+                    if (fresh & (1 << s)) { try { this.onDmaTc(ctl, s); } catch {} }
+                }
+            }
+        }
+        // Watchdog reset: latch flags newly set (1=IWDG, 2=WWDG).
+        if (this.onWdogReset) {
+            let cur = 0;
+            try {
+                if (B && typeof B.iwdg_reset_flag === 'function' && B.iwdg_reset_flag()) cur |= 1;
+                if (B && typeof B.wwdg_reset_flag === 'function' && B.wwdg_reset_flag()) cur |= 2;
+            } catch {}
+            const fresh = cur & ~L.wdog;
+            L.wdog = cur;
+            if (fresh & 1) { try { this.onWdogReset(1); } catch {} }
+            if (fresh & 2) { try { this.onWdogReset(2); } catch {} }
+        }
+        // USB IN-complete: drain per-EP IN blobs (non-destructive when empty).
+        if (this.onUsbIn && B && typeof B.usb_take_in === 'function') {
+            for (let ep = 0; ep < 4; ep++) {
+                let blob = null;
+                try { blob = B.usb_take_in(ep); } catch { blob = null; }
+                if (blob && blob.length) {
+                    try { this.onUsbIn(ep, Array.from(blob)); } catch {}
+                }
+            }
+        }
+        // ITM stimulus ports: drain queued printf bytes.
+        if (this.onItmByte && B && typeof B.itm_take_port === 'function') {
+            for (let port = 0; port < 32; port++) {
+                let pending = 0;
+                try {
+                    pending = (typeof B.itm_port_pending === 'function')
+                        ? B.itm_port_pending(port) : 1;
+                } catch { pending = 0; }
+                if (!pending) continue;
+                let blob = null;
+                try { blob = B.itm_take_port(port); } catch { blob = null; }
+                if (blob && blob.length) {
+                    for (const b of blob) { try { this.onItmByte(port, b & 0xFF); } catch {} }
+                }
+            }
+        }
+        // FSMC bank taps: drain access events (needs fsmcDevices at create).
+        if (this.onFsmcAccess && typeof E.takeFsmcEvents === 'function') {
+            for (let bank = 0; bank < 4; bank++) {
+                let ev = null;
+                try { ev = E.takeFsmcEvents(bank); } catch { ev = null; }
+                if (!ev || !ev.length) continue;
+                for (let i = 0; i + 1 < ev.length; i += 2) {
+                    const hdr = ev[i] >>> 0, val = ev[i + 1] >>> 0;
+                    const write = (hdr & 0x80000000) !== 0;
+                    const off = hdr & 0x7FFFFFFF;
+                    try { this.onFsmcAccess(bank, off, write, 4, val); } catch {}
+                }
+            }
+        }
+    }
+    // F1 `uartRx(byte)` / `uartOutput` USART1 shortcuts.
+    uartRx(byte) { this.usart1.sendData([byte & 0xFF]); return true; }
+    get uartOutput() {
+        let s = '';
+        for (const b of this.usart1._buf) s += String.fromCharCode(b);
+        return s;
+    }
+    // Pure-JS map-symbol helpers (F1 setSymbols/resolveSymbol parity for
+    // the symbols parseMap already provides; no model symbol table on F4).
+    setSymbols(mapText) {
+        this._symbols = parseMap(mapText);
+        return this._symbols.length;
+    }
+    resolveSymbol(pc) {
+        const syms = this._symbols || [];
+        let best = null;
+        for (const s of syms) {
+            if (s.addr <= pc && (!best || s.addr > best.addr)) best = s;
+        }
+        if (!best) return null;
+        const off = (pc - best.addr) >>> 0;
+        return off ? `${best.name}+0x${off.toString(16)}` : best.name;
+    }
 
-    // ── pass-through to the engine ──
+    // ── DMA controller (Wokwi/OpenHW/Velxio integration) ──
+    // Full controller view — see the DMAController class above.
+    dmaController(ctl = 1) { return new DMAController(this, ctl); }
+
+    // ── engine access ──
     read32(addr) { return this._emu.read32(addr); }
     write32(addr, val) { return this._emu.write32(addr, val); }
+    memRead32(addr) { return this._emu.read32(addr); }
+    memWriteBytes(addr, bytes) {
+        const arr = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes);
+        // Probe-style write (F1 memWriteBytes parity): the wuc shim owns
+        // cpu.mem_write (bypasses flash protection + MPU, like a probe).
+        // wuc.mem_write enforces the mapped-range check — out-of-range
+        // throws, same as the edge-case contract.
+        const wuc = this._emu.uc;
+        if (wuc && typeof wuc.mem_write === 'function') {
+            wuc.mem_write(addr >>> 0, arr);
+            return;
+        }
+        for (let i = 0; i < arr.length; i++) {
+            const w = addr & ~3, off = addr & 3;
+            let word = 0;
+            try { word = this._emu.read32(w) >>> 0; } catch { word = 0xFFFFFFFF; }
+            const sh = off * 8;
+            word = ((word & ~(0xFF << sh)) | ((arr[i] & 0xFF) << sh)) >>> 0;
+            this._emu.write32(w, word);
+        }
+    }
+    periphRead(addr, width) {
+        void width;
+        return this._emu.read32(addr);
+    }
+    periphWrite(addr, width, value) {
+        void width;
+        return this._emu.write32(addr, value);
+    }
     getRegisters() { return this._emu.getRegisters(); }
+    getPc() { return this._emu.getRegisters().PC; }
+    getSp() { return this._emu.getRegisters().SP; }
+    faultInfo() {
+        if (typeof this._emu.faultInfo === 'function') return this._emu.faultInfo();
+        return null;
+    }
+    takeFault() {
+        const f = this.faultInfo();
+        return f ? [f.pc >>> 0, 0] : null;
+    }
+    // ── F1 debug-port parity (honest shim — see header) ──
+    // No SWD/JTAG DP exists on the F4 model (no DHCSR/MEM-AP registers).
+    // These give OpenHW/Velxio-shaped call points with documented behavior:
+    swdHalted() { return false; }
+    swdHalt() { /* no halt path: steps are bounded round-trips */ }
+    swdResume() { /* no-op (never halted) */ }
+    swdStep() { this.step(1); return 1; }
+    swdAddWatch(kind, addr, len) {
+        void kind; void len;
+        return this._ensureWatchpoints().length;
+    }
+    swdRemoveWatch(slot) { void slot; }
+    swdTakeTrip() { return []; }
+    swdDpRead(addr) { void addr; return 0; }
+    swdDpWrite(addr, value) { void addr; void value; }
+    swdApRead(bank, reg) { void bank; void reg; return 0; }
+    swdApWrite(bank, reg, value) { void bank; void reg; void value; }
+    // DCRSR-style core register access (0-12, 13 SP, 14 LR, 15 PC, 16 xPSR).
+    swdRegRead(idx) {
+        const r = this._emu.getRegisters();
+        if (idx >= 0 && idx <= 12) return r[`R${idx}`] >>> 0;
+        if (idx === 13) return r.SP >>> 0;
+        if (idx === 14) return r.LR >>> 0;
+        if (idx === 15) return r.PC >>> 0;
+        if (idx === 16) return r.XPSR >>> 0;
+        return 0;
+    }
+    swdRegWrite(idx, value) { void idx; void value; /* read-only shim */ }
+    jtagReset() { /* no TAP on the F4 model */ }
+    jtagIr(ir) { void ir; }
+    jtagIdcode() { return this._evRead(0xE0042000) >>> 0; }
+    jtagDp(addr, rnw, wdata) { void addr; void rnw; void wdata; return 0; }
+    jtagAp(bank, reg, rnw, wdata) { void bank; void reg; void rnw; void wdata; return 0; }
+    _ensureWatchpoints() {
+        if (!this._watchpoints) this._watchpoints = [];
+        return this._watchpoints;
+    }
+    // F1 `addJsPeripheral(base, size, read, write)` parity: F4 has no
+    // model-side MMIO hook table, so this is a JS-side shim — reads/writes
+    // go through periphRead/periphWrite only when the guest has no mapping
+    // there is no mapping check available, so the shim records the region
+    // and exposes jsPeripheralRead/Write helpers the platform calls
+    // explicitly. Documented as a shim (not silicon).
+    addJsPeripheral(base, size, read, write) {
+        const list = this._ensureWatchpoints();
+        const entry = { base: base >>> 0, size: size >>> 0, read, write, js: true };
+        list.push(entry);
+        return true;
+    }
+    // ── F1 power parity (estimate from PWR_CR + clock tree) ──
+    // No calibrated current model on F4 (F1's pwrEstimate is DS5319-based).
+    // Returns a documented ROUGH estimate in µA from the PWR_CR LPDS/PDDS
+    // bits + SystemCoreClock assumption (168 MHz RUN ~ 30 mA class).
+    pwrMode() {
+        let cr = 0;
+        try { cr = this._emu.read32(0x40007000) >>> 0; } catch {}
+        if (cr & 0x02) return 3; // PDDS: STANDBY
+        if (cr & 0x01) return 2; // LPDS: STOP (approx)
+        return 0; // RUN (SLEEP-via-WFI is transient — not latched)
+    }
+    pwrEstimate() {
+        const mode = this.pwrMode();
+        if (mode === 3) return 4; // STANDBY ~4 µA class
+        if (mode === 2) return 400; // STOP ~0.4 mA class
+        return 30000; // RUN ~30 mA class @168 MHz (rough, uncalibrated)
+    }
     stop() { return this._emu.stop(); }
     reset() { return this._emu.reset(); }
     close() { return this._emu.close(); }

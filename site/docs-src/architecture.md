@@ -22,7 +22,7 @@ each other.
 │        (stm32-periph-wasm → stm32_periph_wasm_bg.wasm)           │
 │   • Cortex-M4 core: exact inline exception entry/return (NVIC,   │
 │     SysTick, SVC/PendSV, WFI sleep) — no hooks, no pump          │
-│   • register map parsed from the vendor SVD (monox/stm32f407.svd) │
+│   • register map parsed from the vendor SVD (site/vendor/stm32f407.svd) │
 │   • 41 peripheral modules (USART, GPIO, RCC, DMA, ETH, TIM, ...)  │
 │   • NVIC pending/enable/active, SysTick, system clock             │
 │   • System state: UART output buffer, ETH atomics, DMA queue,     │

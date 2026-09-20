@@ -10,7 +10,7 @@ import { I2cRegisterDevice } from './components.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../rtc_test/rtc_test.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/rtc_test/rtc_test.bin', import.meta.url)));
 
 const init = new Uint8Array(20);
 init.set([0x30, 0x45, 0x10, 0x03, 0x15, 0x07, 0x26]); // 10:45:30 dow3 15/07/26

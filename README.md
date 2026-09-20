@@ -90,13 +90,13 @@ npm run serve                  # then open http://127.0.0.1:8123
 npm test                       # == node site/test_flow.mjs
 
 # websocket bridge: headless Node serves the emulator, browser is a thin UI
-npm run bridge -- blinky/blinky.bin --port 8234
+npm run bridge -- firmware/blinky/blinky.bin --port 8234
 # then open http://127.0.0.1:8123/console.html?bridge=ws://127.0.0.1:8234
 
 # gateway-backed run: firmware talks to a REAL network stack (gVisor)
 cd stm32-periph-wasm/pkg
-node cli.mjs ../../eth_http/eth_http.bin 10000000 \
-  --gateway --config=../../eth_http/config.yaml
+node cli.mjs ../../firmware/eth_http/eth_http.bin 10000000 \
+  --gateway --config=../../firmware/eth_http/config.yaml
 # (requires an HTTP server at 127.0.0.1:8092; see AGENTS.md §10)
 ```
 
@@ -132,6 +132,11 @@ custom SPI/I2C devices) to pins and buses with the component API —
 `ext_devices.spiDevices`/`i2cDevices` for your own bus protocol. See
 [docs/components.md](docs/components.md).
 
+For platform integration (Wokwi/OpenHW/Velxio) use the `STM32F4` facade —
+factories, GPIO/USART/SPI/I2C objects, polled event callbacks, DMA
+controller, live displays, SWD/JTAG/power/probe helpers. See
+[docs/facade.md](docs/facade.md).
+
 ## Drive it from an AI agent (MCP)
 
 `mcp/server.mjs` exposes the emulator over the Model Context Protocol —
@@ -155,7 +160,7 @@ is a thin UI. Zero impact on the existing local WASM path:
 
 ```bash
 # 1. Start the bridge in Node (serves the emulator over WS on port 8234)
-node site/ws-bridge.mjs eth_http/eth_http.bin --port 8234
+node site/ws-bridge.mjs firmware/eth_http/eth_http.bin --port 8234
 
 # 2. Open the browser console with the bridge URL param
 open "http://127.0.0.1:8123/console.html?bridge=ws://127.0.0.1:8234"
@@ -214,7 +219,7 @@ firmware .bin ──► Rust WASM CPU (Thumb-2 + NVIC/exceptions)
   (SysTick, ETH, USART, SVC/PendSV) are delivered inline with exact
   exception stacking — no native deps, no JIT, no hooks.
 - **Peripherals**: a `wasm-bindgen` crate (`stm32-periph-wasm/`); registers
-  and bit fields come from the vendor SVD (`monox/stm32f407.svd`).
+  and bit fields come from the vendor SVD (`site/vendor/stm32f407.svd`).
 - **Ethernet**: TX is captured from the DMA descriptors (OWN/FS/LS poll
   demand); RX frames are delivered head-only with FS+LS status, IPHCE/PCE
   checksum status, and PTP snapshots for event messages. The full MAC
@@ -249,13 +254,13 @@ firmware .bin ──► Rust WASM CPU (Thumb-2 + NVIC/exceptions)
 ├── index.mjs, package.json  npm package entry (stm32f4-emu)
 ├── mcp/                     MCP server (drive the emulator from an AI agent)
 ├── .github/workflows/       CI (Linux/Windows/macOS test matrix) + Pages deploy
-├── tools/make_firmware.mjs  Regenerates site/firmware.js from eth_*/.bin
+├── tools/make_firmware.mjs  Regenerates site/firmware.js from firmware/*/.bin
 ├── stm32-periph-wasm/       Rust peripheral model (WASM build + pkg/)
-├── eth_http/ eth_dhcp/ eth_test/   Sample network firmwares + configs
-├── doom/                    DOOM 1 port (doomgeneric f407 target + WAD path)
+├── firmware/eth_http/ eth_dhcp/ eth_test/   Sample network firmwares + configs
+├── firmware/doom/           DOOM 1 port (doomgeneric f407 target + WAD path)
 ├── openhw-local-gateway/    Go gateway (gVisor network stack)
 ├── scripts/verify_ethernet.sh   Regression runner for all three firmwares
-├── src/, monox/, saturn/    Native SDL emulator (upstream heritage)
+├── hardware/monox/, hardware/saturn/  Upstream printer firmwares (heritage)
 └── AGENTS.md                Full architecture, build steps, runbook
 ```
 
@@ -267,10 +272,9 @@ cd stm32-periph-wasm && wasm-pack build --release --target nodejs
 
 # firmware (bare-metal Makefiles; toolchain from the Arduino core)
 TOOLCHAIN="$HOME/.arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/arm-none-eabi-" \
-  make -C eth_http          # also eth_dhcp, eth_test
+  make -C firmware/eth_http   # also eth_dhcp, eth_test (all firmware lives in firmware/)
 
-# native SDL emulator (upstream heritage, not the headless path)
-cd stm32-emulator-main && cargo build --release
+# (no native SDL emulator in this tree — the headless WASM path above is the only backend)
 ```
 
 `wasm-pack` writes `site/vendor/.gitignore` containing `*` after a browser

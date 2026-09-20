@@ -13,7 +13,7 @@ import { createEmulator } from './emulator.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../dcmi_test/dcmi_test.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/dcmi_test/dcmi_test.bin', import.meta.url)));
 
 const SMALL = { w: 2, h: 2, px: new Uint8Array([0x11, 0x22, 0x33, 0x44]) };
 const BIG = { w: 8, h: 4, px: Uint8Array.from({ length: 32 }, (_, i) => i + 1) };

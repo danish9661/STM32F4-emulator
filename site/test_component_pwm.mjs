@@ -10,7 +10,7 @@ import { Pwm } from './components.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../buzzer_test/buzzer_test.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/buzzer_test/buzzer_test.bin', import.meta.url)));
 
 const emu = await createEmulator({ firmware, bindings, svdXml, wasmInit: wasmBytes });
 

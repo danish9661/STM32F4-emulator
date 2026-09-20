@@ -8,9 +8,9 @@ import { readFileSync } from 'fs';
 import * as bindings from './vendor/stm32_periph_wasm.js';
 import { createEmulator } from './emulator.js';
 
-const svdXml = readFileSync(new URL('../monox/stm32f407.svd', import.meta.url), 'utf8');
+const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../mpu_test/mpu_test.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/mpu_test/mpu_test.bin', import.meta.url)));
 
 const emu = await createEmulator({
     firmware, bindings, svdXml, wasmInit: wasmBytes, enable_irqs: true,

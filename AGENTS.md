@@ -72,7 +72,7 @@ stm32-emulator-main/
 ├── webserver/              The target firmware (Arduino sketch)
 │   ├── webserver.ino       Source (DHCP + TCP + HTTP server)
 │   └── build/              webserver.bin / .elf / .map
-├── monox/stm32f407.svd     SVD XML used to build the register map
+├── hardware/monox/stm32f407.svd  SVD XML used to build the register map (also mirrored in site/vendor/)
 └── know.md                 Older notes (peripheral audit table, build snippets)
 ```
 
@@ -538,7 +538,7 @@ cd stm32-periph-wasm && wasm-pack build --release --target nodejs
 # rdes0 bits [13:0] instead of [29:16], so DHCP Offer RX silently failed).
 # Rebuild + re-verify after any .ino change:
 TOOLCHAIN="$HOME/.arduino15/packages/STMicroelectronics/tools/xpack-arm-none-eabi-gcc/14.2.1-1.1/bin/arm-none-eabi-" \
-  make -C eth_http          # also eth_dhcp, eth_test
+  make -C firmware/eth_http   # also eth_dhcp, eth_test (all firmware lives in firmware/)
 # Configs for all three exist: eth_http/config.yaml, eth_dhcp/config.yaml,
 # eth_test/config.yaml (each sets its own `load:` firmware in the ROM region;
 # in config mode the positional firmware arg is IGNORED).
@@ -1113,7 +1113,7 @@ The browser build (`site/vendor`) still exports `__wbg_init as default`
 DELETES the out-dir contents, including the manually-placed
 `stm32f407.svd` that `site/index.html`/`app.js` fetch at runtime, and writes
 a `.gitignore` containing `*` (which would silently untrack vendor assets).
-After any vendor rebuild: restore the SVD from `monox/stm32f407.svd`, then
+After any vendor rebuild: restore the SVD from `hardware/monox/stm32f407.svd`, then
 `rm site/vendor/.gitignore`. (Before §23 this also covered the vendored
 `unicorn_arm.js`/`unicorn_arm.cjs`, now deleted.)
 
@@ -2234,15 +2234,19 @@ firmware can be driven like a real chip (`gpio`, `usart`, `spi`, `i2c`,
 `dma`) without touching the `createEmulator` plumbing.
 
 ### Files
-- `site/stm32f4.js` — `STM32F4`, `GPIOPin`, `USART`, `DMAStream` classes +
-  the `parseSpi`/`parseI2c` helpers. Pure JS; zero runtime overhead (every
+- `site/stm32f4.js` — `STM32F4`, `GPIOPin`, `GPIO`, `USART` (1-6), `SPI`,
+  `I2C`, `DMAStream`, `DMAController`, `Display` classes + the
+  `parseSpi`/`parseI2c` helpers. Pure JS; zero runtime overhead (every
   call delegates to the underlying `emu`).
-- `index.mjs` — re-exports `STM32F4, GPIOPin, USART, DMAStream` and binds
+- `index.mjs` — re-exports the facade classes and binds
   `STM32F4.create` to the resolved Node assets
   (`bindings`/`svdXml`/`wasmInit` from the local `vendor/`).
-- `package.json` — `"./stm32f4"` export → `site/stm32f4.js`.
-- Tests: `site/test_stm32f4_api.mjs` (facade + GPIO/USART) and
-  `site/test_stm32f4_periph.mjs` (Wokwi SPI/I2C), both wired into `npm test`.
+- `index.d.ts` — facade types (result shapes, callback signatures, DMA/
+  display/debug/power methods). `package.json` — `"./stm32f4"` export →
+  `site/stm32f4.js`.
+- Tests: `site/test_stm32f4_api.mjs` (facade + GPIO/USART + platform
+  surface) and `site/test_stm32f4_periph.mjs` (Wokwi SPI/I2C), both wired
+  into `npm test`. Full surface documented in `docs/facade.md`.
 
 ### Usage
 ```js
@@ -2265,9 +2269,34 @@ mcu.reset(); mcu.close();
   the loaded vector table. A non-zero `PLACEHOLDER_VECTOR` (SP=0x20000000,
   PC=0x08000185) is used when no firmware is given so `createEmulator`'s
   reset-vector check passes; the real firmware replaces it.
-- `execute(cycles)` runs the engine and drains UART into `usart.onData` as a
-  `Buffer` (the emulator returns a **string**, so iterate `charCodeAt`).
-- `read32/write32`, `getRegisters()`, `stop()`, `reset()`, `close()` delegate.
+- `execute(cycles)` returns `{instCount, stopped}`, `step(cycles)` returns
+  `{pc, instCount, stopped}` (both drain UART into `usart1` and run the
+  event poll below).
+- `read32/write32`, `memRead32/memWriteBytes` (probe-style via the `uc`
+  shim), `periphRead/periphWrite`, `getRegisters/getPc/getSp`,
+  `faultInfo/takeFault`, `setSymbols/resolveSymbol` (pure-JS map symbols),
+  `stop()`, `reset()`, `close()` delegate.
+
+### Platform integration surface (Wokwi/OpenHW/Velxio, 2026-09-20)
+Documented in `docs/facade.md`. Polled event callbacks (set directly,
+default null, dispatched once per `execute`/`step` from model-readable
+registers — the F4 model has no core event queue):
+`onExtiEdge` (EXTI PR w1c, verified live on `exti_test`),
+`onCanTx` (TSR edge), `onCanRx` (FMP level + mailbox, verified live on
+`can_host_rx`), `onTimUpdate`/`onTimCapture` (SR w1c + CCR),
+`onDmaTc` (LISR/HISR TCIF), `onWdogReset` (1=IWDG/2=WWDG),
+`onUsbIn`/`onItmByte` (take-drains), `onFsmcAccess` (bank taps, needs
+`fsmcDevices` at create). Absent by design (no model source):
+`onAdcDone/onDacWrite/onCrcResult/onRtcAlarm/onHostTx/onHostRx/onI2cAlert`.
+- DMA: `dmaController(1|2)` → `DMAController` (LISR/HISR, TCIF/HTIF,
+  CR/NDTR/PAR/MxAR/FCR per stream); `dma.stream(i)` is the legacy flat
+  helper. DMA bases are SVD-verified (DMA1 @0x40026000, DMA2 @0x40026400).
+- Display ("DRM"): `mcu.display` — live `oled`/`tft` framebuffers +
+  `ltdc()` layer0 scanout from guest RAM (null when not enabled).
+- Debug/power: honest SWD/JTAG shim (no DP on the model — `swdRegRead`
+  reads the live file, `jtagIdcode` the live IDCODE), `pwrMode/pwrEstimate`
+  (PWR_CR classes), `addJsPeripheral` (recorded JS region — no model MMIO
+  hook table exists).
 
 ### Wokwi-style virtual peripherals
 Built on the EXISTING bus taps — **no Rust change**:
@@ -3352,7 +3381,7 @@ define `BOARDS_OF_FIRMWARE`; F407 builds additionally blanket `ve`
 Same sources + family link/SP (`STACK_TOP`, byte-identical stock
 rebuilds) for eth_http/dhcp/test/irq_test; SRAM layouts nm-verified
 IDENTICAL to F407 (the polling driver's hardcoded E addrs keep working).
-`cli.mjs` now honors `config.cpu.svd` (was hard-coded monox — the field
+`cli.mjs` now honors `config.cpu.svd` (was hard-coded to the default F407 SVD — the field
 existed but dead); 4× `config_f429.yaml` (Keil SVD, 256K RAM).
 - Gateway: http 3 rounds/0 fail, dhcp SUCCESS ×2, test done (all on the
   Keil map, port 5070). irq_test via scripted PONG harness.

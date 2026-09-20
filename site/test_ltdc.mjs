@@ -10,7 +10,7 @@ import { createEmulator } from './emulator.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../ltdc_test/ltdc_test.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/ltdc_test/ltdc_test.bin', import.meta.url)));
 
 const W = 64, H = 32, FB = 0x20002000;
 const pix = (x, y) => (0xFF000000 | (x << 16) | (y << 8) | (x + y)) >>> 0;

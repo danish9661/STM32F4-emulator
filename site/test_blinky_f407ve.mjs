@@ -11,7 +11,7 @@ import { boardFor } from './boards.js';
 const runOne = async (preset) => {
     const board = boardFor(preset);
     // Both VE/ZE presets share the stock blinky binary (markers only).
-    const fwBytes = readFileSync(new URL('../blinky/blinky.bin', import.meta.url));
+    const fwBytes = readFileSync(new URL('../firmware/blinky/blinky.bin', import.meta.url));
     const svdXml = readFileSync(new URL('./vendor/' + board.svd, import.meta.url), 'utf8');
     const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
     const emu = await createEmulator({

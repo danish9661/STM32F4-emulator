@@ -8,7 +8,7 @@ import { Button } from './components.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../exti_test/exti_test.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/exti_test/exti_test.bin', import.meta.url)));
 
 const emu = await createEmulator({ firmware, bindings, svdXml, wasmInit: wasmBytes, enable_irqs: true });
 

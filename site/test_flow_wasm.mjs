@@ -8,7 +8,7 @@ import { createNetSim } from './netsim.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../eth_http/eth_http.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/eth_http/eth_http.bin', import.meta.url)));
 
 const maxInst = Number(process.env.MAX_INST || 20_000_000);
 const netsim = createNetSim({ log: (m) => console.log('[netsim-wasm] ' + m) });

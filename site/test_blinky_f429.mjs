@@ -10,7 +10,7 @@ import { boardFor } from './boards.js';
 const board = boardFor('blinky_f429');
 const svdXml = readFileSync(new URL('./vendor/' + board.svd, import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../blinky_f429/blinky_f429.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/blinky_f429/blinky_f429.bin', import.meta.url)));
 
 const emu = await createEmulator({
     firmware, bindings, svdXml, wasmInit: wasmBytes,

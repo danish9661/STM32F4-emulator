@@ -9,14 +9,14 @@ const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_was
 
 const wants = process.argv.slice(2);
 const allFw = [
-    ['blinky', '../blinky/blinky.bin', ['=== Blinky ===', 'tick 0'], 8_000_000],
-    ['eth_dhcp', '../eth_dhcp/eth_dhcp.bin', ['=== ETH DHCP Test ==='], 30_000_000],
-    ['eth_test', '../eth_test/eth_test.bin', ['ETH Test: done'], 30_000_000],
-    ['timer_test', '../timer_test/timer_test.bin', ['TIM'], 10_000_000],
-    ['can_test', '../can_test/can_test.bin', ['CAN Test: done'], 60_000_000],
-    ['hal_test', '../hal_test/hal_test.ino.bin', ['HAL'], 15_000_000],
-    ['exti_test', '../exti_test/exti_test.bin', ['EXTI'], 10_000_000],
-    ['rtc_test', '../rtc_test/rtc_test.bin', ['RTC'], 10_000_000],
+    ['blinky', '../firmware/blinky/blinky.bin', ['=== Blinky ===', 'tick 0'], 8_000_000],
+    ['eth_dhcp', '../firmware/eth_dhcp/eth_dhcp.bin', ['=== ETH DHCP Test ==='], 30_000_000],
+    ['eth_test', '../firmware/eth_test/eth_test.bin', ['ETH Test: done'], 30_000_000],
+    ['timer_test', '../firmware/timer_test/timer_test.bin', ['TIM'], 10_000_000],
+    ['can_test', '../firmware/can_test/can_test.bin', ['CAN Test: done'], 60_000_000],
+    ['hal_test', '../firmware/hal_test/hal_test.ino.bin', ['HAL'], 15_000_000],
+    ['exti_test', '../firmware/exti_test/exti_test.bin', ['EXTI'], 10_000_000],
+    ['rtc_test', '../firmware/rtc_test/rtc_test.bin', ['RTC'], 10_000_000],
 ];
 const fws = wants.length ? allFw.filter(([n]) => wants.includes(n)) : allFw;
 

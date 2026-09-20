@@ -8,7 +8,7 @@ import { createEmulator } from './emulator.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../deep_sleep_demo/deep_sleep_demo.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/deep_sleep_demo/deep_sleep_demo.bin', import.meta.url)));
 
 function fail(msg) { console.error('LOWPOWER-WASM FAIL: ' + msg); process.exit(1); }
 

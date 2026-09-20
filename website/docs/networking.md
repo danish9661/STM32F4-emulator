@@ -75,7 +75,7 @@ Silicon column = what the real MAC does. Status: ✅ modeled + tested,
 | Board chip | Verdict | Remark |
 |---|---|---|
 | F401, F411 | nothing to do — no silicon | Any ETH firmware fails honestly; no presets, no matrix entries. |
-| F407 (VG/VE/ZE) | complete at MAC level | All rows above ✅/🔶 proven by `eth_*` + `lwip_demo` on the monox map, netsim and real-gateway runs. |
+| F407 (VG/VE/ZE) | complete at MAC level | All rows above ✅/🔶 proven by `eth_*` + `lwip_demo` on the F407 vendor map, netsim and real-gateway runs. |
 | F429 | complete at MAC level | Same sources + family link/SP (`build_family` fams), own `*_f429.bin`, proven on the Keil map (netsim matrix; gateway trio). |
 
 ## 4. What "left" means (deliberate non-models)

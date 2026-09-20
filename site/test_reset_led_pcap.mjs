@@ -8,8 +8,8 @@ import { boardLed } from './boards.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const blinky = new Uint8Array(readFileSync(new URL('../blinky/blinky.bin', import.meta.url)));
-const ethAdv = new Uint8Array(readFileSync(new URL('../eth_adv/eth_adv.bin', import.meta.url)));
+const blinky = new Uint8Array(readFileSync(new URL('../firmware/blinky/blinky.bin', import.meta.url)));
+const ethAdv = new Uint8Array(readFileSync(new URL('../firmware/eth_adv/eth_adv.bin', import.meta.url)));
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log(`  ok: ${m}`); } else { fail++; console.log(`  FAIL: ${m}`); } };

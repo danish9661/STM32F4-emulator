@@ -2,8 +2,8 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=42';
-import { createEmulator } from './emulator.js?v=2';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=43';
+import { createEmulator } from './emulator.js?v=3';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
 import { boardsOf, boardForSelection, BOARDS, boardLed } from './boards.js?v=7';
@@ -142,6 +142,9 @@ const DEVICE_FIRMWARES = {
     buzzer_test_f401: { buzzer: { tim: 'TIM2' } },
     buzzer_test_f411: { buzzer: { tim: 'TIM2' } },
     buzzer_test_f429: { buzzer: { tim: 'TIM2' } },
+    audio_play_test_f401: { speaker: true },
+    audio_play_test_f411: { speaker: true },
+    audio_play_test_f429: { speaker: true },
     rtc_test_f401: { rtc: { i2c: 'I2C1', addr: 0x68, init: RTC_INIT } },
     rtc_test_f411: { rtc: { i2c: 'I2C1', addr: 0x68, init: RTC_INIT } },
     rtc_test_f429: { rtc: { i2c: 'I2C1', addr: 0x68, init: RTC_INIT } },
@@ -481,7 +484,7 @@ const boot = async () => {
     setStatus('booting…', 'stop');
     if (emu) { try { emu.close(); } catch (e) {} emu = null; }
     oledCacheKey = ''; tftCacheKey = ''; buzzerCacheKey = ''; rtcCacheKey = ''; ppsCacheKey = ''; TRACES.length = 0; { const cv = traceCanvas(); if (cv) cv._dma = []; } renderTraces();
-    if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; audioQueued = 0; }
+    if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; audioQueued = 0; audioDropped = 0; if (window.__audioCtx) delete window.__audioCtx; }
     gpioDrivenHigh.clear();
 
     const fw = image.flash;
@@ -546,19 +549,24 @@ const boot = async () => {
         // ── local mode: WASM runs in the browser (default) ──
         // Board variant per firmware preset (SVD + flash/RAM sizes), honoring
         // the board selector when the preset supports the selected board.
-        // NOTE (VENDOR_V): vendor asset versions (?v=42) must be bumped together
+        // NOTE (VENDOR_V): vendor asset versions (?v=43) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
         const { key: boardKey, board } = boardForSelection(image.name, boardSelectEl ? boardSelectEl.value : 'all');
-        const svdXml = await fetch('vendor/' + board.svd + '?v=42').then((r) => r.text());
+        const svdXml = await fetch('vendor/' + board.svd + '?v=43').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
         // Scripted USB host when the demo preset boots locally.
         usbhost = (!bridgeUrl && image.name.startsWith('usb_cdc_test')) ? createUsbHost(bindings) : null;
-        // Harness arms for eth_feat_test (local mode only): the guest
-        // prints markers and spins, the page arms collisions + link (same
-        // mechanism as the node matrix hooks).
-        featHooks = (!bridgeUrl && image.name.startsWith('eth_feat_test') && bindings && typeof bindings.eth_arm_collision === 'function')
+        // Harness arms for collision tests (local mode only): the guest
+        // prints COLLIDE ARM and spins, the page arms the one-shot
+        // collision + link hooks (same mechanism as the node matrix).
+        // Covers eth_feat_test AND eth_pins_test (its COL phase needs the
+        // same arm-before-TX timing; without it PINS COL FAILs while the
+        // node harness passes).
+        featHooks = (!bridgeUrl && bindings && typeof bindings.eth_arm_collision === 'function'
+            && (image.name.startsWith('eth_feat_test') || image.name.startsWith('eth_pins_test'))
+        )
             ? { collideDone: 0, linkDown: false, linkUp: false } : null;
         gw.tx = 0; gw.rx = 0;
         if (gw.connected) setGwStatus(true, gwLabel());
@@ -569,7 +577,7 @@ const boot = async () => {
             svdFile: board.svd,
             flash_size: board.flash_size,
             ram_size: board.ram_size,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=42',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=43',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),
@@ -634,13 +642,14 @@ const loop = async (id) => {
     while (session === id) {
         if (!running) { await raf(); continue; }
         try {
-            // eth_feat_test/eth_adv run at 20k-inst steps: their wire-rate
-            // bands and race windows are calibrated for fine steps (the
-            // node matrix uses 5k-20k); 100k steps would overshoot every
-            // band (observed: eth_adv FRAG FAILs at 100k — both fragments
-            // consumed before the reassembly loop polls — while 20k passes
-            // 13/13; the node matrix runs both at 20k).
-            const fineSteps = image && (image.name.startsWith('eth_feat_test') || image.name.startsWith('eth_adv'));
+            // eth_feat_test/eth_adv/eth_pins_test run at 20k-inst steps:
+            // their wire-rate bands and race windows are calibrated for
+            // fine steps (the node matrix uses 5k-20k); 100k steps would
+            // overshoot every band (observed: eth_adv FRAG FAILs at 100k —
+            // both fragments consumed before the reassembly loop polls —
+            // while 20k passes 13/13; eth_pins_test COL needs the arm to
+            // land inside the TX window; the node matrix runs all at 20k).
+            const fineSteps = image && (image.name.startsWith('eth_feat_test') || image.name.startsWith('eth_adv') || image.name.startsWith('eth_pins_test'));
             const res = await emu.step(fineSteps ? 20000 : undefined);
             totalInst = res.instCount;
             stepsDone++;
@@ -663,7 +672,7 @@ const loop = async (id) => {
         try {
             if (!bridgeUrl && image && image.name.startsWith('dcmi_test') && bindings.dcmi_feed_frame) driveDcmi();
         } catch (e) {}
-        // Harness arms for eth_feat_test (local mode only).
+        // Harness arms for collision tests (local mode only; see boot).
         try {
             if (featHooks) {
                 const arms = uartBuf.split('COLLIDE ARM').length - 1;
@@ -1194,6 +1203,13 @@ const renderBuzzer = () => {
 
 const speakerInfo = $('speakerInfo');
 let audioCtx = null, audioNextTime = 0, audioQueued = 0;
+// Cap on scheduled-ahead audio: the guest produces faster than realtime
+// (a tone loop emits unbounded samples per second of wall time), so an
+// uncapped scheduler piles up hundreds of seconds of BufferSources —
+// audible only after a huge delay, plus unbounded graph/memory growth.
+// MAX_AHEAD keeps ~2 s scheduled; excess samples are dropped (counted).
+const AUDIO_MAX_AHEAD_S = 2.0;
+let audioDropped = 0;
 const renderSpeaker = () => {
     if (!emu || !emu.takeSpeakerSamples) { speakerInfo.textContent = 'no audio firmware'; return; }
     const samples = emu.takeSpeakerSamples();
@@ -1201,12 +1217,19 @@ const renderSpeaker = () => {
     if (!audioCtx) {
         try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
         if (!audioCtx) { speakerInfo.textContent = 'WebAudio unavailable'; return; }
-        audioNextTime = audioCtx.currentTime + 0.05;
+        audioNextTime = Math.max(audioNextTime, audioCtx.currentTime + 0.05);
+        window.__audioCtx = audioCtx;
     }
     if (audioCtx.state === 'suspended') audioCtx.resume();
+    // Rebase late schedulers (tab was hidden / long pause): never schedule
+    // in the past, never more than MAX_AHEAD ahead of now.
+    audioNextTime = Math.max(audioNextTime, audioCtx.currentTime + 0.02);
     let off = 0;
     while (off < samples.length) {
-        const n = Math.min(4096, samples.length - off);
+        const headroom = AUDIO_MAX_AHEAD_S - (audioNextTime - audioCtx.currentTime);
+        if (headroom <= 0) { audioDropped += samples.length - off; break; }
+        const maxN = Math.floor(headroom * audioCtx.sampleRate);
+        const n = Math.min(4096, samples.length - off, Math.max(1, maxN));
         const buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
         const ch = buf.getChannelData(0);
         for (let i = 0; i < n; i++) ch[i] = samples[off + i];
@@ -1218,7 +1241,10 @@ const renderSpeaker = () => {
         off += n;
         audioQueued += n;
     }
-    speakerInfo.textContent = `I2S capture playing — ${(audioQueued / audioCtx.sampleRate).toFixed(1)} s queued`;
+    window.__audioQueued = audioQueued;
+    window.__audioDropped = audioDropped;
+    const ahead = Math.max(0, audioNextTime - audioCtx.currentTime);
+    speakerInfo.textContent = `I2S capture playing — ${(audioQueued / audioCtx.sampleRate).toFixed(1)} s queued (${ahead.toFixed(1)} s ahead${audioDropped ? `, ${audioDropped} dropped` : ''})`;
 };
 
 let rtcCacheKey = '';

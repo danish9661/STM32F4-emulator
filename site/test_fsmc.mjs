@@ -13,7 +13,7 @@ import { createEmulator } from './emulator.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../fsmc_test/fsmc_test.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/fsmc_test/fsmc_test.bin', import.meta.url)));
 
 const RS = 1 << 17;              // the address line the display reads as RS/DC
 

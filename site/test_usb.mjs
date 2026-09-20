@@ -13,7 +13,7 @@ import { createEmulator } from './emulator.js';
 const svdFile = process.argv[3] || 'stm32f407';
 const svdXml = readFileSync(new URL(`./vendor/${svdFile}.svd`, import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL(process.argv[2] || '../usb_cdc_test/usb_cdc_test.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL(process.argv[2] || '../firmware/usb_cdc_test/usb_cdc_test.bin', import.meta.url)));
 // Optional: flash/ram sizes for non-F407 maps (argv[4]/argv[5], hex ok).
 const flashSize = process.argv[4] ? parseInt(process.argv[4]) : 0x100000;
 const ramSize = process.argv[5] ? parseInt(process.argv[5]) : 0x20000;

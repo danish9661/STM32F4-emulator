@@ -1,15 +1,15 @@
 // Verifies the opt-in interrupt pump (enable_irqs) for the RX firmware:
 // USART1 RXNEIE handlers must run for the firmware to make progress.
 import { readFileSync } from 'fs';
-import * as bindings from '../site/vendor/stm32_periph_wasm.js';
-import { createEmulator } from '../site/emulator.js';
+import * as bindings from './vendor/stm32_periph_wasm.js';
+import { createEmulator } from './emulator.js';
 
-const svdXml = readFileSync(new URL('../site/vendor/stm32f407.svd', import.meta.url), 'utf8');
-const wasmBytes = new Uint8Array(readFileSync(new URL('../site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
+const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
+const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 
 const cases = [
-    ['rx_interrupt_test', '../rx_interrupt_test/rx_interrupt_test.bin', 'CRC='],
-    ['rx_crypto_test', '../rx_crypto_test/rx_crypto_test.bin', 'DONE'],
+    ['rx_interrupt_test', '../firmware/rx_interrupt_test/rx_interrupt_test.bin', 'CRC='],
+    ['rx_crypto_test', '../firmware/rx_crypto_test/rx_crypto_test.bin', 'DONE'],
 ];
 
 let fail = 0;

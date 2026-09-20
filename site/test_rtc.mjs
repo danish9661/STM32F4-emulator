@@ -9,7 +9,7 @@ import { createEmulator } from './emulator.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../rtc_test/rtc_test.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/rtc_test/rtc_test.bin', import.meta.url)));
 
 // Register-file seed: BCD time regs 0x00-0x06 (sec/min/hr/dow/day/mon/yr),
 // temp MSB/LSB 0x11/0x12. The guest overwrites the time regs via I2C; the

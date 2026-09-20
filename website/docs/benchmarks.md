@@ -107,14 +107,14 @@ restart (default since 2026-08-09).
 ```bash
 # CLI throughput (gateway mode)
 cd stm32-periph-wasm/pkg
-time node cli.mjs ../eth_http/eth_http.bin 20000000 \
-  --gateway --config=../../eth_http/config.yaml
+time node cli.mjs ../../firmware/eth_http/eth_http.bin 20000000 \
+  --gateway --config=../../firmware/eth_http/config.yaml
 grep -c "TCP connected" <outfile>   # rounds
 grep -c "TCP fail" <outfile>        # must be 0
 
 # Soak with stats
-SOAK_STATS=1 node cli.mjs ../eth_http/eth_http.bin 200000000 \
-  --gateway --config=../../eth_http/config.yaml
+SOAK_STATS=1 node cli.mjs ../../firmware/eth_http/eth_http.bin 200000000 \
+  --gateway --config=../../firmware/eth_http/config.yaml
 
 # Browser-mode throughput (runs in rAF steps; ~a round per few frames)
 node site/test_flow.mjs

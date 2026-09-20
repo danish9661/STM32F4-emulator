@@ -24,6 +24,7 @@ const DOCS = [
     ['docs/peripherals.md', 'peripherals.md', 'Peripheral coverage', 'Model depth per peripheral, IRQs, gaps'],
     ['docs/architecture.md', 'architecture.md', 'Architecture', 'CPU core, driver, stepping, performance'],
     ['docs/components.md', 'components.md', 'Components / devices', 'OLED, TFT, buzzer, RTC panels'],
+    ['docs/facade.md', 'facade.md', 'Facade platform API', 'STM32F4 callbacks, DMA, display, debug, power'],
     ['docs/benchmarks.md', 'benchmarks.md', 'Benchmarks', 'MIPS, soak results, gateway throughput'],
     ['docs/mcp.md', 'mcp.md', 'MCP / AI usage', 'Driving the emulator from AI agents'],
     ['docs/progress-and-future.md', 'progress-and-future.md', 'Progress & future', 'Changelog direction, open items'],

@@ -2,12 +2,12 @@
 // IRQ56 ISR executed, plus the chunked periph-side DMA helpers already
 // probed directly. Runs with the interrupt pump on (needed for irq_wait).
 import { readFileSync } from 'fs';
-import * as bindings from '../site/vendor/stm32_periph_wasm.js';
-import { createEmulator } from '../site/emulator.js';
+import * as bindings from './vendor/stm32_periph_wasm.js';
+import { createEmulator } from './emulator.js';
 
-const svdXml = readFileSync(new URL('../site/vendor/stm32f407.svd', import.meta.url), 'utf8');
-const wasmBytes = new Uint8Array(readFileSync(new URL('../site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const fw = new Uint8Array(readFileSync(new URL('../comprehensive_test/comprehensive_test.bin', import.meta.url)));
+const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
+const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
+const fw = new Uint8Array(readFileSync(new URL('../firmware/comprehensive_test/comprehensive_test.bin', import.meta.url)));
 
 const emu = await createEmulator({ firmware: fw, bindings, svdXml, wasmInit: wasmBytes, enable_irqs: true });
 let uart = '';

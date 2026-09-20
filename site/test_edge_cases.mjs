@@ -9,7 +9,7 @@ import { parseIntelHex, parseElf } from './loaders.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const blinky = new Uint8Array(readFileSync(new URL('../blinky/blinky.bin', import.meta.url)));
+const blinky = new Uint8Array(readFileSync(new URL('../firmware/blinky/blinky.bin', import.meta.url)));
 
 let failures = 0;
 function check(cond, msg) { if (!cond) { console.error('  FAIL: ' + msg); failures++; } else { console.log('  ok: ' + msg); } }

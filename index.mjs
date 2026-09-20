@@ -7,7 +7,7 @@ import { createEmulator } from './site/emulator.js';
 import { createNetSim } from './site/netsim.js';
 import { FIRMWARES } from './site/firmware.js';
 import { LED, Button, Pwm, I2cRegisterDevice, Potentiometer } from './site/components.js';
-import { STM32F4, GPIOPin, USART, DMAStream } from './site/stm32f4.js';
+import { STM32F4, GPIOPin, GPIO, USART, SPI, I2C, DMAStream, DMAController, Display } from './site/stm32f4.js';
 
 // Node consumers get a one-call setup that injects the bundled assets. The
 // `firmware` option is optional (defer to loadBin/loadHex/loadELF after
@@ -39,5 +39,5 @@ export async function createSTM32F407(opts = {}) {
     return createEmulator({ ...opts, firmware: bin, bindings, svdXml, wasmInit: wasmBytes });
 }
 
-export { createEmulator, createNetSim, FIRMWARES, bindings, svdXml, LED, Button, Pwm, I2cRegisterDevice, Potentiometer, STM32F4, GPIOPin, USART, DMAStream };
+export { createEmulator, createNetSim, FIRMWARES, bindings, svdXml, LED, Button, Pwm, I2cRegisterDevice, Potentiometer, STM32F4, GPIOPin, GPIO, USART, SPI, I2C, DMAStream, DMAController, Display };
 export { boardLed, BOARD_LED, BOARD_LED_ALIASES } from './site/boards.js';

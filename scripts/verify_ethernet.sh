@@ -29,9 +29,9 @@ fi
 
 run_check() {
   local name="$1" cfg="$2" log="$3" marker="$4" dir="${5:-$1}" bin="${6:-$1.bin}" inst="${7:-$MAX_INST}"
-  # NOTE: firmware/config paths are repo-root relative (../../ from $PKG);
-  # the old "../$name" form resolved inside stm32-periph-wasm/ and failed.
-  (cd "$PKG" && node cli.mjs "../../$dir/$bin" "$inst" --gateway --config="../../$dir/$cfg") >"$log" 2>&1
+  # NOTE: firmware/config paths are repo-root relative (../../firmware/ from
+  # $PKG); the old "../$name" form resolved inside stm32-periph-wasm/ and failed.
+  (cd "$PKG" && node cli.mjs "../../firmware/$dir/$bin" "$inst" --gateway --config="../../firmware/$dir/$cfg") >"$log" 2>&1
   if grep -a -q "$marker" "$log"; then
     echo "PASS: $name (marker '$marker')"
   else

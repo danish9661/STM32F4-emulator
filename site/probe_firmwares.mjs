@@ -1,29 +1,29 @@
 // Boot-probes candidate firmware binaries: runs each for a few M instructions
 // and prints the UART banner (first ~200 chars) + whether TX happened.
 import { readFileSync } from 'fs';
-import * as bindings from '../site/vendor/stm32_periph_wasm.js';
-import { createEmulator } from '../site/emulator.js';
+import * as bindings from './vendor/stm32_periph_wasm.js';
+import { createEmulator } from './emulator.js';
 
-const svdXml = readFileSync(new URL('../site/vendor/stm32f407.svd', import.meta.url), 'utf8');
-const wasmBytes = new Uint8Array(readFileSync(new URL('../site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
+const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
+const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
 
 const candidates = [
-    ['hal_test', '../hal_test/hal_test.ino.bin'],
-    ['crypto_test', '../crypto_test/build/crypto_test.ino.bin'],
-    ['crypto_deep_test', '../crypto_deep_test/crypto_deep_test.bin'],
-    ['rx_crypto_test', '../rx_crypto_test/rx_crypto_test.bin'],
-    ['periph_test', '../periph_test/periph_test.ino.bin'],
-    ['new_periph_test', '../new_periph_test/new_periph_test.ino.bin'],
-    ['deep_periph_test', '../deep_periph_test/build/deep_periph_test.ino.bin'],
-    ['comprehensive_test', '../comprehensive_test/comprehensive_test.bin'],
-    ['edge_test', '../edge_test/edge_test.ino.bin'],
-    ['echo_test', '../echo_test/build/echo_test.ino.bin'],
-    ['rx_interrupt_test', '../rx_interrupt_test/rx_interrupt_test.bin'],
-    ['blink_serial', '../blink_serial/build/blink_serial.ino.bin'],
-    ['timer_test', '../timer_test/build/timer_test.ino.bin'],
-    ['test_firmware', '../test_firmware/test_firmware.bin'],
-    ['arduino_test', '../arduino_test/arduino_test.ino.bin'],
-    ['i2s_sai_test', '../i2s_sai_test/i2s_sai_test.bin'],
+    ['hal_test', '../firmware/hal_test/hal_test.ino.bin'],
+    ['crypto_test', '../firmware/crypto_test/build/crypto_test.ino.bin'],
+    ['crypto_deep_test', '../firmware/crypto_deep_test/crypto_deep_test.bin'],
+    ['rx_crypto_test', '../firmware/rx_crypto_test/rx_crypto_test.bin'],
+    ['periph_test', '../firmware/periph_test/periph_test.ino.bin'],
+    ['new_periph_test', '../firmware/new_periph_test/new_periph_test.ino.bin'],
+    ['deep_periph_test', '../firmware/deep_periph_test/build/deep_periph_test.ino.bin'],
+    ['comprehensive_test', '../firmware/comprehensive_test/comprehensive_test.bin'],
+    ['edge_test', '../firmware/edge_test/edge_test.ino.bin'],
+    ['echo_test', '../firmware/echo_test/build/echo_test.ino.bin'],
+    ['rx_interrupt_test', '../firmware/rx_interrupt_test/rx_interrupt_test.bin'],
+    ['blink_serial', '../firmware/blink_serial/build/blink_serial.ino.bin'],
+    ['timer_test', '../firmware/timer_test/build/timer_test.ino.bin'],
+    ['test_firmware', '../firmware/test_firmware/test_firmware.bin'],
+    ['arduino_test', '../firmware/arduino_test/arduino_test.ino.bin'],
+    ['i2s_sai_test', '../firmware/i2s_sai_test/i2s_sai_test.bin'],
 ];
 
 const MAX_INST = 4_000_000;

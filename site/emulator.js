@@ -461,6 +461,10 @@ export async function createEmulator(opts) {
                 hint = String(opts.chipHint || opts.svdFile || '');
                 hint = hint.split('/').pop().split('.').slice(0, -1).join('.') || hint;
             } catch {}
+            // compat[0] may carry no SVD filename (older callers pass none):
+            // default to the F407 identity rather than an empty hint that
+            // leaves IDCODE at its reset value (comprehensive_test pins 0x413).
+            if (!hint) hint = 'stm32f407';
             init_svd_chip(svdXml, hint);
         } else init_svd(svdXml);
     }

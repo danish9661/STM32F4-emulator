@@ -6,7 +6,7 @@ import { createEmulator } from './emulator.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f429.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../dma2d_test/dma2d_test.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/dma2d_test/dma2d_test.bin', import.meta.url)));
 
 const emu = await createEmulator({
     firmware, bindings, svdXml, wasmInit: wasmBytes,

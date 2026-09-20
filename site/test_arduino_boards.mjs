@@ -27,7 +27,7 @@ const svdFor = (f) => svdCache[f] || (svdCache[f] = readFileSync(new URL('./vend
 
 let failures = 0;
 for (const [key, svd, flashSize, ramSize, uartAddr, odrAddr, odrMask, label] of BOARDS) {
-    const fwPath = new URL(`../arduino_board/build-${key}/arduino_board.ino.bin`, import.meta.url);
+    const fwPath = new URL(`../firmware/arduino_board/build-${key}/arduino_board.ino.bin`, import.meta.url);
     let fwBytes;
     try {
         fwBytes = readFileSync(fwPath);

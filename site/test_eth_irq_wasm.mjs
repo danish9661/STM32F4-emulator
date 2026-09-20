@@ -4,12 +4,12 @@
 //   scans/re-arms RX descriptors. The driver only signals the model
 //   (eth_tx_done/eth_rx_done) and injects frames — no SRAM flag writes.
 import { readFileSync } from 'fs';
-import * as bindings from '../site/vendor/stm32_periph_wasm.js';
-import { createEmulator } from '../site/emulator.js';
+import * as bindings from './vendor/stm32_periph_wasm.js';
+import { createEmulator } from './emulator.js';
 
-const svdXml = readFileSync(new URL('../site/vendor/stm32f407.svd', import.meta.url), 'utf8');
-const wasmBytes = new Uint8Array(readFileSync(new URL('../site/vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const fw = new Uint8Array(readFileSync(new URL('../eth_irq_test/eth_irq_test.bin', import.meta.url)));
+const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
+const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
+const fw = new Uint8Array(readFileSync(new URL('../firmware/eth_irq_test/eth_irq_test.bin', import.meta.url)));
 
 // Firmware globals (nm eth_irq_test.elf)
 const eth = {

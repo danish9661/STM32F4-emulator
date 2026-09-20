@@ -237,7 +237,7 @@ async function runTest() {
 
     // ── run tests ───────────────────────────────────────────────────────
     // Load blinky firmware
-    const fwBytes = new Uint8Array(readFileSync(resolve(__dirname, '../blinky/blinky.bin')));
+    const fwBytes = new Uint8Array(readFileSync(resolve(__dirname, '../firmware/blinky/blinky.bin')));
     console.log('\n1. LOAD_IMAGE');
     const loadResp = await request(MSG.LOAD_IMAGE, packU32(fwBytes.length), fwBytes);
     assert(loadResp.type === MSG.LOAD_OK, 'LOAD_OK received');

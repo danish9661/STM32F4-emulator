@@ -4,7 +4,7 @@ import { createEmulator } from './emulator.js';
 
 const svdXml = readFileSync(new URL('./vendor/stm32f407.svd', import.meta.url), 'utf8');
 const wasmBytes = new Uint8Array(readFileSync(new URL('./vendor/stm32_periph_wasm_bg.wasm', import.meta.url)));
-const firmware = new Uint8Array(readFileSync(new URL('../freertos_test/freertos_test.bin', import.meta.url)));
+const firmware = new Uint8Array(readFileSync(new URL('../firmware/freertos_test/freertos_test.bin', import.meta.url)));
 
 const emu = await createEmulator({
     firmware, bindings, svdXml,
@@ -18,7 +18,7 @@ const rd32 = (a) => { const b = uc.mem_read(BigInt(a), 4); return (b[3]<<24)|(b[
 // probe doesn't break every time the .bss layout shifts (e.g. adding a
 // .testvars section moves xTickCount/pxCurrentTCB/pxReadyTasksLists around).
 const elfSym = (() => {
-    const buf = new Uint8Array(readFileSync(new URL('../freertos_test/freertos_test.elf', import.meta.url)));
+    const buf = new Uint8Array(readFileSync(new URL('../firmware/freertos_test/freertos_test.elf', import.meta.url)));
     const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     const isLE = buf[5] === 1;
     const u16 = (o) => dv.getUint16(o, isLE);

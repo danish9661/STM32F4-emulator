@@ -18,13 +18,13 @@ const fw = (p) => new Uint8Array(readFileSync(new URL(p, import.meta.url)));
 // Buzzer is the slow one: it needs ~2000 iterations of step(100000) to finish
 // its melody. 400 looks exactly like a failure.
 const CASES = {
-    blinky: { firmware: '../blinky/blinky.bin', marker: 'LED=', iters: 300, ext_devices: {} },
+    blinky: { firmware: '../firmware/blinky/blinky.bin', marker: 'LED=', iters: 300, ext_devices: {} },
     rtc: {
-        firmware: '../rtc_test/rtc_test.bin', marker: 'RTC test done', iters: 300,
+        firmware: '../firmware/rtc_test/rtc_test.bin', marker: 'RTC test done', iters: 300,
         ext_devices: { rtc: { i2c: 'I2C1', addr: 0x68, init: rtcSeed() } },
     },
     buzzer: {
-        firmware: '../buzzer_test/buzzer_test.bin', marker: 'Buzzer done', iters: 2000,
+        firmware: '../firmware/buzzer_test/buzzer_test.bin', marker: 'Buzzer done', iters: 2000,
         ext_devices: { buzzer: { tim: 'TIM2' } },
     },
 };
