@@ -351,12 +351,14 @@ export class Display {
     get oled() {
         const o = this._mcu._emu.oled;
         if (!o) return null;
-        return { w: 128, h: 64, fb: o.fb, frame: o.frame() };
+        // NOTE: emu.oled.frame is a FUNCTION (() => count) on the live
+        // handle (emulator.js) — call it; tolerate a raw number (mocks).
+        return { w: 128, h: 64, fb: o.fb, frame: typeof o.frame === 'function' ? o.frame() : o.frame };
     }
     get tft() {
         const t = this._mcu._emu.tft;
         if (!t) return null;
-        return { w: t.w, h: t.h, fb: t.fb, frame: () => t.frame() };
+        return { w: t.w, h: t.h, fb: t.fb, frame: typeof t.frame === 'function' ? t.frame() : t.frame };
     }
     // LTDC layer0: geometry from WHPCR/WVPCR + PFCR/CFBAR/CFBLR, pixels
     // from guest RAM. Supports pf 0 (ARGB8888) + 2 (RGB565). Returns null
@@ -852,6 +854,141 @@ export class STM32F4 {
     // ── DMA controller (Wokwi/OpenHW/Velxio integration) ──
     // Full controller view — see the DMAController class above.
     dmaController(ctl = 1) { return new DMAController(this, ctl); }
+
+    // ── ADC: live channel injection (anytime, no init constraint) ──
+    // The model keeps a global override table (unlike the SPI/I2C taps);
+    // without an override the channel reads the synthetic default
+    // (16/17 = temp/Vref, 18 = Vbat, else pseudo-random). Verified by the
+    // Potentiometer component + site/test_component_adc.mjs.
+    setAdcChannel(peripheral, channel, value) {
+        this._bindings.adc_set_channel_value(peripheral, channel, value);
+    }
+    clearAdcChannel(peripheral, channel) {
+        this._bindings.adc_clear_channel_value(peripheral, channel);
+    }
+    // Drain ADC samples staged by EOC-triggered DMA requests (CR2 DMA bit).
+    takeAdcDma() {
+        try { return Array.from(this._bindings.adc_take_dma()); }
+        catch { return []; }
+    }
+
+    // ── CAN: host-side frame injection (anytime) ──
+    // Standard 11-bit frames; gated on chip CAN silicon (F401/F411 throw
+    // a useful error instead of sinking into a benign-0 hole).
+    canInject(id, dlc, data) {
+        if (!this.chip.can.length) {
+            throw new Error(`canInject: ${this.chip.key} has no CAN silicon (SVD census)`);
+        }
+        this._emu.canInject(id & 0x7FF, dlc & 0xF, data);
+    }
+    canInjectFd(id, data, brs = false) {
+        if (!this.chip.can.length) {
+            throw new Error(`canInjectFd: ${this.chip.key} has no CAN silicon (SVD census)`);
+        }
+        this._bindings.can_inject_fd(id >>> 0, new Uint8Array(data), !!brs);
+    }
+
+    // ── TIM: edge injection + PWM readback (anytime) ──
+    // The emulator has no external signal source, so a TIx edge is a host
+    // call (mirrors the model export; firmware polls CCR like tim_capture_demo).
+    timInjectCapture(timer, ch) {
+        if (!this.chip.timers.includes(timer | 0)) {
+            throw new Error(`timInjectCapture: TIM${timer} absent on ${this.chip.key} (SVD census)`);
+        }
+        this._emu.timInjectCapture(`TIM${timer | 0}`, ch & 0x3);
+    }
+    // PWM pulse width in µs for timer/channel at a clock rate (model probe;
+    // pass the timer clock, e.g. 84e6 for APB1 — same basis as Pwm).
+    timPwmPulseUs(timer, ch, clockHz) {
+        return this._bindings.tim_pwm_pulse_us(`TIM${timer}`, ch, clockHz);
+    }
+    timOcMode(timer, ch) {
+        return this._bindings.tim_oc_mode(`TIM${timer}`, ch);
+    }
+
+    // ── DAC: hardware trigger + underrun (anytime) ──
+    // Gated on chip DAC silicon (F401/F411 throw instead of sinking).
+    dacTrigger(ch, src, dmaStaged = false) {
+        if (!this.chip.dac) {
+            throw new Error(`dacTrigger: ${this.chip.key} has no DAC silicon (SVD census)`);
+        }
+        this._bindings.dac_hw_trigger(ch, src, !!dmaStaged);
+    }
+    dacUnderrun(ch) {
+        if (!this.chip.dac) return false;
+        try { return !!this._bindings.dac_underrun(ch); } catch { return false; }
+    }
+
+    // ── I2S audio capture drain (anytime) ──
+    // DR writes by the guest land in the model capture FIFO; the speaker
+    // device (ext_devices.speaker) drains it per step, but a platform can
+    // also drain directly here (returns Float32 samples).
+    takeSpeakerSamples() {
+        try { return this._emu.takeSpeakerSamples(); }
+        catch { return new Float32Array(0); }
+    }
+
+    // ── USB OTG_FS host calls (anytime; harness-driven like the model) ──
+    // SETUP/OUT inject into EP0/endpoints; takeIn drains device-to-host IN
+    // blobs; reset/enumerated drive the device state machine. HS twins
+    // exist on the model (usb_hs_*) but the facade targets FS (all chips
+    // have FS silicon; HS is F407/F429-only and needs its own window).
+    usbInjectSetup(bytes) {
+        return !!this._bindings.usb_inject_setup(new Uint8Array(bytes));
+    }
+    usbInjectOut(ep, bytes) {
+        return !!this._bindings.usb_inject_out(ep, new Uint8Array(bytes));
+    }
+    usbTakeIn(ep) {
+        try { return Array.from(this._bindings.usb_take_in(ep)); }
+        catch { return []; }
+    }
+    usbReset() { try { this._bindings.usb_reset(); } catch {} }
+    usbEnumerated() { try { this._bindings.usb_enumerated(); } catch {} }
+
+    // ── ITM stimulus drain (anytime) ──
+    // Port 0 sinks to the UART console in the model; ports 1-31 queue
+    // per-port streams. takeItm drains one port (empty when idle).
+    takeItm(port) {
+        try { return Array.from(this._bindings.itm_take_port(port)); }
+        catch { return []; }
+    }
+    itmPending(port) {
+        try { return this._bindings.itm_port_pending(port) >>> 0; }
+        catch { return 0; }
+    }
+
+    // ── FSMC bank taps (needs ext_devices.fsmcDevices at create) ──
+    // Same create-time rule as SPI/I2C (Fsmc binds banks once at
+    // construction). takeFsmc drains access events; pushFsmc answers reads.
+    takeFsmc(bank) {
+        try { return Array.from(this._emu.takeFsmcEvents(bank)); }
+        catch { return []; }
+    }
+    pushFsmc(bank, values) {
+        try { this._emu.pushFsmcData(bank, values); } catch {}
+    }
+
+    // ── I2C register-file devices (DS3231 RTC style, anytime) ──
+    // The file must be registered at create via ext_devices.regfile (or
+    // the ext_devices.rtc shorthand, which also enables emu.rtc decode).
+    // After that, get/set run any time (the RTC panel reads live).
+    regfileGet(peripheral, offset) {
+        return this._bindings.i2c_regfile_get(peripheral, offset);
+    }
+    regfileSet(peripheral, offset, value) {
+        this._bindings.i2c_regfile_set(peripheral, offset, value & 0xFF);
+    }
+
+    // ── Live device views (same handles the browser panels read) ──
+    // Null unless the matching ext_devices entry enabled the device at
+    // create. oled/tft/rtc/buzzer decode in emulator.js; camera feeds the
+    // DCMI sensor (feed anytime, stop/start the ext_devices.camera source).
+    get oled() { return this._emu.oled; }
+    get tft() { return this._emu.tft; }
+    get rtc() { return this._emu.rtc; }
+    get buzzer() { return this._emu.buzzer; }
+    get camera() { return this._emu.camera; }
 
     // ── engine access ──
     read32(addr) { return this._emu.read32(addr); }

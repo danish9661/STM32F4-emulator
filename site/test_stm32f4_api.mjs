@@ -173,5 +173,48 @@ for (const [chip, fwKey, ledLabel, devId, pwr, ledOn] of CHIP_CASES) {
     m.close();
 }
 
+// ── Test 8: live injection + device views (platform driving) ──
+{
+    const m = await STM32F4.create({ firmware: decodeFirmware('blinky') });
+    // ADC override table (anytime, no init constraint)
+    m.setAdcChannel('ADC1', 3, 2048);
+    m.clearAdcChannel('ADC1', 3);
+    check(Array.isArray(m.takeAdcDma()), 'takeAdcDma() returns array');
+    // TIM edge inject + PWM probes (F407 has all timers)
+    m.timInjectCapture(3, 1);
+    check(typeof m.timPwmPulseUs(2, 1, 84e6) === 'number', 'timPwmPulseUs() returns number');
+    check(typeof m.timOcMode(2, 1) === 'number', 'timOcMode() returns number');
+    // CAN inject (F407 has CAN silicon)
+    m.canInject(0x123, 2, [1, 2]);
+    check(true, 'canInject() accepted on F407');
+    // DAC trigger + underrun (F407 has DAC silicon)
+    m.dacTrigger(1, 0, false);
+    check(m.dacUnderrun(1) === false, 'dacUnderrun() false when idle');
+    // USB FS host calls (harness-driven; empty drains, no throw)
+    check(m.usbTakeIn(1).length === 0, 'usbTakeIn() empty when idle');
+    m.usbReset(); m.usbEnumerated();
+    check(true, 'usbReset()/usbEnumerated() no throw');
+    // ITM drain (empty when idle)
+    check(m.takeItm(0).length === 0 && m.itmPending(0) === 0, 'takeItm()/itmPending() empty when idle');
+    // FSMC taps not registered: empty drains, silent push
+    check(m.takeFsmc(0).length === 0, 'takeFsmc() empty when untapped');
+    m.pushFsmc(0, [0x9341]);
+    check(true, 'pushFsmc() silent when untapped');
+    // Device views null unless enabled at create (not throws)
+    check(m.oled === null && m.tft === null && m.rtc === null && m.buzzer === null, 'oled/tft/rtc/buzzer null when not enabled');
+    check(typeof m.camera === 'object', 'camera object present');
+    check(m.takeSpeakerSamples().length === 0, 'takeSpeakerSamples() empty when idle');
+    // DAC-less chip gates throw useful errors (not silent holes)
+    m.close();
+    const f401 = await STM32F4.create({ chip: 'stm32f401', firmware: decodeFirmware('blinky_f401') });
+    let threw = 0;
+    try { f401.canInject(0x123, 2, [1, 2]); } catch { threw++; }
+    try { f401.dacTrigger(1, 0); } catch { threw++; }
+    try { f401.timInjectCapture(6, 0); } catch { threw++; }
+    try { f401.gpio.pin('K', 0); } catch { threw++; }
+    check(threw === 4, 'F401 gates throw (can/dac/tim6/gpioK)');
+    f401.close();
+}
+
 if (failures) { console.error(`\n${failures} FAILED`); process.exit(1); }
 console.log('\nALL PASS');

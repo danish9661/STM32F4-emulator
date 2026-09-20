@@ -98,6 +98,33 @@ Deliberately absent (no model source — a fake event would be worse than
 none): `onAdcDone`/`onDacWrite`/`onCrcResult`/`onRtcAlarm`/`onHostTx`/
 `onHostRx`/`onI2cAlert`. Poll `read32()` or use the bus taps instead.
 
+## Live injection + device views (platform driving)
+
+Anytime host calls over live model exports (no init constraint, unlike the
+SPI/I2C taps). Presence-gated where the chip lacks silicon (CAN/DAC/TIM
+throw on F401/F411 instead of sinking into benign-0 holes):
+
+- ADC: `setAdcChannel(peripheral, channel, value)` /
+  `clearAdcChannel(...)` (global override table; synthetic temp/Vref/Vbat/
+  random default without it), `takeAdcDma()` (EOC-DMA staged samples).
+- CAN: `canInject(id, dlc, data)` (11-bit, via `emu.canInject`),
+  `canInjectFd(id, data, brs?)`.
+- TIM: `timInjectCapture(timer, ch)` (host TIx edge),
+  `timPwmPulseUs(timer, ch, clockHz)`, `timOcMode(timer, ch)`.
+- DAC: `dacTrigger(ch, src, dmaStaged?)`, `dacUnderrun(ch)`.
+- Audio: `takeSpeakerSamples()` (Float32 drain of the I2S capture FIFO).
+- USB FS: `usbInjectSetup(bytes)`, `usbInjectOut(ep, bytes)`,
+  `usbTakeIn(ep)`, `usbReset()`, `usbEnumerated()`.
+- ITM: `takeItm(port)`, `itmPending(port)` (firmware `printf` path).
+- FSMC: `takeFsmc(bank)`, `pushFsmc(bank, values)` (needs
+  `ext_devices.fsmcDevices` at create — same rule as SPI).
+- RTC/regfile: `regfileGet(peripheral, offset)` /
+  `regfileSet(peripheral, offset, value)` (needs `ext_devices.regfile`
+  or the `rtc` shorthand at create).
+- Live views (same handles the browser panels read; null unless enabled
+  at create): `mcu.oled`, `mcu.tft`, `mcu.rtc`, `mcu.buzzer`,
+  `mcu.camera` (with `feed/stop/start/frames`).
+
 ## DMA (`dmaController` / `DMAStream` / `Display`)
 
 - `mcu.dmaController(1|2)` → `DMAController` (DMA1 @0x40026000, DMA2
