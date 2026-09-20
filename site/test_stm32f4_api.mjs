@@ -109,6 +109,7 @@ mcu4.close();
 const mcu5 = await STM32F4.create({ firmware: blinky });
 check(mcu5.chip.key === 'stm32f407', 'default chip is stm32f407');
 check(mcu5.usart3 !== null && mcu5.usarts[3] === mcu5.usart3, 'f407: usart3 live');
+check(mcu5.usart7 !== null && mcu5.usart8 !== null && mcu5.usarts[8] === mcu5.usart8, 'f407: usart7/8 live');
 // callbacks exist, default null
 check(mcu5.onExtiEdge === null && mcu5.onCanTx === null && mcu5.onCanRx === null, 'callbacks default null (exti/can)');
 check(mcu5.onTimUpdate === null && mcu5.onTimCapture === null && mcu5.onDmaTc === null, 'callbacks default null (tim/dma)');
@@ -167,6 +168,7 @@ for (const [chip, fwKey, ledLabel, devId, pwr, ledOn] of CHIP_CASES) {
     }
     check((m.jtagIdcode() & 0xFFF) === devId, `${chip}: IDCODE DEV_ID 0x${devId.toString(16)}`);
     check((m.usart3 === null) === (chip === 'stm32f401' || chip === 'stm32f411'), `${chip}: usart3 ${m.usart3 === null ? 'null (absent silicon)' : 'live'}`);
+    check((m.usart7 === null && m.usart8 === null) === (chip === 'stm32f401' || chip === 'stm32f411'), `${chip}: usart7/8 ${m.usart7 === null ? 'null (absent silicon)' : 'live'}`);
     check(JSON.stringify(m.chip.can) === JSON.stringify((chip === 'stm32f407' || chip === 'stm32f429') ? [1, 2] : []), `${chip}: CAN list matches silicon`);
     check(m.pwrEstimate() === pwr, `${chip}: pwrEstimate ${pwr} uA (clock-scaled)`);
     check(m.display.ltdc() === null, `${chip}: ltdc() null (layer off${m.chip.ltdc ? '' : ' + no silicon'})`);

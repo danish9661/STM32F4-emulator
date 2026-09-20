@@ -78,7 +78,7 @@ const CHIPS = {
     stm32f407: {
         svd: 'stm32f407.svd', flash_size: 0x100000, ram_size: 0x30000,
         maxClockMHz: 168, label: 'STM32F407 (1M/192K)', idcode: 0x413,
-        usarts: [1, 2, 3, 4, 5, 6], timers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        usarts: [1, 2, 3, 4, 5, 6, 7, 8], timers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         can: [1, 2], dac: true, ltdc: true, gpioBanks: 11, // A-K
         spi: [1, 2, 3, 4, 5, 6], i2c: [1, 2, 3], uart78: [7, 8], i2s: [2, 3], sai: [1],
         sdio: true, dcmi: true, crc: true, cryp: true, hash: true,
@@ -87,7 +87,7 @@ const CHIPS = {
     stm32f407ve: {
         svd: 'stm32f407.svd', flash_size: 0x80000, ram_size: 0x30000,
         maxClockMHz: 168, label: 'STM32F407VE/ZE (512K/192K)', idcode: 0x413,
-        usarts: [1, 2, 3, 4, 5, 6], timers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        usarts: [1, 2, 3, 4, 5, 6, 7, 8], timers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         can: [1, 2], dac: true, ltdc: true, gpioBanks: 11, // A-K
         spi: [1, 2, 3, 4, 5, 6], i2c: [1, 2, 3], uart78: [7, 8], i2s: [2, 3], sai: [1],
         sdio: true, dcmi: true, crc: true, cryp: true, hash: true,
@@ -96,7 +96,7 @@ const CHIPS = {
     stm32f429: {
         svd: 'stm32f429.svd', flash_size: 0x200000, ram_size: 0x40000,
         maxClockMHz: 180, label: 'STM32F429 (2M/256K)', idcode: 0x419,
-        usarts: [1, 2, 3, 4, 5, 6], timers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        usarts: [1, 2, 3, 4, 5, 6, 7, 8], timers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         can: [1, 2], dac: true, ltdc: true, gpioBanks: 11, // A-K
         spi: [1, 2, 3, 4, 5, 6], i2c: [1, 2, 3], uart78: [7, 8], i2s: [2, 3], sai: [1],
         sdio: true, dcmi: true, crc: true, cryp: true, hash: true,
@@ -248,12 +248,14 @@ export class GPIOPin {
     }
 }
 
-// F407 USART base addresses (SVD-verified). The model has one shared UART
-// TX buffer, but RX injection (`uart_rx_byte`) is per-base, so each USART
-// object targets its own peripheral.
+// F407 USART base addresses (SVD-verified, incl. UART7/8 on F407/F429).
+// The model has one shared UART TX buffer, but RX injection
+// (`uart_rx_byte`) is per-base, so each USART object targets its own
+// peripheral.
 const USART_BASE = {
     1: 0x40011000, 2: 0x40004400, 3: 0x40004800,
     4: 0x40004C00, 5: 0x40005000, 6: 0x40011400,
+    7: 0x40007800, 8: 0x40007C00,
 };
 
 // A USART peripheral. `onData` receives each transmitted byte; `send`/
@@ -496,16 +498,16 @@ export class STM32F4 {
             }
             return _pinFn(p, pin | 0);
         };
-        // Six USART slots; only the chip's SVD-present USARTs are live —
-        // the rest are null (F401/F411 have 1,2,6 only). TX is a single
-        // shared model buffer: only usart1._emit is fed (see execute());
-        // RX injects per-base and works on every live USART.
+        // Eight USART slots; only the chip's SVD-present USARTs are live —
+        // the rest are null (F401/F411: 1,2,6 only; F407/F429 add 3,4,5,7,8).
+        // TX is a single shared model buffer: only usart1._emit is fed (see
+        // execute()); RX injects per-base and works on every live USART.
         const mkUsart = (n) => new USART(this, n);
-        for (const n of [1, 2, 3, 4, 5, 6]) {
+        for (const n of [1, 2, 3, 4, 5, 6, 7, 8]) {
             this[`usart${n}`] = this.chip.usarts.includes(n) ? mkUsart(n) : null;
         }
         // `usart` stays the USART1 alias (existing callers); the indexed
-        // map mirrors F1's `usart: {1,2,3}` shape, extended to 6 (live only).
+        // map mirrors F1's `usart: {1,2,3}` shape, extended to 8 (live only).
         this.usart = this.usart1;
         this.usarts = {};
         for (const n of this.chip.usarts) this.usarts[n] = this[`usart${n}`];

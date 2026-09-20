@@ -128,6 +128,7 @@ export class STM32F4 {
   // Slots for absent-silicon USARTs are null (F401/F411: 3,4,5).
   readonly usart1: USART; readonly usart2: USART; readonly usart3: USART | null;
   readonly usart4: USART | null; readonly usart5: USART | null; readonly usart6: USART;
+  readonly usart7: USART | null; readonly usart8: USART | null;
   readonly usarts: Record<number, USART>;
   readonly spi1: SPI | null; readonly spi2: SPI; readonly spi3: SPI;
   readonly spi4: SPI | null; readonly spi5: SPI | null; readonly spi6: SPI | null;
