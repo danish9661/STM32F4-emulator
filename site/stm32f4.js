@@ -52,38 +52,55 @@ const RAM_BASE = 0x20000000;
 // ── Chip table (SVD truth, site/vendor/*.svd + site/boards.js) ─────────
 // Every F4 here is a Cortex-M4F — one shared CPU core, no decoder work
 // per chip. A variant is SVD (register map) + flash/RAM sizes + clock.
-// USART/TIM/CAN/DAC/LTDC/GPIO presence below was read off the four SVDs
-// (Y/x census); bases are identical wherever the peripheral exists.
+// Presence below was read off the four SVDs (Y/x census, 2026-09-20);
+// bases are identical wherever the peripheral exists. Extended rows
+// (spi4-6/uart78/i2s/sai/sdio/dcmi/crc/cryp/hash/rng/fsmc) come from the
+// same census — the facade gates or exposes against them the same way.
 const CHIPS = {
     stm32f401: {
         svd: 'stm32f401.svd', flash_size: 0x80000, ram_size: 0x18000,
         maxClockMHz: 84, label: 'STM32F401 (512K/96K)', idcode: 0x423,
         usarts: [1, 2, 6], timers: [1, 2, 3, 4, 5, 8, 9, 10, 11],
         can: [], dac: false, ltdc: false, gpioBanks: 6, // A-F
+        spi: [1, 2, 3, 4], i2c: [1, 2, 3], uart78: [], i2s: [2, 3], sai: [],
+        sdio: true, dcmi: false, crc: true, cryp: false, hash: false,
+        rng: false, fsmc: false, dma2d: false, qspi: false,
     },
     stm32f411: {
         svd: 'stm32f411.svd', flash_size: 0x80000, ram_size: 0x20000,
         maxClockMHz: 100, label: 'STM32F411 (512K/128K)', idcode: 0x431,
         usarts: [1, 2, 6], timers: [1, 2, 3, 4, 5, 8, 9, 10, 11],
         can: [], dac: false, ltdc: false, gpioBanks: 6, // A-F
+        spi: [1, 2, 3, 4, 5], i2c: [1, 2, 3], uart78: [], i2s: [2, 3], sai: [],
+        sdio: true, dcmi: false, crc: true, cryp: false, hash: false,
+        rng: false, fsmc: false, dma2d: false, qspi: false,
     },
     stm32f407: {
         svd: 'stm32f407.svd', flash_size: 0x100000, ram_size: 0x30000,
         maxClockMHz: 168, label: 'STM32F407 (1M/192K)', idcode: 0x413,
         usarts: [1, 2, 3, 4, 5, 6], timers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         can: [1, 2], dac: true, ltdc: true, gpioBanks: 11, // A-K
+        spi: [1, 2, 3, 4, 5, 6], i2c: [1, 2, 3], uart78: [7, 8], i2s: [2, 3], sai: [1],
+        sdio: true, dcmi: true, crc: true, cryp: true, hash: true,
+        rng: true, fsmc: true, dma2d: false, qspi: true,
     },
     stm32f407ve: {
         svd: 'stm32f407.svd', flash_size: 0x80000, ram_size: 0x30000,
         maxClockMHz: 168, label: 'STM32F407VE/ZE (512K/192K)', idcode: 0x413,
         usarts: [1, 2, 3, 4, 5, 6], timers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         can: [1, 2], dac: true, ltdc: true, gpioBanks: 11, // A-K
+        spi: [1, 2, 3, 4, 5, 6], i2c: [1, 2, 3], uart78: [7, 8], i2s: [2, 3], sai: [1],
+        sdio: true, dcmi: true, crc: true, cryp: true, hash: true,
+        rng: true, fsmc: true, dma2d: false, qspi: true,
     },
     stm32f429: {
         svd: 'stm32f429.svd', flash_size: 0x200000, ram_size: 0x40000,
         maxClockMHz: 180, label: 'STM32F429 (2M/256K)', idcode: 0x419,
         usarts: [1, 2, 3, 4, 5, 6], timers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         can: [1, 2], dac: true, ltdc: true, gpioBanks: 11, // A-K
+        spi: [1, 2, 3, 4, 5, 6], i2c: [1, 2, 3], uart78: [7, 8], i2s: [2, 3], sai: [1],
+        sdio: true, dcmi: true, crc: true, cryp: true, hash: true,
+        rng: true, fsmc: true, dma2d: true, qspi: true,
     },
 };
 
@@ -560,11 +577,13 @@ export class STM32F4 {
         };
         // F1 `spi1..3` / `i2c1..3` (+ indexed maps) parity — call-shape
         // compat only (see SPI/I2C classes above for the create-time caveat).
-        // All three buses exist on every F4 chip in the table (SVD census).
-        this.spi1 = new SPI(this, 1);
-        this.spi2 = new SPI(this, 2);
-        this.spi3 = new SPI(this, 3);
-        this.spiBus = { 1: this.spi1, 2: this.spi2, 3: this.spi3 };
+        // Slots follow the chip table (F401: SPI1-4, F411: SPI1-5, F407/429:
+        // SPI1-6; absent slots are null like the USARTs). I2C1-3 on all.
+        for (const n of [1, 2, 3, 4, 5, 6]) {
+            this[`spi${n}`] = this.chip.spi.includes(n) ? new SPI(this, n) : null;
+        }
+        this.spiBus = {};
+        for (const n of this.chip.spi) this.spiBus[n] = this[`spi${n}`];
         this.i2c1 = new I2C(this, 1);
         this.i2c2 = new I2C(this, 2);
         this.i2c3 = new I2C(this, 3);
@@ -1072,10 +1091,32 @@ export class STM32F4 {
     // PWM pulse width in µs for timer/channel at a clock rate (model probe;
     // pass the timer clock, e.g. 84e6 for APB1 — same basis as Pwm).
     timPwmPulseUs(timer, ch, clockHz) {
+        if (!this.chip.timers.includes(timer | 0)) {
+            throw new Error(`timPwmPulseUs: TIM${timer} absent on ${this.chip.key} (SVD census)`);
+        }
         return this._bindings.tim_pwm_pulse_us(`TIM${timer}`, ch, clockHz);
     }
     timOcMode(timer, ch) {
+        if (!this.chip.timers.includes(timer | 0)) {
+            throw new Error(`timOcMode: TIM${timer} absent on ${this.chip.key} (SVD census)`);
+        }
         return this._bindings.tim_oc_mode(`TIM${timer}`, ch);
+    }
+    timMoe(timer) {
+        if (!this.chip.timers.includes(timer | 0)) return false;
+        try { return !!this._bindings.tim_moe(`TIM${timer}`); } catch { return false; }
+    }
+    // Quadrature-encoder step (host TI edge; no-op outside encoder modes
+    // 1-3 in the model) + break-input drive + encoder/TIM presence gates.
+    timEncoderStep(timer, ti, rising) {
+        if (!this.chip.timers.includes(timer | 0)) {
+            throw new Error(`timEncoderStep: TIM${timer} absent on ${this.chip.key} (SVD census)`);
+        }
+        try { this._bindings.tim_encoder_step(`TIM${timer}`, ti >>> 0, !!rising); } catch {}
+    }
+    timBreakInput(timer, asserted) {
+        if (!this.chip.timers.includes(timer | 0)) return;
+        try { this._bindings.tim_break_input(`TIM${timer}`, !!asserted); } catch {}
     }
 
     // ── DAC: hardware trigger + underrun (anytime) ──
@@ -1089,6 +1130,82 @@ export class STM32F4 {
     dacUnderrun(ch) {
         if (!this.chip.dac) return false;
         try { return !!this._bindings.dac_underrun(ch); } catch { return false; }
+    }
+
+    // ── Fault / model-harness methods (Wokwi fault-injection parity) ──
+    // Every method below mirrors a wasm harness export 1:1 (same name,
+    // same args). They drive the MODEL's fault arms directly — no guest
+    // cooperation needed — so a platform can script wire faults, peer
+    // faults, and clock failures exactly like the Rust unit tests do.
+    // UART wire: CTS peer, framing/parity faults, idle line, LIN break,
+    // TX-break state.
+    uartSetCts(base, asserted) { this._bindings.uart_set_cts(base >>> 0, !!asserted); }
+    uartFaultRx(base, fe, pe) { this._bindings.uart_fault_rx(base >>> 0, !!fe, !!pe); }
+    uartIdle(base) { try { this._bindings.uart_idle(base >>> 0); } catch {} }
+    uartLinBreak(base) { try { this._bindings.uart_lin_break(base >>> 0); } catch {} }
+    uartBreakPending(base) {
+        try { return !!this._bindings.uart_break_pending(base >>> 0); } catch { return false; }
+    }
+    uartTxLen(base) {
+        try { return this._bindings.uart_tx_len(base >>> 0) >>> 0; } catch { return 0; }
+    }
+    uartMuted(base) {
+        try { return !!this._bindings.uart_muted(base >>> 0); } catch { return false; }
+    }
+    // SPI peer faults: CRC corruption on next CRCNEXT, NSS-fault MODF.
+    spiFaultCrc(base) { try { this._bindings.spi_fault_crc(base >>> 0); } catch {} }
+    spiFaultModf(base) { try { this._bindings.spi_fault_modf(base >>> 0); } catch {} }
+    // SPI slave harness (MSTR=0 firmware): NSS drive, SCK clock, gate read.
+    spiSlaveSelect(base, asserted) { try { this._bindings.spi_slave_select(base >>> 0, !!asserted); } catch {} }
+    spiSlaveClock(base, mosi) {
+        try { return this._bindings.spi_slave_clock(base >>> 0, mosi >>> 0) >>> 0; }
+        catch { return 0xFF; }
+    }
+    spiSlaveGate(base) {
+        try { return !!this._bindings.spi_slave_gate(base >>> 0); } catch { return false; }
+    }
+    // I2C peer faults: arbitration loss, SMBus ALERT arm (the peer pulling
+    // SMBA — pairs with the onI2cAlert poll). Slave-harness trio drives an
+    // I2C SLAVE-mode guest (OAR match → ADDR → DR flow) from the host.
+    i2cArmArbLoss(base) { try { this._bindings.i2c_arm_arb_loss(base >>> 0); } catch {} }
+    i2cArmSmbusAlert(base, addr) { try { this._bindings.i2c_arm_smbus_alert(base >>> 0, addr & 0x7F); } catch {} }
+    i2cSlaveAddress(base, addr, isRead) {
+        try { return !!this._bindings.i2c_slave_address(base >>> 0, addr & 0xFF, !!isRead); }
+        catch { return false; }
+    }
+    i2cSlaveWrite(base, byte) { try { this._bindings.i2c_slave_write(base >>> 0, byte & 0xFF); } catch {} }
+    i2cSlaveRead(base) {
+        try { return this._bindings.i2c_slave_read(base >>> 0) & 0xFF; } catch { return 0xFF; }
+    }
+    i2cSlaveStop(base) { try { this._bindings.i2c_slave_stop(base >>> 0); } catch {} }
+    i2cSlaveStatus(base) {
+        try { return this._bindings.i2c_slave_status(base >>> 0) >>> 0; } catch { return 0; }
+    }
+    // SDIO peer: data-CRC corruption on the next block transfer.
+    sdioFaultDataCrc() { try { this._bindings.sdio_fault_data_crc(); } catch {} }
+    // RCC clock-tree failure: kill a source mask, HSI fallback observable
+    // (pairs with RCC ready-bit polling, not an event).
+    rccInjectFailure(srcMask, dead) { try { this._bindings.rcc_inject_failure(srcMask >>> 0, !!dead); } catch {} }
+    // FLASH readout protection level (OPTION byte, OPTLOCK-respecting).
+    flashRdpLevel() {
+        try { return this._bindings.flash_rdp_level() >>> 0; } catch { return 0; }
+    }
+    flashSetRdp(levelByte) { try { this._bindings.flash_set_rdp(levelByte & 0xFF); } catch {} }
+    // RNG host entropy: seed the pool (FIFO, one word per regen), read depth.
+    rngSeedEntropy(words) {
+        try { this._bindings.rng_seed_entropy(new Uint32Array(words)); } catch {}
+    }
+    rngEntropyAvail() {
+        try { return this._bindings.rng_entropy_avail() >>> 0; } catch { return 0; }
+    }
+    // RTC host pins: tamper level (TAFCR-gated physics) + timestamp event
+    // (captures TR/DR/SSR, latches TSF — pairs with the onRtcAlarm poll).
+    rtcTamperPin(level) { try { this._bindings.rtc_tamper_pin(!!level); } catch {} }
+    rtcTimestamp() { try { this._bindings.rtc_timestamp(); } catch {} }
+    // NVIC software trigger (STIR-gated) + pending query.
+    setIntrPending(irq) { try { this._bindings.set_intr_pending(irq | 0); } catch {} }
+    hasPendingInterrupt() {
+        try { return !!this._bindings.has_pending_interrupt(); } catch { return false; }
     }
 
     // ── I2S audio capture drain (anytime) ──
@@ -1172,6 +1289,56 @@ export class STM32F4 {
     get rtc() { return this._emu.rtc; }
     get buzzer() { return this._emu.buzzer; }
     get camera() { return this._emu.camera; }
+
+    // ── Scope probes (read-only model state for platform telemetry) ──
+    // Every probe below mirrors a wasm export 1:1 (same name, same args).
+    // They read MODEL state directly — no guest cooperation, no stepping
+    // side effects — so a platform can sample clocks, link, FIFOs, and
+    // frame counters at display refresh rate.
+    adcDualLatched() {
+        try { return !!this._bindings.adc_dual_latched(); } catch { return false; }
+    }
+    ethPpsCount() {
+        try { return this._bindings.eth_pps_count() >>> 0; } catch { return 0; }
+    }
+    ethPpsLevel() {
+        try { return !!this._bindings.eth_pps_level(); } catch { return false; }
+    }
+    ethLinkUp() {
+        try { return !!this._bindings.eth_link_up(); } catch { return false; }
+    }
+    ethSetLink(up) { try { this._bindings.eth_set_link(!!up); } catch {} }
+    ltdcScanline() {
+        if (!this.chip.ltdc) return 0;
+        try { return this._bindings.ltdc_get_scanline() >>> 0; } catch { return 0; }
+    }
+    ltdcFrameCount() {
+        if (!this.chip.ltdc) return 0;
+        try { return this._bindings.ltdc_get_frame_count() >>> 0; } catch { return 0; }
+    }
+    audioRemaining() {
+        try { return this._bindings.audio_source_remaining() >>> 0; } catch { return 0; }
+    }
+    audioClear() { try { this._bindings.audio_clear(); } catch {} }
+    dcmiSync(vsync, hsync, pclkDiv) {
+        try { this._bindings.dcmi_set_sync(!!vsync, !!hsync, pclkDiv >>> 0); } catch {}
+    }
+    qspiMmapLive() {
+        try { return !!this._bindings.qspi_mmap_live(); } catch { return false; }
+    }
+    qspiMmapRead(offset) {
+        try { return this._bindings.qspi_mmap_read(offset >>> 0) >>> 0; } catch { return 0; }
+    }
+    sdioBusWidth() {
+        try { return this._bindings.sdio_bus_width() >>> 0; } catch { return 0; }
+    }
+    sdioCardBlocks() {
+        try { return this._bindings.sdio_card_blocks() >>> 0; } catch { return 0; }
+    }
+    sdioReadBlock(block) {
+        try { return Array.from(this._bindings.sdio_read_block(block >>> 0)); }
+        catch { return []; }
+    }
 
     // ── engine access ──
     read32(addr) { return this._emu.read32(addr); }

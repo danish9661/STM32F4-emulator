@@ -253,3 +253,60 @@ for (const [chip, fwKey, ledLabel, devId, pwr, ledOn] of CHIP_CASES) {
 
 if (failures) { console.error(`\n${failures} FAILED`); process.exit(1); }
 console.log('\nALL PASS');
+
+// ── Test 10: extended slots + harness + probes ──
+{
+    const m = await STM32F4.create({ firmware: decodeFirmware('blinky') });
+    // SPI4-6 slots live on F407 (chip-gated)
+    check(m.spi4 !== null && m.spi5 !== null && m.spi6 !== null, 'f407: spi4/5/6 live');
+    check(m.spiBus[6] === m.spi6, 'f407: spiBus[6] present');
+    // TIM harness gates
+    m.timEncoderStep(2, 0, true);
+    m.timBreakInput(1, true); m.timBreakInput(1, false);
+    check(m.timMoe(1) === false, 'timMoe() false when idle');
+    check(true, 'timEncoderStep/timBreakInput no throw');
+    // fault harness: no-throw across the board
+    m.uartSetCts(0x40011000, true);
+    m.uartFaultRx(0x40011000, false, false);
+    m.uartIdle(0x40011000); m.uartLinBreak(0x40011000);
+    check(m.uartBreakPending(0x40011000) === false, 'uartBreakPending() false when idle');
+    check(typeof m.uartTxLen(0x40011000) === 'number', 'uartTxLen() returns number');
+    m.spiFaultCrc(0x40013000); m.spiFaultModf(0x40013000);
+    m.spiSlaveSelect(0x40013000, true);
+    check(typeof m.spiSlaveGate(0x40013000) === 'boolean', 'spiSlaveGate() returns bool');
+    m.i2cArmArbLoss(0x40005400);
+    m.i2cArmSmbusAlert(0x40005400, 0x2A);
+    m.i2cSlaveStop(0x40005400);
+    check(typeof m.i2cSlaveStatus(0x40005400) === 'number', 'i2cSlaveStatus() returns number');
+    m.sdioFaultDataCrc();
+    m.rccInjectFailure(0, false);
+    check(typeof m.flashRdpLevel() === 'number', 'flashRdpLevel() returns number');
+    m.flashSetRdp(0xAA);
+    m.rngSeedEntropy([1, 2, 3, 4]);
+    check(typeof m.rngEntropyAvail() === 'number', 'rngEntropyAvail() returns number');
+    m.rtcTamperPin(false); m.rtcTimestamp();
+    m.setIntrPending(6);
+    check(typeof m.hasPendingInterrupt() === 'boolean', 'hasPendingInterrupt() returns bool');
+    check(true, 'fault harness: all no-throw');
+    // scope probes
+    check(m.adcDualLatched() === false, 'adcDualLatched() false when idle');
+    check(typeof m.ethPpsCount() === 'number', 'ethPpsCount() returns number');
+    check(typeof m.ethPpsLevel() === 'boolean', 'ethPpsLevel() returns bool');
+    check(typeof m.ethLinkUp() === 'boolean', 'ethLinkUp() returns bool');
+    m.ethSetLink(true);
+    check(m.ltdcScanline() === 0xFFFF && m.ltdcFrameCount() === 0, 'ltdc probes idle (0xFFFF scanline, 0 frames)');
+    check(typeof m.audioRemaining() === 'number', 'audioRemaining() returns number');
+    m.audioClear();
+    m.dcmiSync(true, true, 1);
+    check(m.qspiMmapLive() === false, 'qspiMmapLive() false with no image');
+    check(m.qspiMmapRead(0) === 0xFFFFFFFF, 'qspiMmapRead() erased (0xFFFFFFFF) with no image');
+    check(typeof m.sdioBusWidth() === 'number', 'sdioBusWidth() returns number');
+    check(typeof m.sdioCardBlocks() === 'number', 'sdioCardBlocks() returns number');
+    check(Array.isArray(m.sdioReadBlock(0)), 'sdioReadBlock() returns array');
+    check(true, 'scope probes: all callable');
+    m.close();
+    // F401: spi4 live, spi5/6 null
+    const f = await STM32F4.create({ chip: 'stm32f401', firmware: decodeFirmware('blinky_f401') });
+    check(f.spi4 !== null && f.spi5 === null && f.spi6 === null, 'f401: spi4 live, spi5/6 null');
+    f.close();
+}

@@ -188,6 +188,26 @@ dependency — works headless):
   edge-case contract), `periphRead/periphWrite`, `getPc/getSp`,
   `faultInfo/takeFault`, `setSymbols/resolveSymbol` (pure-JS map symbols).
 
+## Fault harness + scope probes (platform scripting)
+
+1:1 mirrors of the wasm harness exports (same names, same args) — drive
+fault arms with no guest cooperation:
+
+- UART: `uartSetCts/uartFaultRx/uartIdle/uartLinBreak/uartBreakPending/
+  uartTxLen/uartMuted` (per-base).
+- SPI: `spiFaultCrc/spiFaultModf/spiSlaveSelect/spiSlaveClock/spiSlaveGate`.
+- I2C: `i2cArmArbLoss/i2cArmSmbusAlert` + `i2cSlaveAddress/Write/Read/
+  Stop/Status` (slave-mode guest harness).
+- TIM: `timMoe/timEncoderStep/timBreakInput` (+ gated `timPwmPulseUs/
+  timOcMode/timInjectCapture`).
+- Misc: `sdioFaultDataCrc`, `rccInjectFailure`, `flashRdpLevel/
+  flashSetRdp`, `rngSeedEntropy/rngEntropyAvail`, `rtcTamperPin/
+  rtcTimestamp`, `setIntrPending/hasPendingInterrupt`.
+- Scope probes (read-only): `adcDualLatched`, `ethPpsCount/ethPpsLevel/
+  ethLinkUp/ethSetLink`, `ltdcScanline/ltdcFrameCount` (LTDC-gated),
+  `audioRemaining/audioClear`, `dcmiSync`, `qspiMmapLive/qspiMmapRead`,
+  `sdioBusWidth/sdioCardBlocks/sdioReadBlock`.
+
 ## Tests
 
 `site/test_stm32f4_api.mjs` (factories, GPIO/USART, result shapes, symbols,
@@ -202,11 +222,21 @@ Bases are identical wherever the peripheral exists; presence differs:
 |---|---|---|---|---|---|
 | USART1/2/6 | ✅ | ✅ | ✅ | ✅ | live slots |
 | USART3/UART4/UART5 | ❌ | ❌ | ✅ | ✅ | `null` slots on F401/F411 |
-| SPI1/2/3, I2C1/2/3 | ✅ | ✅ | ✅ | ✅ | always live |
+| SPI1/2/3 | ✅ | ✅ | ✅ | ✅ | always live |
+| SPI4 | ✅ | ✅ | ✅ | ✅ | live slots (chip-gated) |
+| SPI5 | ❌ | ✅ | ✅ | ✅ | `null` on F401 |
+| SPI6 | ❌ | ❌ | ✅ | ✅ | `null` on F401/F411 |
+| I2C1/2/3 | ✅ | ✅ | ✅ | ✅ | always live |
+| UART7/8, I2S2/3ext | ❌/✅ | ❌/✅ | ✅ | ✅ | model-level only (no facade slot; use `periphRead`) |
+| SAI1 | ❌ | ❌ | ✅(SAI1) | ✅(SAI) | model-level only |
 | TIM1-5,8-11 | ✅ | ✅ | ✅ | ✅ | polled |
 | TIM6/7/12/13/14 | ❌ | ❌ | ✅ | ✅ | skipped in TIM poll on F401/F411 |
 | DMA1/DMA2, EXTI, PWR, RTC, IWDG, WWDG, ADC1, FLASH, SYSCFG | ✅ | ✅ | ✅ | ✅ | always live |
 | CAN1/CAN2 | ❌ | ❌ | ✅ | ✅ | polls iterate `chip.can` (empty = skip) |
 | DAC, LTDC | ❌ | ❌ | ✅ | ✅ | `ltdc()` null without silicon |
 | GPIO | A-F | A-F | A-K | A-K | `gpio.pin()` rejects past-bank pins |
-| USB | FS | FS | FS+HS | FS+HS | via `usb_*` exports (all chips) |
+| USB | FS | FS | FS+HS | FS+HS | `usb_*` FS all chips; `usbHs*` F407/F429 window |
+| SDIO, CRC | ✅ | ✅ | ✅ | ✅ | harness methods live on all chips |
+| DCMI, CRYP, HASH, RNG, FSMC | ❌ | ❌ | ✅ | ✅ | methods live (model boots the block regardless) |
+| DMA2D | ❌ | ❌ | ❌ | ✅ | `chip.dma2d` presence flag |
+| QSPI | — | — | — | — | model extension (no SVD): `qspiImage` binds on all chips |
