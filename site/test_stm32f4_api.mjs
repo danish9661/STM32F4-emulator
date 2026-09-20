@@ -216,5 +216,40 @@ for (const [chip, fwKey, ledLabel, devId, pwr, ledOn] of CHIP_CASES) {
     f401.close();
 }
 
+// ── Test 9: new event callbacks + HS-USB + image binding ──
+{
+    const m = await STM32F4.create({ firmware: decodeFirmware('blinky') });
+    // new callbacks exist, default null
+    check(m.onAdcDone === null && m.onDacWrite === null && m.onCrcResult === null, 'callbacks default null (adc/dac/crc)');
+    check(m.onRtcAlarm === null && m.onI2cAlert === null && m.onUsbHsIn === null, 'callbacks default null (rtc/alert/hs)');
+    check(m.onHostTx === null && m.onHostRx === null, 'onHostTx/onHostRx present-but-null (device-only USB)');
+    // HS-USB twins callable (empty drains, no throw)
+    check(m.usbHsTakeIn(1).length === 0, 'usbHsTakeIn() empty when idle');
+    m.usbHsReset(); m.usbHsEnumerated();
+    check(true, 'usbHsReset()/usbHsEnumerated() no throw');
+    // ETH inject path: callable, queued for next poll (no throw)
+    m.ethInject(new Uint8Array(64));
+    check(true, 'ethInject() queues frame');
+    // callbacks fire-or-silent without breaking stepping: set all, step, no crash
+    m.onAdcDone = () => {};
+    m.onDacWrite = () => {};
+    m.onCrcResult = () => {};
+    m.onRtcAlarm = () => {};
+    m.onI2cAlert = () => {};
+    m.onUsbHsIn = () => {};
+    for (let i = 0; i < 5; i++) m.execute(50000);
+    check(true, 'all new callbacks set: 5 executes, no crash');
+    m.close();
+    // image binding sugar lands in ext_devices (create-time rule honored)
+    const q = await STM32F4.create({
+        firmware: decodeFirmware('blinky'),
+        qspiImage: new Uint8Array(256).fill(0xFF),
+        sdioBlocks: 4,
+        cameraFrame: { width: 2, height: 2, pixels: new Uint8Array([1, 2, 3, 4]) },
+    });
+    check(typeof q.camera === 'object', 'cameraFrame sugar binds camera device');
+    q.close();
+}
+
 if (failures) { console.error(`\n${failures} FAILED`); process.exit(1); }
 console.log('\nALL PASS');

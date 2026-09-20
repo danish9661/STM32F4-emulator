@@ -97,12 +97,19 @@ breaks stepping.
 | `onDmaTc(controller,stream)` | DMA LISR/HISR TCIF newly set | `controller` 1\|2, `stream` 0-7. |
 | `onWdogReset(which)` | IWDG/2 latch flags | 1=IWDG, 2=WWDG (F1 parity). |
 | `onUsbIn(ep,data)` | `usb_take_in` drain | Non-destructive when empty. |
+| `onUsbHsIn(ep,data)` | `usb_hs_take_in` drain | HS window (F407/F429 only). |
 | `onItmByte(port,byte)` | `itm_take_port` drain | Firmware `printf` path. |
 | `onFsmcAccess(bank,off,write,size,val)` | FSMC bank tap drain | Needs `ext_devices.fsmcDevices` at create (same rule as SPI). |
+| `onAdcDone(adc,chan,value)` | ADC SR EOC/JEOC newly set | `chan` from SQR3 SQ1 (`0x100` bit = injected group). Non-consuming SR read; value peeked from DR. Guest-paced limit: single-shot firmware that consumes EOC between polls may never show EOC set — CONT/DMA/injected/fine steps always report. |
+| `onDacWrite(chan,value)` | DAC DOR newly changed | DOR IS the pin value. Gated on DAC silicon (never fires on F401/F411). |
+| `onCrcResult(value)` | CRC DR newly changed | Write-accumulate + CR-reset edges. |
+| `onRtcAlarm(which)` | RTC ISR newly set | 0=A, 1=B, 2=wakeup (WUTF), 3=timestamp. Non-consuming ISR read. Tamper (TAMP1F) is NOT reported — enable TAMP1E + drive via `rtc_tamper_pin`. |
+| `onI2cAlert(peripheral,asserted)` | I2C SR1 SMBALERT edge | Armed via `i2c_arm_smbus_alert` (peer pulling SMBA). |
 
-Deliberately absent (no model source — a fake event would be worse than
-none): `onAdcDone`/`onDacWrite`/`onCrcResult`/`onRtcAlarm`/`onHostTx`/
-`onHostRx`/`onI2cAlert`. Poll `read32()` or use the bus taps instead.
+Absent (no model source — the model is a USB *device*, no host channels
+exist): `onHostTx`/`onHostRx` exist as never-firing F1-shape placeholders.
+Host-driven traffic uses the methods below instead (`usbInject*`/
+`usbTakeIn`, `ethInject` + create-time `onTx`).
 
 ## Live injection + device views (platform driving)
 
@@ -120,7 +127,16 @@ throw on F401/F411 instead of sinking into benign-0 holes):
 - DAC: `dacTrigger(ch, src, dmaStaged?)`, `dacUnderrun(ch)`.
 - Audio: `takeSpeakerSamples()` (Float32 drain of the I2S capture FIFO).
 - USB FS: `usbInjectSetup(bytes)`, `usbInjectOut(ep, bytes)`,
-  `usbTakeIn(ep)`, `usbReset()`, `usbEnumerated()`.
+  `usbTakeIn(ep)`, `usbReset()`, `usbEnumerated()`; HS twins
+  `usbHsInjectSetup/usbHsInjectOut/usbHsTakeIn/usbHsReset/usbHsEnumerated`
+  (F407/F429-only window).
+- ETH: TX captured by the create-time `onTx(frame, meta)` tap (no
+  post-create hook — the MAC emits TX polls, not events);
+  `ethInject(frame)` drives RX (netsim/gateway/pcap path).
+- QSPI/SDIO/DCMI images bind at create (same rule as SPI taps — the model
+  clones at construction): `ext_devices.qspi` (or `qspiImage` sugar),
+  `ext_devices.sdio` (or `sdioBlocks` sugar), `ext_devices.camera` (or
+  `cameraFrame` sugar).
 - ITM: `takeItm(port)`, `itmPending(port)` (firmware `printf` path).
 - FSMC: `takeFsmc(bank)`, `pushFsmc(bank, values)` (needs
   `ext_devices.fsmcDevices` at create — same rule as SPI).

@@ -17,10 +17,16 @@
 // - SPI/I2C stay create-time specs (taps snapshot at init — post-create
 //   callback assignment like F1's spi[ch].onTransfer is impossible without a
 //   Rust rescan; a silent no-fire shim would be worse than the explicit opt).
-// - Polled top-level callbacks (onExtiEdge/onCanTx/...) dispatch from
-//   model-readable registers once per execute()/step() — the F4 model has
-//   no core event queue (no drainEvents). Polls skip absent-silicon
-//   addresses (CAN on F401/F411, missing TIMs) — reads are benign-0.
+        // - Polled top-level callbacks (onExtiEdge/onCanTx/onAdcDone/...)
+        //   dispatch from model-readable registers once per
+        //   execute()/step() — the F4 model has no core event queue (no
+        //   drainEvents). Polls skip absent-silicon addresses (CAN on
+        //   F401/F411, missing TIMs) — reads are benign-0.
+        // - Host-driven peripherals (USB device, ETH wire) are harness-style
+        //   methods, not callbacks: usbInject*/usbTakeIn, ethInject + the
+        //   create-time onTx tap. The model is a USB DEVICE (no host
+        //   channels) and the ETH MAC emits TX polls the driver captures —
+        //   onHostTx/onHostRx exist as never-firing F1-shape placeholders.
 // - Symbol/SWD/JTAG/pwr/js-peripheral helpers are JS-side; the model has
 //   no DP/MEM-AP/calibrated-current/hook-table, so behavior is documented
 //   shims (live file/IDCODE/PWR_CR reads where a source exists).
@@ -321,7 +327,14 @@ export class DMAController {
 // USB OTG_FS GOTGINT @+0x04 (SEDET bit2), GINTSTS @+0x14 (USBRST bit12,
 // ENUMDNE bit13, RXFLVL bit4, IEPINT bit18, OEPINT bit19); ITM STIM0-31
 // @0xE0000000+n*4 ( drained, no peek needed — take is non-destructive
-// when empty).
+// when empty). ADC1/2/3 SR @base+0x00 (EOC bit1, JEOC bit2, AWD bit0,
+// OVR bit5 — latched result flags, cleared by DR/JDR reads, NOT by SR
+// reads, so the poll is non-destructive); DR @base+0x4C. DAC DOR1/DOR2
+// @0x4000742C/0x30 (read-only sink value = what the pin carries). CRC DR
+// @0x40023000 (read = live accumulated result). RTC ISR @0x4000280C
+// (ALRAF bit8, ALRBF bit9, WUTF bit10, TSF bit11, TSOVF bit12, TAMP1F
+// bit13 — the ISR write path stores, so the poll never clears). I2C
+// SR1 @base+0x14 (SMBALERT bit15).
 const EXTI_BASE = 0x40013C00, EXTI_PR = 0x14;
 const CAN_BASE = { 1: 0x40006400, 2: 0x40006800 };
 const TIM_BASE = {
@@ -333,6 +346,11 @@ const TIM_BASE = {
 const DMA_BASE = { 1: 0x40026000, 2: 0x40026400 };
 const USB_FS_BASE = 0x50000000;
 const ITM_STIM0 = 0xE0000000;
+const ADC_BASE = { 1: 0x40012000, 2: 0x40012100, 3: 0x40012200 };
+const DAC_BASE = 0x40007400;
+const CRC_BASE = 0x40023000;
+const RTC_BASE = 0x40002800;
+const I2C_BASE = { 1: 0x40005400, 2: 0x40005800, 3: 0x40005C00 };
 
 // ── Platform display surface ("DRM" — dumb raster manager) ─────────────
 // Wokwi/OpenHW/Velxio render virtual screens from raw framebuffers; the F4
@@ -492,12 +510,22 @@ export class STM32F4 {
         // - onWdogReset(which): IWDG(1)/WWDG(2) reset flag newly set
         //   (1=IWDG, 2=WWDG — F1 `which` parity).
         // - onUsbIn(ep,data): USB OTG_FS IN-complete (usb_take_in drains).
+        // - onUsbHsIn(ep,data): USB OTG_HS IN-complete (usb_hs_take_in).
         // - onItmByte(port,byte): ITM STIM port drain (printf path).
         // - onFsmcAccess(bank,off,write,size,val): FSMC bank tap drain
         //   (requires ext_devices.fsmcDevices at create — same rule as SPI).
-        // Stubs with NO model source stay absent: onAdcDone/onDacWrite/
-        // onCrcResult/onRtcAlarm/onHostTx/onHostRx/onI2cAlert (use read32/
-        // polling or the bus taps; a fake event would be worse than none).
+        // - onAdcDone(adc,chan,value): ADC SR EOC newly set (non-consuming
+        //   SR read; value sampled from DR WITHOUT consuming EOC — the DR
+        //   read is the guest's to make, like silicon).
+        // - onDacWrite(chan,value): DAC DOR newly changed since last poll
+        //   (DOR readback IS the pin value — no analog layer exists).
+        // - onCrcResult(value): CRC DR newly changed since last poll.
+        // - onRtcAlarm(which): RTC ISR ALRAF/ALRBF/WUTF/TSF newly set
+        //   (which 0=A, 1=B, 2=wakeup, 3=timestamp; non-consuming ISR read).
+        // - onI2cAlert(peripheral,asserted): I2C SR1 SMBALERT newly set.
+        // Absent (no model source — device-only USB model): onHostTx/
+        // onHostRx (the model is a USB DEVICE; there is no host-channel
+        // layer to dispatch from — see the header note).
         this.onExtiEdge = null;
         this.onCanTx = null;
         this.onCanRx = null;
@@ -506,12 +534,25 @@ export class STM32F4 {
         this.onDmaTc = null;
         this.onWdogReset = null;
         this.onUsbIn = null;
+        this.onUsbHsIn = null;
         this.onItmByte = null;
         this.onFsmcAccess = null;
+        this.onAdcDone = null;
+        this.onDacWrite = null;
+        this.onCrcResult = null;
+        this.onRtcAlarm = null;
+        this.onI2cAlert = null;
+        // ETH: TX goes through onTx at createEmulator (wire tap); RX comes
+        // in via ethInject (netsim/gateway/pcap path). onHostTx/onHostRx
+        // are never-firing F1-shape placeholders (no host channels exist).
+        this.onHostTx = null; // never fires (device-only USB — see above)
+        this.onHostRx = null; // never fires (device-only USB — see above)
         this._evLast = {
             extiPr: 0, canTsr: { 1: 0, 2: 0 }, canFmp: { 1: [0, 0], 2: [0, 0] },
             timSr: {}, dmaLisr: { 1: 0, 2: 0 },
             wdog: 0, usbIn: {},
+            adcSr: { 1: 0, 2: 0, 3: 0 }, dacDor: [null, null], crcDr: null,
+            rtcIsr: 0, i2cSr1: { 1: 0, 2: 0, 3: 0 },
         };
         this.dma = {
             stream: (index) => new DMAStream(this, index),
@@ -586,6 +627,34 @@ export class STM32F4 {
         }
         ext_devices.spiDevices = spiDevs;
         ext_devices.i2cDevices = i2cDevs;
+        // Image-backed devices ride ext_devices straight through to
+        // createEmulator (create-time binding — same rule as the SPI/I2C
+        // taps: the model clones/binds at construction, never rescans):
+        // - qspi: `qspi: 'name'` passthrough — emulator.js binds via
+        //   qspi_register_flash BEFORE init_svd (QUADSPI clones at
+        //   construction). Shorthand data/size accepted here.
+        // - sdio: `sdio: {blocks}` passthrough (binds AFTER init; the
+        //   model boots cardless like silicon boots slot-empty).
+        // - camera: `camera: {width,height,pixels|frame}` passthrough —
+        //   the DCMI sensor source (frames fed per step + feed() anytime).
+        // Facade sugar (optional, all land in ext_devices):
+        // - qspiImage: Uint8Array (or {data,size,peripheral}) → ext_devices.qspi
+        // - sdioBlocks: N → ext_devices.sdio.blocks
+        // - cameraFrame: {width,height,pixels} → ext_devices.camera
+        if (opts.qspiImage !== undefined && !ext_devices.qspi) {
+            const q = opts.qspiImage;
+            ext_devices.qspi = Array.isArray(q) || q instanceof Uint8Array
+                ? [{ peripheral: 'QUADSPI', data: new Uint8Array(q) }]
+                : [{ peripheral: (q && q.peripheral) || 'QUADSPI',
+                     data: (q && q.data) ? new Uint8Array(q.data) : undefined,
+                     size: (q && q.size) || 256 }];
+        }
+        if (opts.sdioBlocks !== undefined && !ext_devices.sdio) {
+            ext_devices.sdio = { blocks: opts.sdioBlocks >>> 0 || 4 };
+        }
+        if (opts.cameraFrame !== undefined && !ext_devices.camera) {
+            ext_devices.camera = opts.cameraFrame;
+        }
         // Chip-resolved emulator sizing + SVD + map identity. Explicit opts
         // win (a caller passing svdXml/flash_size overrides the table); the
         // default SVD text is loaded per chip here so `chip` alone is
@@ -787,12 +856,23 @@ export class STM32F4 {
             if (fresh & 2) { try { this.onWdogReset(2); } catch {} }
         }
         // USB IN-complete: drain per-EP IN blobs (non-destructive when empty).
+        // FS (all chips) + HS twins (F407/F429 only — the HS window is a
+        // separate model instance; on F401/F411 the HS take drains empty).
         if (this.onUsbIn && B && typeof B.usb_take_in === 'function') {
             for (let ep = 0; ep < 4; ep++) {
                 let blob = null;
                 try { blob = B.usb_take_in(ep); } catch { blob = null; }
                 if (blob && blob.length) {
                     try { this.onUsbIn(ep, Array.from(blob)); } catch {}
+                }
+            }
+        }
+        if (this.onUsbHsIn && B && typeof B.usb_hs_take_in === 'function') {
+            for (let ep = 0; ep < 4; ep++) {
+                let blob = null;
+                try { blob = B.usb_hs_take_in(ep); } catch { blob = null; }
+                if (blob && blob.length) {
+                    try { this.onUsbHsIn(ep, Array.from(blob)); } catch {}
                 }
             }
         }
@@ -826,6 +906,86 @@ export class STM32F4 {
                 }
             }
         }
+        // ADC conversion-done: SR EOC (bit1) / JEOC (bit2) newly set per
+        // ADC. SR reads are NON-consuming for result flags (only STRT/JSTRT
+        // strobes clear on SR read), so the poll never eats a sample; the
+        // value is peeked from DR (a DR read WOULD consume EOC, so the poll
+        // must not do it — the guest's own DR read completes the cycle).
+        // ADC1/2/3 exist on all four chips (SVD census).
+        // GUEST-PACED LIMIT (documented, not a bug): single-shot firmware
+        // (adc_demo) consumes EOC via its own DR read between polls, so a
+        // coarse execute() cadence may never observe EOC set — the callback
+        // fires when the poll lands inside the EOC window (CONT mode,
+        // injected group, or fine steps). Continuous/DMA firmware always
+        // reports.
+        if (this.onAdcDone) {
+            for (const adc of [1, 2, 3]) {
+                const sr = this._evRead(ADC_BASE[adc]) & 0x27;
+                const last = L.adcSr[adc] || 0;
+                const newly = sr & ~last;
+                L.adcSr[adc] = sr;
+                if (newly & (1 << 1)) {
+                    const val = this._evRead(ADC_BASE[adc] + 0x4C) & 0xFFFF;
+                    try { this.onAdcDone(adc, this._adcChan(adc), val); } catch {}
+                }
+                if (newly & (1 << 2)) {
+                    const val = this._evRead(ADC_BASE[adc] + 0x4C) & 0xFFFF;
+                    try { this.onAdcDone(adc, this._adcChan(adc) | 0x100, val); } catch {}
+                }
+            }
+        }
+        // DAC output write: DOR1/DOR2 newly changed (DOR readback IS the
+        // pin value — no analog layer exists). Gated on DAC silicon
+        // (F401/F411: DOR reads benign-0, never changes, never fires).
+        if (this.onDacWrite && this.chip.dac) {
+            for (let ch = 1; ch <= 2; ch++) {
+                const dor = this._evRead(DAC_BASE + (ch === 1 ? 0x2C : 0x30)) & 0xFFF;
+                if (L.dacDor[ch - 1] === null) { L.dacDor[ch - 1] = dor; continue; }
+                if (dor !== L.dacDor[ch - 1]) {
+                    L.dacDor[ch - 1] = dor;
+                    try { this.onDacWrite(ch, dor); } catch {}
+                }
+            }
+        }
+        // CRC result: DR newly changed (a DR write accumulates; a CR reset
+        // returns it to 0xFFFFFFFF — both are observable edges).
+        if (this.onCrcResult) {
+            const dr = this._evRead(CRC_BASE) >>> 0;
+            if (L.crcDr !== null && dr !== L.crcDr) {
+                try { this.onCrcResult(dr); } catch {}
+            }
+            L.crcDr = dr;
+        }
+        // RTC alarm: ISR ALRAF/ALRBF/WUTF/TSF newly set (which 0=A, 1=B,
+        // 2=wakeup, 3=timestamp). ISR reads are non-consuming (the write
+        // path stores), so the poll never clears a flag.
+        if (this.onRtcAlarm) {
+            const isr = this._evRead(RTC_BASE + 0x0C);
+            const newly = isr & ~L.rtcIsr;
+            L.rtcIsr = isr;
+            if (newly & (1 << 8)) { try { this.onRtcAlarm(0); } catch {} }
+            if (newly & (1 << 9)) { try { this.onRtcAlarm(1); } catch {} }
+            if (newly & (1 << 10)) { try { this.onRtcAlarm(2); } catch {} }
+            if (newly & (1 << 11)) { try { this.onRtcAlarm(3); } catch {} }
+        }
+        // I2C SMBus ALERT: SR1 SMBALERT (bit15) newly set per bus. The
+        // harness arms it via i2c_arm_smbus_alert (the peer pulling SMBA).
+        if (this.onI2cAlert) {
+            for (const ch of [1, 2, 3]) {
+                const sr1 = this._evRead(I2C_BASE[ch] + 0x14);
+                const alert = (sr1 >>> 15) & 1;
+                const last = (L.i2cSr1[ch] >>> 15) & 1;
+                L.i2cSr1[ch] = sr1;
+                if (alert && !last) { try { this.onI2cAlert(ch, true); } catch {} }
+                else if (!alert && last) { try { this.onI2cAlert(ch, false); } catch {} }
+            }
+        }
+    }
+    // ADC regular-sequence channel for the onAdcDone report: SQR3 SQ1
+    // (bits 4:0, the first conversion in the sequence).
+    _adcChan(adc) {
+        try { return (this._emu.read32(ADC_BASE[adc] + 0x34) >>> 0) & 0x1F; }
+        catch { return 0; }
     }
     // F1 `uartRx(byte)` / `uartOutput` USART1 shortcuts.
     uartRx(byte) { this.usart1.sendData([byte & 0xFF]); return true; }
@@ -854,6 +1014,18 @@ export class STM32F4 {
     // ── DMA controller (Wokwi/OpenHW/Velxio integration) ──
     // Full controller view — see the DMAController class above.
     dmaController(ctl = 1) { return new DMAController(this, ctl); }
+
+    // ── ETH: TX tap + RX inject (netsim/gateway/pcap path) ──
+    // TX leaves the guest through the DMA descriptors; the model raises a
+    // TX poll and the driver (emulator.js wProcessEth) captures the frame
+    // and calls the create-time onTx(frame, meta). There is no post-create
+    // TX hook — register onTx in create() opts (it passes through to
+    // createEmulator). RX enters via injectFrame (the wire): netsim replies,
+    // gateway frames, or pcap replay all land in the driver's RX queue and
+    // are delivered head-only with FS+LS status at the next poll.
+    ethInject(frame) {
+        this._emu.injectFrame(frame);
+    }
 
     // ── ADC: live channel injection (anytime, no init constraint) ──
     // The model keeps a global override table (unlike the SPI/I2C taps);
@@ -931,8 +1103,7 @@ export class STM32F4 {
     // ── USB OTG_FS host calls (anytime; harness-driven like the model) ──
     // SETUP/OUT inject into EP0/endpoints; takeIn drains device-to-host IN
     // blobs; reset/enumerated drive the device state machine. HS twins
-    // exist on the model (usb_hs_*) but the facade targets FS (all chips
-    // have FS silicon; HS is F407/F429-only and needs its own window).
+    // (F407/F429-only window) mirror the same calls on the HS instance.
     usbInjectSetup(bytes) {
         return !!this._bindings.usb_inject_setup(new Uint8Array(bytes));
     }
@@ -945,6 +1116,18 @@ export class STM32F4 {
     }
     usbReset() { try { this._bindings.usb_reset(); } catch {} }
     usbEnumerated() { try { this._bindings.usb_enumerated(); } catch {} }
+    usbHsInjectSetup(bytes) {
+        return !!this._bindings.usb_hs_inject_setup(new Uint8Array(bytes));
+    }
+    usbHsInjectOut(ep, bytes) {
+        return !!this._bindings.usb_hs_inject_out(ep, new Uint8Array(bytes));
+    }
+    usbHsTakeIn(ep) {
+        try { return Array.from(this._bindings.usb_hs_take_in(ep)); }
+        catch { return []; }
+    }
+    usbHsReset() { try { this._bindings.usb_hs_reset(); } catch {} }
+    usbHsEnumerated() { try { this._bindings.usb_hs_enumerated(); } catch {} }
 
     // ── ITM stimulus drain (anytime) ──
     // Port 0 sinks to the UART console in the model; ports 1-31 queue
