@@ -107,6 +107,8 @@ mcu4.close();
 
 // ── Test 6: platform integration surface (Wokwi/OpenHW/Velxio) ──
 const mcu5 = await STM32F4.create({ firmware: blinky });
+check(mcu5.chip.key === 'stm32f407', 'default chip is stm32f407');
+check(mcu5.usart3 !== null && mcu5.usarts[3] === mcu5.usart3, 'f407: usart3 live');
 // callbacks exist, default null
 check(mcu5.onExtiEdge === null && mcu5.onCanTx === null && mcu5.onCanRx === null, 'callbacks default null (exti/can)');
 check(mcu5.onTimUpdate === null && mcu5.onTimCapture === null && mcu5.onDmaTc === null, 'callbacks default null (tim/dma)');
@@ -133,6 +135,43 @@ check(mcu5.display.ltdc() === null, 'display ltdc() null when layer off');
 mcu5.memWriteBytes(0x20000000, [0x11, 0x22, 0x33, 0x44]);
 check((mcu5.memRead32(0x20000000) >>> 0) === 0x44332211, 'memWriteBytes() probe write round-trips');
 mcu5.close();
+
+// ── Test 7: chip option — all four F4 chips boot their blinky ──
+// Each case: chip-resolved SVD + sizes, per-chip LED, per-chip IDCODE,
+// gated USARTs (F401/F411: usart3 null), empty CAN list, clock-scaled power.
+const CHIP_CASES = [
+    // [chip, fwKey, ledLabel, devId, pwr, ledOn]
+    // NOTE: the stock `blinky` firmware drives PA5, not the Discovery PD12 —
+    // so on stm32f407 the test asserts PA5's live state via moder/odr, while
+    // the per-chip blinkies (PC13/PG13) assert through ledStatus().
+    ['stm32f401', 'blinky_f401', 'PC13', 0x423, 15000, true],
+    ['stm32f411', 'blinky_f411', 'PC13', 0x431, 17857, true],
+    ['stm32f407', 'blinky', 'PD12', 0x413, 30000, false],
+    ['stm32f429', 'blinky_f429', 'PG13', 0x419, 32143, true],
+];
+for (const [chip, fwKey, ledLabel, devId, pwr, ledOn] of CHIP_CASES) {
+    const m = await STM32F4.create({ chip, firmware: decodeFirmware(fwKey) });
+    check(m.chip.key === chip, `${chip}: chip.key resolves`);
+    let u = '';
+    m.usart1.onData = (b) => { u += String.fromCharCode(b); };
+    for (let i = 0; i < 200 && !u.includes('LED=ON'); i++) m.execute(50000);
+    check(u.includes('LED=ON'), `${chip}: boots ${fwKey} (LED=ON)`);
+    if (ledOn) {
+        const led = m.ledStatus();
+        check(led.label === ledLabel && led.on === true && led.output === true, `${chip}: LED ${ledLabel} on+output`);
+    } else {
+        // stock blinky drives PA5: assert the live pin state directly.
+        const pa5 = m.gpio.pin('A', 5);
+        check(pa5.read() === true, `${chip}: stock blinky drives PA5 high`);
+        check(m.ledStatus().label === 'PD12', `${chip}: ledStatus defaults to PD12 board LED`);
+    }
+    check((m.jtagIdcode() & 0xFFF) === devId, `${chip}: IDCODE DEV_ID 0x${devId.toString(16)}`);
+    check((m.usart3 === null) === (chip === 'stm32f401' || chip === 'stm32f411'), `${chip}: usart3 ${m.usart3 === null ? 'null (absent silicon)' : 'live'}`);
+    check(JSON.stringify(m.chip.can) === JSON.stringify((chip === 'stm32f407' || chip === 'stm32f429') ? [1, 2] : []), `${chip}: CAN list matches silicon`);
+    check(m.pwrEstimate() === pwr, `${chip}: pwrEstimate ${pwr} uA (clock-scaled)`);
+    check(m.display.ltdc() === null, `${chip}: ltdc() null (layer off${m.chip.ltdc ? '' : ' + no silicon'})`);
+    m.close();
+}
 
 if (failures) { console.error(`\n${failures} FAILED`); process.exit(1); }
 console.log('\nALL PASS');

@@ -39,6 +39,23 @@ export class GPIO {
   constructor(mcu: STM32F4);
   pin(port: string | number, pin: number): GPIOPin;
 }
+export interface ChipRecord {
+  key: string;
+  svd: string;
+  flash_size: number;
+  ram_size: number;
+  maxClockMHz: number;
+  label: string;
+  idcode: number;
+  usarts: number[];
+  timers: number[];
+  can: number[];
+  dac: boolean;
+  ltdc: boolean;
+  gpioBanks: number;
+}
+export declare const CHIPS: Record<string, Omit<ChipRecord, 'key'>>;
+export declare function chipInfo(key?: string): ChipRecord;
 export class USART {
   readonly n: number;
   onData: ((byte: number) => void) | null;
@@ -94,8 +111,9 @@ export class Display {
 export class STM32F4 {
   readonly gpio: GPIO;
   readonly usart: USART;
-  readonly usart1: USART; readonly usart2: USART; readonly usart3: USART;
-  readonly usart4: USART; readonly usart5: USART; readonly usart6: USART;
+  // Slots for absent-silicon USARTs are null (F401/F411: 3,4,5).
+  readonly usart1: USART; readonly usart2: USART; readonly usart3: USART | null;
+  readonly usart4: USART | null; readonly usart5: USART | null; readonly usart6: USART;
   readonly usarts: Record<number, USART>;
   readonly spi1: SPI; readonly spi2: SPI; readonly spi3: SPI;
   readonly spiBus: Record<number, SPI>;
@@ -105,6 +123,8 @@ export class STM32F4 {
   readonly i2c: { specs: any[]; pushRx(peripheral: string, bytes: Uint8Array | number[]): void };
   readonly dma: { stream(index: number): DMAStream; controller(ctl: 1 | 2): DMAController };
   readonly display: Display;
+  readonly chip: ChipRecord;
+  readonly chipSvdXml: string | null;
   // Wokwi/OpenHW/Velxio integration callbacks (polled dispatch, see site/stm32f4.js).
   onExtiEdge: ((line: number) => void) | null;
   onCanTx: ((can: number) => void) | null;
@@ -116,7 +136,7 @@ export class STM32F4 {
   onUsbIn: ((ep: number, data: number[]) => void) | null;
   onItmByte: ((port: number, byte: number) => void) | null;
   onFsmcAccess: ((bank: number, off: number, write: boolean, size: number, val: number) => void) | null;
-  constructor(emu: any, bindings?: any);
+  constructor(emu: any, bindings?: any, chip?: ChipRecord, chipSvdXml?: string | null);
   static create(opts?: any): Promise<STM32F4>;
   static fromELF(buf: Uint8Array | ArrayBuffer, opts?: any): Promise<STM32F4>;
   static fromBin(buf: Uint8Array | ArrayBuffer, opts?: any): Promise<STM32F4>;

@@ -1,10 +1,14 @@
 // Firmware image loaders: Intel HEX, ELF32, and GCC linker map parsers.
 // Pure JS, no imports. All functions are synchronous.
+//
+// Memory windows default to the F407 map (1M flash / 128K RAM); pass
+// flashSize/ramSize for other F4 chips (the STM32F4 facade does this from
+// its chip table). Images outside the window are rejected, never clipped.
 
 // ── Intel HEX ──────────────────────────────────────────────────────────────
 // Returns { flash, ram, entry } — Uint8Array images for 0x08000000 and
 // 0x20000000, plus an optional entry point from the 0x05 record.
-export function parseIntelHex(text) {
+export function parseIntelHex(text, flashSize = 0x100000, ramSize = 0x20000) {
     const image = new Map(); // addr -> byte
     let base = 0;            // extended linear address (record 0x04)
     let entry = null;
@@ -30,21 +34,21 @@ export function parseIntelHex(text) {
         }
         // types 0x02/0x03 (segment) are rare; ignore
     }
-    const toImage = (start, end) => {
-        const out = new Uint8Array(end - start);
+    const toImage = (start, size) => {
+        const out = new Uint8Array(size);
         let any = false;
         for (const [addr, b] of image) {
-            if (addr >= start && addr < end) { out[addr - start] = b; any = true; }
+            if (addr >= start && addr < start + size) { out[addr - start] = b; any = true; }
         }
         return any ? out : null;
     };
-    return { flash: toImage(0x08000000, 0x08100000), ram: toImage(0x20000000, 0x20020000), entry };
+    return { flash: toImage(0x08000000, flashSize), ram: toImage(0x20000000, ramSize), entry };
 }
 
 // ── ELF32 ─────────────────────────────────────────────────────────────────
 // Extracts PT_LOAD segments (flash/RAM images + preload list) and, if the
 // symtab is present, the symbol table for the symbols panel.
-export function parseElf(bytes) {
+export function parseElf(bytes, flashSize = 0x100000, ramSize = 0x20000) {
     if (bytes.length < 52) throw new Error('not a valid ELF: file is only ' + bytes.length + ' bytes (an ELF needs >= 52); pass a compiled STM32F4 firmware (.elf/.bin/.hex)');
     const b = new Uint8Array(bytes);
     if (b[0] !== 0x7F || b[1] !== 0x45 || b[2] !== 0x4C || b[3] !== 0x46)
@@ -69,8 +73,8 @@ export function parseElf(bytes) {
     }
     if (segments.length === 0) throw new Error('ELF has no PT_LOAD segments — not a linked executable firmware (expected FLASH@0x08000000 / RAM@0x20000000 segments)');
 
-    const FLASH_START = 0x08000000, FLASH_END = 0x08100000;
-    const RAM_START = 0x20000000, RAM_END = 0x20020000;
+    const FLASH_START = 0x08000000, FLASH_END = 0x08000000 + flashSize;
+    const RAM_START = 0x20000000, RAM_END = 0x20000000 + ramSize;
     const flash = new Uint8Array(FLASH_END - FLASH_START);
     const ram = new Uint8Array(RAM_END - RAM_START);
     const extraMem = [];
@@ -82,8 +86,9 @@ export function parseElf(bytes) {
             extraMem.push({ addr: seg.vaddr, data: seg.data });
         } else {
             throw new Error('loadable segment at 0x' + seg.vaddr.toString(16) +
-                ' is outside the STM32F407 memory map (FLASH 0x08000000-0x08100000, RAM 0x20000000-0x20020000); ' +
-                'check the linker script targets STM32F407');
+                ' is outside the chip memory map (FLASH 0x' + FLASH_START.toString(16) + '-0x' + FLASH_END.toString(16) +
+                ', RAM 0x' + RAM_START.toString(16) + '-0x' + RAM_END.toString(16) + '); ' +
+                'check the linker script targets this chip');
         }
     }
 

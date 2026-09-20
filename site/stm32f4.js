@@ -10,16 +10,25 @@
 // - execute() returns {instCount, stopped}; step() returns {pc, instCount,
 //   stopped} (both drain UART into usart1, like F1's event drain).
 // - gpio.pin() coerces index ports; GPIOPin.on('change') returns unsubscribe.
-// - USART1-6 objects with per-base RX injection; TX is a single shared model
-//   buffer, so onData/output only ever fire on usart1 (usart2-6 send() works,
-//   their onData never fires — model limit, not a bug).
+// - USART slots are per-chip: F401/F411 expose 1,2,6 only (SVD census),
+//   absent slots are null. TX is a single shared model buffer, so
+//   onData/output only ever fire on usart1 (usart2-6 send() works, their
+//   onData never fires — model limit, not a bug).
 // - SPI/I2C stay create-time specs (taps snapshot at init — post-create
 //   callback assignment like F1's spi[ch].onTransfer is impossible without a
 //   Rust rescan; a silent no-fire shim would be worse than the explicit opt).
-// - No core event queue on F4 (no drainEvents): F1-style top-level callbacks
-//   (onExtiEdge/onCanTx/...) are intentionally absent. Poll watchPin/read32.
-// - No symbol/SWD/JTAG/pwr/js-peripheral layer on F4 (no model support);
-//   setSymbols/resolveSymbol is a pure-JS map-symbol helper only.
+// - Polled top-level callbacks (onExtiEdge/onCanTx/...) dispatch from
+//   model-readable registers once per execute()/step() — the F4 model has
+//   no core event queue (no drainEvents). Polls skip absent-silicon
+//   addresses (CAN on F401/F411, missing TIMs) — reads are benign-0.
+// - Symbol/SWD/JTAG/pwr/js-peripheral helpers are JS-side; the model has
+//   no DP/MEM-AP/calibrated-current/hook-table, so behavior is documented
+//   shims (live file/IDCODE/PWR_CR reads where a source exists).
+// - `chip` (f401/f411/f407/f407ve/f429) resolves SVD + flash/RAM sizes +
+//   clock + IDCODE + presence lists; unknown chip throws. Explicit
+//   svdXml/flash_size/ram_size opts override the table. createEmulator()
+//   callers hitting the model directly must pass the same triple
+//   themselves (the facade does it for you).
 // Virtual-peripheral API (Wokwi-style): SPI/I2C taps must be registered before
 // the model's init_svd() (the Spi/I2c peripheral snapshots its device list once
 // at construction), so they are declared at create() time via the `spi`/`i2c`
@@ -34,16 +43,70 @@ const FLASH_BASE = 0x08000000;
 const FLASH_SIZE = 0x00100000;
 const RAM_BASE = 0x20000000;
 
+// ── Chip table (SVD truth, site/vendor/*.svd + site/boards.js) ─────────
+// Every F4 here is a Cortex-M4F — one shared CPU core, no decoder work
+// per chip. A variant is SVD (register map) + flash/RAM sizes + clock.
+// USART/TIM/CAN/DAC/LTDC/GPIO presence below was read off the four SVDs
+// (Y/x census); bases are identical wherever the peripheral exists.
+const CHIPS = {
+    stm32f401: {
+        svd: 'stm32f401.svd', flash_size: 0x80000, ram_size: 0x18000,
+        maxClockMHz: 84, label: 'STM32F401 (512K/96K)', idcode: 0x423,
+        usarts: [1, 2, 6], timers: [1, 2, 3, 4, 5, 8, 9, 10, 11],
+        can: [], dac: false, ltdc: false, gpioBanks: 6, // A-F
+    },
+    stm32f411: {
+        svd: 'stm32f411.svd', flash_size: 0x80000, ram_size: 0x20000,
+        maxClockMHz: 100, label: 'STM32F411 (512K/128K)', idcode: 0x431,
+        usarts: [1, 2, 6], timers: [1, 2, 3, 4, 5, 8, 9, 10, 11],
+        can: [], dac: false, ltdc: false, gpioBanks: 6, // A-F
+    },
+    stm32f407: {
+        svd: 'stm32f407.svd', flash_size: 0x100000, ram_size: 0x30000,
+        maxClockMHz: 168, label: 'STM32F407 (1M/192K)', idcode: 0x413,
+        usarts: [1, 2, 3, 4, 5, 6], timers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        can: [1, 2], dac: true, ltdc: true, gpioBanks: 11, // A-K
+    },
+    stm32f407ve: {
+        svd: 'stm32f407.svd', flash_size: 0x80000, ram_size: 0x30000,
+        maxClockMHz: 168, label: 'STM32F407VE/ZE (512K/192K)', idcode: 0x413,
+        usarts: [1, 2, 3, 4, 5, 6], timers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        can: [1, 2], dac: true, ltdc: true, gpioBanks: 11, // A-K
+    },
+    stm32f429: {
+        svd: 'stm32f429.svd', flash_size: 0x200000, ram_size: 0x40000,
+        maxClockMHz: 180, label: 'STM32F429 (2M/256K)', idcode: 0x419,
+        usarts: [1, 2, 3, 4, 5, 6], timers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        can: [1, 2], dac: true, ltdc: true, gpioBanks: 11, // A-K
+    },
+};
+
+function resolveChip(opts = {}) {
+    const key = String(opts.chip || opts.board || 'stm32f407').toLowerCase();
+    const table = CHIPS[key];
+    if (!table) throw new Error(`unknown chip '${opts.chip || opts.board}' (have: ${Object.keys(CHIPS).join(', ')})`);
+    return { key, ...table };
+}
+
+function chipInfo(key) {
+    const k = String(key || 'stm32f407').toLowerCase();
+    const table = CHIPS[k];
+    if (!table) throw new Error(`unknown chip '${key}' (have: ${Object.keys(CHIPS).join(', ')})`);
+    return { key: k, ...table };
+}
+
+export { CHIPS, chipInfo };
+
 // A Cortex-M vector table with a non-zero SP/PC so createEmulator's reset-vector
 // check passes; the real firmware is written later via loadBin/loadHex/loadELF,
 // which also resets SP/PC from the loaded image.
 const PLACEHOLDER_VECTOR = new Uint8Array([0x00, 0x00, 0x20, 0x00, 0x85, 0x01, 0x00, 0x08]);
 
-function buildFlashImage(bytes, base) {
-    const img = new Uint8Array(FLASH_SIZE);
+function buildFlashImage(bytes, base, flashSize = FLASH_SIZE) {
+    const img = new Uint8Array(flashSize);
     const off = base - FLASH_BASE;
-    if (off < 0 || off + bytes.length > FLASH_SIZE) {
-        throw new Error(`flash image of ${bytes.length} bytes at 0x${base.toString(16)} does not fit in FLASH 0x${FLASH_BASE.toString(16)}`);
+    if (off < 0 || off + bytes.length > flashSize) {
+        throw new Error(`flash image of ${bytes.length} bytes at 0x${base.toString(16)} does not fit in FLASH 0x${FLASH_BASE.toString(16)} (chip flash 0x${flashSize.toString(16)})`);
     }
     img.set(bytes, off);
     return img;
@@ -296,8 +359,10 @@ export class Display {
         return { w: t.w, h: t.h, fb: t.fb, frame: () => t.frame() };
     }
     // LTDC layer0: geometry from WHPCR/WVPCR + PFCR/CFBAR/CFBLR, pixels
-    // from guest RAM. Supports pf 0 (ARGB8888) + 2 (RGB565).
+    // from guest RAM. Supports pf 0 (ARGB8888) + 2 (RGB565). Returns null
+    // when the layer is off OR the chip has no LTDC (F401/F411).
     ltdc() {
+        if (!this._mcu.chip.ltdc) return null;
         const R = (a) => { try { return this._mcu._emu.read32(a) >>> 0; } catch { return 0; } };
         const LTDC = 0x40016800;
         const gcr = R(LTDC + 0x18), l1cr = R(LTDC + 0x84);
@@ -365,37 +430,48 @@ export class I2C {
 }
 
 export class STM32F4 {
-    constructor(emu, bindings = null) {
+    constructor(emu, bindings = null, chip = null, chipSvdXml = null) {
         this._emu = emu;
         this._bindings = bindings;
+        this.chip = chip || chipInfo('stm32f407');
+        // Per-chip SVD text (Node: loaded in _create; browser: caller passes
+        // svdXml explicitly). Kept for chip-aware helpers (e.g. SVD-verified
+        // pin maps) without re-reading files per call.
+        this.chipSvdXml = chipSvdXml || null;
         this._spiSpecs = [];
         this._i2cSpecs = [];
         this._pinListeners = new Map();
         this._pinUnsub = null;
         this.gpio = new GPIO(this);
         // Back-compat: gpio.pin was a bare function before the GPIO class.
+        // Bank-validated: F401/F411 expose A-F only (SVD census) — a pin on
+        // G/K throws a useful error instead of driving a benign-0 hole.
         const _pinFn = (port, pin) => new GPIOPin(this, port, pin);
         const _origPin = this.gpio.pin.bind(this.gpio);
         void _origPin;
         this.gpio.pin = (port, pin) => {
             const p = typeof port === 'string' ? port.toUpperCase()
                 : String.fromCharCode(65 + (port | 0));
+            const bank = p.charCodeAt(0) - 65;
+            const maxBank = (this.chip.gpioBanks || 11) - 1;
+            if (p.length !== 1 || bank < 0 || bank > maxBank || (pin | 0) < 0 || (pin | 0) > 15) {
+                throw new Error(`gpio.pin('${port}', ${pin}): ${this.chip.key} exposes banks A-${String.fromCharCode(65 + maxBank)}, pins 0-15`);
+            }
             return _pinFn(p, pin | 0);
         };
-        // Six USARTs on F407 (1-3 + UART4/5 + USART6). TX is a single shared
-        // model buffer: only usart1._emit is fed (see execute()); RX
-        // injects per-base and works on all six.
+        // Six USART slots; only the chip's SVD-present USARTs are live —
+        // the rest are null (F401/F411 have 1,2,6 only). TX is a single
+        // shared model buffer: only usart1._emit is fed (see execute());
+        // RX injects per-base and works on every live USART.
         const mkUsart = (n) => new USART(this, n);
-        this.usart1 = mkUsart(1);
-        this.usart2 = mkUsart(2);
-        this.usart3 = mkUsart(3);
-        this.usart4 = mkUsart(4);
-        this.usart5 = mkUsart(5);
-        this.usart6 = mkUsart(6);
+        for (const n of [1, 2, 3, 4, 5, 6]) {
+            this[`usart${n}`] = this.chip.usarts.includes(n) ? mkUsart(n) : null;
+        }
         // `usart` stays the USART1 alias (existing callers); the indexed
-        // map mirrors F1's `usart: {1,2,3}` shape, extended to 6.
+        // map mirrors F1's `usart: {1,2,3}` shape, extended to 6 (live only).
         this.usart = this.usart1;
-        this.usarts = { 1: this.usart1, 2: this.usart2, 3: this.usart3, 4: this.usart4, 5: this.usart5, 6: this.usart6 };
+        this.usarts = {};
+        for (const n of this.chip.usarts) this.usarts[n] = this[`usart${n}`];
         // F1 `uartRx(byte)` / `uartOutput` USART1 shortcuts.
         // ── Wokwi/OpenHW/Velxio integration callbacks (F1 parity) ──
         // Set directly, default null. Dispatched once per execute()/step()
@@ -441,6 +517,7 @@ export class STM32F4 {
         };
         // F1 `spi1..3` / `i2c1..3` (+ indexed maps) parity — call-shape
         // compat only (see SPI/I2C classes above for the create-time caveat).
+        // All three buses exist on every F4 chip in the table (SVD census).
         this.spi1 = new SPI(this, 1);
         this.spi2 = new SPI(this, 2);
         this.spi3 = new SPI(this, 3);
@@ -484,6 +561,7 @@ export class STM32F4 {
     }
 
     static async _create(opts = {}) {
+        const chip = resolveChip(opts);
         const firmware = opts.firmware || PLACEHOLDER_VECTOR;
         const bindings = opts.bindings || null;
         const ext_devices = { ...(opts.ext_devices || {}) };
@@ -506,8 +584,28 @@ export class STM32F4 {
         }
         ext_devices.spiDevices = spiDevs;
         ext_devices.i2cDevices = i2cDevs;
-        const emu = await createEmulator({ ...opts, firmware, ext_devices });
-        const mcu = new STM32F4(emu, bindings);
+        // Chip-resolved emulator sizing + SVD + map identity. Explicit opts
+        // win (a caller passing svdXml/flash_size overrides the table); the
+        // default SVD text is loaded per chip here so `chip` alone is
+        // enough — index.mjs passes its own svdXml (F407), which is why the
+        // default only applies when the caller did NOT supply one. The chip
+        // hint drives the model's DBGMCU IDCODE via init_svd_chip.
+        const needSvd = !opts.svdXml;
+        let chipSvdXml = null;
+        if (needSvd) {
+            try {
+                const mod = await import('node:fs');
+                chipSvdXml = mod.readFileSync(
+                    new URL(`./vendor/${chip.svd}`, import.meta.url), 'utf8');
+            } catch { chipSvdXml = null; } // browser: caller must pass svdXml
+        }
+        const emu = await createEmulator({
+            flash_size: chip.flash_size, ram_size: chip.ram_size,
+            chipHint: chip.svd.replace(/\.svd$/, ''),
+            ...(chipSvdXml ? { svdXml: chipSvdXml } : {}),
+            ...opts, firmware, ext_devices,
+        });
+        const mcu = new STM32F4(emu, bindings, chip, chipSvdXml || opts.svdXml || null);
         mcu._spiSpecs.push(...(opts.spi || []));
         mcu._i2cSpecs.push(...(opts.i2c || []));
         return mcu;
@@ -522,20 +620,24 @@ export class STM32F4 {
         return STM32F4.create({ ...opts, firmware: flash });
     }
 
-    // ── firmware loading ──
+    // ── firmware loading (chip-sized flash image) ──
+    // loadBin/loadELF size against the CHIP's flash (not the 1M F407
+    // default): a 2M F429 image on a 512K F401 throws instead of silently
+    // truncating. loadHex/loadELF pass the flash through the chip-sized
+    // window too (RAM segments ride extraMem, sized by the parser).
     loadBin(bytes, base = FLASH_BASE) {
         const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-        const flash = buildFlashImage(buf, base);
+        const flash = buildFlashImage(buf, base, this.chip.flash_size);
         this._emu.loadImage({ flash });
     }
     loadHex(text) {
-        const { flash, ram } = parseIntelHex(text);
+        const { flash, ram } = parseIntelHex(text, this.chip.flash_size, this.chip.ram_size);
         const extraMem = [];
         if (ram) extraMem.push({ addr: RAM_BASE, data: ram });
         this._emu.loadImage({ flash: flash || new Uint8Array(0), extraMem });
     }
     loadELF(bytes) {
-        const { flash, extraMem } = parseElf(bytes);
+        const { flash, extraMem } = parseElf(bytes, this.chip.flash_size, this.chip.ram_size);
         this._emu.loadImage({ flash: flash || new Uint8Array(0), extraMem });
     }
 
@@ -583,9 +685,11 @@ export class STM32F4 {
                 }
             }
         }
-        // CAN TX: TSR TXOK/RQCP bits newly set since last poll.
+        // CAN TX: TSR TXOK/RQCP bits newly set since last poll. Skipped
+        // for CAN-less chips (F401/F411 have no CAN silicon — the poll
+        // would read benign-0 holes forever).
         if (this.onCanTx) {
-            for (const can of [1, 2]) {
+            for (const can of this.chip.can) {
                 const tsr = this._evRead(CAN_BASE[can] + 0x08);
                 const newly = (tsr & 0x070707) & ~L.canTsr[can];
                 L.canTsr[can] = tsr & 0x070707;
@@ -600,7 +704,7 @@ export class STM32F4 {
         // FMP>0 and the mailbox changed since the last fire (guest may
         // hold the frame for many polls before RFOM-releasing it).
         if (this.onCanRx) {
-            for (const can of [1, 2]) {
+            for (const can of this.chip.can) {
                 for (let fifo = 0; fifo < 2; fifo++) {
                     const fmp = this._evRead(CAN_BASE[can] + 0x0C + fifo * 4) & 0x3;
                     if (fmp === 0) { L.canFmp[can][fifo] = null; continue; }
@@ -624,9 +728,11 @@ export class STM32F4 {
             }
         }
         // TIM update + capture: SR UIF/CCxIF newly set. UIF/CCxIF are w1c
-        // on silicon — clear on dispatch so each edge fires once.
+        // on silicon — clear on dispatch so each edge fires once. Only
+        // the chip's SVD-present timers are polled (F401/F411 lack
+        // 6,7,12,13,14 — those addresses are benign-0 holes there).
         if (this.onTimUpdate || this.onTimCapture) {
-            for (let tim = 1; tim <= 14; tim++) {
+            for (const tim of this.chip.timers) {
                 const base = TIM_BASE[tim];
                 if (base === undefined) continue;
                 const sr = this._evRead(base + 0x10) & 0x1F;
@@ -839,10 +945,10 @@ export class STM32F4 {
         list.push(entry);
         return true;
     }
-    // ── F1 power parity (estimate from PWR_CR + clock tree) ──
+    // ── F1 power parity (estimate from PWR_CR + per-chip clock) ──
     // No calibrated current model on F4 (F1's pwrEstimate is DS5319-based).
     // Returns a documented ROUGH estimate in µA from the PWR_CR LPDS/PDDS
-    // bits + SystemCoreClock assumption (168 MHz RUN ~ 30 mA class).
+    // bits, scaled by the chip's max clock (RUN current ~ linear in MHz).
     pwrMode() {
         let cr = 0;
         try { cr = this._emu.read32(0x40007000) >>> 0; } catch {}
@@ -852,9 +958,10 @@ export class STM32F4 {
     }
     pwrEstimate() {
         const mode = this.pwrMode();
-        if (mode === 3) return 4; // STANDBY ~4 µA class
-        if (mode === 2) return 400; // STOP ~0.4 mA class
-        return 30000; // RUN ~30 mA class @168 MHz (rough, uncalibrated)
+        if (mode === 3) return 4; // STANDBY ~4 µA class (all chips)
+        if (mode === 2) return 400; // STOP ~0.4 mA class (all chips)
+        // RUN scales with clock: 168 MHz F407 ~30 mA class.
+        return Math.round(30000 * (this.chip.maxClockMHz / 168));
     }
     stop() { return this._emu.stop(); }
     reset() { return this._emu.reset(); }
@@ -881,11 +988,13 @@ export class STM32F4 {
         return this._emu.loadImage(image);
     }
     // Board LED readout: { bank, pin, label, on, moder } for the board's
-    // on-board LED (boards.js BOARD_LED + aliases; fwName routes Nucleo).
+    // on-board LED. `boardKey` defaults to this instance's chip (so a
+    // `chip: 'stm32f401'` facade answers PC13 without being told twice);
+    // an explicit key still wins, and Nucleo fw-name aliases route PA5.
     // `on` is the guest-driven ODR level; `output` is whether MODER has the
     // pin as output (false before the firmware configures it).
     ledStatus(fwName, boardKey) {
-        const led = this._ledFor(fwName, boardKey);
+        const led = this._ledFor(fwName, boardKey || (this.chip && this.chip.key));
         const moder = this._emu.read32(0x40020000 + led.bank * 0x400) >>> 0;
         const odr = this._emu.read32(0x40020000 + led.bank * 0x400 + 0x14) >>> 0;
         const mode = (moder >>> (led.pin * 2)) & 3;

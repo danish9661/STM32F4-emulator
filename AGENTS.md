@@ -2234,19 +2234,22 @@ firmware can be driven like a real chip (`gpio`, `usart`, `spi`, `i2c`,
 `dma`) without touching the `createEmulator` plumbing.
 
 ### Files
-- `site/stm32f4.js` — `STM32F4`, `GPIOPin`, `GPIO`, `USART` (1-6), `SPI`,
-  `I2C`, `DMAStream`, `DMAController`, `Display` classes + the
-  `parseSpi`/`parseI2c` helpers. Pure JS; zero runtime overhead (every
-  call delegates to the underlying `emu`).
+- `site/stm32f4.js` — `STM32F4`, `GPIOPin`, `GPIO`, `USART` (per-chip live
+  slots), `SPI`, `I2C`, `DMAStream`, `DMAController`, `Display` classes,
+  `CHIPS`/`chipInfo`/`resolveChip` + the `parseSpi`/`parseI2c` helpers.
+  Pure JS; zero runtime overhead (every call delegates to the underlying
+  `emu`).
 - `index.mjs` — re-exports the facade classes and binds
   `STM32F4.create` to the resolved Node assets
-  (`bindings`/`svdXml`/`wasmInit` from the local `vendor/`).
+  (`bindings`/`wasmInit` from the local `vendor/` — SVD is resolved per
+  `chip` inside `_create`, never a shared F407 default).
 - `index.d.ts` — facade types (result shapes, callback signatures, DMA/
-  display/debug/power methods). `package.json` — `"./stm32f4"` export →
-  `site/stm32f4.js`.
+  display/debug/power methods, `ChipRecord`). `package.json` —
+  `"./stm32f4"` export → `site/stm32f4.js`.
 - Tests: `site/test_stm32f4_api.mjs` (facade + GPIO/USART + platform
-  surface) and `site/test_stm32f4_periph.mjs` (Wokwi SPI/I2C), both wired
-  into `npm test`. Full surface documented in `docs/facade.md`.
+  surface + 4-chip boot) and `site/test_stm32f4_periph.mjs` (Wokwi
+  SPI/I2C), both wired into `npm test`. Full surface documented in
+  `docs/facade.md` (incl. the per-chip support matrix).
 
 ### Usage
 ```js
@@ -2292,11 +2295,23 @@ registers — the F4 model has no core event queue):
   CR/NDTR/PAR/MxAR/FCR per stream); `dma.stream(i)` is the legacy flat
   helper. DMA bases are SVD-verified (DMA1 @0x40026000, DMA2 @0x40026400).
 - Display ("DRM"): `mcu.display` — live `oled`/`tft` framebuffers +
-  `ltdc()` layer0 scanout from guest RAM (null when not enabled).
+  `ltdc()` layer0 scanout from guest RAM (null when not enabled, or when
+  the chip has no LTDC silicon like F401/F411).
 - Debug/power: honest SWD/JTAG shim (no DP on the model — `swdRegRead`
   reads the live file, `jtagIdcode` the live IDCODE), `pwrMode/pwrEstimate`
-  (PWR_CR classes), `addJsPeripheral` (recorded JS region — no model MMIO
-  hook table exists).
+  (PWR_CR classes; RUN scaled by chip clock), `addJsPeripheral` (recorded
+  JS region — no model MMIO hook table exists).
+
+### Chip option — the API covers all F4 chips (2026-09-20)
+`create({ chip })` with `stm32f401`/`stm32f411`/`stm32f407`/`stm32f407ve`/
+`stm32f429` (default `stm32f407`; `board` is an alias). One shared M4F
+core — the `CHIPS` table resolves SVD text + flash/RAM + clock + IDCODE
++ presence lists; explicit `svdXml`/`flash_size`/`ram_size` override it.
+Gating: absent-silicon USART slots are `null` (F401/F411: 3,4,5), CAN
+polls iterate `chip.can`, TIM polls `chip.timers`, `ltdc()` nulls without
+silicon, `gpio.pin()` rejects past-bank pins (A-F on F401/F411), loaders
+size to chip flash/RAM. Verified by Test 7 in `test_stm32f4_api.mjs`
+(4-chip blinky boot + LED + IDCODE). Full matrix in `docs/facade.md`.
 
 ### Wokwi-style virtual peripherals
 Built on the EXISTING bus taps — **no Rust change**:
