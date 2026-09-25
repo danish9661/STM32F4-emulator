@@ -71,8 +71,8 @@ SVD + flash/RAM sizes + clock + IDCODE, resolved from the `CHIPS` table
 - `usart1..8` (+ `usart` = USART1 alias, `usarts` map of live ports;
   7/8 live on F407/F429 only, `null` on F401/F411).
   `send`/`sendData` injects RX per-USART (SVD-verified bases). Slots for
-  absent silicon are `null` (F401/F411: 3,4,5). **TX is one shared model
-  buffer: only `usart1.onData`/`output` ever fire.** `usart2-6.send()`
+  absent silicon are `null` (F401/F411: 3,4,5,7,8). **TX is one shared model
+  buffer: only `usart1.onData`/`output` ever fire.** `usart2-8.send()`
   works; their `onData` never fires — model limit, not a bug.
 - `spi: [{peripheral, cs?, dc?, onTransfer?, onByte?}]` and
   `i2c: [{peripheral, address, onStart?, onWrite?, onRead?, onStop?}]`

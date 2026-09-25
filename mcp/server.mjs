@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 // Sequential instances are supported (see docs/components.md), but there is
 // exactly one active system per process and creating a new one detaches the
 // old, so we close the previous instance before creating the next.
-import { createSTM32F407, FIRMWARES, LED, Button, Pwm, Potentiometer } from '../index.mjs';
+import { createSTM32F407, FIRMWARES, LED, Button, Pwm, Potentiometer, CHIPS } from '../index.mjs';
 
 // The MCP SDK and zod are OPTIONAL peer dependencies: the emulator library
 // itself has no runtime dependencies, and only this server needs them, so
@@ -73,16 +73,19 @@ server.registerTool('load_firmware', {
     inputSchema: {
         firmware: z.string().describe('a firmware key from list_firmwares, e.g. "blinky"'),
         enable_irqs: z.boolean().optional().describe('run guest IRQ handlers between batches (needed for interrupt-driven firmware; must stay off for the ETH demos)'),
+        chip: z.string().optional().describe(`chip variant: ${Object.keys(CHIPS).join('|')} (default stm32f407)`),
     },
-}, async ({ firmware, enable_irqs = false }) => {
+}, async ({ firmware, enable_irqs = false, chip = 'stm32f407' }) => {
     if (!FIRMWARES[firmware]) return err(`unknown firmware '${firmware}' (have: ${Object.keys(FIRMWARES).join(', ')})`);
+    if (!CHIPS[chip]) return err(`unknown chip '${chip}' (have: ${Object.keys(CHIPS).join(', ')})`);
     const replaced = session !== null;
     if (session) { try { session.emu.close(); } catch {} }
-    const emu = await createSTM32F407({ firmware, enable_irqs });
+    const emu = await createSTM32F407({ firmware, enable_irqs, chip });
     session = { emu, firmware, components: new Map() };
     componentSeq = 0;
     return text({
         loaded: firmware,
+        chip,
         enable_irqs,
         note: replaced
             ? 'Replaced a previous session. Peripheral state is process-global in the wasm model, so switching firmware in one process can misbehave (see docs/components.md) — restart this server for a fully clean boot.'

@@ -3,6 +3,14 @@
 // only in SVD (register map), flash/RAM sizes, and clock. Firmware presets
 // map to boards via BOARD_OF_FIRMWARE (default: stm32f407).
 //
+// OWNERSHIP: this file owns board-UI wiring (preset compat lists, LED map,
+// per-board sizes for the browser boot path). The SILICON truth (SVD
+// presence lists, IDCODE, clocks) lives in site/stm32f4.js CHIPS, which is
+// the owner for programmatic use (STM32F4.create({chip}), CLI --chip,
+// MCP chip, createSTM32F407({chip})). The size/clock/label values here
+// duplicate CHIPS by design (UI bundle without the facade); if they ever
+// disagree, CHIPS wins — keep both in sync when adding a chip.
+//
 // SVD files live in site/vendor/ next to stm32f407.svd (wasm-pack deletes
 // that dir on rebuild — restore them alongside the SVD, see AGENTS.md).
 

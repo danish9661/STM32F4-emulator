@@ -15,9 +15,11 @@ import { dirname, resolve } from 'node:path';
 import * as bindings from './site/vendor/stm32_periph_wasm.js';
 import { createEmulator } from './site/emulator.js';
 import { parseIntelHex, parseElf } from './site/loaders.js';
+import { CHIPS, chipInfo } from './site/stm32f4.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const svdXml = readFileSync(resolve(__dirname, 'site/vendor/stm32f407.svd'), 'utf8');
+const svdCache = {};
+const svdFor = (f) => svdCache[f] || (svdCache[f] = readFileSync(resolve(__dirname, 'site/vendor/' + f), 'utf8'));
 const wasmBytes = new Uint8Array(readFileSync(resolve(__dirname, 'site/vendor/stm32_periph_wasm_bg.wasm')));
 const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8'));
 
@@ -32,6 +34,7 @@ Arguments:
 Options:
   -n, --inst <N>        instruction budget to run (default 20000000)
   -f, --format <fmt>    firmware format: auto|bin|hex|elf (default auto)
+  -c, --chip <chip>     chip: stm32f401|stm32f411|stm32f407|stm32f407ve|stm32f429 (default stm32f407)
   -v, --verbose         trace guest PCs to stderr (capped per step)
   -l, --lowpower        halt on WFI/WFE and advance the virtual RTC until wakeup
   -h, --help            show this help
@@ -62,6 +65,7 @@ async function main() {
     let firmwarePath = null;
     let inst = 20000000;
     let format = 'auto';
+    let chipKey = 'stm32f407';
     let verbose = false;
     let lowpower = false;
     for (let i = 0; i < args.length; i++) {
@@ -79,6 +83,11 @@ async function main() {
         if (a === '-f' || a === '--format') {
             format = args[++i];
             if (!['auto', 'bin', 'hex', 'elf'].includes(format)) fail(`invalid --format: ${format}`);
+            continue;
+        }
+        if (a === '-c' || a === '--chip') {
+            chipKey = String(args[++i] || '').toLowerCase();
+            if (!CHIPS[chipKey]) fail(`invalid --chip: ${args[i]} (have: ${Object.keys(CHIPS).join(', ')})`);
             continue;
         }
         if (a.startsWith('-')) fail(`unknown option: ${a}`);
@@ -115,8 +124,13 @@ async function main() {
 
     let emu;
     try {
+        const chip = chipInfo(chipKey);
         emu = await createEmulator({
-            firmware, bindings, svdXml, wasmInit: wasmBytes,
+            firmware, bindings,
+            svdXml: svdFor(chip.svd), svdFile: chip.svd,
+            wasmInit: wasmBytes,
+            flash_size: chip.flash_size, ram_size: chip.ram_size,
+            chipHint: chip.svd.replace(/\.svd$/, ''),
             extra_mem, lowpower,
         });
     } catch (e) {

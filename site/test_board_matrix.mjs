@@ -80,8 +80,8 @@ const makeWav = () => {
 // [demo, boards, bin, markers, anti, opts, script, iters, step]
 const FAM = ['f401', 'f411', 'f429'];
 const E = [];
-const famBin = (d, f) => `${d}/${d}_${f}.bin`;
-const inoBin = (d, k) => `${d}/build-${k}/${d}.ino.bin`;
+const famBin = (d, f) => `firmware/${d}/${d}_${f}.bin`;
+const inoBin = (d, k) => `firmware/${d}/build-${k}/${d}.ino.bin`;
 const bare = (demo, boards, m, anti = null, opts = {}, script = null, iters = 600, step = 100000) => {
     for (const b of boards) E.push([demo, b, famBin(demo, b), m, anti, opts, script, iters, step]);
 };
@@ -139,30 +139,30 @@ bare('gap10_dma', ALL3, ['DMA GAP10 OK'], ['FAIL']);
 bare('gap10_dac', ['f429'], ['DAC GAP10 OK'], ['FAIL']);
 bare('gap10_dac', ['f401', 'f411'], ['DAC GAP10 OK'], ['FAIL'], { expectFail: 'no-DAC-silicon' });
 bare('ltdc_test', ['f429'], ['LTDC pixels OK']);
-E.push(['dma2d_test', 'f429', 'dma2d_test/dma2d_test_f429.bin', ['=== DMA2D Test: done ==='], ['TIMEOUT', 'FAIL '], IRQ, null, 600, 100000]);
-E.push(['gpio_k_test', 'f429', 'gpio_k_test/gpio_k_test_f429.bin', ['PK3=ON odr=1', 'PK3=OFF odr=0', 'GPIOK OK'], ['FAIL'], {}, null, 600, 100000]);
+E.push(['dma2d_test', 'f429', 'firmware/dma2d_test/dma2d_test_f429.bin', ['=== DMA2D Test: done ==='], ['TIMEOUT', 'FAIL '], IRQ, null, 600, 100000]);
+E.push(['gpio_k_test', 'f429', 'firmware/gpio_k_test/gpio_k_test_f429.bin', ['PK3=ON odr=1', 'PK3=OFF odr=0', 'GPIOK OK'], ['FAIL'], {}, null, 600, 100000]);
 bare('usb_cdc_test', ['f401', 'f429'], ['USB enum done', 'USB echo OK', 'USB done'], ['USB FAIL', 'USBHOST FAIL'], {}, 'usb', 1500, 50000);
 // F429 Ethernet (netsim backend; same ARP/DHCP/TCP/HTTP coverage as the
 // gateway runs). eth_http runs polling (no IRQs); the rest use irq_eth.
-E.push(['eth_http_f429', 'f429', 'eth_http/eth_http_f429.bin', ['TCP connected'], ['TCP fail'], {}, 'netsim', 600, 100000]);
+E.push(['eth_http_f429', 'f429', 'firmware/eth_http/eth_http_f429.bin', ['TCP connected'], ['TCP fail'], {}, 'netsim', 600, 100000]);
 const IRQETH = { enable_irqs: true, irq_eth: true };
 const IRQETHLP = { enable_irqs: true, irq_eth: true, lowpower: true };
-E.push(['eth_dhcp_f429', 'f429', 'eth_dhcp/eth_dhcp_f429.bin', ['=== DHCP SUCCESS ==='], null, IRQETH, 'netsim', 600, 100000]);
-E.push(['eth_test_f429', 'f429', 'eth_test/eth_test_f429.bin', ['ETH Test: done', 'ICMP reply OK', 'ICMP RX reply sent', 'DNS IP=093.184.216.034', 'UDP echo OK'], ['TIMEOUT!'], IRQETH, 'netsim', 900, 200000]);
+E.push(['eth_dhcp_f429', 'f429', 'firmware/eth_dhcp/eth_dhcp_f429.bin', ['=== DHCP SUCCESS ==='], null, IRQETH, 'netsim', 600, 100000]);
+E.push(['eth_test_f429', 'f429', 'firmware/eth_test/eth_test_f429.bin', ['ETH Test: done', 'ICMP reply OK', 'ICMP RX reply sent', 'DNS IP=093.184.216.034', 'UDP echo OK'], ['TIMEOUT!'], IRQETH, 'netsim', 900, 200000]);
 const FEAT_MARKERS = ['PHY link OK', 'PHY AN restart OK', 'PHY force OK', 'PHY media RMII OK', 'PHY media MII OK', 'CSUM TX insert OK', 'CSUM RX IPHCE OK', 'CSUM RX PCE OK', 'MCAST PM OK', 'MCAST BFD OK', 'MCAST OK', 'VLAN OK', 'VLAN INV OK', 'PTP target OK', 'PTP drift OK', 'PTP snap gate OK', 'PTP TX snap OK', 'PTP RX snap OK', 'WOL OK', 'WOL filter OK', 'WIRE RATE OK', 'COLLIDE OK', 'COLLIDE DROP OK', 'RX RATE OK', 'DEFER OK', 'DEFER DROP OK', 'LINK DOWN OK', 'LINK UP OK', 'PPS window done', 'WOKE BY WOL', 'SARC OK', 'SARC OFF OK', 'FEF DROP OK', 'IPCO OFF OK', 'PAUSE TERM OK', 'PAUSE PWTS OK', 'PAUSE STALL OK', 'PAUSE UPFD OK', 'PAUSE PCF00 OK', 'PAUSE PCF11 OK', 'PAUSE PCF11 PAM OK', 'PAUSE PCF10 OK', 'PAUSE FCB OK', 'PAUSE TX OK', 'PAUSE ZQPD OK', 'MMC COUNT OK', 'MMC CR OK', 'MMC ROR OK', 'MACSR TSTS OK', 'DMASR TSTS OK', 'RBUS OK', 'RBUS CLEAR OK', 'MFC OK', 'ROS OK', 'ROS CLEAR OK', 'MFC DRAIN OK', 'JABBER OK', 'JABBER WD OK', 'HPF STRICT OK', 'HPF OR OK', 'SAF SELF OK', 'SAF DROP OK', 'SAIF INV OK', 'RA OFF OK', 'RA OK', 'FEAT Test: done'];
 // PPS scope probe: 200k inst at 32768 Hz (edge per ~5041 inst) ~= 39.
 const FEAT_PPS_POST = (b) => { const n = b.eth_pps_count(); return (n >= 20 && n <= 60) ? null : ('pps_count=' + n); };
 const IRQETH_LAYOUT = { rxDesc: 0x20000050, rxBuf: 0x2000005c, rxStride: 1536, rxDescs: 1 };
 const IRQETHADV = { enable_irqs: true, irq_eth: true, lowpower: true, eth: { rxDesc: 0x20000c40, rxBuf: 0x2000060c, rxStride: 1536, rxDescs: 1 } };
 const ADV_MARKERS = ['RST OK', 'RTO OK', 'MSS OK', 'WINDOW OK', 'FRAG OK', 'ICMPERR OK', 'DHCPNAK OK', 'DHCPRENEW OK', 'IGMP OK', 'ND OK', 'LLDP OK', 'STP OK', 'ADV Test: done'];
-E.push(['eth_adv', 'disco_f407vg', 'eth_adv/eth_adv.bin', ADV_MARKERS, ['FAIL', 'TIMEOUT'], IRQETHADV, 'netsim', 6000, 20000]);
-E.push(['eth_adv_f429', 'f429', 'eth_adv/eth_adv_f429.bin', ADV_MARKERS, ['FAIL', 'TIMEOUT'], IRQETHADV, 'netsim', 6000, 20000]);
+E.push(['eth_adv', 'disco_f407vg', 'firmware/eth_adv/eth_adv.bin', ADV_MARKERS, ['FAIL', 'TIMEOUT'], IRQETHADV, 'netsim', 6000, 20000]);
+E.push(['eth_adv_f429', 'f429', 'firmware/eth_adv/eth_adv_f429.bin', ADV_MARKERS, ['FAIL', 'TIMEOUT'], IRQETHADV, 'netsim', 6000, 20000]);
 const IRQETHFEAT = { enable_irqs: true, irq_eth: true, lowpower: true, eth: { rxDesc: 0x20000630, rxBuf: 0x20000668, rxStride: 1536, rxDescs: 1 } };
-E.push(['eth_feat_test', 'disco_f407vg', 'eth_feat_test/eth_feat_test.bin', FEAT_MARKERS, ['FAIL', 'TIMEOUT'], IRQETHFEAT, 'netsim', 6000, 20000, FEAT_PPS_POST]);
-E.push(['eth_feat_test_f429', 'f429', 'eth_feat_test/eth_feat_test_f429.bin', FEAT_MARKERS, ['FAIL', 'TIMEOUT'], IRQETHFEAT, 'netsim', 6000, 20000, FEAT_PPS_POST]);
-E.push(['eth_pins_test', 'f429', 'eth_pins_test/eth_pins_test_f429.bin', ['PINS AF OK', 'PINS TX OK', 'PINS RX OK', 'PINS COL OK', 'PINS COL DROP OK', 'PINS IDLE OK', 'PINS ALL PASS'], ['FAIL'], IRQETH, 'netsim', 1200, 100000]);
-E.push(['lwip_demo_f429', 'f429', 'lwip_demo/lwip_demo_f429.bin', ['LWIP init OK', 'LWIP DNS 093.184.216.034', 'LWIP TCP echo OK', 'LWIP TCP server OK', 'LWIP SELECT OK', 'LWIP UDP echo OK', 'LWIP ERR OK', 'LWIP DEMO DONE'], ['FAIL'], IRQETH, 'netsim', 1200, 200000]);
-E.push(['eth_irq_test_f429', 'f429', 'eth_irq_test/eth_irq_test_f429.bin', ['ETH IRQ Test: done'], ['TIMEOUT'], { ...IRQETH, eth: IRQETH_LAYOUT }, 'netsim', 600, 100000]);
+E.push(['eth_feat_test', 'disco_f407vg', 'firmware/eth_feat_test/eth_feat_test.bin', FEAT_MARKERS, ['FAIL', 'TIMEOUT'], IRQETHFEAT, 'netsim', 6000, 20000, FEAT_PPS_POST]);
+E.push(['eth_feat_test_f429', 'f429', 'firmware/eth_feat_test/eth_feat_test_f429.bin', FEAT_MARKERS, ['FAIL', 'TIMEOUT'], IRQETHFEAT, 'netsim', 6000, 20000, FEAT_PPS_POST]);
+E.push(['eth_pins_test', 'f429', 'firmware/eth_pins_test/eth_pins_test_f429.bin', ['PINS AF OK', 'PINS TX OK', 'PINS RX OK', 'PINS COL OK', 'PINS COL DROP OK', 'PINS IDLE OK', 'PINS ALL PASS'], ['FAIL'], IRQETH, 'netsim', 1200, 100000]);
+E.push(['lwip_demo_f429', 'f429', 'firmware/lwip_demo/lwip_demo_f429.bin', ['LWIP init OK', 'LWIP DNS 093.184.216.034', 'LWIP TCP echo OK', 'LWIP TCP server OK', 'LWIP SELECT OK', 'LWIP UDP echo OK', 'LWIP ERR OK', 'LWIP DEMO DONE'], ['FAIL'], IRQETH, 'netsim', 1200, 200000]);
+E.push(['eth_irq_test_f429', 'f429', 'firmware/eth_irq_test/eth_irq_test_f429.bin', ['ETH IRQ Test: done'], ['TIMEOUT'], { ...IRQETH, eth: IRQETH_LAYOUT }, 'netsim', 600, 100000]);
 ino('blink_serial', ['disco_f429zi'], ['Hello from UART4!']);
 const UART4KEYS = ['disco_f407vg', 'disco_f429zi', 'black_f407ve', 'black_f407ze'];
 const HASHKEYS = ['disco_f407vg', 'disco_f429zi', 'black_f407ve', 'black_f407ze'];

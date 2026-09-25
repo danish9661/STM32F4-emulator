@@ -15,8 +15,8 @@ export function createNetSim(opts?: any): any;
 
 export const FIRMWARES: Record<string, { bytes: string; [key: string]: unknown }>;
 export const bindings: any;
-export const unicornFactory: any;
 export const svdXml: string;
+// Removed: unicornFactory (Unicorn backend deleted — Rust CPU is sole backend).
 
 // STM32F4 high-level facade (see site/stm32f4.js). F1-API parity surface:
 // factories, execute/step results, GPIO/USART/SPI/I2C classes, symbol

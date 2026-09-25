@@ -4,6 +4,35 @@ All notable changes to `stm32f4-emu` are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/); this project uses
 date-based entries rather than strict SemVer until the first published release.
 
+## [1.3.0] — 2026-09-20 (new API surface: all-chips facade + platform integration)
+
+STM32F4 facade (`site/stm32f4.js`) becomes the Wokwi/OpenHW/Velxio integration
+surface for all five F4 chips — `create({chip})` with
+`stm32f401`/`stm32f411`/`stm32f407`/`stm32f407ve`/`stm32f429` (SVD truth in
+`site/vendor/*.svd`; one shared M4F core, no decoder work per chip):
+- `CHIPS`/`chipInfo()` (SVD + flash/RAM + clock + IDCODE + USART/TIM/CAN/
+  DAC/LTDC/GPIO/SPI/I2C presence lists); `chip`/`board` opt on
+  `STM32F4.create`, `createSTM32F407`, CLI `--chip`, bridge `--chip`, MCP
+  `chip`; explicit `svdXml`/`flash_size`/`ram_size` still override.
+  Gating: absent-silicon USART/SPI slots `null`, CAN/TIM polls follow
+  presence lists, `ltdc()` nulls without silicon, `gpio.pin()` rejects
+  past-bank pins, loaders size to chip flash/RAM, RUN power scales by clock.
+- Usart1-8 slots (UART7/8 @0x40007800/0x40007C00 on F407/F429, RX-verified),
+  SPI1-6 slots (F401: 1-4, F411: 1-5), polled event callbacks
+  (`onExtiEdge`/`onCanTx`/`onCanRx`/`onTimUpdate`/`onTimCapture`/`onDmaTc`/
+  `onWdogReset`/`onUsbIn`/`onUsbHsIn`/`onItmByte`/`onFsmcAccess`/`onAdcDone`/
+  `onDacWrite`/`onCrcResult`/`onRtcAlarm`/`onI2cAlert`; `onHostTx`/`onHostRx`
+  never-firing placeholders — device-only USB), full `DMAController` view,
+  live `Display` DRM (`oled`/`tft`/`ltdc()`), honest SWD/JTAG shim,
+  `pwrMode`/`pwrEstimate`, probe memory, fault-harness 1:1 mirrors
+  (UART/SPI/I2C/SDIO/RCC/FLASH/RNG/RTC/TIM) + scope probes, QSPI/SDIO/DCMI
+  image binding. Full surface in `docs/facade.md` (+ support matrix).
+- Verified: 133-check facade suite (4-chip blinky boot + LED + IDCODE +
+  gating + power), periph taps, `tsc --noEmit` clean, matrix slice green.
+- Correctness sweep in the same release: dead `unicornFactory` export
+  removed, pack stats fixed (30 files / 1.7 MB), matrix `firmware/` paths,
+  usart2-8 wording. `CHIPS`-vs-`BOARDS` ownership documented (silicon vs UI).
+
 ## [1.2.0] — 2026-09-19 (NOT published — release candidate, `npm pack` verified)
 
 New peripheral surface since 1.1.1 (all in the packed tarball, all verified

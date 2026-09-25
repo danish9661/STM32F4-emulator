@@ -32,15 +32,27 @@ export function decodeFirmware(key) {
     return Uint8Array.from(bin, c => c.charCodeAt(0));
 }
 
-// Convenience: create an emulator with the bundled STM32F407 assets.
+// Convenience: create an emulator with the bundled assets.
 //   await createSTM32F407({ firmware })           // firmware: Uint8Array
 //   await createSTM32F407({ firmware: 'eth_http' })  // or a FIRMWARES key
+//   await createSTM32F407({ firmware, chip: 'stm32f401' })  // other chips
+// `chip` resolves SVD + flash/RAM + IDCODE from the facade CHIPS table
+// (default stm32f407); explicit svdXml/flash_size/ram_size opts override it.
 // All extra options pass through to createEmulator().
 export async function createSTM32F407(opts = {}) {
-    const { firmware } = opts;
+    const { firmware, chip = 'stm32f407' } = opts;
     const bin = typeof firmware === 'string' ? decodeFirmware(firmware) : firmware;
     if (!bin) throw new Error('createSTM32F407 requires `firmware` (Uint8Array or a FIRMWARES key)');
-    return createEmulator({ ...opts, firmware: bin, bindings, svdXml, wasmInit: wasmBytes });
+    const info = chipInfo(chip);
+    const cSvd = (opts.svdXml !== undefined) ? opts.svdXml
+        : readFileSync(new URL(`./site/vendor/${info.svd}`, import.meta.url), 'utf8');
+    return createEmulator({
+        ...opts, firmware: bin, bindings, wasmInit: wasmBytes,
+        svdXml: cSvd, svdFile: info.svd,
+        flash_size: opts.flash_size ?? info.flash_size,
+        ram_size: opts.ram_size ?? info.ram_size,
+        chipHint: info.svd.replace(/\.svd$/, ''),
+    });
 }
 
 export { createEmulator, createNetSim, FIRMWARES, bindings, svdXml, LED, Button, Pwm, I2cRegisterDevice, Potentiometer, STM32F4, GPIOPin, GPIO, USART, SPI, I2C, DMAStream, DMAController, Display, CHIPS, chipInfo };

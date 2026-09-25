@@ -11,9 +11,9 @@
 //   stopped} (both drain UART into usart1, like F1's event drain).
 // - gpio.pin() coerces index ports; GPIOPin.on('change') returns unsubscribe.
 // - USART slots are per-chip: F401/F411 expose 1,2,6 only (SVD census),
-//   absent slots are null. TX is a single shared model buffer, so
-//   onData/output only ever fire on usart1 (usart2-6 send() works, their
-//   onData never fires — model limit, not a bug).
+//   F407/F429 add 3,4,5,7,8; absent slots are null. TX is a single shared
+//   model buffer, so onData/output only ever fire on usart1 (usart2-8
+//   send() works, their onData never fires — model limit, not a bug).
 // - SPI/I2C stay create-time specs (taps snapshot at init — post-create
 //   callback assignment like F1's spi[ch].onTransfer is impossible without a
 //   Rust rescan; a silent no-fire shim would be worse than the explicit opt).
@@ -56,6 +56,11 @@ const RAM_BASE = 0x20000000;
 // bases are identical wherever the peripheral exists. Extended rows
 // (spi4-6/uart78/i2s/sai/sdio/dcmi/crc/cryp/hash/rng/fsmc) come from the
 // same census — the facade gates or exposes against them the same way.
+//
+// OWNERSHIP: CHIPS is the silicon owner (presence lists, IDCODE, clocks)
+// for programmatic use; site/boards.js BOARDS owns board-UI wiring
+// (preset compat, LED map, browser boot sizes) and duplicates the
+// size/clock/label values by design. Keep both in sync on new chips.
 const CHIPS = {
     stm32f401: {
         svd: 'stm32f401.svd', flash_size: 0x80000, ram_size: 0x18000,
@@ -262,7 +267,7 @@ const USART_BASE = {
 // `sendData` injects bytes into the guest's RX stream (as if received on
 // the wire). `output` accumulates this USART's TX bytes (F1 parity).
 // MODEL LIMIT: TX is one shared buffer, so only usart1._emit is ever fed
-// (see execute()). usart2-6.send() injects RX correctly; their onData and
+// (see execute()). usart2-8.send() injects RX correctly; their onData and
 // output stay empty because the model cannot attribute TX bytes per USART.
 export class USART {
     constructor(mcu, n) {

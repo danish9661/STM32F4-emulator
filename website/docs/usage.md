@@ -253,7 +253,7 @@ console.log(emu.drainUart());
 emu.close();
 ```
 
-`npm pack` produces the tarball (16 files, ~1.2 MB); install from the
+`npm pack` produces the tarball (30 files, ~1.7 MB); install from the
 tarball to consume it. The package is **not yet published** to the npm
 registry.
 
