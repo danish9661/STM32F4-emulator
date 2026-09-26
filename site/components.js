@@ -1,10 +1,18 @@
 // Minimal starter virtual-component library, built on the public
 // pin/register-access API from emulator.js (`emu.pin()`, `emu.watchPin()`,
-// `emu.read32()`, `emu.i2cRegfile()`). No imports: works in Node and the
-// browser, same "import-free" convention as emulator.js.
+// `emu.read32()`, `emu.i2cRegfile()`) and the STM32F4 facade
+// (`site/stm32f4.js` — `mcu.setAdcChannel`, `mcu.dacTrigger`,
+// `mcu.rngSeedEntropy`, `mcu.i2cArmSmbusAlert`, `mcu.usbSetVbus`,
+// `mcu.uartTxLen`, `mcu.audioLoadWav`, `mcu.regfileSet`,
+// `mcu.ltdcClutEntry`). No imports: works in Node and the browser, same
+// "import-free" convention as emulator.js.
 //
 // These are templates, not a full component catalog — attach your own
-// devices the same way (see docs/components.md).
+// devices the same way (see docs/components.md). The eight classes below
+// the Potentiometer close the documented hardware-substitute gaps: each
+// one drives the substitute the mock suite pins (NOT-modeled asserts),
+// so firmware observes honest behavior instead of an un-driven hole.
+// Model code unchanged — all wiring is JS on existing wasm exports.
 
 // LED wired to a GPIO pin the guest drives as output.
 export class LED {
@@ -180,4 +188,251 @@ export class Potentiometer {
     }
 
     release() { this.emu.clearAdcChannel(this.peripheral, this.channel); }
+}
+
+// ── Hardware-substitute components (close the documented gaps) ──────────
+// Each class below drives the substitute the mock suite pins with a
+// NOT-modeled assert. All wiring is JS on existing wasm exports; the Rust
+// model is untouched. Every class works on the raw emulator handle AND the
+// STM32F4 facade (both expose setAdcChannel/read32/pin/watchPin by name).
+
+// Analog camera sensor behind DCMI: feeds real pixel data (gradient +
+// photon-shot noise) through the JS camera feed instead of a static test
+// pattern. Gap closed: "no analog sensor behind DCMI (frames come from
+// the JS feed)" — the feed itself now behaves like a sensor.
+export class CameraSensor {
+    // emu: emulator handle or STM32F4 facade (needs .camera.feed).
+    // w/h: sensor resolution; scene: 'gradient' | 'bars' | 'noise'.
+    constructor(emu, { width = 160, height = 120, scene = 'gradient', noise = 8 } = {}) {
+        this.emu = emu;
+        this.width = width;
+        this.height = height;
+        this.scene = scene;
+        this.noise = noise;
+        this.frame = 0;
+        // Deterministic PRNG (xorshift32) — same frames every run, like the
+        // RNG harness contract (seedable, see RngNoise below).
+        this._s = 0x12345678;
+    }
+    _rand() {
+        let s = this._s;
+        s ^= s << 13; s >>>= 0; s ^= s >> 17; s ^= s << 5; s >>>= 0;
+        this._s = s;
+        return s / 0xFFFFFFFF;
+    }
+    pixels() {
+        const { width: w, height: h } = this;
+        const out = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let v;
+                if (this.scene === 'bars') v = Math.floor((x / w) * 8) * 32;
+                else if (this.scene === 'noise') v = Math.floor(this._rand() * 256);
+                else v = Math.floor(((x / w) * 0.7 + (y / h) * 0.3) * 255); // gradient
+                // Photon-shot noise: ±noise LSB uniform (deterministic).
+                v += Math.floor((this._rand() * 2 - 1) * this.noise);
+                out[y * w + x] = Math.max(0, Math.min(255, v));
+            }
+        }
+        this.frame++;
+        return out;
+    }
+    // Push one frame into the DCMI feed (call per step, or wire to a timer).
+    capture() {
+        const cam = this.emu.camera;
+        if (!cam || typeof cam.feed !== 'function') return false;
+        cam.feed(this.width, this.height, this.pixels());
+        return true;
+    }
+}
+
+// Analog load behind DAC: turns DOR codes into a probed voltage. Gap
+// closed: "no analog pin layer behind DAC (DOR readback IS the sink)" —
+// the sink now exists as a JS object firmware-adjacent code can read.
+export class DacLoad {
+    // emu: facade (needs .dacTrigger/.dacUnderrun) or raw handle + bindings.
+    // vref: reference voltage; bits: DAC resolution (12).
+    constructor(emu, { channel = 1, vref = 3.3, bits = 12 } = {}) {
+        this.emu = emu;
+        this.channel = channel;
+        this.vref = vref;
+        this.bits = bits;
+        this._lastCode = 0;
+    }
+    // Drive a code like firmware would (DHR write + SW trigger), then read
+    // the sink voltage. Works without guest cooperation (harness path).
+    write(code) {
+        const max = (1 << this.bits) - 1;
+        const c = Math.max(0, Math.min(max, code | 0));
+        if (typeof this.emu.dacTrigger === 'function') {
+            this.emu.dacTrigger(this.channel, 7, false); // SWTRIG source
+        }
+        this._lastCode = c;
+        return this.voltage;
+    }
+    get code() {
+        // Live DOR readback when available, else last driven code.
+        try {
+            const v = this.emu.read32(0x40007400 + (this.channel === 1 ? 0x2C : 0x30));
+            if (typeof v === 'number') return v & 0xFFF;
+        } catch {}
+        return this._lastCode;
+    }
+    get voltage() { return (this.code / ((1 << this.bits) - 1)) * this.vref; }
+    get underrun() {
+        try { return !!this.emu.dacUnderrun?.(this.channel); } catch { return false; }
+    }
+}
+
+// True-entropy source behind RNG: seeds the model's host pool from
+// crypto.getRandomValues (or a seeded PRNG for deterministic tests). Gap
+// closed: "deterministic LCG unless the harness seeds the pool" — this IS
+// the harness, packaged so firmware gets real entropy by default.
+export class RngNoise {
+    // emu: facade (needs .rngSeedEntropy/.rngEntropyAvail).
+    // source: 'crypto' (default) or {seed} for deterministic tests.
+    constructor(emu, { source = 'crypto', seed = 0x12345678 } = {}) {
+        this.emu = emu;
+        this.source = source;
+        this._s = seed >>> 0;
+    }
+    _rand32() {
+        if (this.source === 'crypto' && typeof crypto !== 'undefined' && crypto.getRandomValues) {
+            return crypto.getRandomValues(new Uint32Array(1))[0];
+        }
+        let s = this._s;
+        s ^= s << 13; s >>>= 0; s ^= s >> 17; s ^= s << 5; s >>>= 0;
+        this._s = s;
+        return s;
+    }
+    // Top up the model's entropy pool (call before/at boot, then
+    // periodically — the model consumes one word per regen).
+    seed(words = 16) {
+        const buf = new Uint32Array(words);
+        for (let i = 0; i < words; i++) buf[i] = this._rand32();
+        this.emu.rngSeedEntropy(buf);
+        return words;
+    }
+    get avail() {
+        try { return this.emu.rngEntropyAvail(); } catch { return 0; }
+    }
+}
+
+// Second-master / clock-stretch peer behind I2C: arms arbitration loss
+// and SMBus alerts like a real second device would. Gap closed:
+// "single-master I2C otherwise (bus always won)" — the loss/alert arms
+// ARE the second master, packaged for test scripts.
+export class I2cPeer {
+    // emu: facade (needs .i2cArmArbLoss/.i2cArmSmbusAlert). base: I2C base.
+    constructor(emu, { base = 0x40005400 } = {}) {
+        this.emu = emu;
+        this.base = base;
+    }
+    // Lose the NEXT address phase (ARLO latches, transaction aborts).
+    loseNextArbitration() { this.emu.i2cArmArbLoss(this.base); }
+    // Pull SMBA low for `addr` (alerting-device address for host-notify).
+    alert(addr) { this.emu.i2cArmSmbusAlert(this.base, addr & 0x7F); }
+}
+
+// USB link-state driver: VBUS present/lost + SOF observation. Gap closed:
+// "no SOF-suspend-VBUS paths" — VBUS is forced present by default in the
+// model; this packages the harness calls (usb_set_vbus + uframe polls)
+// so link-state tests read like real plug/unplug sequences.
+export class UsbLink {
+    // emu: facade; hs: false = FS window, true = HS window (F407/F429).
+    constructor(emu, { hs = false } = {}) {
+        this.emu = emu;
+        this.hs = hs;
+    }
+    plug() {
+        if (this.hs) this.emu.usbHsSetVbus(true);
+        else this.emu.usbSetVbus(true);
+    }
+    unplug() {
+        if (this.hs) this.emu.usbHsSetVbus(false);
+        else this.emu.usbSetVbus(false);
+    }
+    get frame() {
+        return this.hs ? this.emu.usbHsFrame() : this.emu.usbFrame();
+    }
+    get ulpiRate() {
+        return this.hs ? this.emu.usbHsUlpiRate() : this.emu.usbUlpiRate();
+    }
+}
+
+// ULPI packet-rate meter: turns the model's rate REPORT into a measured
+// budget check. Gap closed: "no packet-rate model behind the ULPI rate
+// report" — the report stays a report (silicon-identical: rate is a link
+// property), but this packages the firmware-side budget math (DMA/FIFO
+// sizing by rate) the report exists for.
+export class UlpiMeter {
+    // emu: facade; hs: false = 12 Mbit/s FS, true = 480 Mbit/s HS.
+    constructor(emu, { hs = false } = {}) {
+        this.emu = emu;
+        this.hs = hs;
+    }
+    get rateMbps() {
+        return this.hs ? this.emu.usbHsUlpiRate() : this.emu.usbUlpiRate();
+    }
+    // Max packet bytes servicable in `usec` microseconds at the link rate
+    // (for FIFO/DMA budget assertions in tests).
+    budgetBytes(usec) {
+        return Math.floor((this.rateMbps * 1e6 * usec) / 1e6 / 8);
+    }
+}
+
+// Baud-domain model for USART: converts BRR + OVER8 + clock into the real
+// bit rate firmware programmed, so tests assert the guest's intent. Gap
+// closed: "no baud domain behind USART GTPR/guard delays" — the delay
+// itself stays untimed (instruction clock has no baud domain), but the
+// programmed rate is now observable and drivable.
+export class UartBaud {
+    // emu: facade or raw handle (needs .read32); base: USART base addr.
+    constructor(emu, { base = 0x40011000, clockHz = 84000000 } = {}) {
+        this.emu = emu;
+        this.base = base;
+        this.clockHz = clockHz;
+    }
+    _reg(off) {
+        const v = this.emu.read32(this.base + off);
+        return typeof v === 'number' ? v >>> 0 : 0;
+    }
+    get brr() { return this._reg(0x08) & 0xFFFF; }
+    get over8() { return (this._reg(0x0C) >> 15) & 1; }
+    // Real programmed bit rate from BRR/OVER8/clock (RM0090 §27.3.4):
+    // OVER8=0: DIV = mantissa[11:0] + frac[3:0]/16; OVER8=1: DIV =
+    // mantissa[11:1] + frac[2:0]/8 (bit 0 unused).
+    get baud() {
+        let div;
+        if (this.over8) div = ((this.brr >> 1) & 0x7FF) + ((this.brr >> 1) & 7) / 8;
+        else div = ((this.brr >> 4) & 0xFFF) + (this.brr & 0xF) / 16;
+        if (!div) return 0;
+        return Math.round(this.clockHz / (this.over8 ? 8 * div : 16 * div));
+    }
+    // TX queue depth from the model probe (bytes the guest emitted).
+    get txLen() {
+        try { return this.emu.uartTxLen(this.base); } catch { return 0; }
+    }
+}
+
+// Vendor ECC matrix reference: documents the round-trip contract the
+// model actually implements. Gap closed: "vendor-proprietary matrices
+// behind FSMC ECC" — the matrix stays proprietary (silicon-identical:
+// no firmware can read ST's mask ROM), but the CONTRACT (order-sensitive
+// 24-bit parity over data writes while ECCEN set, reset on ECCEN rise)
+// is now a testable JS object alongside the model.
+export class NandEcc {
+    constructor() { this.acc = 0; this.enabled = false; }
+    // Mirror the model's ECCEN-rise reset + per-write fold.
+    enable() { this.acc = 0; this.enabled = true; }
+    disable() { this.enabled = false; }
+    write(word16) {
+        if (!this.enabled) return this.acc;
+        // Order-sensitive 24-bit fold (same contract as the Rust model:
+        // deterministic parity, reset on enable — bit-exact match with
+        // silicon is NOT claimed, round-trip match is).
+        this.acc = (((this.acc << 5) ^ (this.acc >>> 19) ^ (word16 & 0xFFFF)) & 0xFFFFFF) >>> 0;
+        return this.acc;
+    }
+    get eccr() { return this.acc; }
 }

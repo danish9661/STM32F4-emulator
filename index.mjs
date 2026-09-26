@@ -6,7 +6,7 @@ import * as bindings from './site/vendor/stm32_periph_wasm.js';
 import { createEmulator } from './site/emulator.js';
 import { createNetSim } from './site/netsim.js';
 import { FIRMWARES } from './site/firmware.js';
-import { LED, Button, Pwm, I2cRegisterDevice, Potentiometer } from './site/components.js';
+import { LED, Button, Pwm, Servo, I2cRegisterDevice, Potentiometer, CameraSensor, DacLoad, RngNoise, I2cPeer, UsbLink, UlpiMeter, UartBaud, NandEcc } from './site/components.js';
 import { STM32F4, GPIOPin, GPIO, USART, SPI, I2C, DMAStream, DMAController, Display, CHIPS, chipInfo } from './site/stm32f4.js';
 
 // Node consumers get a one-call setup that injects the bundled assets. The
@@ -55,5 +55,5 @@ export async function createSTM32F407(opts = {}) {
     });
 }
 
-export { createEmulator, createNetSim, FIRMWARES, bindings, svdXml, LED, Button, Pwm, I2cRegisterDevice, Potentiometer, STM32F4, GPIOPin, GPIO, USART, SPI, I2C, DMAStream, DMAController, Display, CHIPS, chipInfo };
+export { createEmulator, createNetSim, FIRMWARES, bindings, svdXml, LED, Button, Pwm, Servo, I2cRegisterDevice, Potentiometer, CameraSensor, DacLoad, RngNoise, I2cPeer, UsbLink, UlpiMeter, UartBaud, NandEcc, STM32F4, GPIOPin, GPIO, USART, SPI, I2C, DMAStream, DMAController, Display, CHIPS, chipInfo };
 export { boardLed, BOARD_LED, BOARD_LED_ALIASES } from './site/boards.js';

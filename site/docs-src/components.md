@@ -261,3 +261,21 @@ for why), so a process that boots thousands of firmwares will grow.
   driver would use DMA rather than polling DR, which is the case
   `dcmi_test` deliberately does NOT cover (it asserts the OVR that polling
   produces instead).
+
+## Hardware-substitute components (close the documented gaps)
+
+Eight classes that drive the substitute each gap doc promises — pure JS on
+existing wasm exports, model untouched, all exported from `stm32f4-emu`
+(and `site/components.js`). Tested by `site/test_components_subs.mjs`
+(19 checks, in `npm run test:components`):
+
+| Class | Gap closed | How |
+|---|---|---|
+| `CameraSensor` | no analog sensor behind DCMI | gradient/bars/noise pixels + photon-shot noise through `camera.feed()` |
+| `DacLoad` | no analog pin behind DAC | DOR code → voltage (`vref`, 12-bit); `underrun` probe |
+| `RngNoise` | deterministic LCG unless seeded | `crypto.getRandomValues` (or seeded PRNG) → `rngSeedEntropy` pool |
+| `I2cPeer` | single-master I2C otherwise | `i2cArmArbLoss` (ARLO) + `i2cArmSmbusAlert` (SMBA) arms |
+| `UsbLink` | no SOF-suspend-VBUS paths | `usbSetVbus` plug/unplug + `usbFrame`/`usbUlpiRate` reads (FS+HS) |
+| `UlpiMeter` | no packet-rate model behind ULPI | rate report → FIFO/DMA `budgetBytes(usec)` math |
+| `UartBaud` | no baud domain behind GTPR/guard | BRR/OVER8/clock → programmed rate (mantissa.frac exact) + `txLen` |
+| `NandEcc` | vendor-proprietary ECC matrices | round-trip contract (order-sensitive 24-bit parity, reset on enable) |

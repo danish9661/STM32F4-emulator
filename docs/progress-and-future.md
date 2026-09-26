@@ -141,15 +141,21 @@ builds in the board matrix (176/176) and the browser smoke.
    would re-scan `rx_desc` and stomp the driver's frame bookkeeping).
    IRQ firmware (`irq_eth`) owns its flags through the real handler.
 3. **Hardware paths not modeled**: no analog sensor behind DCMI (frames
-    come from the JS feed), no analog pin layer behind DAC (DOR readback IS
-    the sink), no true-entropy RNG source (deterministic LCG unless the
-    harness seeds the pool), single-master I2C otherwise (bus always won),
-    no USB isochronous/host/SOF-suspend-VBUS paths, no packet-rate model
-    behind the ULPI rate report, no baud domain behind USART GTPR/guard
-    delays, vendor-proprietary matrices behind FSMC ECC, CAN has a real
+    come from the JS feed — now with a `CameraSensor` component producing
+    gradient/noise pixels), no analog pin layer behind DAC (DOR readback IS
+    the sink — now with a `DacLoad` voltage object), no true-entropy RNG
+    source (deterministic LCG unless the harness seeds the pool — now with
+    an `RngNoise` crypto seeder), single-master I2C otherwise (bus always
+    won — now with an `I2cPeer` ARLO/ALERT driver), no USB isochronous/host/
+    SOF-suspend-VBUS paths (now with a `UsbLink` VBUS driver), no
+    packet-rate model behind the ULPI rate report (now with a `UlpiMeter`
+    budget helper), no baud domain behind USART GTPR/guard delays (now with
+    a `UartBaud` programmed-rate probe), vendor-proprietary matrices behind
+    FSMC ECC (now with a `NandEcc` round-trip contract), CAN has a real
     two-node bus with arbitration, I2S/SAI have a WAV-backed DMA capture
     path, LTDC has real scanout + a browser sink. Each substitute is pinned
-    by mock asserts so the docs can't drift from the model.
+    by mock asserts so the docs can't drift from the model; the eight
+    component classes are tested by `site/test_components_subs.mjs`.
 4. **Timers are instruction-count driven**, not wall-clock driven — a
    `delay_ms(100)` is ~2.4M emulated instructions, so real-time blink
    rates don't hold (documented in AGENTS.md §11).

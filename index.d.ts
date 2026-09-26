@@ -379,6 +379,57 @@ export class Potentiometer {
 export class I2cRegisterDevice {
   constructor(emu: any, peripheral: string, opts?: any);
 }
+// Hardware-substitute components (close the documented model gaps — pure
+// JS on existing wasm exports, see site/components.js).
+export class CameraSensor {
+  constructor(emu: any, opts?: { width?: number; height?: number; scene?: string; noise?: number });
+  pixels(): Uint8Array;
+  capture(): boolean;
+  frame: number;
+}
+export class DacLoad {
+  constructor(emu: any, opts?: { channel?: number; vref?: number; bits?: number });
+  write(code: number): number;
+  get code(): number;
+  get voltage(): number;
+  get underrun(): boolean;
+}
+export class RngNoise {
+  constructor(emu: any, opts?: { source?: string; seed?: number });
+  seed(words?: number): number;
+  get avail(): number;
+}
+export class I2cPeer {
+  constructor(emu: any, opts?: { base?: number });
+  loseNextArbitration(): void;
+  alert(addr: number): void;
+}
+export class UsbLink {
+  constructor(emu: any, opts?: { hs?: boolean });
+  plug(): void;
+  unplug(): void;
+  get frame(): number;
+  get ulpiRate(): number;
+}
+export class UlpiMeter {
+  constructor(emu: any, opts?: { hs?: boolean });
+  get rateMbps(): number;
+  budgetBytes(usec: number): number;
+}
+export class UartBaud {
+  constructor(emu: any, opts?: { base?: number; clockHz?: number });
+  get brr(): number;
+  get over8(): number;
+  get baud(): number;
+  get txLen(): number;
+}
+export class NandEcc {
+  constructor();
+  enable(): void;
+  disable(): void;
+  write(word16: number): number;
+  get eccr(): number;
+}
 
 // Component-attachment API (attach devices to an emulator handle).
 // Board LED map + host reset/boot control (see site/boards.js,
