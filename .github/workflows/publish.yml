@@ -50,6 +50,7 @@ jobs:
   publish-npm:
     name: Publish to npm Registry
     needs: test
+    if: github.event_name != 'workflow_dispatch' || inputs.version != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +80,10 @@ jobs:
   publish-gpr:
     name: Publish to GitHub Packages
     needs: test
+    # GPR needs a linked repository before the first scoped publish or the
+    # registry answers 403 permission_denied: write_package. Skip it (never
+    # block npm + release) until the package page exists.
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,7 +124,7 @@ jobs:
   create-release:
     name: Create Git Tag & GitHub Release
     if: github.event_name == 'workflow_dispatch'
-    needs: [publish-npm, publish-gpr]
+    needs: [publish-npm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

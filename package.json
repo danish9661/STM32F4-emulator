@@ -5,9 +5,9 @@
   "type": "module",
   "main": "index.mjs",
   "bin": {
-    "stm32f4-emu": "./cli.mjs",
-    "stm32f4-mcp": "./mcp/server.mjs",
-    "stm32f4-bridge": "./site/ws-bridge.mjs"
+    "stm32f4-emu": "cli.mjs",
+    "stm32f4-mcp": "mcp/server.mjs",
+    "stm32f4-bridge": "site/ws-bridge.mjs"
   },
   "types": "index.d.ts",
   "exports": {
