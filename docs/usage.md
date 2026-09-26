@@ -117,7 +117,7 @@ Or in the repo root: `npm run serve`.
 
 ### Deployed demo
 
-https://danish9661.github.io/stm32F4-emulator/ (GitHub Pages, CI-deployed).
+https://danish9661.github.io/STM32F4-emulator/ (GitHub Pages, CI-deployed).
 
 ### What you get
 

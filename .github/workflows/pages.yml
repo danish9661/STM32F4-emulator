@@ -29,11 +29,11 @@ jobs:
         working-directory: website
 
       - name: Build docs
-        run: npm run build
+        run: npm run build 2>&1 | tail -5
         working-directory: website
 
       - name: Copy emulator console into docs build
-        run: mkdir -p website/build/console && cp -r site/* website/build/console/
+        run: mkdir -p website/build/console && cp -r site/* website/build/console/ && ls website/build/console/console.html website/build/console/doom.html
 
       - uses: actions/configure-pages@v5
         with:

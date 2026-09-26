@@ -8,4 +8,4 @@ Disallow: /vendor/
 Disallow: /doom1.wad
 Disallow: /firmware.js
 
-Sitemap: https://danish9661.github.io/stm32F4-emulator/sitemap.xml
+Sitemap: https://danish9661.github.io/STM32F4-emulator/sitemap.xml

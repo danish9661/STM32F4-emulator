@@ -7,10 +7,10 @@ const config = {
   favicon: 'img/favicon.svg',
 
   url: 'https://danish9661.github.io',
-  baseUrl: '/stm32F4-emulator/',
+  baseUrl: '/STM32F4-emulator/',
 
   organizationName: 'danish9661',
-  projectName: 'stm32F4-emulator',
+  projectName: 'STM32F4-emulator',
   deploymentBranch: 'gh-pages',
   trailingSlash: false,
 
@@ -29,7 +29,7 @@ const config = {
       ({
         docs: {
           sidebarPath: './sidebars.js',
-          editUrl: 'https://github.com/danish9661/stm32F4-emulator/tree/master/website/',
+          editUrl: 'https://github.com/danish9661/STM32F4-emulator/tree/master/website/',
         },
         blog: false,
         theme: {
@@ -57,12 +57,12 @@ const config = {
             label: 'Documentation',
           },
           {
-            href: '/stm32F4-emulator/console/',
+            href: '/STM32F4-emulator/console/',
             label: 'Live Demo',
             position: 'left',
           },
           {
-            href: 'https://github.com/danish9661/stm32F4-emulator',
+            href: 'https://github.com/danish9661/STM32F4-emulator',
             label: 'GitHub',
             position: 'right',
           },
@@ -88,15 +88,15 @@ const config = {
           {
             title: 'Community',
             items: [
-              { label: 'GitHub', href: 'https://github.com/danish9661/stm32F4-emulator' },
+              { label: 'GitHub', href: 'https://github.com/danish9661/STM32F4-emulator' },
               { label: 'npm', href: 'https://www.npmjs.com/package/stm32f4-emu' },
             ],
           },
           {
             title: 'More',
             items: [
-              { label: 'Live Demo', href: '/stm32F4-emulator/console/' },
-              { label: 'DOOM', href: '/stm32F4-emulator/console/doom.html' },
+              { label: 'Live Demo', href: '/STM32F4-emulator/console/' },
+              { label: 'DOOM', href: '/STM32F4-emulator/console/doom.html' },
             ],
           },
         ],

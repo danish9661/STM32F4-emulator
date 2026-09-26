@@ -6,7 +6,7 @@ import Layout from '@theme/Layout';
 // Single-landing policy: the live launcher lives in site/ (served as
 // /console/ on Pages, as / locally). This root page only redirects there
 // (plus a manual link for no-JS/crawlers). Docs under /docs/ are unaffected.
-const TARGET = '/stm32F4-emulator/console/';
+const TARGET = '/STM32F4-emulator/console/';
 
 export default function Home() {
   useEffect(() => {

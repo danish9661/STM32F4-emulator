@@ -22,7 +22,7 @@ The same firmware binaries that run here also run on real F4 hardware.
 
 ## Try it
 
-Open the [live console](https://danish9661.github.io/stm32F4-emulator/console/console.html) — pick a firmware preset
+Open the [live console](https://danish9661.github.io/STM32F4-emulator/console/console.html) — pick a firmware preset
 (`?fw=blinky`), a board (`?board=stm32f401`), or upload your own
 `.bin` / `.hex` / `.elf`.
 

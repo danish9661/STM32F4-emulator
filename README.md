@@ -3,8 +3,8 @@
 [![npm version](https://img.shields.io/npm/v/stm32f4-emu.svg)](https://www.npmjs.com/package/stm32f4-emu)
 [![npm downloads](https://img.shields.io/npm/dm/stm32f4-emu.svg)](https://www.npmjs.com/package/stm32f4-emu)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![CI](https://github.com/danish9661/stm32F4-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/danish9661/stm32F4-emulator/actions/workflows/ci.yml)
-[![Pages](https://github.com/danish9661/stm32F4-emulator/actions/workflows/pages.yml/badge.svg)](https://github.com/danish9661/stm32F4-emulator/actions/workflows/pages.yml)
+[![CI](https://github.com/danish9661/STM32F4-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/danish9661/STM32F4-emulator/actions/workflows/ci.yml)
+[![Pages](https://github.com/danish9661/STM32F4-emulator/actions/workflows/pages.yml/badge.svg)](https://github.com/danish9661/STM32F4-emulator/actions/workflows/pages.yml)
 
 > **Status: emulation complete.** All 41 peripheral modules are Detailed
 > (0 Partial), all five board maps verify green (37/37/72/73/59 presets),
@@ -34,7 +34,7 @@ npm package.
 
 The browser demo deploys to GitHub Pages:
 
-**https://danish9661.github.io/stm32F4-emulator/**
+**https://danish9661.github.io/STM32F4-emulator/**
 
 A single console page that starts **idle** — nothing runs until you pick a
 firmware: a preset dropdown with 223 bundled binaries (network demos, a

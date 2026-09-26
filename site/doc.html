@@ -9,8 +9,8 @@
 <meta property="og:site_name" content="STM32F4 Emulator">
 <meta property="og:title" content="Docs — STM32F4 Emulator">
 <meta property="og:description" content="Emulator documentation rendered live from the repo sources: usage, boards, networking, peripherals, architecture.">
-<meta property="og:url" content="https://danish9661.github.io/stm32F4-emulator/docs.html">
-<link rel="canonical" href="https://danish9661.github.io/stm32F4-emulator/docs.html">
+<meta property="og:url" content="https://danish9661.github.io/STM32F4-emulator/docs.html">
+<link rel="canonical" href="https://danish9661.github.io/STM32F4-emulator/docs.html">
 <title>Docs — STM32F4 Emulator</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -111,7 +111,7 @@ footer a { color: var(--cyan); }
     <a class="nav" href="doom.html">DOOM</a>
     <a class="nav active" href="docs.html">Docs</a>
     <a class="nav" href="about.html">About</a>
-    <a class="nav" href="https://github.com/danish9661/stm32F4-emulator" target="_blank" rel="noopener">GitHub</a>
+    <a class="nav" href="https://github.com/danish9661/STM32F4-emulator" target="_blank" rel="noopener">GitHub</a>
 </header>
 <main>
 <h1 id="doc-title">Docs</h1>
@@ -120,7 +120,7 @@ footer a { color: var(--cyan); }
 </main>
 <footer>
     STM32F4 Emulator &middot; <a href="docs.html">Docs</a> &middot; <a href="console.html">Live Console</a> &middot;
-    <a href="https://github.com/danish9661/stm32F4-emulator" target="_blank" rel="noopener">Source</a>
+    <a href="https://github.com/danish9661/STM32F4-emulator" target="_blank" rel="noopener">Source</a>
 </footer>
 <script type="module">
 // Repo source path for a served doc file: boards/* live under docs/boards/,
@@ -250,7 +250,7 @@ try {
     document.title = title + ' — STM32F4 Emulator Docs';
     // Per-doc discovery tags (Google executes JS): canonical + OG +
     // TechArticle schema so each ?f= doc is indexed on its own URL.
-    const pageUrl = 'https://danish9661.github.io/stm32F4-emulator/doc.html?f=' + file;
+    const pageUrl = 'https://danish9661.github.io/STM32F4-emulator/doc.html?f=' + file;
     const setMeta = (attr, key, val) => {
         let el = document.head.querySelector(`meta[${attr}="${key}"]`);
         if (!el) { el = document.createElement('meta'); el.setAttribute(attr, key); document.head.appendChild(el); }
@@ -271,7 +271,7 @@ try {
     document.getElementById('doc-title').textContent = title;
     document.getElementById('crumb').textContent = 'Docs · ' + title;
     document.getElementById('doc-src').innerHTML =
-        `Rendered live from <a href="https://github.com/danish9661/stm32F4-emulator/blob/master/${srcPath(file)}">${file}</a>`;
+        `Rendered live from <a href="https://github.com/danish9661/STM32F4-emulator/blob/master/${srcPath(file)}">${file}</a>`;
     body.innerHTML = (tocs.length >= 3
         ? `<div class="toc"><b>On this page</b><ul>${tocs.map(([id, t]) => `<li><a href="#${id}">${inline(t)}</a></li>`).join('')}</ul></div>`
         : '') + bodyHtml;

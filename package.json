@@ -58,11 +58,11 @@
   "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/danish9661/stm32F4-emulator.git"
+    "url": "git+https://github.com/danish9661/STM32F4-emulator.git"
   },
-  "homepage": "https://danish9661.github.io/stm32F4-emulator/",
+  "homepage": "https://danish9661.github.io/STM32F4-emulator/",
   "bugs": {
-    "url": "https://github.com/danish9661/stm32F4-emulator/issues"
+    "url": "https://github.com/danish9661/STM32F4-emulator/issues"
   },
   "engines": {
     "node": ">=20"

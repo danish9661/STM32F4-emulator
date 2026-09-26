@@ -3296,7 +3296,7 @@ examples, `usage.md` (serve + 67-preset count).
 
 ### Landing redirect + boards doc (2026-09-11)
 Single-landing policy: `website/src/pages/index.js` is now a redirect to
-`/stm32F4-emulator/console/` (meta refresh + JS replace + manual link;
+`/STM32F4-emulator/console/` (meta refresh + JS replace + manual link;
 docs unaffected) — the site/ launcher is the one landing. Deployed,
 `/console/` = copy of `site/` (pages.yml), so root → site landing →
 console/doom. Verified: built + served, redirect fires (lands on 404
