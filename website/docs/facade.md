@@ -208,6 +208,18 @@ fault arms with no guest cooperation:
   ethLinkUp/ethSetLink`, `ltdcScanline/ltdcFrameCount` (LTDC-gated),
   `audioRemaining/audioClear`, `dcmiSync`, `qspiMmapLive/qspiMmapRead`,
   `sdioBusWidth/sdioCardBlocks/sdioReadBlock`.
+- Peripheral-domain helpers: `ethMacAddr/ethTxDeferred/ethCollisionArmed/
+  ethArmCollision/ethPauseTx/ethBackoffSlots`, `dma2dTakeJob/dma2dJobDone/
+  dma2dFifoThreshold/dmaStreamCt/dmaStreamFeif`, `fsmcBindNand/
+  fsmcNandErase`, `traceStart/traceStop/takeTrace`, `getFpuState/setSreg/
+  setFpscr`, `wdogRequested/wdogClearFlags/wdogIwdgFlag/wdogWwdgFlag/
+  flashProgramming`.
+- Protocol helpers: `usbInStatus/usbOutStatus/usbHsInStatus/usbHsOutStatus/
+  usbSetVbus/usbHsSetVbus/usbFrame/usbHsFrame/usbUlpiRate/usbHsUlpiRate/
+  usbDmaProgress`, `uartBreakTx/uartIrdaRx/uartIrdaTxClass/uartSmartcardNack/
+  uartSmartcardRetries`, `canNoteError/canFdLen/canFdByte/canFdCost`,
+  `i2cPec/spiFlashDebug/sdioCardIrq/rtcTamper/audioLoadWav/
+  ltdcClutEntry/ltdcLutPixel`.
 
 ## Tests
 

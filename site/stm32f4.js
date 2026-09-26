@@ -1346,6 +1346,161 @@ export class STM32F4 {
         try { return Array.from(this._bindings.sdio_read_block(block >>> 0)); }
         catch { return []; }
     }
+    // ── Peripheral-domain helpers (model state + harness, grouped by bus) ──
+    // Thin 1:1 mirrors of the wasm exports platforms actually poll in a
+    // frame loop or drive from test harnesses. Gated on chip silicon where
+    // the SVD census says the block is absent (reads would be benign-0).
+    // ETH link + wire status (all ETH exports need a live MAC; F401/F411
+    // have no ETH silicon — return inert defaults there, never throw,
+    // because link polling runs unconditionally in platform loops).
+    ethMacAddr() {
+        try { return this._bindings.eth_station_addr(); } catch { return 0n; }
+    }
+    ethTxDeferred() {
+        try { return !!this._bindings.eth_tx_deferred(); } catch { return false; }
+    }
+    ethCollisionArmed() { // one-shot: true = a collision is armed for next TX
+        try { return !!this._bindings.eth_take_collision(); } catch { return false; }
+    }
+    ethArmCollision() { try { this._bindings.eth_arm_collision(); } catch {} }
+    ethPauseTx() {
+        try { return this._bindings.eth_take_pause_tx() >>> 0; } catch { return 0; }
+    }
+    ethBackoffSlots(attempt, seed) {
+        try { return this._bindings.eth_backoff_slots(attempt >>> 0, seed >>> 0) >>> 0; }
+        catch { return 0; }
+    }
+    // DMA2D jobs (F429 only — chip.dma2d gate): take staged job, blend/
+    // convert pixels, mark done. The driver loop in emulator.js does this
+    // per step; platforms driving DMA2D manually use the same three calls.
+    dma2dTakeJob() {
+        if (!this.chip.dma2d) return [];
+        try { return Array.from(this._bindings.dma2d_take_job()); } catch { return []; }
+    }
+    dma2dJobDone() { try { this._bindings.dma2d_job_done(); } catch {} }
+    dma2dFifoThreshold(dma, stream) { // mirror of dma_stream_fifo_threshold
+        try { return this._bindings.dma_stream_fifo_threshold(dma, stream) >>> 0; }
+        catch { return 0; }
+    }
+    dmaStreamCt(dma, stream) {
+        try { return !!this._bindings.dma_stream_ct(dma, stream); } catch { return false; }
+    }
+    dmaStreamFeif(dma, stream) {
+        try { return !!this._bindings.dma_stream_feif(dma, stream); } catch { return false; }
+    }
+    // FSMC NAND backend (create-time ext_devices.fsmcDevices for the tap;
+    // the NAND image binds here): erase + bind.
+    fsmcBindNand(bank, size) { try { this._bindings.fsmc_bind_nand(bank >>> 0, size >>> 0); } catch {} }
+    fsmcNandErase(bank, offset, len) {
+        try { this._bindings.fsmc_nand_erase(bank >>> 0, offset >>> 0, len >>> 0); } catch {}
+    }
+    // CPU trace + FPU file (debugger pokes; Dd aliases S(2d)/S(2d+1)).
+    traceStart() { try { this._emu.traceStart(); } catch {} }
+    traceStop() { try { this._emu.traceStop(); } catch {} }
+    takeTrace() { try { return Array.from(this._emu.takeTrace()); } catch { return []; } }
+    getFpuState() { try { return this._emu.getFpuState(); } catch { return null; } }
+    setSreg(i, v) { try { this._emu.setSreg(i >>> 0, v >>> 0); } catch {} }
+    setFpscr(v) { try { this._emu.setFpscr(v >>> 0); } catch {} }
+    // Watchdog + MPU fault state (complements the onWdogReset poll).
+    wdogRequested() {
+        try { return !!this._bindings.is_watchdog_reset_requested(); } catch { return false; }
+    }
+    wdogClearFlags() { try { this._bindings.clear_watchdog_reset_flags(); } catch {} }
+    wdogIwdgFlag() {
+        try { return !!this._bindings.iwdg_reset_flag(); } catch { return false; }
+    }
+    wdogWwdgFlag() {
+        try { return !!this._bindings.wwdg_reset_flag(); } catch { return false; }
+    }
+    flashProgramming() {
+        try { return !!this._bindings.flash_is_programming(); } catch { return false; }
+    }
+    // ── Protocol helpers (USB status/VBUS, UART LIN/SMARTCARD/IrDA,
+    // CAN error + FD window) ──
+    // Status reads platforms poll around usbInject*/usbTakeIn; VBUS +
+    // frame counters for link-state widgets; CAN error injection + FD
+    // payload window for bus test harnesses.
+    usbInStatus(ep) {
+        try { return this._bindings.usb_in_status(ep) >>> 0; } catch { return 0; }
+    }
+    usbOutStatus(ep) {
+        try { return this._bindings.usb_out_status(ep) >>> 0; } catch { return 0; }
+    }
+    usbHsInStatus(ep) {
+        try { return this._bindings.usb_hs_in_status(ep) >>> 0; } catch { return 0; }
+    }
+    usbHsOutStatus(ep) {
+        try { return this._bindings.usb_hs_out_status(ep) >>> 0; } catch { return 0; }
+    }
+    usbSetVbus(present) { try { this._bindings.usb_set_vbus(!!present); } catch {} }
+    usbHsSetVbus(present) { try { this._bindings.usb_hs_set_vbus(!!present); } catch {} }
+    usbFrame() {
+        try { return this._bindings.usb_uframe() >>> 0; } catch { return 0; }
+    }
+    usbHsFrame() {
+        try { return this._bindings.usb_hs_uframe() >>> 0; } catch { return 0; }
+    }
+    usbUlpiRate() {
+        try { return this._bindings.usb_ulpi_rate() >>> 0; } catch { return 0; }
+    }
+    usbHsUlpiRate() {
+        try { return this._bindings.usb_hs_ulpi_rate() >>> 0; } catch { return 0; }
+    }
+    usbDmaProgress(ep) {
+        try { return this._bindings.usb_dma_progress(ep); } catch { return 0n; }
+    }
+    uartBreakTx(base) { try { this._bindings.uart_break_tx(base >>> 0); } catch {} }
+    uartIrdaRx(base, byte, lowPower = false) {
+        try { this._bindings.uart_irda_rx(base >>> 0, byte & 0xFF, !!lowPower); } catch {}
+    }
+    uartIrdaTxClass(base) {
+        try { return this._bindings.uart_irda_tx_class(base >>> 0) >>> 0; } catch { return 0; }
+    }
+    uartSmartcardNack(base) { try { this._bindings.uart_sc_nack(base >>> 0); } catch {} }
+    uartSmartcardRetries(base) {
+        try { return this._bindings.uart_sc_retries(base >>> 0) >>> 0; } catch { return 0; }
+    }
+    canNoteError(base, lec, recover = false) {
+        if (!this.chip.can.length) return;
+        try { this._bindings.can_note_error(base >>> 0, lec & 0x7, !!recover); } catch {}
+    }
+    canFdLen(base, fifo, slot) {
+        if (!this.chip.can.length) return 0;
+        try { return this._bindings.can_fd_len(base >>> 0, fifo >>> 0, slot >>> 0) >>> 0; }
+        catch { return 0; }
+    }
+    canFdByte(base, fifo, slot, idx) {
+        if (!this.chip.can.length) return 0;
+        try { return this._bindings.can_fd_byte(base >>> 0, fifo >>> 0, slot >>> 0, idx >>> 0) & 0xFF; }
+        catch { return 0; }
+    }
+    canFdCost(base, fd, brs, payloadBytes) {
+        if (!this.chip.can.length) return 0n;
+        try { return BigInt(this._bindings.can_fd_cost(base >>> 0, !!fd, !!brs, payloadBytes >>> 0)); }
+        catch { return 0n; }
+    }
+    i2cPec(base) {
+        try { return this._bindings.i2c_pec(base >>> 0) & 0xFF; } catch { return 0; }
+    }
+    spiFlashDebug(peripheral) {
+        try { return Array.from(this._bindings.spi_flash_debug(peripheral)); }
+        catch { return []; }
+    }
+    sdioCardIrq(set) { try { this._bindings.sdio_card_irq(!!set); } catch {} }
+    rtcTamper() { try { this._bindings.rtc_tamper(); } catch {} }
+    audioLoadWav(bytes) { try { this._bindings.audio_load_wav(new Uint8Array(bytes)); } catch {} }
+    ltdcClutEntry(layer, idx) {
+        if (!this.chip.ltdc) return 0;
+        try { return this._bindings.ltdc_clut_entry(layer >>> 0, idx >>> 0) >>> 0; }
+        catch { return 0; }
+    }
+    ltdcLutPixel(layer, pf, byte) {
+        // NOTE: the model resolves through the CLUT with a black default —
+        // unprogrammed entries read 0xFF000000 (opaque black), NOT 0.
+        if (!this.chip.ltdc) return 0;
+        try { return this._bindings.ltdc_lut_pixel(layer >>> 0, pf >>> 0, byte & 0xFF) >>> 0; }
+        catch { return 0; }
+    }
 
     // ── engine access ──
     read32(addr) { return this._emu.read32(addr); }

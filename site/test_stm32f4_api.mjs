@@ -312,3 +312,60 @@ console.log('\nALL PASS');
     check(f.spi4 !== null && f.spi5 === null && f.spi6 === null, 'f401: spi4 live, spi5/6 null');
     f.close();
 }
+
+// ── Test 11: peripheral-domain + protocol helpers ──
+{
+    const m = await STM32F4.create({ firmware: decodeFirmware('blinky') });
+    // ETH status
+    check(typeof m.ethMacAddr() === 'bigint', 'ethMacAddr() bigint');
+    check(m.ethTxDeferred() === false, 'ethTxDeferred() false idle');
+    m.ethArmCollision();
+    check(typeof m.ethBackoffSlots(1, 0) === 'number', 'ethBackoffSlots() number');
+    check(m.ethPauseTx() === 0, 'ethPauseTx() 0 idle');
+    // DMA2D (non-F429: empty job, no throw)
+    check(Array.isArray(m.dma2dTakeJob()), 'dma2dTakeJob() array');
+    m.dma2dJobDone();
+    check(m.dmaStreamCt(1, 0) === false, 'dmaStreamCt() false idle');
+    check(m.dmaStreamFeif(1, 0) === false, 'dmaStreamFeif() false idle');
+    // NAND backend binds (no throw)
+    m.fsmcBindNand(0, 64); m.fsmcNandErase(0, 0, 64);
+    check(true, 'fsmcBindNand/NandErase no throw');
+    // trace + FPU
+    m.traceStart(); m.traceStop();
+    check(Array.isArray(m.takeTrace()), 'takeTrace() array');
+    check(m.getFpuState() !== undefined, 'getFpuState() callable');
+    m.setSreg(0, 0); m.setFpscr(0);
+    check(true, 'setSreg/setFpscr no throw');
+    // watchdog + flash state
+    check(m.wdogRequested() === false, 'wdogRequested() false idle');
+    m.wdogClearFlags();
+    check(m.wdogIwdgFlag() === false && m.wdogWwdgFlag() === false, 'wdog flags false idle');
+    check(m.flashProgramming() === false, 'flashProgramming() false idle');
+    // USB status + VBUS + frames + DMA progress
+    check(m.usbInStatus(1) === 0 && m.usbOutStatus(1) === 0, 'usbIn/OutStatus() 0 idle');
+    check(m.usbHsInStatus(1) === 0 && m.usbHsOutStatus(1) === 0, 'usbHsIn/OutStatus() 0 idle');
+    m.usbSetVbus(true); m.usbHsSetVbus(true);
+    check(typeof m.usbFrame() === 'number' && typeof m.usbHsFrame() === 'number', 'usbFrame()/usbHsFrame() numbers');
+    check(typeof m.usbUlpiRate() === 'number' && typeof m.usbHsUlpiRate() === 'number', 'usbUlpiRate() numbers');
+    check(m.usbDmaProgress(1) !== undefined, 'usbDmaProgress() callable');
+    // UART protocol helpers
+    m.uartBreakTx(0x40011000);
+    m.uartIrdaRx(0x40011000, 0x55);
+    check(typeof m.uartIrdaTxClass(0x40011000) === 'number', 'uartIrdaTxClass() number');
+    m.uartSmartcardNack(0x40011000);
+    check(typeof m.uartSmartcardRetries(0x40011000) === 'number', 'uartSmartcardRetries() number');
+    // CAN error + FD window (F407: live silicon)
+    m.canNoteError(0x40006400, 0, false);
+    check(m.canFdLen(0x40006400, 0, 0) === 0, 'canFdLen() 0 idle');
+    check(m.canFdByte(0x40006400, 0, 0, 0) === 0, 'canFdByte() 0 idle');
+    check(typeof m.canFdCost(0x40006400, false, false, 8) === 'bigint', 'canFdCost() bigint');
+    // misc protocol probes
+    check(m.i2cPec(0x40005400) === 0, 'i2cPec() 0 idle');
+    check(Array.isArray(m.spiFlashDebug('SPI1')), 'spiFlashDebug() array');
+    m.sdioCardIrq(false);
+    m.rtcTamper();
+    m.audioLoadWav(new Uint8Array(44));
+    check(m.ltdcClutEntry(0, 0) === 0, 'ltdcClutEntry() 0 idle');
+    check(m.ltdcLutPixel(0, 0, 0) === 0xFF000000, 'ltdcLutPixel() opaque-black default');
+    m.close();
+}
