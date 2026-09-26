@@ -1,6 +1,6 @@
 name: Publish to npm & GitHub Packages
 
-on:
+"on":
   release:
     types: [published]
   workflow_dispatch:
