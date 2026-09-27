@@ -5,35 +5,56 @@
      the Docusaurus splash (/), the console app (/console.html), and DOOM.
      Everything else under site/ is an asset (wasm, SVD, WAD, JS) and must
      not be indexed as a page. -->
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
   <url>
     <loc>https://danish9661.github.io/STM32F4-emulator/</loc>
     <lastmod>2026-09-27</lastmod>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
+    <image:image>
+      <image:loc>https://danish9661.github.io/STM32F4-emulator/img/shot-landing.png</image:loc>
+      <image:title>STM32F4 Emulator home — spec plate and destinations</image:title>
+    </image:image>
   </url>
   <url>
     <loc>https://danish9661.github.io/STM32F4-emulator/console.html</loc>
     <lastmod>2026-09-27</lastmod>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
+    <image:image>
+      <image:loc>https://danish9661.github.io/STM32F4-emulator/img/shot-console.png</image:loc>
+      <image:title>Emulator console running the blinky firmware</image:title>
+    </image:image>
   </url>
   <url>
     <loc>https://danish9661.github.io/STM32F4-emulator/doom.html</loc>
     <lastmod>2026-08-14</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
+    <image:image>
+      <image:loc>https://danish9661.github.io/STM32F4-emulator/img/shot-doom.png</image:loc>
+      <image:title>DOOM 1 shareware on the emulated STM32F407</image:title>
+    </image:image>
   </url>
   <url>
     <loc>https://danish9661.github.io/STM32F4-emulator/docs.html</loc>
     <lastmod>2026-09-27</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.7</priority>
+    <image:image>
+      <image:loc>https://danish9661.github.io/STM32F4-emulator/img/shot-docs.png</image:loc>
+      <image:title>Documentation index with live guide cards</image:title>
+    </image:image>
   </url>
   <url>
     <loc>https://danish9661.github.io/STM32F4-emulator/about.html</loc>
     <lastmod>2026-09-27</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.5</priority>
+    <image:image>
+      <image:loc>https://danish9661.github.io/STM32F4-emulator/img/shot-console.png</image:loc>
+      <image:title>About the emulator — architecture and firmware coverage</image:title>
+    </image:image>
   </url>
 </urlset>

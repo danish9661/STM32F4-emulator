@@ -6,7 +6,7 @@
 <meta name="description" content="About the STM32F4 emulator: run real STM32F407 firmware in Node or the browser." />
 <meta name="google-site-verification" content="15oUGn7tDY5qFKh0oX7q0zWcuUJ_nFIIjjZk6ixculo" />
 <meta name="robots" content="index, follow" />
-<meta name="theme-color" content="#0d1117" />
+<meta name="theme-color" content="#0e1216" />
 <link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <link rel="icon" href="favicon-32x32.png" sizes="32x32" type="image/png" />
 <link rel="icon" href="favicon-16x16.png" sizes="16x16" type="image/png" />
@@ -17,58 +17,83 @@
 <meta property="og:title" content="About — STM32F4 Emulator" />
 <meta property="og:description" content="About the STM32F4 emulator: run real STM32F407 firmware in Node or the browser." />
 <meta property="og:url" content="https://danish9661.github.io/STM32F4-emulator/about.html" />
-<meta property="og:image" content="https://danish9661.github.io/STM32F4-emulator/apple-touch-icon.png" />
-<meta name="twitter:card" content="summary" />
-<meta name="twitter:image" content="https://danish9661.github.io/STM32F4-emulator/apple-touch-icon.png" />
+<meta property="og:image" content="https://danish9661.github.io/STM32F4-emulator/img/shot-console.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://danish9661.github.io/STM32F4-emulator/img/shot-console.png" />
 <title>About — STM32F4 Emulator</title>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "AboutPage",
+  "name": "About — STM32F4 Emulator",
+  "url": "https://danish9661.github.io/STM32F4-emulator/about.html",
+  "isPartOf": { "@type": "WebSite", "name": "STM32F4 Emulator", "url": "https://danish9661.github.io/STM32F4-emulator/" },
+  "description": "How the STM32F4 emulator works: Rust CPU, peripheral model, JS driver, firmware coverage, usage."
+}
+</script>
 <style>
   :root {
-    --bg: #0d1117; --panel: #161b22; --border: #30363d;
-    --fg: #e6edf3; --dim: #8b949e; --green: #3fb950; --yellow: #d29922;
-    --red: #f85149; --cyan: #39c5cf;
+    color-scheme: dark;
+    --bg: #0e1216; --panel: #151b21;
+    --line: #2b333c;
+    --fg: #d8dee4; --dim: #8f99a3;
+    --green: #4cc38a;
+    --link: #6aa9e8;
+    --mono: 'JetBrains Mono', ui-monospace, Consolas, monospace;
   }
   * { box-sizing: border-box; }
+  :focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
-    font: 14px/1.6 "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font: 14px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
     padding: 0 0 48px;
   }
   header {
-    border-bottom: 1px solid var(--border); background: var(--panel);
-    padding: 18px 24px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+    padding: 12px 22px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
   }
-  header h1 { margin: 0; font-size: 18px; }
-  header .tag { color: var(--dim); font-size: 13px; }
-  header nav a {
-    color: var(--cyan); text-decoration: none; margin-left: 14px; font-size: 13px;
-  }
-  header nav a:hover { text-decoration: underline; }
-  main { max-width: 920px; margin: 0 auto; padding: 24px; }
-  h2 {
-    border-left: 3px solid var(--green); padding-left: 10px; margin-top: 38px;
-    font-size: 16px;
-  }
-  h3 { color: var(--cyan); font-size: 14px; margin-top: 24px; }
-  p, li { color: var(--fg); }
-  a { color: var(--cyan); }
+  header h1 { margin: 0; font-size: 14px; font-weight: 650; }
+  header h1::before { content: ''; display: inline-block; width: 9px; height: 9px; background: var(--green); margin-right: 9px; }
+  header .tag { color: var(--dim); font-size: 12px; }
+  header nav { margin-left: auto; display: flex; gap: 18px; }
+  header nav a { color: var(--dim); text-decoration: none; font-size: 12.5px; }
+  header nav a:hover { color: var(--fg); text-decoration: underline; }
+  header nav a[aria-current="page"] { color: var(--fg); }
+  main { max-width: 960px; margin: 0 auto; padding: 40px 22px 0; }
+  main h1.page { font-size: 26px; font-weight: 700; letter-spacing: -0.015em; margin-bottom: 6px; }
+  main p.lede { color: var(--dim); margin: 0 0 26px; max-width: 62ch; }
+  h2 { font-size: 13px; font-weight: 650; margin: 30px 0 4px; }
+  p.sub { font-size: 12.5px; color: var(--dim); margin: 0 0 6px; }
+  p, li { color: var(--dim); font-size: 13.5px; }
+  p strong, li strong { color: var(--fg); }
+  ul { padding-left: 22px; } li { margin: 4px 0; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
   code {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
-    padding: 1px 5px; font-size: 12.5px; color: var(--yellow);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 3px;
+    padding: 0 5px; font-size: 12px; color: var(--fg); font-family: var(--mono);
   }
   pre {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-    padding: 14px 16px; overflow-x: auto; font-size: 12.5px; line-height: 1.5;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+    padding: 14px 16px; overflow-x: auto; font-size: 12.5px; line-height: 1.6;
+    font-family: var(--mono); color: var(--dim);
   }
   pre .c { color: var(--dim); }
-  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
-  th, td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; vertical-align: top; }
-  th { background: var(--panel); color: var(--dim); font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; }
   td code { white-space: nowrap; }
-  .pill {
-    display: inline-block; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 999px; padding: 1px 10px; color: var(--dim); font-size: 12px;
-  }
-  footer { text-align: center; color: var(--dim); font-size: 12px; margin-top: 48px; }
+  figure.shot { margin: 18px 0; border: 1px solid var(--line); background: var(--panel); }
+  figure.shot img { display: block; width: 100%; height: auto; }
+  figure.shot figcaption { font-size: 12px; color: var(--dim); padding: 8px 12px; border-top: 1px solid var(--line); }
+  dl.spec { border: 1px solid var(--line); background: var(--panel); margin: 14px 0; }
+  dl.spec .row { display: flex; justify-content: space-between; gap: 16px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+  dl.spec .row:last-child { border-bottom: none; }
+  dl.spec dt { font-size: 12.5px; color: var(--dim); }
+  dl.spec dd { margin: 0; font-family: var(--mono); font-size: 13px; color: var(--green); white-space: nowrap; }
+  footer { max-width: 960px; margin: 40px auto 0; padding: 12px 22px; color: var(--dim); font-size: 12px; border-top: 1px solid var(--line); }
+  footer a { color: var(--dim); }
+  @media (max-width: 640px) { header .tag { display: none; } main { padding: 28px 14px 0; } }
 </style>
 </head>
 <body>
@@ -80,72 +105,59 @@
     <a href="console.html">Console</a>
     <a href="doom.html">DOOM</a>
     <a href="docs.html">Docs</a>
-    <a href="about.html">About</a>
+    <a href="about.html" aria-current="page">About</a>
   </nav>
 </header>
 
 <main>
-  <h2>Overview</h2>
-  <p>
-    <strong>stm32f4-emu</strong> is an emulator for the
-    <strong>STM32F407</strong> (ARM Cortex-M4) microcontroller. It runs
-    <em>real compiled firmware</em> — not a reimplementation — by pairing a
-    CPU emulator with a cycle-accurate-enough model of the on-chip
-    peripherals. You can boot a binary, watch its UART, poke GPIO and
-    registers, and drive it from scripts, a web UI, or an MCP client.
-  </p>
-  <p>
-    The two halves are connected by <strong>direct model calls</strong>:
-    every read/write the firmware makes to a peripheral register calls
-    straight into the peripheral model (one width-correct call per access),
-    so the guest sees exactly what real silicon would present.
-  </p>
+  <h1 class="page">About</h1>
+  <p class="lede"><strong>stm32f4-emu</strong> runs <strong>real compiled STM32F407 firmware</strong> — not a reimplementation — by pairing a CPU emulator with a model of the on-chip peripherals. Boot a binary, watch its UART, poke GPIO and registers, drive it from scripts, a web UI, or an MCP client.</p>
 
-  <h2>Architecture</h2>
+  <figure class="shot">
+    <img src="img/shot-console.png" alt="The emulator console running the blinky firmware: UART terminal printing tick lines, firmware and machine-state panels" width="1200" height="750" loading="lazy" />
+    <figcaption>The console running blinky — this is what the emulator looks like in use.</figcaption>
+  </figure>
+
+  <h2>How it fits together</h2>
+  <p class="sub">Three parts, one width-correct call per register access.</p>
   <ul>
-    <li><strong>CPU</strong> — a Rust WASM-native Thumb-2 interpreter,
-      executing instructions with exact Cortex-M exception entry/return,
-      including the VFPv4-SP FPU (single-precision arithmetic, conversions,
-      fused multiply-add).
-      Reset vector, SP/PC, and NVIC handling follow
-      the Cortex-M programming model.</li>
-    <li><strong>Peripheral model</strong> — a Rust crate compiled to WASM via
-      <code>wasm-bindgen</code>. 41 peripheral modules (RCC, GPIO, USART,
-      TIM, NVIC/SysTick/EXTI, ETH+DMA, I2C, SPI/I2S, CAN, LTDC, DCMI, RTC,
-      QSPI,
-      ADC, FLASH …) answer <code>periph_read</code>/<code>periph_write</code>
-      — direct width-correct model calls, one per access.</li>
-    <li><strong>JS driver</strong> — steps the Rust core
-      (<code>emu.step(budget)</code>), drains UART, services ETH TX/RX and
-      DMA, and drives virtual devices (displays, sensors, bus taps). Guest
-      IRQs are delivered inline by the core when the firmware opts in
-      (<code>enable_irqs</code>/<code>irq_eth</code>/<code>freertos</code>/
-      <code>lowpower</code>); polling firmware runs with delivery off.</li>
+    <li><strong>CPU</strong> — a Rust WASM-native Thumb-2 interpreter with exact Cortex-M exception entry/return, including the VFPv4-SP FPU. Reset vector, SP/PC, and NVIC handling follow the Cortex-M programming model.</li>
+    <li><strong>Peripheral model</strong> — a Rust crate compiled to WASM. 41 modules (RCC, GPIO, USART, TIM, NVIC/SysTick/EXTI, ETH+DMA, I2C, SPI/I2S, CAN, LTDC, DCMI, RTC, QSPI, ADC, FLASH …) answer <code>periph_read</code>/<code>periph_write</code>.</li>
+    <li><strong>JS driver</strong> — steps the core (<code>emu.step(budget)</code>), drains UART, services ETH TX/RX and DMA, drives virtual devices. Guest IRQs are delivered inline when the firmware opts in (<code>enable_irqs</code>/<code>irq_eth</code>/<code>freertos</code>/<code>lowpower</code>); polling firmware runs with delivery off.</li>
   </ul>
-  <p class="pill">Driver protocol: emu.step(budget) → direct model calls per access → UART/DMA/ETH serviced between steps.</p>
-  <p>See <a href="docs/architecture.md">docs/architecture.md</a> and
-     <a href="docs/peripherals.md">docs/peripherals.md</a> for the full design
-     and a per-peripheral implementation matrix.</p>
+  <dl class="spec">
+    <div class="row"><dt>Peripherals modeled</dt><dd>41 / 41</dd></div>
+    <div class="row"><dt>Firmware builds</dt><dd>223</dd></div>
+    <div class="row"><dt>Chips</dt><dd>F401 · F411 · F407 · VE · F429</dd></div>
+    <div class="row"><dt>DOOM</dt><dd>35 fps</dd></div>
+  </dl>
+  <p>Full design: <a href="docs/architecture.md">docs/architecture.md</a>. Per-peripheral matrix: <a href="docs/peripherals.md">docs/peripherals.md</a>.</p>
 
-  <h2>Featured firmwares</h2>
+  <h2>What runs on it</h2>
+  <p class="sub">A few of the 223 builds.</p>
   <table>
     <tr><th>Firmware</th><th>What it shows</th></tr>
-    <tr><td><code>eth_http</code></td><td>DHCP → TCP handshake → HTTP GET/response, driven through a real gVisor network stack (or a canned netsim). The flagship networking demo.</td></tr>
-    <tr><td><code>blinky</code></td><td>Bare-metal blink + UART banner; toggles PA5 so you can watch the GPIO panel update live.</td></tr>
-    <tr><td><code>can_test</code></td><td>Two-node CAN bus: loopback TX, arbitration (lower ID wins), and filter-gated delivery.</td></tr>
-    <tr><td><code>freertos_test</code></td><td>FreeRTOS scheduler: TIM3 ISR → <code>xSemaphoreGiveFromISR</code> → PendSV context switch to a higher-priority task.</td></tr>
+    <tr><td><code>eth_http</code></td><td>DHCP → TCP handshake → HTTP GET/response, through a real gVisor stack or canned netsim.</td></tr>
+    <tr><td><code>blinky</code></td><td>Bare-metal blink + UART banner; toggles PA5 so the GPIO panel updates live.</td></tr>
+    <tr><td><code>can_test</code></td><td>Two-node CAN bus: loopback TX, arbitration (lower ID wins), filter-gated delivery.</td></tr>
+    <tr><td><code>freertos_test</code></td><td>FreeRTOS scheduler: TIM3 ISR → <code>xSemaphoreGiveFromISR</code> → PendSV context switch.</td></tr>
     <tr><td><code>rtc_test</code></td><td>DS3231 I2C RTC: set time, read-back, temperature.</td></tr>
-    <tr><td><code>fpu_test</code></td><td>VFPv4-SP FPU: real GCC hard-float output (vfma/vcmpe/vcvt/vsqrt, high S-regs) with bit-exact result checks.</td></tr>
-    <tr><td><code>fpu_irq_test</code></td><td>FPU state preserved across SysTick interrupts (lazy stacking).</td></tr>
-    <tr><td><code>mpu_test</code></td><td>MPU enforcement: regions + MemManage faults with exact MMFSR/MMFAR, unprivileged probes, SVC return.</td></tr>
-    <tr><td><code>usb_cdc_test</code></td><td>USB OTG FS device: CDC-ACM enumeration + bulk echo, driven by a scripted host (node test or in-page usbhost).</td></tr>
-    <tr><td><code>oled_test</code> / <code>tft_test</code> / <code>buzzer_test</code> / <code>audio_play_test</code></td><td>Virtual peripherals over I2C/SPI/TIM/I2S (SSD1306, ILI9341, PWM, I2S capture).</td></tr>
-    <tr><td><code>doom</code></td><td>doomgeneric F407 port — DOOM 1 shareware running in a Web Worker. Open <a href="doom.html">doom.html</a>.</td></tr>
+    <tr><td><code>fpu_test</code></td><td>VFPv4-SP FPU: real GCC hard-float output with bit-exact result checks.</td></tr>
+    <tr><td><code>mpu_test</code></td><td>MPU enforcement: regions + MemManage faults with exact MMFSR/MMFAR.</td></tr>
+    <tr><td><code>usb_cdc_test</code></td><td>USB OTG FS device: CDC-ACM enumeration + bulk echo via a scripted host.</td></tr>
+    <tr><td><code>oled_test</code> / <code>tft_test</code> / <code>buzzer_test</code></td><td>Virtual peripherals over I2C/SPI/TIM (SSD1306, ILI9341, PWM).</td></tr>
+    <tr><td><code>doom</code></td><td>doomgeneric F407 port — DOOM 1 shareware in a Web Worker. Open <a href="doom.html">doom.html</a>.</td></tr>
   </table>
 
-  <h2>How to use</h2>
+  <figure class="shot">
+    <img src="img/shot-doom.png" alt="DOOM 1 shareware running on the emulated STM32F407: shotgun in a corridor, YOU GOT THE SHOTGUN banner, status bar with ammo health armor" width="1200" height="750" loading="lazy" />
+    <figcaption>DOOM on the emulated F407 — framebuffer, audio, savegames, all in the tab.</figcaption>
+  </figure>
 
-  <h3>Headless CLI</h3>
+  <h2>Use it</h2>
+  <p class="sub">Three doors.</p>
+
+  <h2 style="font-size:15px;margin-top:18px;">Headless CLI</h2>
   <pre><span class="c"># boot a firmware and stream its UART to stdout</span>
 node cli.mjs firmware.bin --inst 20000000
 
@@ -158,16 +170,13 @@ node cli.mjs --version   <span class="c"># version</span></pre>
      <code>--format auto|bin|hex|elf</code>, <code>--verbose</code> register
      trace, <code>--help</code>, <code>--version</code>.</p>
 
-  <h3>Browser console</h3>
+  <h2 style="font-size:15px;margin-top:18px;">Browser console</h2>
   <pre><span class="c"># from the repo root</span>
 python3 -m http.server 8123 --directory site
 <span class="c"># then open http://localhost:8123/console.html</span></pre>
-  <p>Pick a firmware preset from the dropdown, click <strong>Run</strong>, and
-     watch the UART terminal. The console also shows a live GPIO grid, key
-     peripheral registers, device panels (OLED/TFT/buzzer/RTC), and — with a
-     gateway URL — real Ethernet.</p>
+  <p>Pick a firmware preset, click <strong>Run</strong>, watch the UART terminal — plus a live GPIO grid, key peripheral registers, device panels, and real Ethernet with a gateway URL.</p>
 
-  <h3>Node library API</h3>
+  <h2 style="font-size:15px;margin-top:18px;">Node library</h2>
   <pre><span class="c">// npm install stm32f4-emu  (or use the local checkout)</span>
 import { createSTM32F407 } from 'stm32f4-emu';
 import { readFileSync } from 'node:fs';
@@ -185,7 +194,7 @@ console.log('PC=', emu.read32(0x08000000 + 4).toString(16));</pre>
      <code>drainUart()</code>, <code>read32/write32/read16/write16/read8/write8</code>,
      <code>close()</code>. TypeScript types ship in <code>index.d.ts</code>.</p>
 
-  <h3>MCP server</h3>
+  <h2 style="font-size:15px;margin-top:18px;">MCP server</h2>
   <pre><span class="c"># optional peer dep:</span>
 npm install @modelcontextprotocol/sdk zod
 npx stm32f4-mcp          <span class="c"># speaks MCP over stdio</span></pre>
