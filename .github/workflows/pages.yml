@@ -33,15 +33,13 @@ jobs:
         working-directory: website
 
       - name: Copy emulator console into docs build
-        # site/ deploys under /console/, but /console/ itself must BE the
-        # console (not the landing splash): promote console.html to the
-        # directory index, keep the splash as landing.html, so both
-        # /console/ and /console/console.html serve the console app.
+        # site/ is the whole emulator UI — copy it FLAT into the build root
+        # so the console lives at /console.html, DOOM at /doom.html, etc.
+        # (no /console/ prefix). The Docusaurus root page is the splash
+        # landing (website/src/pages/index.js), NOT a redirect.
         run: |
-          mkdir -p website/build/console && cp -r site/* website/build/console/ \
-          && cp website/build/console/index.html website/build/console/landing.html \
-          && cp website/build/console/console.html website/build/console/index.html \
-          && ls website/build/console/index.html website/build/console/console.html website/build/console/landing.html website/build/console/doom.html
+          cp -r site/* website/build/ \
+          && ls website/build/console.html website/build/doom.html website/build/index.html
 
       - uses: actions/configure-pages@v5
         with:

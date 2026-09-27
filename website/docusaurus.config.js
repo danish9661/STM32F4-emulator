@@ -57,7 +57,7 @@ const config = {
             label: 'Documentation',
           },
           {
-            href: '/STM32F4-emulator/console/',
+            href: '/STM32F4-emulator/console.html',
             label: 'Live Demo',
             position: 'left',
           },
@@ -95,8 +95,8 @@ const config = {
           {
             title: 'More',
             items: [
-              { label: 'Live Demo', href: '/STM32F4-emulator/console/' },
-              { label: 'DOOM', href: '/STM32F4-emulator/console/doom.html' },
+              { label: 'Live Demo', href: '/STM32F4-emulator/console.html' },
+              { label: 'DOOM', href: '/STM32F4-emulator/doom.html' },
             ],
           },
         ],

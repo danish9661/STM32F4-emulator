@@ -91,7 +91,7 @@ npm test                       # == node site/test_flow.mjs
 
 # websocket bridge: headless Node serves the emulator, browser is a thin UI
 npm run bridge -- firmware/blinky/blinky.bin --port 8234
-# then open http://127.0.0.1:8123/?bridge=ws://127.0.0.1:8234
+# then open http://127.0.0.1:8123/console.html?bridge=ws://127.0.0.1:8234
 
 # gateway-backed run: firmware talks to a REAL network stack (gVisor)
 cd stm32-periph-wasm/pkg
@@ -163,7 +163,7 @@ is a thin UI. Zero impact on the existing local WASM path:
 node site/ws-bridge.mjs firmware/eth_http/eth_http.bin --port 8234
 
 # 2. Open the browser console with the bridge URL param
-open "http://127.0.0.1:8123/?bridge=ws://127.0.0.1:8234"
+open "http://127.0.0.1:8123/console.html?bridge=ws://127.0.0.1:8234"
 ```
 
 The `RemoteEmu` adapter (`site/remote-emu.js`) is a drop-in replacement

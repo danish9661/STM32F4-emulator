@@ -107,8 +107,8 @@ scripts/verify_ethernet.sh [max_inst]   # all 3 firmwares + HTTP server, exit 0 
 
 ```bash
 python3 -m http.server 8123 --directory site
-# console app at / (splash/landing at /landing.html)
-# open http://127.0.0.1:8123/
+# splash at /, console app at /console.html
+# open http://127.0.0.1:8123/console.html
 ```
 
 `file://` will NOT work — the SVD and WASM are fetched at runtime.
@@ -117,21 +117,20 @@ Or in the repo root: `npm run serve`.
 
 ### Deployed demo
 
-The docs site root redirects to the console, and the emulator deploys
-under `/console/` (GitHub Pages, CI-deployed — `pages.yml` copies `site/`
-there and promotes `console.html` to the directory index):
+Docs + splash at the site root, emulator UI flat beside them (GitHub
+Pages, CI-deployed — `pages.yml` copies `site/*` to the build root):
 
-- console app: https://danish9661.github.io/STM32F4-emulator/console/
-  (same bytes as `console.html` — both URLs work)
-- landing splash: https://danish9661.github.io/STM32F4-emulator/console/landing.html
+- splash: https://danish9661.github.io/STM32F4-emulator/
+- console app: https://danish9661.github.io/STM32F4-emulator/console.html
+- DOOM: https://danish9661.github.io/STM32F4-emulator/doom.html
 
 ### What you get
 
 - **Preset dropdown** — 223 bundled firmware builds. Auto-boot with
   `?fw=eth_http`, `?fw=blinky`, `?fw=crypto_test`, … (or `?fw=<name>`
   for any preset) appended to the console URL — locally
-  `http://127.0.0.1:8123/?fw=blinky`, deployed
-  `…/console/?fw=blinky` (the `console.html?...` form works too).
+  `http://127.0.0.1:8123/console.html?fw=blinky`, deployed
+  `…/console.html?fw=blinky`.
 - **UART terminal** — firmware TX scrolls here; the input box sends bytes
   to the emulated USART (RX works — verified end-to-end). Enter sends the
   line + `\r` (0x0D), Shift+Enter sends `\n` (0x0A), empty Enter sends a
@@ -290,7 +289,7 @@ node site/ws-bridge.mjs firmware/eth_http/eth_http.bin --port 8234
 
 # 2. Open the browser console with the bridge URL param
 npm run serve   # serves site/ on http://127.0.0.1:8123
-# then open: http://127.0.0.1:8123/?bridge=ws://127.0.0.1:8234
+# then open: http://127.0.0.1:8123/console.html?bridge=ws://127.0.0.1:8234
 ```
 
 Or use the npm script:
