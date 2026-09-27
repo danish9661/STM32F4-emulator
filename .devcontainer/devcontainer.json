@@ -1,18 +1,20 @@
 {
-    "name": "STM32F4 emulator",
-    "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
-    "features": {
-        "ghcr.io/devcontainers/features/node:1": { "version": "22" },
-        "ghcr.io/devcontainers/features/rust:1": {},
-        "ghcr.io/devcontainers/features/go:1": {}
-    },
-    "onCreateCommand": "curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=$HOME/.local/bin sh && arduino-cli core install STMicroelectronics:stm32 && cargo install wasm-pack",
-    "postCreateCommand": "npm ci --prefix website; npm ci",
-    "customizations": {
-        "vscode": {
-            "extensions": ["dbaeumer.vscode-eslint", "rust-lang.rust-analyzer"],
-            "settings": { "eslint.useFlatConfig": true }
-        }
-    },
-    "remoteUser": "vscode"
+  "name": "STM32F4 emulator",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" },
+    "ghcr.io/devcontainers/features/rust:1": {},
+    "ghcr.io/devcontainers/features/go:1": {}
+  },
+  "onCreateCommand": "curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=$HOME/.local/bin sh && arduino-cli core install STMicroelectronics:stm32 && cargo install wasm-pack",
+  "postCreateCommand": "npm ci --prefix website; npm ci",
+  "forwardPorts": [8123, 8234, 8092, 5070, 5071],
+  "portsAttributes": { "8123": { "label": "browser console" }, "8234": { "label": "ws-bridge" } },
+  "customizations": {
+    "vscode": {
+      "extensions": ["dbaeumer.vscode-eslint", "rust-lang.rust-analyzer"],
+      "settings": { "eslint.useFlatConfig": true }
+    }
+  },
+  "remoteUser": "vscode"
 }

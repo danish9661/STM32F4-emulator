@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Flash + debug (OpenOCD, STM32F407VG)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "openocd",
+      "configFiles": ["interface/stlink.cfg", "target/stm32f4x.cfg"],
+      "executable": "${workspaceFolder}/firmware/blinky/blinky.elf",
+      "runToEntryPoint": "main",
+      "svdFile": "${workspaceFolder}/site/vendor/stm32f407.svd",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

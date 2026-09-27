@@ -15,6 +15,8 @@ const ALL_TESTS = [
     'site/test_component_led.mjs',
     'site/test_component_button.mjs',
     'site/test_component_pwm.mjs',
+    'site/test_component_servo.mjs',
+    'site/test_components_subs.mjs',
     'site/test_component_i2cregfile.mjs',
     'site/test_component_adc.mjs',
     'site/test_multi_instance.mjs',
@@ -31,6 +33,7 @@ const ALL_TESTS = [
     'site/test_wwdg_window.mjs',
     'site/test_tim_capture.mjs',
     'site/test_qspi.mjs',
+    'site/test_eth_irq.mjs',
 ];
 
 const filter = process.argv.includes('--filter')

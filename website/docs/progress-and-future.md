@@ -384,7 +384,13 @@ re-filed as model work)
       "drive the emulator from your editor" use case (see above), and the
       `.devcontainer.json` is the ~30-line file (node:22 + rust +
       arduino-cli + go toolchains) this item was waiting for — no model
-      work involved.
+      work involved. `.vscode/` carries the matching editor config:
+      `extensions.json` (eslint + rust-analyzer + C/C++ + cortex-debug
+      recommendations), `launch.json` (cortex-debug OpenOCD/ST-Link flash
+      + debug of `firmware/blinky/blinky.elf` with the F407 SVD), and
+      `settings.json` (flat-config eslint, prettier format-on-save).
+      The devcontainer forwards the repo's real ports (8123 console,
+      8234 ws-bridge, 8092 eth_http peer, 5070/5071 gateway plain/TLS).
 
 
 ## Verification checklist (regression)
