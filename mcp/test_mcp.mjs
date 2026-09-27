@@ -54,6 +54,12 @@ check('read_registers returns a PC', typeof regs.PC === 'string' && regs.PC.star
 const odr = JSON.parse(textOf(await client.callTool({ name: 'read_memory', arguments: { address: 0x40020014 } })));
 check('read_memory reads GPIOA_ODR', typeof odr.value === 'string', odr.value);
 
+const fpu = JSON.parse(textOf(await client.callTool({ name: 'read_fpu', arguments: {} })));
+check('read_fpu returns 32 S-regs + FPSCR', Array.isArray(fpu.s) && fpu.s.length === 32 && typeof fpu.fpscr === 'string', `s0=${fpu.s && fpu.s[0]}`);
+
+const trace = await client.callTool({ name: 'read_trace', arguments: {} });
+check('read_trace drains without error', trace.isError !== true);
+
 await client.callTool({ name: 'set_adc_channel', arguments: { peripheral: 'ADC1', channel: 3, value: 1234 } });
 check('set_adc_channel accepted', true);
 

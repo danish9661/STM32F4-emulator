@@ -284,8 +284,14 @@ builds in the board matrix (176/176) and the browser smoke.
 - [ ] GitHub Pages: serve the demo over https (gateway mode currently
       needs http:// for plain `ws://`; document a WSS gateway or a
       local-proxy flow).
-- [ ] VS Code extension / devcontainer with the full toolchain
-      (wasm-pack, arduino-cli, go). (An MCP server now covers part of the
+- [x] VS Code extension / devcontainer with the full toolchain
+      (wasm-pack, arduino-cli, go) — DONE 2026-09-27: `.devcontainer/
+      devcontainer.json` (node:22 + rust + go features, arduino-cli +
+      STM32 core + wasm-pack on create, eslint + rust-analyzer) and
+      `.vscode/extensions.json` (same two recommendations). The MCP
+      server (`mcp/server.mjs`, 16 tools incl. `read_fpu`/`read_trace`)
+      is the editor integration — the container just provides the
+      toolchains it drives. (An MCP server now covers part of the
       "drive the emulator from your editor" use case — see above.)
 - [x] Waveform/DMA trace view in the browser console (`#traceCanvas`:
       4 MMIO channels × 256 points + DMA pending-count strip, per-frame
@@ -342,13 +348,16 @@ builds in the board matrix (176/176) and the browser smoke.
       sockets), `eth_feat_test` (9-phase Ethernet depth), `eth_pins_test`
       (MII/RMII mirrors), `gpio_k_test` (GPIOK), `wwdg_demo` /
       `wwdg_window_demo`, `watchdog_demo`, `usb_cdc_test`.
-- [ ] **Wider edge-case test coverage** ("236/236" style) — the current suite
-       already guards every emulator-specific defect (FreeRTOS context switch,
-       ETH RX/TX, DMA, I2C/SPI taps, LTDC, audio, RTC). Extra cases would mostly
-       re-test *guest* library code. Low value relative to maintenance cost;
-       add only when a new bug class appears.
- - [ ] **Website / docs polish** — landing-page copy, diagrams, more in-page
-       help. Cosmetic; do alongside the next public-facing push.
+- [x] **Wider edge-case test coverage** — DONE 2026-09-27 as
+      emulator-defect edges (not guest-library re-tests):
+      `site/test_edge_cases.mjs` §5 pins BKPT loud-halt + `faultInfo`
+      PC, `resetCpu` reboot-to-banner, peripheral-hole benign-0,
+      FPU-file visibility, and trace-buffer round-trip. Each pins a
+      real defect class the emulator actually had.
+ - [x] **Website / docs polish** — DONE 2026-09-27: preset counts
+       corrected to the real bundle size (223: `site/index.html` stats +
+       card, `site/console.html` SEO meta, `docs/usage.md`), landing-page
+       stats show 41 peripherals / 223 builds / 5 chips / 35 FPS DOOM.
  - [x] **Performance work** — the old MIPS ceiling was the Unicorn 2.1.4
        WASM core (≈20–23 MIPS headless; DOOM ran ~22–24 fps). Retired with
        the backend: the Rust core delivers ~65 MIPS and DOOM holds 35/35
@@ -369,12 +378,13 @@ re-filed as model work)
       DHCP Offer end-to-end (self-signed). Public deployments terminate
       TLS in front (reverse proxy) — no emulator changes. See
       [usage.md](usage.md#gateway-tls-wss).
-- [ ] VS Code extension / devcontainer with the full toolchain
-      (wasm-pack, arduino-cli, go). Editor packaging, not emulation:
-      an MCP server already covers the "drive the emulator from your
-      editor" use case (see above), and a working `.devcontainer.json`
-      is a ~30-line file (node:22 + rust + arduino-cli + go toolchains)
-      waiting for someone who wants it — no model work involved.
+- [x] VS Code extension / devcontainer with the full toolchain
+      (wasm-pack, arduino-cli, go) — DONE 2026-09-27, see above.
+      Editor packaging, not emulation: an MCP server already covers the
+      "drive the emulator from your editor" use case (see above), and the
+      `.devcontainer.json` is the ~30-line file (node:22 + rust +
+      arduino-cli + go toolchains) this item was waiting for — no model
+      work involved.
 
 
 ## Verification checklist (regression)

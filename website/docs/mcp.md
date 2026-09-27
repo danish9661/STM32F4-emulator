@@ -92,6 +92,10 @@ firmware over MCP.
 | `read_component` | Read an attached component's state |
 | `control_component` | `press`/`release` a button, or `set` a potentiometer value |
 | `reset` | Close the session and drop attached components |
+| `reset_cpu` | Host reset button: CPU back to the vector table, peripherals keep state |
+| `set_nrst` | Hold/release the NRST line (omit `level` to query) |
+| `read_fpu` | VFPv4-SP file: S0-S31 as hex plus FPSCR |
+| `read_trace` | Drain the guest-PC trace buffer (empty unless tracing was started) |
 
 Components are the same classes documented in
 [components.md](components.md) — the MCP layer is a thin wrapper over the

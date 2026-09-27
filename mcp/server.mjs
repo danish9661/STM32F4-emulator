@@ -265,6 +265,25 @@ server.registerTool('reset_cpu', {
     return text('cpu reset to vector table');
 });
 
+server.registerTool('read_fpu', {
+    description: 'Read the VFPv4-SP floating-point file (S0-S31 as hex plus FPSCR). Useful for fpu_test-style firmware.',
+    inputSchema: {},
+}, async () => {
+    const { emu } = requireSession();
+    if (typeof emu.getFpuState !== 'function') return err('FPU state not exposed by this backend');
+    const s = emu.getFpuState();
+    return text({ s: s.s.map((v) => '0x' + (v >>> 0).toString(16)), fpscr: '0x' + (s.fpscr >>> 0).toString(16) });
+});
+
+server.registerTool('read_trace', {
+    description: 'Drain the guest-PC trace buffer (traceStart enables it, takeTrace drains). Empty unless tracing was started.',
+    inputSchema: {},
+}, async () => {
+    const { emu } = requireSession();
+    if (typeof emu.takeTrace !== 'function') return err('trace buffer not exposed by this backend');
+    return text(emu.takeTrace());
+});
+
 server.registerTool('set_nrst', {
     description: 'Hold (assert=true) or release the NRST line. While held, step() only advances the model clock — the CPU executes nothing, like real hardware in reset. Query with level omitted.',
     inputSchema: { level: z.boolean().optional().describe('true = assert (hold in reset), false = release; omit to query') },

@@ -77,6 +77,88 @@ console.log('[invalid-mmio]');
     }
     check(allBooted, 'five sequential emulator instances all boot cleanly');
 
+    // ── 5. Emulator-defect edges (not guest-library re-tests) ──
+    // Each pins a real defect class the emulator actually had, so a
+    // regression fails here instead of silently returning wrong data.
+    console.log('[emulator-defect-edges]');
+
+    // 5a. faultInfo: a BKPT firmware stops with a fault PC (never a silent
+    // wrong result — the loud-halt contract in AGENTS §21). The BKPT is
+    // baked into the image: the core loads firmware straight into flash,
+    // so a mem_write-then-step races nothing, but the image path is the
+    // canonical one (no post-boot patching).
+    {
+        // 16-byte image: vector table + bkpt #0 at 0x08000008.
+        const img = new Uint8Array(16);
+        const dv = new DataView(img.buffer);
+        dv.setUint32(0, 0x20020000, true);   // SP
+        dv.setUint32(4, 0x08000009, true);   // PC (Thumb) -> offset 8
+        img[8] = 0x00; img[9] = 0xBE;        // bkpt #0
+        const e2 = await createEmulator({ firmware: img, bindings, svdXml, wasmInit: wasmBytes });
+        const r = e2.step(100);
+        const fi = e2.faultInfo();
+        check(r.stopped === true, 'BKPT firmware stops (stopped=true)');
+        check(fi !== null && (fi.pc >>> 0) === 0x08000008, 'faultInfo reports the BKPT pc');
+        e2.close();
+    }
+
+    // 5b. resetCpu: re-running the same image restarts its UART from the
+    // top (regression: stale per-instance state leaking across resets).
+    {
+        const e3 = await makeEmu();
+        for (let i = 0; i < 60; i++) e3.step(100000);
+        const before = e3.drainUart().toString();
+        check(/blinky/i.test(before) || before.includes('tick'), 'resetCpu probe instance booted');
+        e3.resetCpu();
+        let after = '';
+        for (let i = 0; i < 60; i++) { e3.step(100000); after += e3.drainUart().toString(); }
+        check(/blinky/i.test(after) || after.includes('tick'), 'resetCpu reboots to banner output');
+        e3.close();
+    }
+
+    // 5c. Peripheral-space holes read benign-0 (HALs probe reserved regs;
+    // wild *memory* BusFaults — the documented split, AGENTS §21).
+    {
+        const e4 = await makeEmu();
+        for (let i = 0; i < 5; i++) e4.step(100000);
+        // 0x40002C00 is WWDG (modeled); a hole like 0x40010000+0x3C00
+        // (between real blocks) must read 0, not throw.
+        let hole = null, threwHole = false;
+        try { hole = e4.read32(0x40010C00); } catch { threwHole = true; }
+        check(!threwHole && (hole >>> 0) === 0, 'peripheral-space hole reads benign-0');
+        e4.close();
+    }
+
+    // 5d. FPU file visible: fpu_test boots and S-regs/FPSCR read back
+    // (regression: core-side-only FPU state, AGENTS §25). Path is
+    // site-relative (this harness lives in site/, firmware/ is one up).
+    {
+        let fpu = null;
+        try {
+            const fpuBin = new Uint8Array(readFileSync(new URL('../firmware/fpu_test/fpu_test.bin', import.meta.url)));
+            const e5 = await createEmulator({ firmware: fpuBin, bindings, svdXml, wasmInit: wasmBytes });
+            for (let i = 0; i < 40; i++) e5.step(100000);
+            fpu = e5.getFpuState();
+            e5.close();
+        } catch (err) { console.error('  fpu probe: ' + (err && err.message)); }
+        check(fpu !== null && Array.isArray(fpu.s) && fpu.s.length === 32, 'FPU S0-S31 + FPSCR visible via getFpuState');
+    }
+
+    // 5e. Trace buffer: traceStart/takeTrace round-trips guest PCs
+    // (regression: trace API present but unwired). takeTrace returns a
+    // Uint32Array view over wasm memory (not a JS Array) — assert the
+    // typed-array contract, not Array.isArray.
+    {
+        const e6 = await makeEmu();
+        e6.traceStart();
+        for (let i = 0; i < 5; i++) e6.step(100000);
+        let tr = null;
+        try { tr = e6.takeTrace(); } catch {}
+        e6.traceStop();
+        check(tr !== null && typeof tr.length === 'number' && tr.length > 0, 'takeTrace returns guest PCs after traceStart');
+        e6.close();
+    }
+
     if (failures) { console.error('EDGE FAIL: ' + failures + ' check(s) failed'); process.exit(1); }
     console.log('EDGE PASS');
     process.exit(0);

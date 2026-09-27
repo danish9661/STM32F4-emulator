@@ -121,7 +121,7 @@ https://danish9661.github.io/STM32F4-emulator/ (GitHub Pages, CI-deployed).
 
 ### What you get
 
-- **Preset dropdown** — 215 bundled firmware builds. Auto-boot with
+- **Preset dropdown** — 223 bundled firmware builds. Auto-boot with
   `console.html?fw=eth_http`, `console.html?fw=blinky`,
   `console.html?fw=crypto_test`, … (or `console.html?fw=<name>`
   for any preset).
