@@ -33,7 +33,15 @@ jobs:
         working-directory: website
 
       - name: Copy emulator console into docs build
-        run: mkdir -p website/build/console && cp -r site/* website/build/console/ && ls website/build/console/console.html website/build/console/doom.html
+        # site/ deploys under /console/, but /console/ itself must BE the
+        # console (not the landing splash): promote console.html to the
+        # directory index, keep the splash as landing.html, so both
+        # /console/ and /console/console.html serve the console app.
+        run: |
+          mkdir -p website/build/console && cp -r site/* website/build/console/ \
+          && cp website/build/console/index.html website/build/console/landing.html \
+          && cp website/build/console/console.html website/build/console/index.html \
+          && ls website/build/console/index.html website/build/console/console.html website/build/console/landing.html website/build/console/doom.html
 
       - uses: actions/configure-pages@v5
         with:

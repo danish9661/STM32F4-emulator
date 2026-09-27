@@ -41,8 +41,8 @@ under each board they run on). `firmware.js` holds 223 builds
 Preset counts come from inverting `BOARDS_OF_FIRMWARE` in
 `site/boards.js`. The console filters the preset menu to the selected
 board (board-only demos hide on other chips; picking one auto-switches
-the chip), and deep links work as `console.html?board=stm32f401` /
-`console.html?fw=arduino_disco_f407vg`. The UART input box follows the
+the   chip), and deep links work as `?board=stm32f401` /
+`?fw=arduino_disco_f407vg`. The UART input box follows the
 board's native Serial port (`uartAddr`: USART2 `0x40004400` on
 Nucleo/Disc-F407).
 

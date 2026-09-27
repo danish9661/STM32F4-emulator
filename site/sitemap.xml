@@ -1,17 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Submit this in Google Search Console: Sitemaps -> add
      https://danish9661.github.io/STM32F4-emulator/sitemap.xml
-     Only the two real pages are listed; everything else under site/ is an
-     asset (wasm, SVD, WAD, JS) and must not be indexed as a page. -->
+     Real pages: the landing splash, the console app, and DOOM.
+     The deploy promotes console.html to /console/ (directory index),
+     so the canonical console URL is /console/ — console.html stays as
+     the same-bytes alias. Everything else under site/ is an asset
+     (wasm, SVD, WAD, JS) and must not be indexed as a page.
+     NOTE: site/ serves at /console/ on Pages (pages.yml copies site/*
+     there), so these paths are console-relative here and get prefixed
+     with /console/ at deploy time. -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://danish9661.github.io/STM32F4-emulator/</loc>
-    <lastmod>2026-08-14</lastmod>
+    <loc>https://danish9661.github.io/STM32F4-emulator/console/</loc>
+    <lastmod>2026-09-27</lastmod>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>https://danish9661.github.io/STM32F4-emulator/doom.html</loc>
+    <loc>https://danish9661.github.io/STM32F4-emulator/console/landing.html</loc>
+    <lastmod>2026-09-27</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.6</priority>
+  </url>
+  <url>
+    <loc>https://danish9661.github.io/STM32F4-emulator/console/doom.html</loc>
     <lastmod>2026-08-14</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
