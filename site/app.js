@@ -467,7 +467,7 @@ $('fwFile').addEventListener('change', async (e) => {
 const raf = () => new Promise((r) => requestAnimationFrame(r));
 
 const setBusy = (busy) => {
-    for (const id of ['btnRun', 'btnStop', 'btnReset']) $(id).disabled = !busy;
+    for (const id of ['btnRun', 'btnReset']) $(id).disabled = !busy;
 };
 
 // Remote bridge mode: when ?bridge=ws://… is set, the emulator runs in Node
@@ -709,12 +709,6 @@ $('btnRun').addEventListener('click', () => {
         setStatus('running', 'run');
         loop(session);
     }
-});
-$('btnStop').addEventListener('click', () => {
-    if (!emu) return;
-    running = false;
-    $('btnRun').textContent = 'Run';
-    setStatus('stopped', 'stop');
 });
 $('btnReset').addEventListener('click', async () => {
     if (gw.connected && gw.ws) {

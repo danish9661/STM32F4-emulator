@@ -6,7 +6,7 @@
 <meta name="description" content="STM32F4 emulator landing: launch the live browser console (223 firmware builds, 5 chips) or play DOOM on an emulated STM32F407." />
 <meta name="google-site-verification" content="15oUGn7tDY5qFKh0oX7q0zWcuUJ_nFIIjjZk6ixculo" />
 <meta name="robots" content="index, follow" />
-<meta name="theme-color" content="#080b12" />
+<meta name="theme-color" content="#0e1216" />
 <title>STM32F4 Emulator — live console, DOOM, 223 firmware builds</title>
 <link rel="canonical" href="https://danish9661.github.io/STM32F4-emulator/" />
 <meta property="og:url" content="https://danish9661.github.io/STM32F4-emulator/" />
@@ -24,124 +24,135 @@
 <link rel="icon" href="favicon-16x16.png" sizes="16x16" type="image/png" />
 <link rel="apple-touch-icon" href="apple-touch-icon.png" />
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
 :root {
   color-scheme: dark;
-  --bg: #080b12;
-  --panel: rgba(16,21,32,0.85);
-  --panel-solid: #101520;
-  --border: rgba(56,75,120,0.3);
-  --border-bright: rgba(80,120,200,0.25);
-  --fg: #e2e8f0;
-  --dim: #7b8ba5;
-  --green: #34d399;
-  --blue: #60a5fa;
-  --cyan: #22d3ee;
-  --purple: #a78bfa;
-  --radius: 10px;
-  --radius-sm: 6px;
+  --bg: #0e1216;
+  --panel: #151b21;
+  --line: #2b333c;
+  --txt: #d8dee4;
+  --dim: #8f99a3;
+  --green: #4cc38a;
+  --link: #6aa9e8;
 }
 * { box-sizing: border-box; margin: 0; }
-::selection { background: rgba(96,165,250,0.35); color: #fff; }
+::selection { background: #23415e; color: #fff; }
 body {
   background: var(--bg);
-  background-image:
-    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(59,130,246,0.08), transparent),
-    radial-gradient(ellipse 60% 40% at 80% 100%, rgba(52,211,153,0.05), transparent);
-  color: var(--fg);
-  font: 14px/1.6 'Inter', system-ui, -apple-system, sans-serif;
+  color: var(--txt);
+  font: 14px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
   min-height: 100vh; display: flex; flex-direction: column;
 }
+a { color: var(--link); }
+:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+/* Bench header: flat bar, hairline seam, nothing floats. */
 header {
-  display: flex; align-items: center; gap: 16px;
-  padding: 0 20px; height: 52px; flex: none;
-  background: linear-gradient(135deg, rgba(16,21,32,0.95), rgba(12,16,25,0.98));
-  border-bottom: 1px solid var(--border);
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 12px 22px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
 }
-header h1 { font-size: 15px; font-weight: 700; letter-spacing: -0.02em; }
+header .mark {
+  width: 10px; height: 10px; background: var(--green);
+  align-self: center; flex: none;
+}
+header h1 { font-size: 14px; font-weight: 650; letter-spacing: 0; white-space: nowrap; }
+header h1 span { color: var(--dim); font-weight: 450; white-space: nowrap; }
+@media (max-width: 640px) { header h1 span { display: none; } }
+header h1 span { color: var(--dim); font-weight: 450; }
 header nav { margin-left: auto; display: flex; gap: 18px; }
-header nav a { color: var(--dim); text-decoration: none; font-size: 13px; font-weight: 500; }
-header nav a:hover { color: var(--fg); }
-main { width: 100%; max-width: 1020px; margin: 0 auto; padding: 64px 20px 40px; flex: 1; }
-.hero { text-align: center; }
-.badge {
-  display: inline-block; padding: 6px 16px; border-radius: 20px;
-  background: rgba(52,211,153,0.08); border: 1px solid rgba(52,211,153,0.2);
-  color: var(--green); font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
-  margin-bottom: 22px;
+header nav a { color: var(--dim); text-decoration: none; font-size: 13px; }
+header nav a:hover { color: var(--txt); }
+header nav a[aria-current="page"] { color: var(--txt); }
+
+main { width: 100%; max-width: 960px; margin: 0 auto; padding: 56px 22px 36px; flex: 1; }
+
+/* Top: statement left, spec plate right. */
+.top { display: grid; grid-template-columns: 1.25fr 0.75fr; gap: 40px; margin-bottom: 48px; }
+@media (max-width: 760px) { .top { grid-template-columns: 1fr; } }
+.top h2 {
+  font-size: 30px; line-height: 1.2; font-weight: 700;
+  letter-spacing: -0.015em; margin-bottom: 12px;
 }
-.hero h2 {
-  font-size: clamp(2.2rem, 5vw, 3.4rem); font-weight: 800; letter-spacing: -0.03em;
-  line-height: 1.1; margin-bottom: 14px;
-  background: linear-gradient(135deg, #ffffff 0%, #34d399 50%, #60a5fa 100%);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  background-clip: text;
-}
-.hero p.sub { font-size: 1.05rem; color: #94a3b8; max-width: 620px; margin: 0 auto 30px; }
-.cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 44px; }
+.lede { color: var(--dim); max-width: 44ch; margin-bottom: 22px; }
+.lede b { color: var(--txt); font-weight: 600; }
+.actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 22px; }
 .btn {
-  font-size: 14px; font-weight: 600; text-decoration: none;
-  padding: 12px 28px; border-radius: var(--radius-sm);
-  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
-  display: inline-block;
+  font-size: 13.5px; font-weight: 600; text-decoration: none;
+  padding: 9px 18px; border-radius: 4px; display: inline-block;
+  border: 1px solid transparent;
 }
-.btn:hover { transform: translateY(-2px); }
-.btn-live {
-  background: linear-gradient(135deg, #34d399, #059669); color: #fff;
-  box-shadow: 0 4px 20px rgba(52,211,153,0.3);
+.btn-primary { background: #1e7a4e; color: #fff; }
+.btn-primary:hover { background: #23905c; }
+.btn-ghost { border-color: var(--line); color: var(--txt); background: transparent; }
+.btn-ghost:hover { border-color: var(--dim); }
+.actions .docs { font-size: 13px; }
+.tryline {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px; color: var(--dim);
+  border-top: 1px solid var(--line); padding-top: 14px;
 }
-.btn-live:hover { box-shadow: 0 6px 28px rgba(52,211,153,0.45); }
-.btn-doom {
-  background: rgba(255,255,255,0.06); color: var(--fg);
-  border: 1px solid var(--border);
+.tryline a { text-decoration: none; }
+.tryline a:hover { text-decoration: underline; }
+
+/* Spec plate: instrument label plate, rows ruled like a datasheet table. */
+.spec { border: 1px solid var(--line); background: var(--panel); align-self: start; }
+.spec h3 {
+  font-size: 12px; font-weight: 600; color: var(--dim);
+  padding: 9px 14px; border-bottom: 1px solid var(--line);
 }
-.btn-doom:hover { background: rgba(255,255,255,0.1); border-color: var(--border-bright); }
-.stats { display: flex; justify-content: center; gap: 2.2rem; flex-wrap: wrap; margin-bottom: 56px; }
-.stat { text-align: center; }
-.stat b {
-  display: block; font: 700 1.9rem/1.2 'JetBrains Mono', monospace;
-  background: linear-gradient(135deg, #e2e8f0, #94a3b8);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  background-clip: text;
+.spec dl { margin: 0; }
+.spec .row {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+  padding: 8px 14px; border-bottom: 1px solid var(--line);
 }
-.stat span { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
-.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.1rem; margin-bottom: 44px; }
-@media (max-width: 820px) { .cards { grid-template-columns: 1fr; } }
-.card {
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 22px;
-  text-decoration: none; color: var(--fg); display: block;
-  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+.spec .row:last-child { border-bottom: none; }
+.spec dt { font-size: 12.5px; color: var(--dim); }
+.spec dd {
+  margin: 0; font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px; color: var(--green); white-space: nowrap;
 }
-a.card:hover { transform: translateY(-3px); border-color: var(--border-bright); box-shadow: 0 8px 28px rgba(0,0,0,0.35); }
-.card .k { font-size: 1.5rem; margin-bottom: 10px; }
-.card h3 { font-size: 15px; font-weight: 700; margin-bottom: 6px; }
-.card p { font-size: 12.5px; color: #94a3b8; }
-.card p code, .try code {
-  font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
-  background: rgba(255,255,255,0.06); border-radius: 4px; padding: 1px 6px;
+.spec p.note { font-size: 11.5px; color: var(--dim); padding: 9px 14px; margin: 0; }
+
+/* Destination rows: ruled list, not cards. */
+section.block { margin-bottom: 40px; }
+section.block > h3 { font-size: 13px; font-weight: 650; margin-bottom: 4px; }
+section.block > p.sub { color: var(--dim); font-size: 12.5px; margin: 0 0 6px; }
+a.go {
+  display: grid; grid-template-columns: 150px 1fr auto; gap: 16px; align-items: baseline;
+  padding: 12px 4px; text-decoration: none; color: var(--txt);
+  border-bottom: 1px solid var(--line);
 }
-.try {
-  text-align: center; color: var(--dim); font-size: 13px;
-  border: 1px dashed var(--border); border-radius: var(--radius);
-  padding: 16px 20px; margin-bottom: 20px;
+a.go:first-of-type { border-top: 1px solid var(--line); }
+a.go:hover { background: var(--panel); }
+a.go .name { font-weight: 650; font-size: 13.5px; }
+a.go .desc { color: var(--dim); font-size: 12.5px; }
+a.go .hint {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11.5px; color: var(--dim); white-space: nowrap;
 }
-.try a { color: var(--cyan); text-decoration: none; font-family: 'JetBrains Mono', monospace; font-size: 12.5px; }
-.try a:hover { text-decoration: underline; }
+@media (max-width: 640px) { a.go { grid-template-columns: 1fr; gap: 2px; } }
+p.fine { font-size: 12.5px; color: var(--dim); max-width: 70ch; }
+p.fine code {
+  font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 0 5px;
+}
 footer {
-  padding: 14px 20px; color: var(--dim); font-size: 11.5px;
-  border-top: 1px solid var(--border); background: rgba(16,21,32,0.6);
-  text-align: center; flex: none;
+  padding: 12px 22px; color: var(--dim); font-size: 12px;
+  border-top: 1px solid var(--line); text-align: left;
+  max-width: 960px; width: 100%; margin: 0 auto;
 }
-footer a { color: var(--blue); text-decoration: none; }
-footer a:hover { text-decoration: underline; }
+footer a { color: var(--dim); }
 </style>
 </head>
 <body>
 <header>
-  <h1>STM32F4 Emulator</h1>
+  <span class="mark" aria-hidden="true"></span>
+  <h1>STM32F4 Emulator <span>— bench build</span></h1>
   <nav>
-    <a href="index.html">Home</a>
+    <a href="index.html" aria-current="page">Home</a>
     <a href="console.html">Console</a>
     <a href="doom.html">DOOM</a>
     <a href="docs.html">Docs</a>
@@ -149,65 +160,55 @@ footer a:hover { text-decoration: underline; }
   </nav>
 </header>
 <main>
-  <div class="hero">
-    <div class="badge">Open Source · Browser + Node · WebAssembly</div>
-    <h2>STM32F4 Emulator</h2>
-    <p class="sub">Real Cortex-M4 firmware on an emulated MCU — Rust CPU + Rust peripherals, all WebAssembly. No install, no plugins: it runs in this tab.</p>
-    <div class="cta">
-      <a class="btn btn-live" href="console.html">Launch Console →</a>
-      <a class="btn btn-doom" href="doom.html">▶ Play DOOM</a>
+  <div class="top">
+    <div>
+      <h2>Run real STM32 firmware in your browser.</h2>
+      <p class="lede">A Cortex-M4 and its peripherals, emulated in WebAssembly. Pick one of <b>223 firmware builds</b> across five chips, watch it boot over UART, poke its pins — no install, no plugins.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="console.html">Open console</a>
+        <a class="btn btn-ghost" href="doom.html">Play DOOM</a>
+        <a class="docs" href="docs.html">Read the docs</a>
+      </div>
+      <p class="tryline">console.html?fw=<a href="console.html?fw=blinky">blinky</a> · <a href="console.html?fw=eth_http">eth_http</a> · <a href="console.html?fw=can_test">can_test</a> · <a href="console.html?fw=usb_cdc_test">usb_cdc_test</a> · <a href="console.html?board=stm32f401">F401</a> · <a href="console.html?board=stm32f429">F429</a></p>
     </div>
-    <div class="stats">
-      <div class="stat"><b>41</b><span>Peripherals</span></div>
-      <div class="stat"><b>223</b><span>Firmware builds</span></div>
-      <div class="stat"><b>5</b><span>Chips</span></div>
-      <div class="stat"><b>35</b><span>FPS DOOM</span></div>
-    </div>
-  </div>
-  <div class="cards">
-    <a class="card" href="console.html">
-      <div class="k">🖥️</div>
-      <h3>Live Console</h3>
-      <p>223 firmware builds across 5 chips — networking, displays, USB, FreeRTOS, sensors. UART terminal, GPIO grid, packet viewer.</p>
-    </a>
-    <a class="card" href="doom.html">
-      <div class="k">💀</div>
-      <h3>DOOM</h3>
-      <p>Full DOOM 1 shareware at 35 FPS on the emulated F407 — audio, saves, attract mode. WASD + mouse.</p>
-    </a>
-    <a class="card" href="docs.html">
-      <div class="k">📚</div>
-      <h3>Documentation</h3>
-      <p>Usage, <code>boards</code> per-chip guides, Ethernet networking, peripheral coverage, architecture, benchmarks.</p>
-    </a>
-    <a class="card" href="doc.html?f=boards.md">
-      <div class="k">🔌</div>
-      <h3>Boards &amp; chips</h3>
-      <p>F401, F411, F407, F407VE/ZE, F429 — sizes, Arduino targets, preset wiring, verification matrix.</p>
-    </a>
-    <a class="card" href="doc.html?f=networking.md">
-      <div class="k">🌐</div>
-      <h3>Networking</h3>
-      <p>MAC/PHY, filters, VLAN, PTP, WOL, LwIP sockets — over the canned netsim peer or the real gVisor gateway.</p>
-    </a>
-    <div class="card">
-      <div class="k">📦</div>
-      <h3>Bring firmware</h3>
-      <p>Drop your own <code>.bin</code>, <code>.hex</code> or <code>.elf</code> onto the console — symbols, watches and GPIO included.</p>
+    <div class="spec">
+      <h3>Unit under test</h3>
+      <dl>
+        <div class="row"><dt>Peripherals modeled</dt><dd>41 / 41</dd></div>
+        <div class="row"><dt>Firmware builds</dt><dd>223</dd></div>
+        <div class="row"><dt>Chips</dt><dd>F401 · F411 · F407 · VE · F429</dd></div>
+        <div class="row"><dt>DOOM</dt><dd>35 fps</dd></div>
+        <div class="row"><dt>Core</dt><dd>Rust → WASM</dd></div>
+      </dl>
+      <p class="note">Everything runs locally in this tab.</p>
     </div>
   </div>
-  <div class="try">
-    Try now — no boot needed:
-    <a href="console.html?fw=blinky">blinky</a> ·
-    <a href="console.html?fw=eth_http">eth_http</a> ·
-    <a href="console.html?fw=can_test">can_test</a> ·
-    <a href="console.html?fw=usb_cdc_test">usb_cdc_test</a> ·
-    <a href="console.html?board=stm32f401">F401 board</a> ·
-    <a href="console.html?board=stm32f429">F429 board</a>
-  </div>
+  <section class="block">
+    <h3>Start here</h3>
+    <p class="sub">Three doors, each a different bench.</p>
+    <a class="go" href="console.html">
+      <span class="name">Live console</span>
+      <span class="desc">UART terminal, GPIO grid, packet viewer, memory watch. Networking, displays, USB, FreeRTOS, sensors.</span>
+      <span class="hint">223 builds</span>
+    </a>
+    <a class="go" href="doom.html">
+      <span class="name">DOOM</span>
+      <span class="desc">DOOM 1 shareware on the emulated F407 — framebuffer, audio, savegames. WASD and mouse.</span>
+      <span class="hint">35 fps</span>
+    </a>
+    <a class="go" href="docs.html">
+      <span class="name">Documentation</span>
+      <span class="desc">Usage, per-chip board guides, Ethernet networking, peripheral coverage, architecture, benchmarks.</span>
+      <span class="hint">16 guides</span>
+    </a>
+  </section>
+  <section class="block">
+    <h3>Reference</h3>
+    <p class="fine">Boards and chips: F401, F411, F407, F407VE/ZE, F429 — sizes, Arduino targets, preset wiring. Networking covers MAC/PHY, filters, VLAN, PTP, WOL and LwIP sockets over the scripted netsim peer or the real gVisor gateway. Bring your own <code>.bin</code>, <code>.hex</code> or <code>.elf</code> — drop it on the console, symbols and watches included.</p>
+  </section>
 </main>
 <footer>
-  Rust Thumb-2 CPU + peripheral model (WASM) + a small JS driver — everything runs locally in your tab. Docs: <a href="docs.html">Docs</a> · <a href="about.html">About</a>.
+  Rust Thumb-2 CPU + peripheral model (WASM) + a small JS driver. Docs: <a href="docs.html">Docs</a> · <a href="about.html">About</a>.
 </footer>
 </body>
 </html>

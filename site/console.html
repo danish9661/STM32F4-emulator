@@ -46,41 +46,28 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 :root {
   color-scheme: dark;
-  --bg: #080b12;
-  --bg2: #0c1019;
-  --panel: rgba(16,21,32,0.85);
-  --panel-solid: #101520;
-  --border: rgba(56,75,120,0.3);
-  --border-bright: rgba(80,120,200,0.25);
-  --fg: #e2e8f0;
-  --dim: #7b8ba5;
-  --green: #34d399;
-  --green-dim: rgba(52,211,153,0.15);
-  --yellow: #fbbf24;
-  --red: #f87171;
-  --cyan: #22d3ee;
-  --blue: #60a5fa;
-  --purple: #a78bfa;
-  --accent: #60a5fa;
-  --glow-green: 0 0 20px rgba(52,211,153,0.3);
-  --glow-blue: 0 0 20px rgba(96,165,250,0.2);
-  --radius: 10px;
-  --radius-sm: 6px;
+  --bg: #0e1216;
+  --panel: #151b21;
+  --term: #0a0d10;
+  --border: #2b333c;
+  --fg: #d8dee4;
+  --dim: #8f99a3;
+  --green: #4cc38a;
+  --yellow: #d9a441;
+  --red: #d9635f;
+  --cyan: #58b6c9;
+  --blue: #6aa9e8;
+  --radius: 4px;
 }
 * { box-sizing: border-box; margin: 0; }
 html, body { height: 100%; }
-::selection { background: rgba(96,165,250,0.35); color: #fff; }
-/* Dark thin scrollbars everywhere (webkit); firefox uses the thin hints
-   set on the individual scroll containers. */
-::-webkit-scrollbar { width: 8px; height: 8px; }
+::selection { background: #23415e; color: #fff; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(96,120,180,0.25); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(96,120,180,0.45); }
+::-webkit-scrollbar-thumb { background: var(--border); border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--dim); }
 body {
   background: var(--bg);
-  background-image:
-    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(59,130,246,0.08), transparent),
-    radial-gradient(ellipse 60% 40% at 80% 100%, rgba(52,211,153,0.05), transparent);
   color: var(--fg);
   font: 13px/1.5 'Inter', system-ui, -apple-system, sans-serif;
   display: flex; flex-direction: column; overflow: hidden;
@@ -89,26 +76,19 @@ body > * { font-family: inherit; }
 
 /* ── Header ─────────────────────────────────────────────────────────── */
 header {
-  display: flex; align-items: center; gap: 16px;
+  display: flex; align-items: center; gap: 10px;
   padding: 0 20px; height: 52px;
-  background: linear-gradient(135deg, rgba(16,21,32,0.95), rgba(12,16,25,0.98));
+  background: var(--panel);
   border-bottom: 1px solid var(--border);
-  backdrop-filter: blur(12px);
   position: sticky; top: 0; z-index: 50;
 }
-header::before {
-  content: '';
-  position: absolute; inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(59,130,246,0.04), transparent);
-  pointer-events: none;
-}
 header h1 {
-  font-size: 15px; font-weight: 700; margin: 0;
-  white-space: nowrap; flex: none;
-  background: linear-gradient(135deg, #e2e8f0, #94a3b8);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  background-clip: text;
-  letter-spacing: -0.02em;
+  font-size: 14px; font-weight: 650; margin: 0;
+  white-space: nowrap; flex: none; color: var(--fg);
+}
+header h1::before {
+  content: ''; display: inline-block; width: 9px; height: 9px;
+  background: var(--green); margin-right: 9px; vertical-align: baseline;
 }
 .tagline {
   font-size: 12px; color: var(--dim); white-space: nowrap;
@@ -118,44 +98,26 @@ header h1 {
 .tagline b { color: var(--fg); font-weight: 600; }
 @media (max-width: 980px) { .tagline { display: none; } }
 a.doomLink, a.aboutLink {
-  font-size: 11px; font-weight: 600; color: #fff; text-decoration: none;
-  background: linear-gradient(135deg, #34d399, #059669);
-  padding: 5px 14px; border-radius: 20px;
+  font-size: 12.5px; color: var(--dim); text-decoration: none;
   white-space: nowrap; flex: none;
-  transition: all 0.2s ease;
-  box-shadow: 0 2px 8px rgba(52,211,153,0.25);
-  letter-spacing: 0.02em;
 }
-a.doomLink:hover, a.aboutLink:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(52,211,153,0.35);
-  filter: brightness(1.1);
-}
-a.aboutLink { background: linear-gradient(135deg, #60a5fa, #3b82f6); box-shadow: 0 2px 8px rgba(96,165,250,0.25); }
-a.aboutLink:hover { box-shadow: 0 4px 16px rgba(96,165,250,0.35); }
+a.doomLink:hover, a.aboutLink:hover { color: var(--fg); text-decoration: underline; }
 #status {
   font-size: 12px; color: var(--dim); margin-left: auto; white-space: nowrap;
   display: flex; align-items: center; gap: 8px;
   font-family: 'JetBrains Mono', monospace;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid var(--border); border-radius: 20px;
-  padding: 5px 14px 5px 10px;
 }
 .dot {
-  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-  background: var(--dim); transition: all 0.3s ease;
+  display: inline-block; width: 9px; height: 9px;
+  background: var(--dim);
 }
-.dot.run {
-  background: var(--green);
-  box-shadow: 0 0 8px var(--green), 0 0 16px rgba(52,211,153,0.2);
-  animation: pulse-green 2s ease-in-out infinite;
+.dot.run { background: var(--green); }
+.dot.stop { background: var(--yellow); }
+.dot.err  { background: var(--red); }
+@media (prefers-reduced-motion: no-preference) {
+  .dot.run { animation: lamp-blink 1.6s steps(2, start) infinite; }
 }
-.dot.stop { background: var(--yellow); box-shadow: 0 0 8px rgba(251,191,36,0.4); }
-.dot.err  { background: var(--red); box-shadow: 0 0 8px rgba(248,113,113,0.4); }
-@keyframes pulse-green {
-  0%, 100% { box-shadow: 0 0 8px var(--green), 0 0 16px rgba(52,211,153,0.2); }
-  50% { box-shadow: 0 0 12px var(--green), 0 0 24px rgba(52,211,153,0.3); }
-}
+@keyframes lamp-blink { 50% { opacity: 0.45; } }
 
 /* ── Main grid ──────────────────────────────────────────────────────── */
 main {
@@ -180,33 +142,26 @@ main > aside::-webkit-scrollbar-thumb { background: var(--border); border-radius
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
-  backdrop-filter: blur(8px);
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
-.panel:hover { border-color: var(--border-bright); }
 .panel h2 {
-  margin: 0; padding: 10px 14px;
-  font-size: 10px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.1em; color: var(--dim);
+  margin: 0; padding: 9px 14px;
+  font-size: 12px; font-weight: 650; color: var(--fg);
   border-bottom: 1px solid var(--border);
-  background: rgba(255,255,255,0.02);
+  background: var(--panel);
 }
 aside .panel h2 {
   cursor: pointer; user-select: none;
   display: flex; align-items: center; gap: 8px;
-  transition: color 0.15s ease;
 }
 aside .panel h2::before {
-  content: ""; display: inline-block; width: 0; height: 0;
-  border-left: 4px solid var(--dim); border-top: 3px solid transparent;
-  border-bottom: 3px solid transparent;
-  transition: transform 0.2s ease;
+  content: "\203a"; display: inline-block; margin-right: 2px;
+  color: var(--dim); font-weight: 400;
 }
-aside .panel.collapsed h2 { border-bottom: none; background: transparent; }
-aside .panel.collapsed h2::before { transform: rotate(90deg); }
+aside .panel.collapsed h2 { border-bottom: none; }
+aside .panel.collapsed h2::before { content: "\00d7"; }
 aside .panel.collapsed > *:not(h2) { display: none !important; }
 aside .panel h2:hover { color: var(--fg); }
-aside .panel h2:hover::before { border-left-color: var(--fg); }
+aside .panel h2:hover::before { color: var(--fg); }
 
 /* ── Terminal ───────────────────────────────────────────────────────── */
 #uart {
@@ -214,15 +169,14 @@ aside .panel h2:hover::before { border-left-color: var(--fg); }
   overflow-y: auto; padding: 14px 16px;
   font: 500 12px/1.6 'JetBrains Mono', 'Fira Code', monospace;
   white-space: pre-wrap; word-break: break-all;
-  background: #020408;
-  color: #94a3b8;
-  border-top: 1px solid rgba(59,130,246,0.08);
+  background: var(--term);
+  color: #b9c4cd;
   caret-color: var(--green);
   font-variant-numeric: tabular-nums;
 }
 #uart::-webkit-scrollbar { width: 6px; }
 #uart::-webkit-scrollbar-track { background: transparent; }
-#uart::-webkit-scrollbar-thumb { background: rgba(96,165,250,0.2); border-radius: 3px; }
+#uart::-webkit-scrollbar-thumb { background: var(--border); border-radius: 0; }
 
 /* ── Controls ───────────────────────────────────────────────────────── */
 .controls {
@@ -231,72 +185,51 @@ aside .panel h2:hover::before { border-left-color: var(--fg); }
   flex-wrap: wrap; align-items: center;
 }
 button {
-  background: rgba(255,255,255,0.06); color: var(--fg);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: transparent; color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--radius);
   padding: 6px 14px; font: 500 12px/1 'Inter', sans-serif; cursor: pointer;
-  transition: all 0.15s ease;
-  letter-spacing: 0.01em;
 }
-button:hover {
-  background: rgba(255,255,255,0.1);
-  border-color: var(--border-bright);
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-}
-button:active { transform: translateY(0); }
+button:hover { border-color: var(--dim); background: rgba(255,255,255,0.03); }
 button.primary {
-  background: linear-gradient(135deg, #34d399, #059669);
-  border-color: rgba(52,211,153,0.4); color: #fff; font-weight: 600;
-  box-shadow: 0 2px 8px rgba(52,211,153,0.2);
+  background: #1e7a4e;
+  border-color: #1e7a4e; color: #fff; font-weight: 600;
 }
-button.primary:hover {
-  background: linear-gradient(135deg, #3adb9c, #10b981);
-  box-shadow: 0 4px 16px rgba(52,211,153,0.3);
-}
+button.primary:hover { background: #23905c; border-color: #23905c; }
 button.danger {
-  background: linear-gradient(135deg, #f87171, #dc2626);
-  border-color: rgba(248,113,113,0.4); color: #fff;
+  background: transparent;
+  border-color: var(--red); color: var(--red);
 }
-button:disabled { opacity: 0.4; cursor: default; transform: none !important; box-shadow: none !important; }
+button.danger:hover { background: rgba(217,99,95,0.1); }
+button:disabled { opacity: 0.4; cursor: default; }
 /* The Run/Stop toggle changes label while running — fixed width keeps the
    control row from shifting under it. */
 #btnRun { min-width: 78px; text-align: center; }
 
 /* ── Stats grid ─────────────────────────────────────────────────────── */
-.stats {
-  display: grid; grid-template-columns: 1fr 1fr;
-  gap: 1px; background: var(--border);
-  border-radius: var(--radius-sm); overflow: hidden;
-}
+.stats { display: block; }
 .stat {
-  background: var(--panel-solid); padding: 10px 14px;
-  transition: background 0.2s ease;
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 7px 14px; border-bottom: 1px solid var(--border);
 }
-.stat:hover { background: rgba(25,32,48,1); }
+.stat:last-child { border-bottom: none; }
 .stat b {
-  display: block; font-size: 16px; font-weight: 700;
-  font-family: 'JetBrains Mono', monospace;
-  background: linear-gradient(135deg, #e2e8f0, #94a3b8);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  background-clip: text;
+  order: 2; font-size: 13px; font-weight: 600;
+  font-family: 'JetBrains Mono', monospace; color: var(--green);
 }
 .stat span {
-  font-size: 9px; color: var(--dim); text-transform: uppercase;
-  letter-spacing: 0.08em; font-weight: 600;
+  order: 1; font-size: 12px; color: var(--dim);
 }
 
 /* ── Sections / Forms ───────────────────────────────────────────────── */
 .sec { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
 .sec label { font-size: 11px; color: var(--dim); font-weight: 500; }
 .sec input[type=text], .sec select {
-  width: 100%; background: rgba(255,255,255,0.04); color: var(--fg);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  width: 100%; background: var(--term); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--radius);
   padding: 7px 10px; font: 500 12px/1.4 'JetBrains Mono', monospace;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .sec input[type=text]:focus, .sec select:focus {
-  outline: none; border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(96,165,250,0.15);
+  outline: 1px solid var(--green); outline-offset: -1px; border-color: var(--green);
 }
 .sec select {
   font: 500 12px/1.4 'Inter', sans-serif;
@@ -314,20 +247,20 @@ button:disabled { opacity: 0.4; cursor: default; transform: none !important; box
 }
 .sec input[type=file] { width: 100%; font: inherit; font-size: 12px; color: var(--dim); }
 .sec input[type=file]::-webkit-file-upload-button {
-  background: rgba(255,255,255,0.06); color: var(--fg);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: transparent; color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--radius);
   padding: 5px 12px; font: 500 12px/1 'Inter', sans-serif; cursor: pointer;
-  transition: all 0.15s ease; margin-right: 8px;
+  margin-right: 8px;
 }
 .sec input[type=file]::-webkit-file-upload-button:hover {
-  background: rgba(255,255,255,0.1); border-color: var(--border-bright);
+  border-color: var(--dim);
 }
 input[type=checkbox] {
   appearance: none; -webkit-appearance: none;
-  width: 16px; height: 16px; border-radius: 4px;
-  background: rgba(255,255,255,0.06); border: 1px solid var(--border);
+  width: 14px; height: 14px; border-radius: 0;
+  background: transparent; border: 1px solid var(--dim);
   cursor: pointer; position: relative; vertical-align: middle;
-  transition: all 0.15s ease; flex-shrink: 0;
+  flex-shrink: 0;
 }
 input[type=checkbox]:checked {
   background: var(--green); border-color: var(--green);
@@ -343,11 +276,10 @@ input[type=checkbox]:checked::after {
   position: relative; width: 100%;
 }
 .custom-select-trigger {
-  width: 100%; background: rgba(255,255,255,0.04); color: var(--fg);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  width: 100%; background: var(--term); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--radius);
   padding: 7px 32px 7px 10px; font: 500 12px/1.4 'Inter', sans-serif;
   cursor: pointer; display: flex; align-items: center;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
   position: relative; user-select: none;
 }
 .custom-select-trigger::after {
@@ -357,16 +289,15 @@ input[type=checkbox]:checked::after {
   border-top: 5px solid var(--dim);
 }
 .custom-select-trigger:hover, .custom-select.open .custom-select-trigger {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(96,165,250,0.15);
+  border-color: var(--green);
 }
 .custom-select.open .custom-select-trigger::after {
   transform: translateY(-50%) rotate(180deg);
 }
 .custom-select-dropdown {
   display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0;
-  background: #141a26; border: 1px solid var(--border); border-radius: var(--radius-sm);
-  box-shadow: 0 8px 32px rgba(0,0,0,0.5); z-index: 1000;
+  background: var(--panel); border: 1px solid var(--dim);
+  z-index: 1000;
   max-height: min(320px, 60vh); overflow-y: auto;
   scrollbar-width: thin; scrollbar-color: var(--border) transparent;
 }
@@ -374,7 +305,6 @@ input[type=checkbox]:checked::after {
    would be clipped by the sidebar scroll container — open above instead. */
 .custom-select.up .custom-select-dropdown {
   top: auto; bottom: calc(100% + 4px);
-  box-shadow: 0 -8px 32px rgba(0,0,0,0.5);
 }
 .custom-select-dropdown::-webkit-scrollbar { width: 6px; }
 .custom-select-dropdown::-webkit-scrollbar-track { background: transparent; }
@@ -388,22 +318,21 @@ input[type=checkbox]:checked::after {
   display: block; position: fixed; z-index: 1000;
 }
 .custom-select-group-label {
-  font-size: 10px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.08em; color: var(--green); padding: 8px 12px 4px;
-  background: #141a26; border-top: 1px solid var(--border);
+  font-size: 11px; font-weight: 650; color: var(--fg); padding: 8px 12px 4px;
+  background: var(--panel); border-top: 1px solid var(--border);
   position: sticky; top: 0; z-index: 1;
 }
 .custom-select-group-label:first-child { border-top: none; }
 .custom-select-option {
   padding: 7px 12px 7px 28px; font: 500 12px/1.4 'Inter', sans-serif;
-  color: var(--fg); cursor: pointer; transition: background 0.1s ease;
+  color: var(--fg); cursor: pointer;
   display: block; position: relative;
 }
-.custom-select-option:hover { background: rgba(96,165,250,0.1); }
-.custom-select-option.selected { background: rgba(52,211,153,0.12); color: var(--green); }
+.custom-select-option:hover { background: rgba(255,255,255,0.05); }
+.custom-select-option.selected { color: var(--green); }
 .custom-select-option.selected::before {
-  content: '✓'; position: absolute; left: 11px; top: 7px;
-  font-size: 11px; font-weight: 700;
+  content: '>'; position: absolute; left: 12px; top: 7px;
+  font-size: 11px;
 }
 .sec p { color: var(--dim); font-size: 11px; margin: 0; line-height: 1.5; }
 .sec p b { color: var(--fg); font-weight: 600; }
@@ -415,9 +344,7 @@ input[type=checkbox]:checked::after {
 .frame {
   padding: 6px 14px; border-bottom: 1px solid var(--border);
   font: 500 11px/1.5 'JetBrains Mono', monospace;
-  transition: background 0.15s ease;
 }
-.frame:hover { background: rgba(255,255,255,0.03); }
 .frame .tag { font-weight: 700; }
 .frame.tx .tag { color: var(--yellow); }
 .frame.rx .tag { color: var(--cyan); }
@@ -431,20 +358,18 @@ input[type=checkbox]:checked::after {
 }
 .gpio .pins { display: inline-flex; gap: 3px; vertical-align: middle; }
 .pin {
-  width: 10px; height: 10px; border-radius: 2px;
-  background: rgba(255,255,255,0.06); border: 1px solid var(--border);
-  transition: all 0.15s ease;
+  width: 10px; height: 10px; border-radius: 0;
+  background: transparent; border: 1px solid var(--dim);
 }
 .pin.out-on {
   background: var(--green); border-color: var(--green);
-  box-shadow: 0 0 6px rgba(52,211,153,0.5);
 }
-.pin.out-off { background: rgba(255,255,255,0.08); }
-.pin.in-on { background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 4px rgba(34,211,238,0.4); }
+.pin.out-off { background: transparent; }
+.pin.in-on { background: var(--cyan); border-color: var(--cyan); }
 /* Input-mode pins are host-drivable (click) — see the #gpio handler in
    app.js. The class is toggled per refresh; outputs never get it. */
 .pin.drivable { cursor: pointer; }
-.pin.drivable:hover { border-color: var(--cyan); box-shadow: 0 0 6px rgba(34,211,238,0.5); }
+.pin.drivable:hover { border-color: var(--fg); }
 .gpio .regs { color: var(--dim); font-size: 10px; margin-top: 3px; font-family: 'JetBrains Mono', monospace; }
 
 /* ── Peripherals ─────────────────────────────────────────────────────── */
@@ -467,9 +392,9 @@ input[type=checkbox]:checked::after {
 }
 .watch .row .lbl { color: var(--dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .watch .row .lbl b { color: var(--fg); font-weight: 600; }
-.watch .row .val { color: var(--accent); font-variant-numeric: tabular-nums; font-family: 'JetBrains Mono', monospace; }
+.watch .row .val { color: var(--green); font-variant-numeric: tabular-nums; font-family: 'JetBrains Mono', monospace; }
 .watch .row input { width: 78px; }
-.watch .row .rm { color: var(--dim); cursor: pointer; border: none; background: none; font-size: 13px; padding: 0 2px; transition: color 0.15s; }
+.watch .row .rm { color: var(--dim); cursor: pointer; border: none; background: none; font-size: 13px; padding: 0 2px; }
 .watch .row .rm:hover { color: var(--red); }
 .watch .empty { color: var(--dim); padding: 4px 0; }
 
@@ -478,9 +403,7 @@ input[type=checkbox]:checked::after {
 .sym {
   display: flex; justify-content: space-between; padding: 3px 14px;
   font: 500 11px/1.5 'JetBrains Mono', monospace;
-  transition: background 0.1s ease;
 }
-.sym:hover { background: rgba(255,255,255,0.03); }
 .sym span { color: var(--dim); }
 
 /* ── Gateway status ──────────────────────────────────────────────────── */
@@ -495,8 +418,8 @@ footer {
   letter-spacing: -0.01em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-footer a { color: var(--accent); text-decoration: none; transition: color 0.15s; }
-footer a:hover { color: var(--blue); }
+footer a { color: var(--dim); text-decoration: underline; }
+footer a:hover { color: var(--fg); }
 
 /* ── Canvas panels ──────────────────────────────────────────────────── */
 canvas {
@@ -508,7 +431,7 @@ canvas {
 <body>
 <header>
   <h1>STM32F407 in the Browser</h1>
-  <span class="tagline">Real Cortex-M4 firmware on an emulated MCU — <b>Rust CPU + peripherals</b>, all WebAssembly</span>
+  <span class="tagline">Bench 04 — Cortex-M4 + peripherals, live</span>
   <a class="doomLink aboutLink" href="index.html">⌂ Home</a>
   <a class="doomLink" href="doom.html">▶ Play DOOM</a>
   <a class="doomLink aboutLink" href="docs.html">Docs</a>
@@ -521,7 +444,6 @@ canvas {
     <div id="uart"></div>
     <div class="controls">
       <button id="btnRun" class="primary">Run</button>
-      <button id="btnStop">Stop</button>
       <button id="btnReset">Reset</button>
       <button id="btnClear">Clear log</button>
       <button id="btnSaveLog">Save log</button>
