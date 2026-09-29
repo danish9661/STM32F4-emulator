@@ -307,6 +307,7 @@ export const BOARDS_OF_FIRMWARE = {
     tim_capture_demo: ['stm32f407', 'stm32f407ve'],
     timer_test: ['stm32f407', 'stm32f407ve'],
     usb_cdc_test: ['stm32f407', 'stm32f407ve'],
+    usb_cdc_live: ['stm32f407', 'stm32f407ve'],
     watchdog_demo: ['stm32f407', 'stm32f407ve'],
     wwdg_demo: ['stm32f407', 'stm32f407ve'],
     wwdg_window_demo: ['stm32f407', 'stm32f407ve'],

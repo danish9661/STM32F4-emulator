@@ -294,6 +294,19 @@ input[type=checkbox]:checked::after {
 .custom-select.open .custom-select-trigger::after {
   transform: translateY(-50%) rotate(180deg);
 }
+/* Search field pinned at the top of the preset list (bench style: flat,
+   square, same ink as the trigger). */
+.fw-search {
+  width: 100%; background: var(--term); color: var(--fg);
+  border: none; border-bottom: 1px solid var(--border);
+  padding: 8px 12px; font: 500 12px/1.4 'Inter', sans-serif;
+  position: sticky; top: 0; z-index: 2;
+}
+.fw-search:focus { outline: 1px solid var(--green); outline-offset: -1px; }
+.fw-search::placeholder { color: var(--dim); }
+.fw-none {
+  padding: 10px 12px; font-size: 12px; color: var(--dim);
+}
 .custom-select-dropdown {
   display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0;
   background: var(--panel); border: 1px solid var(--dim);
@@ -452,7 +465,17 @@ canvas {
       </label>
     </div>
     <div class="controls" style="border-top:none;padding-top:0;">
-      <input type="text" id="rxInput" placeholder="UART RX — type bytes to send to the firmware (Enter=CR, Shift+Enter=LF)" style="flex:1;background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font:inherit;font-size:12px;">
+      <select id="rxPort" title="Serial input target" style="flex:none;max-width:190px;background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:5px 6px;font:inherit;font-size:12px;">
+        <option value="auto">Port: auto (firmware)</option>
+        <option value="0x40011000">USART1 (0x40011000)</option>
+        <option value="0x40011400">USART6 (0x40011400)</option>
+        <option value="0x40004400">USART2 (0x40004400)</option>
+        <option value="0x40004800">USART3 (0x40004800)</option>
+        <option value="0x40004C00">UART4 (0x40004C00)</option>
+        <option value="0x40005000">UART5 (0x40005000)</option>
+        <option value="usb">USB CDC</option>
+      </select>
+      <input type="text" id="rxInput" placeholder="Serial in — type bytes to send (Enter=CR, Shift+Enter=LF)" style="flex:1;background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font:inherit;font-size:12px;">
       <button id="btnSend">Send</button>
     </div>
   </section>
@@ -467,6 +490,8 @@ canvas {
         <div class="custom-select" id="fwSelectWrap">
           <div class="custom-select-trigger" id="fwSelectTrigger">eth_http — web client (DHCP+TCP+HTTP)</div>
           <div class="custom-select-dropdown" id="fwDropdown">
+            <input type="text" id="fwSearch" class="fw-search" placeholder="Search firmware…" autocomplete="off" spellcheck="false">
+            <div id="fwNone" class="fw-none" style="display:none;">No firmware matches.</div>
             <div class="custom-select-group-label">Network</div>
             <div class="custom-select-option selected" data-value="eth_http">eth_http — web client (DHCP+TCP+HTTP)</div>
             <div class="custom-select-option" data-value="eth_dhcp">eth_dhcp — DHCP loop</div>
@@ -589,6 +614,7 @@ canvas {
             <div class="custom-select-option" data-value="fpu_irq_test">fpu_irq_test — FPU state across SysTick IRQs</div>
             <div class="custom-select-option" data-value="mpu_test">mpu_test — MPU enforcement (MemManage + MMFSR/MMFAR)</div>
             <div class="custom-select-option" data-value="usb_cdc_test">usb_cdc_test — USB OTG FS CDC-ACM echo</div>
+            <div class="custom-select-option" data-value="usb_cdc_live">usb_cdc_live — USB CDC live echo (serial-input peer)</div>
             <div class="custom-select-option" data-value="deep_sleep_demo">deep_sleep_demo — WFI/STOP + RTC-alarm wakeup</div>
             <div class="custom-select-option" data-value="standby_demo">standby_demo — WFI/STANDBY + RTC-alarm wakeup</div>
             <div class="custom-select-option" data-value="test_firmware">test_firmware — TIM2/ADC dump</div>
@@ -703,7 +729,7 @@ canvas {
     <select id="fwSelect" hidden>
       <option value="eth_http">eth_http</option><option value="eth_dhcp">eth_dhcp</option><option value="eth_test">eth_test</option><option value="eth_http_f429">eth_http_f429</option><option value="eth_dhcp_f429">eth_dhcp_f429</option><option value="eth_test_f429">eth_test_f429</option><option value="eth_irq_test_f429">eth_irq_test_f429</option><option value="eth_feat_test">eth_feat_test</option><option value="eth_feat_test_f429">eth_feat_test_f429</option><option value="eth_adv">eth_adv</option><option value="eth_adv_f429">eth_adv_f429</option><option value="lwip_demo">lwip_demo</option><option value="lwip_demo_f429">lwip_demo_f429</option><option value="eth_pins_test">eth_pins_test</option><option value="eth_pins_test_f429">eth_pins_test_f429</option>
       <option value="blinky">blinky</option><option value="blinky_f401">blinky_f401</option><option value="blinky_f411">blinky_f411</option><option value="blinky_f407g">blinky_f407g</option><option value="blinky_nucleo_f401">blinky_nucleo_f401</option><option value="blinky_nucleo_f411">blinky_nucleo_f411</option><option value="blinky_f429">blinky_f429</option><option value="blinky_f407ve">blinky_f407ve</option><option value="blinky_f407ze">blinky_f407ze</option><option value="arduino_bp_f401cc">arduino_bp_f401cc</option><option value="arduino_bp_f411ce">arduino_bp_f411ce</option><option value="arduino_nucleo_f401re">arduino_nucleo_f401re</option><option value="arduino_nucleo_f411re">arduino_nucleo_f411re</option><option value="arduino_disco_f407vg">arduino_disco_f407vg</option><option value="arduino_disco_f429zi">arduino_disco_f429zi</option><option value="arduino_black_f407ve">arduino_black_f407ve</option><option value="arduino_black_f407ze">arduino_black_f407ze</option><option value="adc_demo">adc_demo</option><option value="dac_demo">dac_demo</option><option value="pwm_demo">pwm_demo</option><option value="blink_serial">blink_serial</option><option value="timer_test">timer_test</option><option value="arduino_test">arduino_test</option><option value="hal_test">hal_test</option>
-      <option value="periph_test">periph_test</option><option value="new_periph_test">new_periph_test</option><option value="deep_periph_test">deep_periph_test</option><option value="comprehensive_test">comprehensive_test</option><option value="eth_irq_test">eth_irq_test</option><option value="edge_test">edge_test</option><option value="i2s_sai_test">i2s_sai_test</option><option value="spi_tft_test">spi_tft_test</option><option value="audio_test">audio_test</option><option value="ltdc_test">ltdc_test</option><option value="oled_test">oled_test</option><option value="tft_test">tft_test</option><option value="buzzer_test">buzzer_test</option><option value="audio_play_test">audio_play_test</option><option value="rtc_test">rtc_test</option><option value="can_test">can_test</option><option value="can_demo">can_demo</option><option value="can_host_rx">can_host_rx</option><option value="watchdog_demo">watchdog_demo</option><option value="wwdg_demo">wwdg_demo</option><option value="wwdg_window_demo">wwdg_window_demo</option><option value="tim_capture_demo">tim_capture_demo</option><option value="qspi_test">qspi_test</option><option value="gap10_sdio">gap10_sdio</option><option value="gap10_qspi">gap10_qspi</option><option value="gap10_ltdc">gap10_ltdc</option><option value="gap10_i2c">gap10_i2c</option><option value="gap10_dma">gap10_dma</option><option value="gap10_dac">gap10_dac</option><option value="fpu_test">fpu_test</option><option value="fpu_irq_test">fpu_irq_test</option><option value="mpu_test">mpu_test</option>      <option value="usb_cdc_test">usb_cdc_test</option><option value="deep_sleep_demo">deep_sleep_demo</option><option value="standby_demo">standby_demo</option><option value="test_firmware">test_firmware</option><option value="exti_test">exti_test</option><option value="flash_test">flash_test</option><option value="spi_flash_test">spi_flash_test</option><option value="freertos_test">freertos_test</option><option value="fsmc_test">fsmc_test</option><option value="dcmi_test">dcmi_test</option>
+      <option value="periph_test">periph_test</option><option value="new_periph_test">new_periph_test</option><option value="deep_periph_test">deep_periph_test</option><option value="comprehensive_test">comprehensive_test</option><option value="eth_irq_test">eth_irq_test</option><option value="edge_test">edge_test</option><option value="i2s_sai_test">i2s_sai_test</option><option value="spi_tft_test">spi_tft_test</option><option value="audio_test">audio_test</option><option value="ltdc_test">ltdc_test</option><option value="oled_test">oled_test</option><option value="tft_test">tft_test</option><option value="buzzer_test">buzzer_test</option><option value="audio_play_test">audio_play_test</option><option value="rtc_test">rtc_test</option><option value="can_test">can_test</option><option value="can_demo">can_demo</option><option value="can_host_rx">can_host_rx</option><option value="watchdog_demo">watchdog_demo</option><option value="wwdg_demo">wwdg_demo</option><option value="wwdg_window_demo">wwdg_window_demo</option><option value="tim_capture_demo">tim_capture_demo</option><option value="qspi_test">qspi_test</option><option value="gap10_sdio">gap10_sdio</option><option value="gap10_qspi">gap10_qspi</option><option value="gap10_ltdc">gap10_ltdc</option><option value="gap10_i2c">gap10_i2c</option><option value="gap10_dma">gap10_dma</option><option value="gap10_dac">gap10_dac</option>      <option value="fpu_test">fpu_test</option><option value="fpu_irq_test">fpu_irq_test</option><option value="mpu_test">mpu_test</option>      <option value="usb_cdc_test">usb_cdc_test</option><option value="usb_cdc_live">usb_cdc_live</option><option value="deep_sleep_demo">deep_sleep_demo</option><option value="standby_demo">standby_demo</option><option value="test_firmware">test_firmware</option><option value="exti_test">exti_test</option><option value="flash_test">flash_test</option><option value="spi_flash_test">spi_flash_test</option><option value="freertos_test">freertos_test</option><option value="fsmc_test">fsmc_test</option><option value="dcmi_test">dcmi_test</option>
       <option value="crypto_test">crypto_test</option><option value="crypto_deep_test">crypto_deep_test</option><option value="rx_crypto_test">rx_crypto_test</option>
       <option value="echo_test">echo_test</option><option value="rx_interrupt_test">rx_interrupt_test</option><option value="rx_interrupt_test_f401">rx_interrupt_test_f401</option><option value="rx_interrupt_test_f411">rx_interrupt_test_f411</option><option value="rx_interrupt_test_f429">rx_interrupt_test_f429</option><option value="adc_demo_f401">adc_demo_f401</option><option value="adc_demo_f411">adc_demo_f411</option><option value="adc_demo_f429">adc_demo_f429</option><option value="pwm_demo_f401">pwm_demo_f401</option><option value="pwm_demo_f411">pwm_demo_f411</option><option value="pwm_demo_f429">pwm_demo_f429</option><option value="oled_test_f401">oled_test_f401</option><option value="oled_test_f411">oled_test_f411</option><option value="oled_test_f429">oled_test_f429</option><option value="tft_test_f401">tft_test_f401</option><option value="tft_test_f411">tft_test_f411</option><option value="tft_test_f429">tft_test_f429</option><option value="buzzer_test_f401">buzzer_test_f401</option><option value="buzzer_test_f411">buzzer_test_f411</option><option value="buzzer_test_f429">buzzer_test_f429</option><option value="audio_play_test_f401">audio_play_test_f401</option><option value="audio_play_test_f411">audio_play_test_f411</option><option value="audio_play_test_f429">audio_play_test_f429</option><option value="watchdog_demo_f401">watchdog_demo_f401</option><option value="watchdog_demo_f411">watchdog_demo_f411</option><option value="watchdog_demo_f429">watchdog_demo_f429</option><option value="wwdg_demo_f401">wwdg_demo_f401</option><option value="wwdg_demo_f411">wwdg_demo_f411</option><option value="wwdg_demo_f429">wwdg_demo_f429</option><option value="wwdg_window_demo_f401">wwdg_window_demo_f401</option><option value="wwdg_window_demo_f411">wwdg_window_demo_f411</option><option value="wwdg_window_demo_f429">wwdg_window_demo_f429</option><option value="tim_capture_demo_f401">tim_capture_demo_f401</option><option value="tim_capture_demo_f411">tim_capture_demo_f411</option><option value="tim_capture_demo_f429">tim_capture_demo_f429</option><option value="spi_flash_test_f401">spi_flash_test_f401</option><option value="spi_flash_test_f411">spi_flash_test_f411</option><option value="spi_flash_test_f429">spi_flash_test_f429</option><option value="flash_test_f401">flash_test_f401</option><option value="flash_test_f411">flash_test_f411</option><option value="flash_test_f429">flash_test_f429</option><option value="exti_test_f401">exti_test_f401</option><option value="exti_test_f411">exti_test_f411</option><option value="exti_test_f429">exti_test_f429</option><option value="rx_crypto_test_f401">rx_crypto_test_f401</option><option value="rx_crypto_test_f411">rx_crypto_test_f411</option><option value="rx_crypto_test_f429">rx_crypto_test_f429</option><option value="test_firmware_f401">test_firmware_f401</option><option value="test_firmware_f411">test_firmware_f411</option><option value="test_firmware_f429">test_firmware_f429</option><option value="spi_tft_test_f401">spi_tft_test_f401</option><option value="spi_tft_test_f411">spi_tft_test_f411</option><option value="spi_tft_test_f429">spi_tft_test_f429</option><option value="deep_sleep_demo_f401">deep_sleep_demo_f401</option><option value="standby_demo_f401">standby_demo_f401</option><option value="deep_sleep_demo_f411">deep_sleep_demo_f411</option><option value="standby_demo_f411">standby_demo_f411</option><option value="deep_sleep_demo_f429">deep_sleep_demo_f429</option><option value="standby_demo_f429">standby_demo_f429</option><option value="rtc_test_f401">rtc_test_f401</option><option value="rtc_test_f411">rtc_test_f411</option><option value="rtc_test_f429">rtc_test_f429</option><option value="audio_test_f401">audio_test_f401</option><option value="audio_test_f411">audio_test_f411</option><option value="audio_test_f429">audio_test_f429</option><option value="fpu_test_f401">fpu_test_f401</option><option value="fpu_test_f411">fpu_test_f411</option><option value="fpu_test_f429">fpu_test_f429</option><option value="fpu_irq_test_f401">fpu_irq_test_f401</option><option value="fpu_irq_test_f411">fpu_irq_test_f411</option><option value="fpu_irq_test_f429">fpu_irq_test_f429</option><option value="mpu_test_f401">mpu_test_f401</option><option value="mpu_test_f411">mpu_test_f411</option><option value="mpu_test_f429">mpu_test_f429</option><option value="freertos_test_f411">freertos_test_f411</option><option value="freertos_test_f429">freertos_test_f429</option><option value="can_demo_f429">can_demo_f429</option><option value="can_test_f429">can_test_f429</option><option value="can_host_rx_f429">can_host_rx_f429</option><option value="dac_demo_f429">dac_demo_f429</option><option value="fsmc_test_f429">fsmc_test_f429</option><option value="dcmi_test_f429">dcmi_test_f429</option><option value="qspi_test_f429">qspi_test_f429</option><option value="ltdc_test_f429">ltdc_test_f429</option><option value="crypto_deep_test_f429">crypto_deep_test_f429</option><option value="i2s_sai_test_f429">i2s_sai_test_f429</option><option value="usb_cdc_test_f401">usb_cdc_test_f401</option><option value="usb_cdc_test_f429">usb_cdc_test_f429</option><option value="hal_test_bp_f401cc">hal_test_bp_f401cc</option><option value="hal_test_bp_f411ce">hal_test_bp_f411ce</option><option value="hal_test_nucleo_f401re">hal_test_nucleo_f401re</option><option value="hal_test_nucleo_f411re">hal_test_nucleo_f411re</option><option value="hal_test_disco_f407vg">hal_test_disco_f407vg</option><option value="hal_test_disco_f429zi">hal_test_disco_f429zi</option><option value="hal_test_black_f407ve">hal_test_black_f407ve</option><option value="hal_test_black_f407ze">hal_test_black_f407ze</option><option value="arduino_test_bp_f401cc">arduino_test_bp_f401cc</option><option value="arduino_test_bp_f411ce">arduino_test_bp_f411ce</option><option value="arduino_test_nucleo_f401re">arduino_test_nucleo_f401re</option><option value="arduino_test_nucleo_f411re">arduino_test_nucleo_f411re</option><option value="arduino_test_disco_f407vg">arduino_test_disco_f407vg</option><option value="arduino_test_disco_f429zi">arduino_test_disco_f429zi</option><option value="arduino_test_black_f407ve">arduino_test_black_f407ve</option><option value="arduino_test_black_f407ze">arduino_test_black_f407ze</option><option value="edge_test_bp_f401cc">edge_test_bp_f401cc</option><option value="edge_test_bp_f411ce">edge_test_bp_f411ce</option><option value="edge_test_nucleo_f401re">edge_test_nucleo_f401re</option><option value="edge_test_nucleo_f411re">edge_test_nucleo_f411re</option><option value="edge_test_disco_f407vg">edge_test_disco_f407vg</option><option value="edge_test_disco_f429zi">edge_test_disco_f429zi</option><option value="edge_test_black_f407ve">edge_test_black_f407ve</option><option value="edge_test_black_f407ze">edge_test_black_f407ze</option><option value="periph_test_bp_f401cc">periph_test_bp_f401cc</option><option value="periph_test_bp_f411ce">periph_test_bp_f411ce</option><option value="periph_test_nucleo_f401re">periph_test_nucleo_f401re</option><option value="periph_test_nucleo_f411re">periph_test_nucleo_f411re</option><option value="periph_test_disco_f407vg">periph_test_disco_f407vg</option><option value="periph_test_disco_f429zi">periph_test_disco_f429zi</option><option value="periph_test_black_f407ve">periph_test_black_f407ve</option><option value="periph_test_black_f407ze">periph_test_black_f407ze</option><option value="timer_test_disco_f407vg">timer_test_disco_f407vg</option><option value="timer_test_disco_f429zi">timer_test_disco_f429zi</option><option value="timer_test_black_f407ve">timer_test_black_f407ve</option><option value="timer_test_black_f407ze">timer_test_black_f407ze</option><option value="echo_test_disco_f407vg">echo_test_disco_f407vg</option><option value="echo_test_disco_f429zi">echo_test_disco_f429zi</option><option value="echo_test_black_f407ve">echo_test_black_f407ve</option><option value="echo_test_black_f407ze">echo_test_black_f407ze</option><option value="crypto_test_disco_f407vg">crypto_test_disco_f407vg</option><option value="crypto_test_disco_f429zi">crypto_test_disco_f429zi</option><option value="crypto_test_black_f407ve">crypto_test_black_f407ve</option><option value="crypto_test_black_f407ze">crypto_test_black_f407ze</option><option value="blink_serial_disco_f429zi">blink_serial_disco_f429zi</option><option value="dma2d_test">dma2d_test</option><option value="dma2d_test_f429">dma2d_test_f429</option><option value="gpio_k_test">gpio_k_test</option><option value="gpio_k_test_f429">gpio_k_test_f429</option><option value="comprehensive_test_f429">comprehensive_test_f429</option>
     </select>
@@ -889,7 +915,7 @@ canvas {
     · <a href="about.html">About</a>
  </footer>
 
-<script type="module" src="app.js?v=52"></script>
+<script type="module" src="app.js?v=53"></script>
 <script>
 // Custom firmware dropdown (replaces native <select>)
 (() => {
@@ -897,7 +923,47 @@ canvas {
   const trigger = document.getElementById('fwSelectTrigger');
   const dropdown = document.getElementById('fwDropdown');
   const hiddenSelect = document.getElementById('fwSelect');
+  const search = document.getElementById('fwSearch');
+  const none = document.getElementById('fwNone');
   const options = dropdown.querySelectorAll('.custom-select-option');
+
+  // Search filter: substring match on the full option text (name + blurb),
+  // case-insensitive. Group labels with no visible preset hide; the empty
+  // row shows when nothing matches. Board filtering (style.display) and
+  // search filtering compose — an option shows only if both pass.
+  function applySearch() {
+    const q = (search.value || '').trim().toLowerCase();
+    let any = false;
+    options.forEach((opt) => {
+      const boardHidden = opt.dataset.boardHidden === '1';
+      const match = !q || opt.textContent.toLowerCase().includes(q);
+      const show = match && !boardHidden;
+      opt.style.display = show ? '' : 'none';
+      if (show) any = true;
+    });
+    const kids = Array.from(dropdown.children);
+    for (let i = 0; i < kids.length; i++) {
+      if (!kids[i].classList || !kids[i].classList.contains('custom-select-group-label')) continue;
+      let vis = false;
+      for (let j = i + 1; j < kids.length && !(kids[j].classList && kids[j].classList.contains('custom-select-group-label')); j++) {
+        if (kids[j].classList && kids[j].classList.contains('custom-select-option') && kids[j].style.display !== 'none') { vis = true; break; }
+      }
+      kids[i].style.display = vis ? '' : 'none';
+    }
+    none.style.display = any ? 'none' : '';
+  }
+  search.addEventListener('input', applySearch);
+  search.addEventListener('click', (e) => e.stopPropagation());
+  search.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      // Boot the first match straight from the keyboard.
+      const first = Array.from(options).find((o) => o.style.display !== 'none');
+      if (first) selectOption(first);
+    } else if (e.key === 'Escape') {
+      search.value = ''; applySearch();
+    }
+  });
 
   function selectOption(opt) {
     options.forEach(o => o.classList.remove('selected'));
@@ -949,7 +1015,9 @@ canvas {
     e.stopPropagation();
     if (wrap.classList.contains('open')) { closeDropdown(); return; }
     wrap.classList.add('open');
+    search.value = ''; applySearch();
     placeDropdown();
+    search.focus({ preventScroll: true });
     // Reopen at the selected option: the list element keeps its scrollTop
     // across opens, otherwise every reopen starts mid-list with the top
     // row half-clipped. Done manually (not scrollIntoView) so only the
@@ -973,7 +1041,12 @@ canvas {
     });
   });
 
-  document.addEventListener('click', () => closeDropdown());
+  document.addEventListener('click', (e) => {
+    // Clicks on the search field must not collapse the list (it lives
+    // inside the detached dropdown, outside wrap).
+    if (e.target && e.target.id === 'fwSearch') return;
+    closeDropdown();
+  });
   // A floating list desyncs from its trigger on scroll/resize — just
   // close it (native selects do the same). Ignore scrolls inside the list
   // itself: while detached it lives under <body>, outside wrap.

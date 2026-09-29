@@ -302,8 +302,7 @@ async function runTest() {
 
     // Remote-emu adapter over the same server (covers remote-emu.js
     // getFpuState/setSreg/setFpscr, which the raw client above bypasses).
-    console.log('\n8. remote-emu adapter FP round-trip');
-    const { createRemoteEmulator } = await import('./remote-emu.js');
+    console.log('\n8. remote-emu adapter FP round-trip');    const { createRemoteEmulator } = await import('./remote-emu.js');
     const remote = await createRemoteEmulator('ws://127.0.0.1:8235');
     await remote.loadImage(fwBytes);
     await remote.step(100000);
@@ -328,6 +327,36 @@ async function runTest() {
     const s2 = await remote.step(100000);
     assert(s1.instCount === s2.instCount, `adapter: held steps advance nothing (${s1.instCount} == ${s2.instCount})`);
     assert(await remote.setNrst(false) === false, 'adapter: setNrst(false) releases');
+
+    // Serial-input routing over the bridge: legacy UART_TX (no trailer)
+    // lands on the firmware's own port; an explicit 4-byte trailer
+    // selects the USART base (covers remote-emu.js sendUart/sendUartTo).
+    console.log('\n10. bridge UART_TX port routing');
+    const rxFw = new Uint8Array(readFileSync(resolve(__dirname, '../firmware/rx_interrupt_test/rx_interrupt_test.bin')));
+    await remote.loadImage(rxFw);
+    for (let i = 0; i < 40; i++) await remote.step(100000);
+    const sendRaw = (bytes, addr) => {
+        const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        const extra = addr === undefined ? 0 : 4;
+        const msg = new Uint8Array(3 + b.length + extra);
+        msg[0] = MSG.UART_TX;
+        msg[1] = b.length & 0xFF;
+        msg[2] = (b.length >> 8) & 0xFF;
+        msg.set(b, 3);
+        if (addr !== undefined) {
+            const a = addr >>> 0;
+            msg[3 + b.length] = a & 0xFF;
+            msg[3 + b.length + 1] = (a >>> 8) & 0xFF;
+            msg[3 + b.length + 2] = (a >>> 16) & 0xFF;
+            msg[3 + b.length + 3] = (a >>> 24) & 0xFF;
+        }
+        ws.send(msg);
+    };
+    // Legacy path first (no trailer): goes to USART1, firmware CRCs it.
+    sendRaw(Uint8Array.from([72, 101, 108, 108, 111, 13]));
+    // Explicit-port path via the adapter: same USART1 by address.
+    await remote.sendUartTo(0x40011000, Uint8Array.from([87, 111, 114, 108, 100, 13]));
+    for (let i = 0; i < 30; i++) await remote.step(100000);
     await remote.close();
 
     // ── cleanup ─────────────────────────────────────────────────────────

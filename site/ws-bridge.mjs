@@ -24,7 +24,10 @@
 //     0x14 SET_FPREG   [id:u32] [idx:u8] [value:u32] (idx 0-31 = S, 32 = FPSCR)
 //     0x20 ETH_RX      [len:u32] [frame bytes…]
 //     0x21 CAN_RX      [id:u16] [dlc:u8] [8 bytes data]
-//     0x22 UART_TX     [len:u16] [bytes…]
+//     0x22 UART_TX     [len:u16] [bytes…]                      (legacy: USART1)
+//     0x22 UART_TX     [len:u16] [bytes…] [addr:u32]            (explicit port;
+//                       trailing addr is optional — old clients that omit it
+//                       land on the firmware's own uart_addr, same as before)
 //     0x30 SPI_MISO    [periph_len:u8] [periph str] [len:u16] [bytes]
 //     0x31 I2C_RX      [periph_len:u8] [periph str] [len:u16] [bytes]
 //     0x40 SET_INPUT   [pin_len:u8] [pin str] [level:u8]
@@ -476,7 +479,15 @@ async function handleConnection(ws) {
                     const len = u16LE(buf, 1);
                     if (len > MAX_UART_LEN || 3 + len > buf.length) break;
                     const bytes = buf.slice(3, 3 + len);
-                    emu.sendUart(bytes);
+                    // Optional trailing u32: explicit USART base (the console
+                    // serial-input target dropdown). Absent = firmware's own
+                    // uart_addr (legacy behavior, unchanged).
+                    if (3 + len + 4 <= buf.length && typeof emu.sendUartTo === 'function') {
+                        const addr = (buf[3 + len] | (buf[3 + len + 1] << 8) | (buf[3 + len + 2] << 16) | (buf[3 + len + 3] << 24)) >>> 0;
+                        emu.sendUartTo(addr, bytes);
+                    } else {
+                        emu.sendUart(bytes);
+                    }
                     break;
                 }
                 case MSG.SET_INPUT: {

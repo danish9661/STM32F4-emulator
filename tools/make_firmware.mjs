@@ -99,6 +99,8 @@ const firmwares = [
     ['mpu_test', 'firmware/mpu_test/mpu_test.bin', 'mpu_test.bin'],
     // USB OTG FS device: CDC-ACM echo, enumerated by a harness host
     ['usb_cdc_test', 'firmware/usb_cdc_test/usb_cdc_test.bin', 'usb_cdc_test.bin'],
+    // USB CDC LIVE echo: same enum, echo loop never ends (console serial-input peer)
+    ['usb_cdc_live', 'firmware/usb_cdc_live/usb_cdc_live.bin', 'usb_cdc_live.bin'],
     // board-family builds (matrix-verified; see site/test_board_matrix.mjs)
     ['adc_demo_f401', 'firmware/adc_demo/adc_demo_f401.bin', 'adc_demo_f401.bin'],
     ['adc_demo_f411', 'firmware/adc_demo/adc_demo_f411.bin', 'adc_demo_f411.bin'],

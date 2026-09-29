@@ -359,6 +359,24 @@ export async function createRemoteEmulator(url, opts = {}) {
             try { ws.send(msg); } catch {}
         },
 
+        // Explicit-port serial send (console rxPort dropdown): appends the
+        // USART base so the bridge routes to that port; the bridge treats
+        // a missing trailer as the firmware's own uart_addr (legacy path).
+        sendUartTo(addr, bytes) {
+            const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+            const a = addr >>> 0;
+            const msg = new Uint8Array(3 + b.length + 4);
+            msg[0] = MSG.UART_TX;
+            msg[1] = b.length & 0xFF;
+            msg[2] = (b.length >> 8) & 0xFF;
+            msg.set(b, 3);
+            msg[3 + b.length] = a & 0xFF;
+            msg[3 + b.length + 1] = (a >>> 8) & 0xFF;
+            msg[3 + b.length + 2] = (a >>> 16) & 0xFF;
+            msg[3 + b.length + 3] = (a >>> 24) & 0xFF;
+            try { ws.send(msg); } catch {}
+        },
+
         canInject(id, dlc, data) {
             const d = new Uint8Array(8);
             if (data) d.set(data instanceof Uint8Array ? data : new Uint8Array(data));

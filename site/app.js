@@ -2,7 +2,7 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=43';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=44';
 import { createEmulator } from './emulator.js?v=3';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
@@ -157,6 +157,49 @@ const DEVICE_FIRMWARES = {
     qspi_test_f429: { qspi: [{ peripheral: 'QUADSPI', size: 256 }] },
     gap10_sdio: { sdio: { blocks: 4 } },
     gap10_qspi: { qspi: [{ peripheral: 'QUADSPI', size: 256 }] },
+    // Arduino-family builds: same devices as the base preset, per board.
+    // The page boots these through boardForSelection (own SVD/sizes), but
+    // DEVICE_FIRMWARES is keyed by preset name — without an entry the
+    // firmware runs with no virtual devices and stalls at its first
+    // device wait (observed: edge/periph _bp_f401cc hang at "--- I2C ---",
+    // rtc _f429 never reaches "RTC test done").
+    // NOTE: Arduino .ino builds (edge_test/periph_test + ALL build-bp/nucleo/
+    // disco/black variants) never set I2C PE (CR1 stays 0) yet their I2C
+    // helpers only need SB/ADDR/TXE latching — the model answers those
+    // without requiring PE (probe-verified: CR1=0 + devices reaches DONE;
+    // without devices it stalls at --- I2C --- with SR1=0x400 TXE-idle).
+    ...(() => {
+        const D = {};
+        const fam = (base, dev) => { for (const s of ['f401', 'f411', 'f429']) D[`${base}_${s}`] = dev; };
+        // Arduino .ino board builds (build-bp/nucleo/disco/black suffixes):
+        // same devices as the base preset. Suffix list mirrors the bundle
+        // keys in tools/make_firmware.mjs (bp_f401cc, bp_f411ce,
+        // nucleo_f401re, nucleo_f411re, disco_f407vg, disco_f429zi,
+        // black_f407ve, black_f407ze).
+        const ino = (base, dev) => {
+            D[base] = dev;
+            for (const s of ['bp_f401cc', 'bp_f411ce', 'nucleo_f401re', 'nucleo_f411re', 'disco_f407vg', 'disco_f429zi', 'black_f407ve', 'black_f407ze']) D[`${base}_${s}`] = dev;
+        };
+        const eeprom = () => ({ i2c_eeprom: [{ peripheral: 'I2C1', address: 0x50, data: new Uint8Array(256).fill(0xFF) }] });
+        const spiflash = () => ({ spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4015, size: 0x200000, cs: 'PB12', data: new Uint8Array(0x200000).fill(0xFF) }] });
+        fam('rtc_test', { rtc: { i2c: 'I2C1', addr: 0x68, init: RTC_INIT } });
+        fam('oled_test', { oled: { i2c: 'I2C1', addr: 0x3C } });
+        fam('tft_test', { tft: { spi: 'SPI2', cs: 'PB12', dc: 'PB11' } });
+        fam('buzzer_test', { buzzer: { tim: 'TIM2' } });
+        fam('audio_play_test', { speaker: true });
+        fam('spi_flash_test', spiflash());
+        fam('spi_tft_test', spiflash());
+        fam('periph_test', eeprom());
+        ino('edge_test', { i2c_eeprom: [{ peripheral: 'I2C1', address: 0x50, data: new Uint8Array(256).fill(0xFF) }], spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4016, size: 0x200000, cs: null, data: new Uint8Array(0x200000).fill(0xFF) }] });
+        ino('periph_test', eeprom());
+        fam('qspi_test', { qspi: [{ peripheral: 'QUADSPI', size: 256 }] });
+        fam('fsmc_test', { fsmcDevices: [{ bank: 0, handler: fsmcRddidSink }] });
+        fam('edge_test', { i2c_eeprom: [{ peripheral: 'I2C1', address: 0x50, data: new Uint8Array(256).fill(0xFF) }], spi_flash: [{ peripheral: 'SPI3', jedec_id: 0xEF4016, size: 0x200000, cs: null, data: new Uint8Array(0x200000).fill(0xFF) }] });
+        const cam = { camera: { width: 64, height: 48, pixels: Uint8Array.from({ length: 64 * 48 }, (_, i) => i & 0xFF) } };
+        fam('new_periph_test', cam);
+        fam('deep_periph_test', cam);
+        return D;
+    })(),
 };
 
 // audio_test needs the same 64-sample PCM16 WAV the node harness
@@ -549,15 +592,15 @@ const boot = async () => {
         // ── local mode: WASM runs in the browser (default) ──
         // Board variant per firmware preset (SVD + flash/RAM sizes), honoring
         // the board selector when the preset supports the selected board.
-        // NOTE (VENDOR_V): vendor asset versions (?v=43) must be bumped together
+        // NOTE (VENDOR_V): vendor asset versions (?v=44) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
         const { key: boardKey, board } = boardForSelection(image.name, boardSelectEl ? boardSelectEl.value : 'all');
-        const svdXml = await fetch('vendor/' + board.svd + '?v=43').then((r) => r.text());
+        const svdXml = await fetch('vendor/' + board.svd + '?v=44').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
         // Scripted USB host when the demo preset boots locally.
-        usbhost = (!bridgeUrl && image.name.startsWith('usb_cdc_test')) ? createUsbHost(bindings) : null;
+        usbhost = (!bridgeUrl && (image.name.startsWith('usb_cdc_test') || image.name.startsWith('usb_cdc_live'))) ? createUsbHost(bindings) : null;
         // Harness arms for collision tests (local mode only): the guest
         // prints COLLIDE ARM and spins, the page arms the one-shot
         // collision + link hooks (same mechanism as the node matrix).
@@ -577,7 +620,7 @@ const boot = async () => {
             svdFile: board.svd,
             flash_size: board.flash_size,
             ram_size: board.ram_size,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=43',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=44',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),
@@ -629,6 +672,7 @@ const boot = async () => {
         ? `(bridge ${bridgeUrl})`
         : (gw.connected ? '(gateway)' : '(netsim)');
     appendUart(`── booted ${image.name} ${bootTags} ──\r\n`);
+    syncRxPort();
     window.__emu = emu;          // debug handle (CDP smoke tests)
     window.__bindings = bindings;
     running = true;
@@ -662,8 +706,11 @@ const loop = async (id) => {
         appendUart(emu.drainUart());
         // Scripted USB host for the usb_cdc_test preset (local mode only —
         // USB has no gateway backend; this is the netsim equivalent).
+        // NOTE: no .done gate — frame() also drains the live bulk-OUT tap
+        // (serial-input box → EP1 OUT), which must stay live after the
+        // scripted enum+echoes complete.
         try {
-            if (usbhost && !usbhost.done) usbhost.frame(uartBuf);
+            if (usbhost) usbhost.frame(uartBuf);
         } catch (e) {}
         // Scripted DCMI camera for dcmi_test (local mode only): phase 1 was
         // fed at boot; feed the oversized frame when PHASE2 prints (the
@@ -791,9 +838,32 @@ const sendRx = (term) => {
     for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xFF;
     if (term) bytes[text.length] = term;
     if (!bytes.length || !emu) return;
+    // Serial-input target: explicit dropdown, or the firmware's own port
+    // when set to auto. USB CDC goes to the scripted host's bulk OUT
+    // (usb_cdc_test); anything else goes to the chosen USART base.
+    const port = ($('rxPort') && $('rxPort').value) || 'auto';
     appendUart('> ' + text + (term === 0x0D ? '\r' : term === 0x0A ? '\n' : '') + '\r\n');
-    emu.sendUart(bytes);
+    if (port === 'usb') {
+        if (usbhost && typeof usbhost.bulkOut === 'function') usbhost.bulkOut(bytes);
+        else appendUart('(no USB CDC firmware booted — bulk OUT dropped)\r\n');
+    } else {
+        const addr = port === 'auto' ? image.uartAddr : parseInt(port, 16) >>> 0;
+        try {
+            if (typeof emu.sendUartTo === 'function') emu.sendUartTo(addr, bytes);
+            else emu.sendUart(bytes);
+        } catch (e) { appendUart('(serial send failed: ' + e.message + ')\r\n'); }
+    }
     input.value = '';
+};
+const syncRxPort = () => {
+    // Keep the dropdown honest: auto shows the firmware's own port.
+    const el = $('rxPort');
+    if (!el) return;
+    if (el.value !== 'auto') return;
+    const names = { 0x40011000: 'USART1', 0x40011400: 'USART6', 0x40004400: 'USART2', 0x40004800: 'USART3', 0x40004C00: 'UART4', 0x40005000: 'UART5' };
+    el.options[0].textContent = image && image.uartAddr
+        ? `Port: auto (${names[image.uartAddr] || ('0x' + image.uartAddr.toString(16))})`
+        : 'Port: auto (firmware)';
 };
 $('btnSend').addEventListener('click', () => sendRx(0x0D));
 $('rxInput').addEventListener('keydown', (e) => {
@@ -1452,7 +1522,10 @@ const applyBoardFilter = () => {
     opts.forEach((opt) => {
         const compat = boardsOf(opt.dataset.value);
         const show = sel === 'all' || compat.includes(sel);
-        opt.style.display = show ? '' : 'none';
+        // Board filtering composes with the dropdown search box: the
+        // search pass reads dataset.boardHidden, style.display stays the
+        // search pass's output (see applySearch in console.html).
+        opt.dataset.boardHidden = show ? '0' : '1';
         if (show && !firstVisible) firstVisible = opt;
     });
     if (hidden) {
@@ -1461,17 +1534,22 @@ const applyBoardFilter = () => {
             o.disabled = !(sel === 'all' || compat.includes(sel));
         }
     }
-    // Hide group labels with no visible preset underneath.
+    // Hide group labels with no board-visible preset underneath. The
+    // search pass re-hides by its own rule on every keystroke, so this
+    // only needs the board dimension.
     if (dropdown) {
         const kids = Array.from(dropdown.children);
         for (let i = 0; i < kids.length; i++) {
             if (!kids[i].classList.contains('custom-select-group-label')) continue;
             let any = false;
             for (let j = i + 1; j < kids.length && !kids[j].classList.contains('custom-select-group-label'); j++) {
-                if (kids[j].style.display !== 'none') { any = true; break; }
+                if (kids[j].classList.contains('custom-select-option') && kids[j].dataset.boardHidden !== '1') { any = true; break; }
             }
             kids[i].style.display = any ? '' : 'none';
         }
+        // Re-run the search pass so style.display reflects both filters.
+        const si = dropdown.querySelector('#fwSearch');
+        if (si) si.dispatchEvent(new Event('input', { bubbles: true }));
     }
     // A filtered-out selection falls back to the first visible preset.
     if (hidden && hidden.selectedOptions.length && hidden.selectedOptions[0].disabled && firstVisible) {

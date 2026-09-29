@@ -126,11 +126,11 @@ function t_dbgmcu_idcode() {
     init_svd_chip(svd407, 'stm32f429');
     ok((R(0xE0042000) & 0xFFF) === 0x419, 'dbgmcu: F429 DEV_ID 0x419');
     init_svd_chip(svd407, 'stm32f407');
-    // (Full-word restore reads 0x10006413: set_idcode replaces DEV_ID[11:0]
-    // over the default word whose low12 is 0x411 — the shipped firmware
-    // probes pin 0x10006411 on the untouched default map, which still
-    // holds. What matters here is the DEV_ID field is exact.)
-    ok((R(0xE0042000) & 0xFFF) === 0x413, 'dbgmcu: F407 DEV_ID 0x413');
+    // Full-word restore reads exactly 0x10006411 (silicon word for DEV_ID
+    // 0x413 — set_idcode reconstructs the whole word, it does not mask
+    // DEV_ID[11:0] in place, which would corrupt the 0x6_ middle nibble
+    // into 0x10006413 and fail the shipped deep_periph_test IDCODE check).
+    ok((R(0xE0042000) >>> 0) === 0x10006411, 'dbgmcu: F407 full-word restore 0x10006411');
     W(0xE0042004, 0x1F0077);
     ok(R(0xE0042004) === 0x1F0077, 'dbgmcu: CR 0x1F0077 round-trips');
 }

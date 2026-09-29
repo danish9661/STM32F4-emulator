@@ -105,14 +105,20 @@ impl Dbgmcu {
     /// 0x413 F405/F407, 0x423 F401xB/C, 0x433 F401xD/E, 0x431 F411,
     /// 0x419 F429. Called once at map construction (see the from_svd
     /// tail in mod.rs); unknown maps keep the F407 default.
-    /// Layout keeps the default word's high 20 bits (REV_ID 0x1000 +
-    /// the 0x6 middle nibble the F407 probe observes at 0x1000_6411) and
-    /// replaces only DEV_ID[11:0]: 0x413→0x423 gives 0x1000_6423. The
-    /// middle nibble on non-F407 silicon is unverified — but no firmware
-    /// in this repo masks it in, and DEV_ID[11:0] (what every probe and
-    /// bootloader switch reads) is exact on all four maps.
+    /// Full-word exact: the F407 silicon word is 0x1000_6411, so writing
+    /// DEV_ID 0x413 must restore exactly that (not 0x1000_6413 — the low
+    /// 12 bits of the default word are 0x411, and masking them out then
+    /// ORing 0x413 corrupts the 0x6_ middle nibble the shipped firmware
+    /// probes). The whole IDCODE word is therefore reconstructed from
+    /// the known silicon words, not masked in place.
     pub fn set_idcode(&mut self, dev_id: u16) {
-        self.idcode = (self.idcode & !0xFFF) | (dev_id as u32 & 0xFFF);
+        self.idcode = match dev_id & 0xFFF {
+            0x413 => 0x1000_6411,
+            0x423 => 0x1000_6423,
+            0x431 => 0x1000_6431,
+            0x419 => 0x1000_6419,
+            other => (self.idcode & !0xFFF) | (other as u32),
+        };
     }
 }
 
@@ -212,7 +218,7 @@ mod idcode_tests {
         let mut boxed = Dbgmcu::new("DBGMCU").unwrap();
         let d = boxed.as_any_mut().downcast_mut::<Dbgmcu>().unwrap();
         assert_eq!(d.read(&sys, 0x00), 0x1000_6411, "F407 default IDCODE");
-        for (dev, want) in [(0x423u16, 0x1000_6423u32), (0x431, 0x1000_6431), (0x419, 0x1000_6419), (0x413, 0x1000_6413u32)] {
+        for (dev, want) in [(0x423u16, 0x1000_6423u32), (0x431, 0x1000_6431), (0x419, 0x1000_6419), (0x413, 0x1000_6411u32)] {
             d.set_idcode(dev);
             assert_eq!(d.read(&sys, 0x00), want, "DEV_ID {dev:#x}");
         }

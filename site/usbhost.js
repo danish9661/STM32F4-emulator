@@ -74,8 +74,23 @@ export function createUsbHost(bindings, opts = {}) {
     ];
     let pc = 0;
     let done = false;
+    // Live bulk-OUT tap for the page's serial-input box (USB CDC target).
+    // bulkOut() stages bytes; frame() drains them whenever the script is
+    // past enumeration — independently of pc, so the tap stays live after
+    // the scripted echoes complete (when done=true the script no longer
+    // runs, but typed lines must still reach EP1 OUT).
+    const liveBulk = [];
+    const bulkOut = (bytes) => {
+        for (const b of bytes) liveBulk.push(b & 0xFF);
+    };
 
     const frame = (uartText) => {
+        // Live tap first: typed bytes go to EP1 OUT as soon as the
+        // firmware is past enumeration (else injectOut has no endpoint
+        // to land on). Runs even when the script is done.
+        if (liveBulk.length && uartText.includes('USB enum done')) {
+            try { api.injectOut(1, U8(liveBulk.splice(0))); } catch (e) {}
+        }
         if (done || pc >= script.length) { done = true; return; }
         const op = script[pc];
         if (op.waitUart) {
@@ -120,5 +135,5 @@ export function createUsbHost(bindings, opts = {}) {
         pc++;
     };
 
-    return { frame, get done() { return done; } };
+    return { frame, bulkOut, get done() { return done; } };
 }

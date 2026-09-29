@@ -453,6 +453,16 @@ impl Peripheral for I2c {
                 if start != 0 && prev_start == 0 {
                     self.state = I2cState::StartSent;
                     self.sr1 = 1;
+                    // AF (acknowledge failure, SR1 bit 10) is sticky until
+                    // firmware clears it — but a fresh START begins a new
+                    // transaction, so it must not inherit the previous
+                    // transaction's AF. Without this, a stale AF corrupts
+                    // the very next DR write's ACK/NACK decision (observed:
+                    // the NACK probe left AF set, the following EEPROM
+                    // write then NACKed too and edge_test stalled at
+                    // "--- I2C ---"). Assigned (=1), not ORed, so no
+                    // earlier error bit can survive into the new attempt.
+                    self.sr1 &= !(1 << 10);
                     self.sr2 = (1 << 0) | (1 << 1);
                     self.active_device = None;
                     // PEC counter resets at START (silicon behavior); a

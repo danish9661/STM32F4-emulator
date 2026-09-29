@@ -1379,6 +1379,14 @@ export async function createEmulator(opts) {
                 const arr = typeof bytes === 'string' ? [...bytes].map((c) => c.charCodeAt(0)) : [...bytes];
                 for (const b of arr) { try { uart_rx_byte(uart_addr, b & 0xFF); } catch {} }
             },
+            // Explicit-port variant for the console's serial-input target
+            // dropdown: same path, but the caller picks the USART base
+            // (the default stays the firmware's own uart_addr).
+            sendUartTo: (addr, bytes) => {
+                const a = addr >>> 0;
+                const arr = typeof bytes === 'string' ? [...bytes].map((c) => c.charCodeAt(0)) : [...bytes];
+                for (const b of arr) { try { uart_rx_byte(a, b & 0xFF); } catch {} }
+            },
             sendUartByte(b) { try { uart_rx_byte(uart_addr, b & 0xFF); } catch {} },
             rxQueue,
             pin, watchPin, i2cRegfile, setAdcChannel, clearAdcChannel,
