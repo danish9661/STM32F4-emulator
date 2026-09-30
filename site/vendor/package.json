@@ -2,6 +2,7 @@
   "name": "stm32-periph-wasm",
   "type": "module",
   "version": "0.1.0",
+  "license": "MIT",
   "files": [
     "stm32_periph_wasm_bg.wasm",
     "stm32_periph_wasm.js",

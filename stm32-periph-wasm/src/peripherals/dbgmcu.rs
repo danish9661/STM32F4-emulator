@@ -15,7 +15,10 @@ use super::Peripheral;
 pub struct Dbgmcu {
     cr: u32, apb1_fz: u32, apb2_fz: u32,
     /// MCU device ID code (IDCODE DEV_ID[11:0] | REV_ID[31:16]): the chip
-    /// this map targets. F407/F405/F415/F417 = 0x413 (reset 0x10006411),
+    /// this map targets. F407/F405/F415/F417 = 0x413 (reset 0x10016413 =
+    /// REV_ID 0x1001 "Rev 1" + DEV_ID 0x413 — silicon-verified via OpenOCD
+    /// `device id` readout and hw-list Rev-Z captures; NOT the SVD's
+    /// 0x10006411 placeholder),
     /// F401xB/C = 0x423, F401xD/E = 0x433, F411 = 0x431, F429 = 0x419
     /// (verified IDs; REV_ID pinned 0x1000 = Rev A on all four maps —
     /// silicon revises it per stepping, which no firmware can observe
@@ -93,7 +96,7 @@ pub fn dbgmcu_frozen(sys: &System, name: &str) -> bool {
 }
 
 impl Default for Dbgmcu {
-    fn default() -> Self { Self { cr: 0, apb1_fz: 0, apb2_fz: 0, idcode: 0x1000_6411 } }
+    fn default() -> Self { Self { cr: 0, apb1_fz: 0, apb2_fz: 0, idcode: 0x1001_6413 } }
 }
 
 impl Dbgmcu {
@@ -101,19 +104,19 @@ impl Dbgmcu {
         if name == "DBGMCU" || name == "DBG" { Some(Box::new(Self::default())) } else { None }
     }
 
-    /// Pin the map's device ID (DEV_ID[11:0]; REV_ID stays 0x1000):
+    /// Pin the map's device ID (DEV_ID[11:0]; REV_ID stays 0x1001):
     /// 0x413 F405/F407, 0x423 F401xB/C, 0x433 F401xD/E, 0x431 F411,
     /// 0x419 F429. Called once at map construction (see the from_svd
     /// tail in mod.rs); unknown maps keep the F407 default.
-    /// Full-word exact: the F407 silicon word is 0x1000_6411, so writing
+    /// Full-word exact: the F407 silicon word is 0x1001_6413, so writing
     /// DEV_ID 0x413 must restore exactly that (not 0x1000_6413 — the low
-    /// 12 bits of the default word are 0x411, and masking them out then
+    /// 12 bits of the default word are 0x413, and masking them out then
     /// ORing 0x413 corrupts the 0x6_ middle nibble the shipped firmware
     /// probes). The whole IDCODE word is therefore reconstructed from
     /// the known silicon words, not masked in place.
     pub fn set_idcode(&mut self, dev_id: u16) {
         self.idcode = match dev_id & 0xFFF {
-            0x413 => 0x1000_6411,
+            0x413 => 0x1001_6413,
             0x423 => 0x1000_6423,
             0x431 => 0x1000_6431,
             0x419 => 0x1000_6419,
@@ -211,14 +214,14 @@ mod idcode_tests {
     use crate::peripherals::Peripheral;
 
     // Per-map IDCODE: F407 default + set_idcode pins the DEV_ID field
-    // while REV_ID stays 0x1000 (verified IDs: 0x413/0x423/0x431/0x419).
+    // while REV_ID stays 0x1001 (verified IDs: 0x413/0x423/0x431/0x419).
     #[test]
     fn idcode_per_map_and_cr_mask() {
         let sys = crate::system::test_dummy_system();
         let mut boxed = Dbgmcu::new("DBGMCU").unwrap();
         let d = boxed.as_any_mut().downcast_mut::<Dbgmcu>().unwrap();
-        assert_eq!(d.read(&sys, 0x00), 0x1000_6411, "F407 default IDCODE");
-        for (dev, want) in [(0x423u16, 0x1000_6423u32), (0x431, 0x1000_6431), (0x419, 0x1000_6419), (0x413, 0x1000_6411u32)] {
+        assert_eq!(d.read(&sys, 0x00), 0x1001_6413, "F407 default IDCODE");
+        for (dev, want) in [(0x423u16, 0x1000_6423u32), (0x431, 0x1000_6431), (0x419, 0x1000_6419), (0x413, 0x1001_6413u32)] {
             d.set_idcode(dev);
             assert_eq!(d.read(&sys, 0x00), want, "DEV_ID {dev:#x}");
         }

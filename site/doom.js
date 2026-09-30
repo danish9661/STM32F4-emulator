@@ -15,7 +15,7 @@
 //
 // Serve from site/ (python3 -m http.server 8123 --directory site) — the page
 // fetches the WAD + SVD + wasm at runtime (file:// won't work).
-import { FIRMWARES } from './firmware.js?v=12';
+import { FIRMWARES } from './firmware.js?v=13';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
@@ -77,8 +77,8 @@ window.__doomLog = () => dbgLog.slice();
 // frame jump, and whether the page believed itself hidden.
 window.__pace = () => window.__lastPace || null;
 // Build stamp: type __doomVer in the console — if it doesn't print the
-// number below, the tab runs a cached copy (hard-refresh: Ctrl+Shift+R).
-window.__doomVer = 81;
+// current number, the tab runs a cached copy (Ctrl+Shift+R).
+window.__doomVer = 82;
 // Keys pressed before the worker boots would be eaten (nothing listens
 // yet) — the old "wait before touching anything" ritual. Instead they queue
 // here and flush on 'booted', so press ahead: the game catches up. The
@@ -488,7 +488,7 @@ async function boot(keepDetail) {
 
     try {
         const [svdXml, wad] = await Promise.all([
-            fetch('vendor/stm32f407.svd?v=44').then((r) => r.text()),
+            fetch('vendor/stm32f407.svd?v=45').then((r) => r.text()),
             fetch('doom1.wad').then((r) => r.arrayBuffer()),
         ]);
         const firmware = new Uint8Array(atob(FIRMWARES.doom.bytes).split('').map((c) => c.charCodeAt(0)));

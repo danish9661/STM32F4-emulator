@@ -4,6 +4,51 @@ All notable changes to `stm32f4-emu` are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/); this project uses
 date-based entries rather than strict SemVer until the first published release.
 
+## [1.4.0] — 2026-09-30 (MIT relicense + npm demo + IDCODE + OLED fixes)
+
+Relicense: the package is now MIT (`LICENSE`, `package.json`,
+`package-lock.json`, `stm32-periph-wasm/Cargo.toml`,
+`site/vendor/package.json`; README badge + License section updated).
+The engine was already GPL-clean (zero GPL text in
+`stm32-periph-wasm/src`, `site/*.js`, `index.mjs`, `tools/`, `mcp/`);
+the only GPL payload is the `doom` demo (GPL-2.0-or-later doomgeneric
+engine, `firmware/doom/engine`, 177 files) which is now walled off:
+`tools/make_firmware.mjs` defaults to the slim manifest (`NPM_SLIM=1`,
+doom excluded — 223 entries, doom absent) with the full demo bundle
+(incl. doom blob for `site/doom.html`) via `NPM_SLIM=0`; see
+`firmware/doom/NOTICE.md`. LwIP stays (BSD `Redistribution and use`
+headers + clean glue). New `npm run test:demo`
+(`site/test_npm_demo.mjs`, also last step of `npm test`) boots `blinky`
+through the published `index.mjs` entry — PASS verified in-tree and in
+a consumer tarball install.
+
+- `edge_test` base bin rebuilt: the committed `firmware/edge_test/
+  edge_test.ino.bin` predated the AF=bit10 firmware fix (it probed ARLO
+  bit 9 while the model latches AF at SR1 bit 10 and all 8 board bins
+  check bit 10), so the browser printed `FAIL I2C NACK on invalid
+  address` + `FAIL: 00000001` while the node matrix passed 8/8. Rebuilt
+  with `arduino-cli GENERIC_F407VGTX`, refreshed the `build/` copy,
+  regenerated `site/firmware.js`. Node matrix edge_test 8/8 + periph 8/8,
+  browser `FAIL: 00000000`, 12-preset browser verify 12/12.
+- OLED graphics fixed (two bugs): firmware `oled_putchar` font indexing
+  read wild memory for digits (negative index), `':'` hit entry 28
+  instead of 52, no lowercase handling — fixed to index 42+(c-0x30),
+  `':'` = 52, lowercase folds to uppercase. Canvas `#oledCanvas` was
+  256×128 while `renderOled` blits native 128×64 via `putImageData`
+  (1:1, ignores CSS — same class as the DOOM quarter-size bug), so the
+  game/text drew into the top-left quarter; canvas attributes now
+  128×64. Rebuilt stock + f401/f411/f429 bins, `site/firmware.js`
+  regenerated. Node `test_oled.mjs` PASS (lit=1428, bar=1024), matrix
+  oled 3/3, browser canvas 128×64 with readable `F407 OLED` /
+  `HELLO FROM` / `STM32F407` + bottom bar. `?v=` bumps: firmware.js
+  26→27, app.js 53→54, doom.js 82→83, `__doomVer` 81→82.
+- DBGMCU IDCODE corrected to silicon: F407 reset word is `0x10016413`
+  (REV_ID `0x1001` + DEV_ID `0x413`, OpenOCD-verified — not the SVD's
+  `0x10006411` placeholder). Model default + `set_idcode(0x413)` now
+  reconstruct `0x10016413`; `deep_periph_test` check + mock pins updated
+  and bins rebuilt; vendor + pkg wasm rebuilt with `?v=` 44→45. Full
+  `npm test` green (incl. facade IDCODE 0x413) + crate tests 243 green.
+
 ## [1.3.0] — 2026-09-20 (new API surface: all-chips facade + platform integration)
 
 STM32F4 facade (`site/stm32f4.js`) becomes the Wokwi/OpenHW/Velxio integration

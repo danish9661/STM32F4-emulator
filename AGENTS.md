@@ -4256,3 +4256,52 @@ options, test_browser `eth_adv` case).
   table (needs HM then PM widening); `undefined` netsim `advUl` helper
   removed.
 - Battery at commit: cargo 243, mock 317, matrix 176/176, eth_adv node 2/2.
+
+---
+
+## 40. edge_test base-bin staleness + OLED graphics fixes (2026-09-30)
+
+### edge_test base bin rebuilt (AF=bit10)
+The committed base bin `firmware/edge_test/edge_test.ino.bin` predated the
+AF=bit10 firmware fix (commit 8b4056a): it still probed ARLO bit 9
+(`lsls r1,r1,#22` at file offset 0x970), while the model has latched AF at
+SR1 bit 10 since §31 and all 8 board bins already check bit 10
+(`lsls r1,r1,#21`). The browser boots the base bin, so `edge_test`
+printed `FAIL I2C NACK on invalid address` + `FAIL: 00000001` while the
+node matrix (8 board bins) passed 8/8 — a stale-binary failure, not a
+model failure. Proof: byte-scan of all 9 bins (only the base had the old
+pattern), plus a manual NACK sequence in the live page latching
+SR1=0x400 (AF set, model correct). Fix: rebuilt the base bin with
+`arduino-cli GENERIC_F407VGTX` into `firmware/edge_test/build/`, copied
+to the base path, regenerated `site/firmware.js` (225 firmwares).
+Verified: node matrix edge_test 8/8 + periph 8/8, browser edge_test
+`FAIL: 00000000`, 12-preset browser verify 12/12. `.map` path-churn
+reverted (tracked maps embed local cache paths).
+
+### OLED graphics: firmware font indexing + canvas quarter-size
+User report with screenshot: the OLED panel showed garbled text
+(`HAAAR:ARAA`-style rows) in the top-left quarter of the canvas.
+Two independent bugs, both fixed:
+1. **Firmware font indexing** (`firmware/oled_test/main.c`
+   `oled_putchar`): the digit index `0x30-0x41+(c-0x30)` goes negative
+   (0x30 < 0x41) and reads wild memory — digits rendered as garbage;
+   `':'` indexed entry 28 (`'"'`) instead of the last entry (52); no
+   lowercase handling (guest prints `Hello from`, table is A-Z only).
+   Fixed: lowercase folds to uppercase, digits use index `42+(c-0x30)`
+   (26 letters + 16 punctuation entries `' '`-`'/'`), `':'` uses 52.
+   Rebuilt stock + f401/f411/f429 bins (manual gcc, same flags as the
+   Makefile; `build_family.mjs` path is broken — it resolves
+   `root/demo` instead of `root/firmware/demo`).
+2. **Canvas quarter-size** (`site/console.html`): `#oledCanvas` was
+   `256x128` while `renderOled` (app.js) blits a native `128x64`
+   ImageData with `putImageData` (1:1, ignores CSS scaling — same class
+   as the §16 DOOM quarter-size bug). Three quarters stayed black and CSS
+   scaled the mostly-empty buffer. Fixed: canvas attributes now `128x64`.
+Verified: node `test_oled.mjs` PASS (lit=1428, bar=1024), matrix oled 3/3,
+browser CDP: canvas `128x64`, `nonblack=1428/8192`, readable
+`F407 OLED` / `HELLO FROM` / `STM32F407` + solid bottom bar
+(`/tmp/oled_render.png`). `?v=` bumps: firmware.js 26→27 (app.js/doom.js),
+app.js 53→54 (console.html), doom.js 82→83 + `__doomVer` 81→82
+(doom.html). NOTE: the OLED panel starts **collapsed** (device panels are
+collapsed by default in console.html) — a blank screenshot of the sidebar
+top is expected until the panel is expanded.

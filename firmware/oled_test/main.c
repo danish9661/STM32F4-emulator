@@ -146,12 +146,19 @@ static const unsigned char font5x7[][5] = {
 };
 
 static void oled_putchar(unsigned char c, int x, int page) {
+    // Lowercase renders as uppercase (the table only carries A-Z).
+    if (c >= 0x61 && c <= 0x7A) c -= 0x20;
     const unsigned char *g = font5x7[0];         // default 'A'
     if (c >= 0x41 && c <= 0x5A) g = font5x7[c - 0x41];
-    else if (c >= 0x30 && c <= 0x39) g = font5x7[0x30 - 0x41 + (c - 0x30)];
+    // Digits live at table indices 42-51 ('0' is the 42nd entry: 26 letters
+    // + 16 punctuation entries from ' ' to '/'). The old index
+    // (0x30-0x41+(c-0x30)) went negative and read wild memory — digits
+    // rendered as garbage.
+    else if (c >= 0x30 && c <= 0x39) g = font5x7[42 + (c - 0x30)];
     else if (c == ' ') g = font5x7[0x5A - 0x41 + 1];
     else if (c == '!') g = font5x7[0x5A - 0x41 + 2];
-    else if (c == ':') g = font5x7[0x5A - 0x41 + 3];
+    // ':' is the last table entry (index 52), not index 28 ('"').
+    else if (c == ':') g = font5x7[52];
     unsigned char line[7];
     oled_cmd(0xB0 | page);
     oled_cmd(x & 0x0F);

@@ -117,20 +117,20 @@ function t_pwr() {
 // ── DBGMCU per-map IDCODE ─────────────────────────────────────────────
 // COMPLETE: IDCODE DEV_ID[11:0] follows the map (F407 0x413 default;
 // init_svd_chip pins 0x423/0x431/0x419 for F401/F411/F429, REV_ID stays
-// 0x1000); CR mask 0x1F_E0F7 keeps the shipped 0x1F0077 probe stable.
+// 0x1001); CR mask 0x1F_E0F7 keeps the shipped 0x1F0077 probe stable.
 function t_dbgmcu_idcode() {
-    ok((R(0xE0042000) >>> 0) === 0x10006411, 'dbgmcu: F407 default IDCODE', 'got 0x' + (R(0xE0042000) >>> 0).toString(16));
+    ok((R(0xE0042000) >>> 0) === 0x10016413, 'dbgmcu: F407 default IDCODE', 'got 0x' + (R(0xE0042000) >>> 0).toString(16));
     const svd407 = svdXml;
     init_svd_chip(svd407, 'stm32f401');
     ok((R(0xE0042000) & 0xFFF) === 0x423, 'dbgmcu: F401 DEV_ID 0x423');
     init_svd_chip(svd407, 'stm32f429');
     ok((R(0xE0042000) & 0xFFF) === 0x419, 'dbgmcu: F429 DEV_ID 0x419');
     init_svd_chip(svd407, 'stm32f407');
-    // Full-word restore reads exactly 0x10006411 (silicon word for DEV_ID
+    // Full-word restore reads exactly 0x10016413 (silicon word for DEV_ID
     // 0x413 — set_idcode reconstructs the whole word, it does not mask
     // DEV_ID[11:0] in place, which would corrupt the 0x6_ middle nibble
     // into 0x10006413 and fail the shipped deep_periph_test IDCODE check).
-    ok((R(0xE0042000) >>> 0) === 0x10006411, 'dbgmcu: F407 full-word restore 0x10006411');
+    ok((R(0xE0042000) >>> 0) === 0x10016413, 'dbgmcu: F407 full-word restore 0x10016413');
     W(0xE0042004, 0x1F0077);
     ok(R(0xE0042004) === 0x1F0077, 'dbgmcu: CR 0x1F0077 round-trips');
 }

@@ -296,7 +296,7 @@ void setup() {
     CHECK(*(volatile uint32_t *)0x40013814 == 0xFEDCBA98, "SYSCFG EXTICR4 write/read");
 
     // DBGMCU: ID code and control
-    CHECK(*(volatile uint32_t *)0xE0042000 == 0x10006411, "DBGMCU IDCODE default");
+    CHECK(*(volatile uint32_t *)0xE0042000 == 0x10016413, "DBGMCU IDCODE default");
     *(volatile uint32_t *)0xE0042004 = 0x1F0077;
     CHECK(*(volatile uint32_t *)0xE0042004 == 0x1F0077, "DBGMCU CR write/read");
     *(volatile uint32_t *)0xE0042008 = 0xAAAAAAAA;

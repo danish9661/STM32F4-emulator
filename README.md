@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/stm32f4-emu.svg)](https://www.npmjs.com/package/stm32f4-emu)
 [![npm downloads](https://img.shields.io/npm/dm/stm32f4-emu.svg)](https://www.npmjs.com/package/stm32f4-emu)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/danish9661/STM32F4-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/danish9661/STM32F4-emulator/actions/workflows/ci.yml)
 [![Pages](https://github.com/danish9661/STM32F4-emulator/actions/workflows/pages.yml/badge.svg)](https://github.com/danish9661/STM32F4-emulator/actions/workflows/pages.yml)
 
@@ -323,6 +323,16 @@ rebuild — delete it so the vendor assets stay tracked/committed.
 
 ## License & Credits
 
-- **License**: GPL-3.0-only. See [LICENSE](LICENSE).
-- **Heritage**: Fork and continuation of [nviennot/stm32-emulator](https://github.com/nviennot/stm32-emulator) (native SDL 3D printer emulator by Nicolas Viennot). The headless WASM peripheral model, networking stack, browser demo, virtual components API, MCP server, and npm package are new work built on that base.
-- **DOOM**: Ported using [doomgeneric](https://github.com/ozkl/doomgeneric) by Ozkan Sezgin.
+- **License**: MIT. See [LICENSE](LICENSE).
+- **Heritage**: clean-room Rust CPU core + peripheral model, JS driver, and
+  npm package written for this project (no upstream emulator code remains
+  in the tree — the legacy native/SDL prototype was removed; see
+  `firmware/doom/NOTICE.md` for the one GPL-walled demo exception). The
+  networking stack, browser demo, virtual components API, MCP server, and
+  npm package are new work built on that base.
+- **DOOM demo (GPL-walled, not in npm)**: the `doom` preset + `site/doom.*`
+  page run a doomgeneric port (GPL-2.0-or-later engine,
+  `firmware/doom/engine`, by id Software / Simon Howard / Ozkan Sezgin —
+  see [doomgeneric](https://github.com/ozkl/doomgeneric)); only the F407
+  glue in `firmware/doom/f407` is original. The doom blob + WAD ship in
+  the repo demo only, never in the npm tarball.
