@@ -4,6 +4,12 @@ All notable changes to `stm32f4-emu` are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/); this project uses
 date-based entries rather than strict SemVer until the first published release.
 
+## [1.5.0] — 2026-09-30 (published release; syncs tree with the registry)
+
+The registry now carries 1.5.0 (published from the release workflow off
+this tree). Tree version synced to match (`package.json`,
+`package-lock.json`, `mcp/server.mjs`); no code changes vs 1.4.2.
+
 ## [1.4.2] — 2026-09-30 (republish: 1.4.1 already taken on npm)
 
 Same payload as 1.4.0 (MIT relicense + slim manifest + npm demo +
