@@ -4,6 +4,16 @@ All notable changes to `stm32f4-emu` are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/); this project uses
 date-based entries rather than strict SemVer until the first published release.
 
+## [1.4.2] — 2026-09-30 (republish: 1.4.1 already taken on npm)
+
+Same payload as 1.4.0 (MIT relicense + slim manifest + npm demo +
+IDCODE/OLED fixes). Version bump only: 1.4.1 was already published on
+the registry by an earlier run, so the publish workflow's
+`npm version 1.4.1` step produced a tarball npm rejects with 403
+("cannot publish over previously published versions"). Bumped to 1.4.2
+(`package.json`, `package-lock.json`, `mcp/server.mjs`) so the next
+release run publishes cleanly. No code changes vs 1.4.0.
+
 ## [1.4.0] — 2026-09-30 (MIT relicense + npm demo + IDCODE + OLED fixes)
 
 Relicense: the package is now MIT (`LICENSE`, `package.json`,
