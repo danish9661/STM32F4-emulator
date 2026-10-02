@@ -35,7 +35,7 @@ async function main() {
     // Gateway URL: --gw-url= overrides the loopback default (e.g. a wss://
     // TLS endpoint for https pages, or a remote host). Env GW_URL.
     const gwUrl = args.find(a => a.startsWith('--gw-url='))?.split('=').slice(1).join('=')
-        || process.env.GW_URL || 'ws://127.0.0.1:5070/api/network-gateway';
+        || process.env.GW_URL || 'ws://127.0.0.1:5030/api/network-gateway';
     let uartAddr = parseHex(args.find(a => a.startsWith('--uart='))?.split('=')[1] || process.env.UART_ADDR || '0x40011000');
 
     // Load and merge configs
@@ -262,7 +262,7 @@ async function main() {
         if (!useGateway) return;
         try {
             if (spawnGateway) {
-                const gwPath = process.env.GW_PATH || path.join(import.meta.dirname, '..', '..', 'openhw-local-gateway', 'openhw-gw');
+                const gwPath = process.env.GW_PATH || path.join(import.meta.dirname, '..', '..', '..', 'esp32 emu', 'openhw-unified-gateway', 'openhw-gw');
                 gwProcess = spawn(gwPath, [], { stdio: 'pipe' });
                 gwProcess.stdout.on('data', d => process.stdout.write(d));
                 gwProcess.stderr.on('data', d => process.stderr.write(d));
