@@ -15,7 +15,7 @@
 //
 // Serve from site/ (python3 -m http.server 8123 --directory site) — the page
 // fetches the WAD + SVD + wasm at runtime (file:// won't work).
-import { FIRMWARES } from './firmware.js?v=13';
+import { FIRMWARES_DOOM as FIRMWARES } from './firmware-doom.js?v=1';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
@@ -78,7 +78,7 @@ window.__doomLog = () => dbgLog.slice();
 window.__pace = () => window.__lastPace || null;
 // Build stamp: type __doomVer in the console — if it doesn't print the
 // current number, the tab runs a cached copy (Ctrl+Shift+R).
-window.__doomVer = 82;
+window.__doomVer = 85;
 // Keys pressed before the worker boots would be eaten (nothing listens
 // yet) — the old "wait before touching anything" ritual. Instead they queue
 // here and flush on 'booted', so press ahead: the game catches up. The
@@ -233,11 +233,22 @@ function updateKeysLabel() {
 // The keyup-ordering dance (holding a U back until the guest consumed the D)
 // lives in the worker, next to the ring it writes. Here we only track what is
 // held so the topbar label stays honest.
-document.addEventListener('keydown', (e) => {
+function doomCodeFor(e) {
     let code = DOM_TO_DOOM[e.key];
     if (code === undefined && e.key.length === 1 && e.key >= 'a' && e.key <= 'z') {
         code = e.key.charCodeAt(0);    // raw ASCII letters reach the menu
     }                                  // string-entry + 'y' confirm prompts
+    if (code === undefined) {
+        // Bare modifiers: e.key is 'Shift'/'Control' while the map holds the
+        // e.code spellings ('ShiftLeft' etc.), so look up by e.code here —
+        // otherwise strafe (Shift) and fire (Ctrl) never reach the guest.
+        if (e.key === 'Shift') code = e.code === 'ShiftRight' ? KEY.STRAFE_R : KEY.STRAFE_L;
+        else if (e.key === 'Control') code = KEY.FIRE;
+    }
+    return code;
+}
+document.addEventListener('keydown', (e) => {
+    const code = doomCodeFor(e);
     if (code === undefined) return;
     e.preventDefault();
     initAudio();                       // user gesture: unlock WebAudio
@@ -248,10 +259,7 @@ document.addEventListener('keydown', (e) => {
     }
 });
 document.addEventListener('keyup', (e) => {
-    let code = DOM_TO_DOOM[e.key];
-    if (code === undefined && e.key.length === 1 && e.key >= 'a' && e.key <= 'z') {
-        code = e.key.charCodeAt(0);
-    }
+    const code = doomCodeFor(e);
     if (code === undefined) return;
     e.preventDefault();
     if (held.delete(code)) {
@@ -284,6 +292,95 @@ document.addEventListener('mouseup', () => {
 document.addEventListener('visibilitychange', () => {
     send({ t: 'hidden', hidden: document.hidden });
 });
+
+// ── touch deck (retro-handheld controls for phones/tablets) ──
+// Same press path as the keyboard handlers (held-gated downs, worker-gated
+// ups via sendKey), so touch taps deliver exactly one (D,U) pair each and
+// holds never spam. Pointer events unify mouse+touch; each control tracks
+// its own press, so multi-touch holds work (e.g. dish-Up + A together).
+function press(code, down) {
+    initAudio();                       // touch counts as a user gesture
+    if (down) {
+        if (!held.has(code)) { held.add(code); updateKeysLabel(); sendKey(code, true); }
+    } else if (held.delete(code)) { updateKeysLabel(); sendKey(code, false); }
+}
+const deck = $('deck'), btnTouch = $('btnTouch');
+function setDeck(v, save) {
+    deck.hidden = !v;
+    btnTouch.setAttribute('aria-pressed', String(!!v));
+    if (save) { try { localStorage.setItem('doom-touch', v ? '1' : '0'); } catch (e) {} }
+}
+let touchPref = null;
+try { touchPref = localStorage.getItem('doom-touch'); } catch (e) {}
+if (touchPref === null) {
+    touchPref = (window.matchMedia && matchMedia('(pointer: coarse)').matches) ||
+        ('ontouchstart' in window);
+}
+setDeck(!!touchPref, false);
+btnTouch.addEventListener('click', () => setDeck(deck.hidden, true));
+function codeOf(el) {
+    if (el.dataset.code !== undefined && el.dataset.code !== '') return parseInt(el.dataset.code, 10);
+    return KEY[el.dataset.k];
+}
+document.querySelectorAll('#deck button.tbtn').forEach((el) => {
+    const code = codeOf(el);
+    if (code === undefined) return;
+    el.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        try { el.setPointerCapture(e.pointerId); } catch (err) {}
+        el.classList.add('on');
+        press(code, true);
+    });
+    const release = () => { el.classList.remove('on'); press(code, false); };
+    el.addEventListener('pointerup', release);
+    el.addEventListener('pointercancel', release);
+    el.addEventListener('contextmenu', (e) => e.preventDefault());
+});
+// D-pad dish: direction comes from the touch vector (dead zone at center),
+// so a thumb can hold Up and roll into Left without lifting — turns while
+// moving, like a thumbstick. One pointer owns the dish; others are ignored.
+const dpad = $('dpad');
+let dpadPtr = null, dpadDir = 0;
+function dpadCode(dx, dy, w, h) {
+    const nx = dx / (w / 2), ny = dy / (h / 2);
+    if (nx * nx + ny * ny < 0.09) return 0;      // ~30% dead zone
+    return Math.abs(nx) > Math.abs(ny)
+        ? (nx > 0 ? KEY.RIGHTARROW : KEY.LEFTARROW)
+        : (ny > 0 ? KEY.DOWNARROW : KEY.UPARROW);
+}
+function dpadMove(e) {
+    const r = dpad.getBoundingClientRect();
+    const code = dpadCode(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2), r.width, r.height);
+    if (code !== dpadDir) {
+        if (dpadDir) press(dpadDir, false);
+        dpadDir = code;
+        dpad.querySelectorAll('.dz').forEach((z) => z.classList.remove('on'));
+        if (code) {
+            press(code, true);
+            const sel = code === KEY.UPARROW ? '.up' : code === KEY.DOWNARROW ? '.down'
+                : code === KEY.LEFTARROW ? '.left' : '.right';
+            const z = dpad.querySelector(sel);
+            if (z) z.classList.add('on');
+        }
+    }
+}
+dpad.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    if (dpadPtr !== null) return;                 // one thumb owns the dish
+    dpadPtr = e.pointerId;
+    try { dpad.setPointerCapture(e.pointerId); } catch (err) {}
+    dpadMove(e);
+});
+dpad.addEventListener('pointermove', (e) => { if (e.pointerId === dpadPtr) dpadMove(e); });
+const dpadEnd = (e) => {
+    if (e.pointerId !== dpadPtr) return;
+    dpadPtr = null;
+    if (dpadDir) { press(dpadDir, false); dpadDir = 0; }
+    dpad.querySelectorAll('.dz').forEach((z) => z.classList.remove('on'));
+};
+dpad.addEventListener('pointerup', dpadEnd);
+dpad.addEventListener('pointercancel', dpadEnd);
+dpad.addEventListener('contextmenu', (e) => e.preventDefault());
 
 $('btnPause').addEventListener('click', () => {
     paused = !paused;

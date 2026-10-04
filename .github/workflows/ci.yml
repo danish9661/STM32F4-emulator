@@ -45,4 +45,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Cargo test
-        run: cargo test --manifest-path stm32-periph-wasm/Cargo.toml
+        # Single-threaded: the model shares process-global state across tests
+        # (SYS instance, INSTRUCTION_COUNT, fault channels, ExtDevices
+        # Rc<RefCell> links), so parallel threads race — flakes observed in
+        # unrelated tests run to run (UNALIGNED sticky 0 in
+        # cpu::tests::unalign_trp_traps_odd_access; RefCell already borrowed
+        # in peripherals::spi::tests::firmware_flow_via_gpio_cs). Serial is
+        # green (243/243); do not re-parallelize without making that state
+        # thread-local first.
+        run: cargo test --manifest-path stm32-periph-wasm/Cargo.toml -- --test-threads=1

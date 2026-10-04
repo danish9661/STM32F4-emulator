@@ -4,6 +4,28 @@ All notable changes to `stm32f4-emu` are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/); this project uses
 date-based entries rather than strict SemVer until the first published release.
 
+## [Unreleased]
+
+- DOOM boot crash fixed: the MIT slim manifest dropped the `doom` blob
+  from `site/firmware.js` while `site/doom.js` still read
+  `FIRMWARES.doom.bytes` (`TypeError: Cannot read properties of
+  undefined`). `tools/make_firmware.mjs` now always writes slim
+  `site/firmware.js` plus `site/firmware-doom.js` (doom blob only,
+  excluded from the npm tarball); `site/doom.js` imports from there.
+- Touch deck for mobile (`site/doom.html`): retro-handheld controls
+  (D-pad dish, A/B, L/R shoulders, START/SELECT, SAVE/LOAD/Y),
+  auto-shown on coarse pointers. Fixed dead Shift/Ctrl keys on the way
+  (`e.key` vs `e.code` mismatch — strafe + fire never reached the guest).
+  Playwright-verified: menu navigation, all keys reach the ring, desktop
+  toggle, zero page errors.
+- Sprint-hunt: 90s E1M1 sampling of guest tic deltas + pace telemetry
+  shows no fast-forward (max window 22.6 t/s, `jump=1` everywhere,
+  pause drift 0); mean rate follows host CPU by design (backlog-drop).
+- CI Rust job pinned to `--test-threads=1`: the suite shares
+  process-global model state, so parallel threads flake in unrelated
+  tests (`UNALIGNED` sticky 0, `RefCell already borrowed`); serial is
+  243/243 green.
+
 ## [1.5.0] — 2026-09-30 (published release; syncs tree with the registry)
 
 The registry now carries 1.5.0 (published from the release workflow off

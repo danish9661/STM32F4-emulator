@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
@@ -70,6 +71,47 @@
   #guide { flex: none; border-top: 1px solid #222; padding: 5px 12px; font-size: 12px;
            color: #999; display: flex; flex-wrap: wrap; gap: 3px 22px; line-height: 1.5; }
   #guide b { color: #eee; }
+  /* ── Touch deck: retro-handheld controls (top display, lower control) ──
+     Shown automatically on touch devices, toggle with Controls. */
+  #deck { flex: none; background: #0c0c0c; border-top: 1px solid #222;
+          padding: 8px 12px 10px; }
+  #deck[hidden] { display: none; }
+  #deck .dk-sh { display: flex; justify-content: space-between; gap: 8px;
+                 margin-bottom: 8px; }
+  #deck .dk-main { display: flex; justify-content: space-between; align-items: center;
+                   gap: 8px; max-width: 560px; margin: 0 auto; }
+  #dpad { position: relative; width: 132px; height: 132px; flex: none; border-radius: 50%;
+          background: radial-gradient(circle, #1e1e1e 0%, #131313 70%);
+          border: 1px solid #333; touch-action: none; user-select: none;
+          -webkit-user-select: none; }
+  #dpad .dz { position: absolute; color: #5a5a5a; font-size: 18px; line-height: 1;
+              pointer-events: none; }
+  #dpad .dz.up { top: 6px; left: 50%; transform: translateX(-50%); }
+  #dpad .dz.down { bottom: 6px; left: 50%; transform: translateX(-50%); }
+  #dpad .dz.left { left: 9px; top: 50%; transform: translateY(-50%); }
+  #dpad .dz.right { right: 9px; top: 50%; transform: translateY(-50%); }
+  #dpad .dz.on { color: #f90; }
+  #deck .dk-mid { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+  #deck .dk-mini { display: flex; gap: 6px; }
+  .tbtn { touch-action: none; user-select: none; -webkit-user-select: none;
+          -webkit-tap-highlight-color: transparent;
+          background: #222; color: #ccc; border: 1px solid #444;
+          font: 12px monospace; cursor: pointer; }
+  .tbtn:active, .tbtn.on { background: #3a2c12; border-color: #f90; color: #fc6; }
+  .tbtn.pill { border-radius: 12px; padding: 6px 14px; }
+  .tbtn.sh { border-radius: 8px; padding: 5px 10px; font-size: 11px; }
+  .tbtn.mini { border-radius: 6px; padding: 4px 8px; font-size: 10px; color: #999; }
+  #deck .dk-ab { display: flex; gap: 10px; align-items: center; }
+  .tbtn.round { width: 64px; height: 64px; border-radius: 50%;
+                font-size: 20px; font-weight: bold; }
+  .tbtn.a { color: #f66; border-color: #633; }
+  .tbtn.b { color: #fc6; border-color: #663; }
+  #deckHint { text-align: center; color: #5f5f5f; font-size: 11px; margin-top: 8px; }
+  @media (max-width: 480px) {
+    #dpad { width: 112px; height: 112px; }
+    .tbtn.round { width: 56px; height: 56px; font-size: 17px; }
+    #topbar h1 { font-size: 12px; }
+  }
   pre#uart { height: 66px; overflow-y: auto; background: #000; border-top: 1px solid #222;
              padding: 4px 12px; margin: 0; white-space: pre-wrap; font-size: 12px; flex: none; }
   /* Collapsing the log hands its space back to the game. */
@@ -93,6 +135,7 @@
     <button id="btnClear" title="Clear the UART log">Clear</button>
     <button id="btnReHi" title="Headroom is back — reboot straight into high detail (auto never switches low->high live: the mid-game re-tune can leave the 3D view ~208px wide)" style="display:none">High detail</button>
     <button id="btnDetail" title="Cycle render detail: Auto -> High -> Low (low saves ~20% inst/frame; high->low applies live, low->high needs a reboot)">Detail: Auto</button>
+    <button id="btnTouch" aria-pressed="false" title="Touch controls for phones/tablets (D-pad + buttons, retro-handheld deck)">Controls</button>
   </div>
 </div>
 <!-- Backing store MUST be the native framebuffer size (320x200): renderFb
@@ -111,12 +154,41 @@
   <span><b>Load</b>: F3 · F9 quickload</span>
   <span><b>Other</b>: F1 help · F10 end game · F11 quit · F12 screenshot</span>
 </div>
+<!-- Retro-handheld deck: top display (canvas above), lower control here.
+     Auto-shown on touch devices; toggle with Controls. Pointer events unify
+     mouse+touch, so every button also works with a mouse (multi-touch: one
+     thumb per control — hold Up on the dish while tapping A to fire). -->
+<div id="deck" hidden>
+  <div class="dk-sh">
+    <button class="tbtn sh" data-k="STRAFE_L" title="Strafe left (Shift)">L · strafe</button>
+    <button class="tbtn sh" data-k="STRAFE_R" title="Strafe right (Shift)">strafe · R</button>
+  </div>
+  <div class="dk-main">
+    <div id="dpad" role="application" aria-label="D-pad: move and turn (slides like a thumbstick)">
+      <span class="dz up">▲</span><span class="dz left">◀</span><span class="dz right">▶</span><span class="dz down">▼</span>
+    </div>
+    <div class="dk-mid">
+      <button class="tbtn pill" data-k="ENTER" title="Menu open / select (Enter)">START</button>
+      <button class="tbtn pill" data-k="ESC" title="Menu back (Esc)">SELECT</button>
+      <div class="dk-mini">
+        <button class="tbtn mini" data-k="F6" title="Quicksave (F6)">SAVE</button>
+        <button class="tbtn mini" data-k="F9" title="Quickload (F9), then Y to confirm">LOAD</button>
+        <button class="tbtn mini" data-code="121" title="Confirm prompts (y)">Y</button>
+      </div>
+    </div>
+    <div class="dk-ab">
+      <button class="tbtn round b" data-k="USE" title="Use doors/switches (Space)">B</button>
+      <button class="tbtn round a" data-k="FIRE" title="Fire (Ctrl)">A</button>
+    </div>
+  </div>
+  <div id="deckHint">dish move/turn · A fire · B use · START menu/ok · SELECT back · SAVE quick-save · LOAD quick-load+Y</div>
+</div>
 <pre id="uart"></pre>
 
 <!-- Emulation runs in doom-worker.js (Rust CPU core + peripheral model). -->
 <!-- Bump ?v= on every doom.js edit: the module is cached hard, and a stale
      copy looks exactly like the bug you thought you just fixed. The worker
      has its own ?v= inside doom.js. -->
-<script type="module" src="doom.js?v=83"></script>
+<script type="module" src="doom.js?v=86"></script>
 </body>
 </html>

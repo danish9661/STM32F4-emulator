@@ -4305,3 +4305,63 @@ app.js 53→54 (console.html), doom.js 82→83 + `__doomVer` 81→82
 (doom.html). NOTE: the OLED panel starts **collapsed** (device panels are
 collapsed by default in console.html) — a blank screenshot of the sidebar
 top is expected until the panel is expanded.
+
+### DOOM firmware split + dead modifier keys (2026-10-04)
+The MIT slim-down removed the `doom` blob from `site/firmware.js`
+(223 entries, doom absent — correct for npm) while `site/doom.js:494`
+still read `FIRMWARES.doom.bytes` → boot crashed with
+`TypeError: Cannot read properties of undefined (reading 'bytes')`.
+Fix keeps npm MIT-clean AND the demo working: `tools/make_firmware.mjs`
+now always writes slim `site/firmware.js` **plus**
+`site/firmware-doom.js` (`FIRMWARES_DOOM`, doom blob only — NOT in
+`package.json` `files`, so the tarball stays clean; Pages serves it
+because `pages.yml` copies all of `site/` flat). `site/doom.js` imports
+the blob from there. Also fixed a latent `slim.length` crash in the same
+script (variable removed by the split edit).
+Playwright-verified `.pw-scratch/probe_menukeys.py` (new): ArrowDown
+moves `itemOn` 3/3 taps, ArrowUp moves back, all 17 mapped keys advance
+the guest ring — EXCEPT it caught Shift/Ctrl as dead (`+0` advance):
+the map holds `e.code` spellings (`ShiftLeft`/`ControlLeft`) but the
+handlers look up `e.key` (bare `'Shift'`/`'Control'`), so strafe + fire
+never reached the guest. Fix: `doomCodeFor(e)` falls back to `e.code`
+for bare modifiers (ShiftRight→STRAFE_R). `?v=` bumps: doom.js 83→84
+(doom.html), 84→85 with this fix; `__doomVer` 82→83→84;
+firmware-doom.js?v=1 (new). Speed, measured holding W+ArrowLeft in E1M1:
+core MIPS rock-steady 32–39, game 30–34 t/s typical with transient
+windows down to ~16–24 on a loaded box (another tenant's chrome eating
+CPU at the time) — that is the designed backlog-drop slow-mo, never
+fast-forward; audio rate tracks continuously (0.6–1.0x, no starvation
+gaps). Solo-box runs hold 34–36 t/s. Menu-hint for users: arrows do
+nothing on the TITLE screen by engine design — press Enter to open the
+menu first.
+Sprint-hunt `.pw-scratch/probe_doomspan.py` (2026-10-04, v85): 90s
+W-hold in E1M1 sampling GAMETIC deltas (ground truth, not the meter) +
+pace telemetry, with a 5s mid-run pause. Result: NO fast-forward — max
+window 22.6 t/s over 45 windows, `jump=1` in every window (never a
+multi-frame jump), pause drift exactly 0 with a clean no-burst resume,
+zero pageerrors, node `test_doom_wasm.mjs` PASS alongside. Mean rate
+sits wherever the host allows (20–30 t/s on the loaded box, 34–36
+solo); that slowdown IS the backlog-drop design, and slowness must not
+be "fixed" by chasing backlog (that reintroduces the sprint).
+
+### Touch deck for mobile (2026-10-04)
+`site/doom.html` now has a retro-handheld deck (display on top, controls
+below): D-pad dish, A (fire) / B (use), L/R strafe shoulders, START
+(Enter) / SELECT (Esc), SAVE (F6 quicksave) / LOAD (F9) / Y (confirm
+prompts). Auto-shows on coarse pointers (`matchMedia('(pointer:
+coarse)')`, override in `localStorage doom-touch`), toggle is the
+topbar Controls button. All buttons go through the same `press()` path
+as the keyboard (held-gated D, worker-gated U), so taps deliver exactly
+one (D,U) pair and multi-touch holds work (dish-Up + A together). The
+dish derives direction from the touch vector with a ~30% dead zone, so a
+thumb can roll Up→Left without lifting; one pointerId owns the dish.
+`touch-action: none` + `user-scalable=no` viewport + contextmenu
+suppression keep taps responsive (no scroll/zoom/callout).
+This fixed a real bug the probe caught: Shift/Ctrl were dead
+(`DOM_TO_DOOM` holds `e.code` spellings but handlers used `e.key`) —
+`doomCodeFor()` now falls back to `e.code` for bare modifiers.
+Verified `.pw-scratch/probe_touch.py` (mobile 390×844 touch context):
+deck auto-shows, START opens menu, dish down/up move `itemOn`,
+all 8 deck buttons + 4 dish zones advance the ring, desktop toggle
+works, zero pageerrors, deck screenshot readable. `?v=`: doom.js 85→86
+(doom.html), `__doomVer` 84→85, firmware-doom.js?v=1 (unchanged file).
