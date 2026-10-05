@@ -4343,6 +4343,19 @@ zero pageerrors, node `test_doom_wasm.mjs` PASS alongside. Mean rate
 sits wherever the host allows (20–30 t/s on the loaded box, 34–36
 solo); that slowdown IS the backlog-drop design, and slowness must not
 be "fixed" by chasing backlog (that reintroduces the sprint).
+"16fps + low-bitrate look" diagnosis (2026-10-04, user report):
+`FPS: 16/35` is real slow-mo (guest frames, 2s-smoothed — not meter
+noise), and the chunky look is auto-detail LOW (double-width columns
+across the 3D view; HUD stays crisp — compare `.pw-scratch/perf_auto.png`
+vs `perf_high.png`). Both share one cause: the host can't deliver the
+~38 MIPS E1M1-high needs, so auto drops to low after 4s under 30 t/s
+and the game still can't hold 35. Forced-High reboot on the same box
+holds 35/35 (reboot path has no 208px bar), proving the renderer is
+fine. No pacing/render change fixes a slow host — forcing high only
+slows it further. User guidance: Detail→High (reboots) for full quality
+where the machine holds it; the hidden "High detail" button appears on
+sustained headroom; close other tabs; desktop Chrome for full speed.
+Do NOT "fix" slowness by chasing backlog or shrinking batches.
 
 ### Touch deck for mobile (2026-10-04)
 `site/doom.html` now has a retro-handheld deck (display on top, controls

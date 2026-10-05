@@ -1428,11 +1428,21 @@ pub fn i2c_register_slave(peripheral: &str, address: u8) {
 }
 
 /// Drain all events for a tapped I2C slave since the last call. Each entry
-/// is a u32: bit31 = START/STOP boundary event (bit30 = 1 START / 0 STOP),
-/// otherwise the low byte is one byte the master wrote to the slave.
+/// is a u32: bit31 = START/STOP boundary event (bit30 = 1 START / 0 STOP);
+/// bit30 WITHOUT bit31 = master-read request `(1<<30)|addr7`, pushed at the
+/// address phase of a read from a tapped slave (parseI2c dispatches onRead
+/// on it); otherwise the low byte is one byte the master wrote.
 #[wasm_bindgen]
 pub fn i2c_take_events(peripheral: &str) -> Vec<u32> {
     system::i2c_tap_take_tx(peripheral)
+}
+
+/// Drain every protocol-tap queue (I2C TX/RX, SPI events/MISO) plus the
+/// deferred fault channels, keeping device registrations. Reset hygiene
+/// for `emu.reset()`: no stale bus event or latched fault may survive it.
+#[wasm_bindgen]
+pub fn drain_tap_queues() {
+    system::drain_tap_queues();
 }
 
 /// Queue bytes the tapped I2C slave answers on master reads.

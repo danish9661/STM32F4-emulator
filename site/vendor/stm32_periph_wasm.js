@@ -803,6 +803,15 @@ export function dma_stream_fifo_threshold(dma, stream) {
 }
 
 /**
+ * Drain every protocol-tap queue (I2C TX/RX, SPI events/MISO) plus the
+ * deferred fault channels, keeping device registrations. Reset hygiene
+ * for `emu.reset()`: no stale bus event or latched fault may survive it.
+ */
+export function drain_tap_queues() {
+    wasm.drain_tap_queues();
+}
+
+/**
  * Arm a single-node collision for the next TX completion (consumed once;
  * the driver reports EC + CC=15 when the MAC is half-duplex).
  */
@@ -1570,8 +1579,10 @@ export function i2c_slave_write(base, byte) {
 
 /**
  * Drain all events for a tapped I2C slave since the last call. Each entry
- * is a u32: bit31 = START/STOP boundary event (bit30 = 1 START / 0 STOP),
- * otherwise the low byte is one byte the master wrote to the slave.
+ * is a u32: bit31 = START/STOP boundary event (bit30 = 1 START / 0 STOP);
+ * bit30 WITHOUT bit31 = master-read request `(1<<30)|addr7`, pushed at the
+ * address phase of a read from a tapped slave (parseI2c dispatches onRead
+ * on it); otherwise the low byte is one byte the master wrote.
  * @param {string} peripheral
  * @returns {Uint32Array}
  */

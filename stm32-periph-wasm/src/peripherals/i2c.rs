@@ -535,6 +535,29 @@ impl Peripheral for I2c {
                             self.sr1 = 1 << 1;
                             self.sr2 = (1 << 0) | (1 << 1);
                             if is_read {
+                                // Tapped slave (JS-visible device): the
+                                // master is about to clock bytes OUT of us.
+                                // The tap answers DR reads from its
+                                // pre-pushed RX queue (0xFF when empty), but
+                                // JS only learns about the read after the
+                                // fact — so announce the address phase NOW
+                                // with a read-request marker, (1<<30)|addr7,
+                                // on the event stream. Bit30-without-bit31
+                                // is unambiguous (data bytes are low-8,
+                                // START/STOP carry bit31); parseI2c
+                                // dispatches onRead on it and the handler's
+                                // pushRx fill serves the DR reads that follow
+                                // (small step budgets required — fills land
+                                // between steps; a cold bus still answers
+                                // 0xFF on the very first byte). Non-tap
+                                // devices (eeprom/regfile) serve real data
+                                // and get no marker.
+                                if self.devices[idx].name.contains("i2c-tap") {
+                                    crate::system::i2c_tap_push_event(
+                                        &self.name,
+                                        (1 << 30) | ((addr & 0x7F) as u32),
+                                    );
+                                }
                                 let mut d = self.devices[idx].device.borrow_mut();
                                 self.dr = d.read(sys, ()) as u32;
                             }
@@ -733,6 +756,79 @@ mod tests {
         w(&sys, I2C1 + 0x10, 0xA0);
         assert_ne!(r(&sys, I2C1 + 0x14) & (1 << 1), 0, "ADDR set after disarm");
         w(&sys, I2C1, 1 | (1 << 9)); // STOP (clean)
+    }
+
+    fn system_with_tap() -> std::rc::Rc<crate::system::System> {
+        use crate::ext_devices::i2c_tap::{I2cTap, I2cTapConfig};
+        let mut ext = crate::ext_devices::ExtDevices::default();
+        ext.i2c_taps.push(std::rc::Rc::new(std::cell::RefCell::new(
+            I2cTap::new(I2cTapConfig {
+                peripheral: "I2C1".into(),
+                address: 0x3C,
+            }),
+        )));
+        crate::system::test_system_with(&ext)
+    }
+
+    /// Master READ of a tapped slave pushes a read-request marker,
+    /// (1<<30)|addr7, at the address phase; a master WRITE pushes none.
+    /// The marker (not a data byte, not START/STOP) is what parseI2c
+    /// dispatches onRead on.
+    #[test]
+    fn tap_read_pushes_request_marker() {
+        let sys = system_with_tap();
+        // Drain any edge events other parallel tests left on I2C1; assert
+        // with contains, never exact equality (shared queue).
+        let _ = crate::system::i2c_tap_take_tx("I2C1");
+        // Write transaction first: START -> ADDR(W) -> latch -> data.
+        w(&sys, I2C1, 1 | (1 << 8)); // PE + START
+        w(&sys, I2C1 + 0x10, 0x78); // 0x3C write
+        assert_ne!(r(&sys, I2C1 + 0x14) & (1 << 1), 0, "ADDR set (write)");
+        let _ = r(&sys, I2C1 + 0x14);
+        let _ = r(&sys, I2C1 + 0x18);
+        w(&sys, I2C1 + 0x10, 0xAB); // data byte
+        w(&sys, I2C1, 1 | (1 << 9)); // STOP
+        let ev = crate::system::i2c_tap_take_tx("I2C1");
+        assert!(ev.iter().any(|&v| v == (1 << 31) | (1 << 30)), "START edge");
+        assert!(!ev.iter().any(|&v| (v & 0x4000_0000) != 0 && (v & 0x8000_0000) == 0),
+            "no read marker on a write transaction");
+        // Read transaction: START -> ADDR(R) -> latch. The marker must be
+        // in the queue even though no data byte was ever written.
+        w(&sys, I2C1, 1 | (1 << 8)); // PE + START
+        w(&sys, I2C1 + 0x10, 0x79); // 0x3C read
+        assert_ne!(r(&sys, I2C1 + 0x14) & (1 << 1), 0, "ADDR set (read)");
+        let _ = r(&sys, I2C1 + 0x14);
+        let _ = r(&sys, I2C1 + 0x18);
+        let ev = crate::system::i2c_tap_take_tx("I2C1");
+        assert!(ev.iter().any(|&v| v == (1 << 30) | 0x3C), "read marker");
+        w(&sys, I2C1, 1 | (1 << 9)); // STOP the read transaction
+        // Prefilled RX serves the DR read that follows a fresh address
+        // phase (the match itself pops the head of the RX queue into DR).
+        crate::system::i2c_tap_rx_push("I2C1", &[0x42]);
+        w(&sys, I2C1, 1 | (1 << 8)); // fresh START
+        w(&sys, I2C1 + 0x10, 0x79); // 0x3C read
+        assert_ne!(r(&sys, I2C1 + 0x14) & (1 << 1), 0, "ADDR set (refill)");
+        let _ = r(&sys, I2C1 + 0x14);
+        let _ = r(&sys, I2C1 + 0x18);
+        let got = r(&sys, I2C1 + 0x10); // DR read: the prefilled byte
+        assert_eq!(got & 0xFF, 0x42, "prefilled RX byte served");
+        w(&sys, I2C1, 1 | (1 << 9)); // STOP (clean)
+        crate::system::drain_tap_queues();
+    }
+
+    /// drain_tap_queues() clears stale bus events without unregistering
+    /// devices (reset hygiene: nothing observed pre-reset leaks through).
+    #[test]
+    fn drain_tap_queues_clears_stale_events() {
+        let sys = system_with_tap();
+        let _ = crate::system::i2c_tap_take_tx("I2C1");
+        w(&sys, I2C1, 1 | (1 << 8)); // START (edge event lands on I2C1)
+        assert!(!crate::system::i2c_tap_take_tx("I2C1").is_empty(), "setup staged an event");
+        w(&sys, I2C1, 1 | (1 << 8)); // another edge
+        crate::system::drain_tap_queues();
+        assert!(crate::system::i2c_tap_take_tx("I2C1").is_empty(), "drained");
+        w(&sys, I2C1, 1 | (1 << 9)); // STOP (clean)
+        crate::system::drain_tap_queues();
     }
 
     #[test]

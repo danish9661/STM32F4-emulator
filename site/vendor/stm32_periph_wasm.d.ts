@@ -282,6 +282,13 @@ export function dma_stream_feif(dma: string, stream: number): boolean;
 export function dma_stream_fifo_threshold(dma: string, stream: number): number;
 
 /**
+ * Drain every protocol-tap queue (I2C TX/RX, SPI events/MISO) plus the
+ * deferred fault channels, keeping device registrations. Reset hygiene
+ * for `emu.reset()`: no stale bus event or latched fault may survive it.
+ */
+export function drain_tap_queues(): void;
+
+/**
  * Arm a single-node collision for the next TX completion (consumed once;
  * the driver reports EC + CC=15 when the MAC is half-duplex).
  */
@@ -687,8 +694,10 @@ export function i2c_slave_write(base: number, byte: number): void;
 
 /**
  * Drain all events for a tapped I2C slave since the last call. Each entry
- * is a u32: bit31 = START/STOP boundary event (bit30 = 1 START / 0 STOP),
- * otherwise the low byte is one byte the master wrote to the slave.
+ * is a u32: bit31 = START/STOP boundary event (bit30 = 1 START / 0 STOP);
+ * bit30 WITHOUT bit31 = master-read request `(1<<30)|addr7`, pushed at the
+ * address phase of a read from a tapped slave (parseI2c dispatches onRead
+ * on it); otherwise the low byte is one byte the master wrote.
  */
 export function i2c_take_events(peripheral: string): Uint32Array;
 
@@ -1213,6 +1222,7 @@ export interface InitOutput {
     readonly dma_stream_ct: (a: number, b: number, c: number) => number;
     readonly dma_stream_feif: (a: number, b: number, c: number) => number;
     readonly dma_stream_fifo_threshold: (a: number, b: number, c: number) => number;
+    readonly drain_tap_queues: () => void;
     readonly eth_arm_collision: () => void;
     readonly eth_backoff_slots: (a: number, b: number) => number;
     readonly eth_check_wol: (a: number, b: number) => number;

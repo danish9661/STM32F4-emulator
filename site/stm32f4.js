@@ -38,10 +38,15 @@
 // Virtual-peripheral API (Wokwi-style): SPI/I2C taps must be registered before
 // the model's init_svd() (the Spi/I2c peripheral snapshots its device list once
 // at construction), so they are declared at create() time via the `spi`/`i2c`
-// options — exactly like rp2040js components. No Rust change is needed: the
-// model already emits transaction-level events (spi_take_events /
-// i2c_take_events) and accepts injected reply bytes (spi_push_miso /
-// i2c_push_rx).
+// options — exactly like rp2040js components. The model emits
+// transaction-level events (spi_take_events / i2c_take_events) and accepts
+// injected reply bytes (spi_push_miso / i2c_push_rx). Bus events fan out:
+// every consumer on one peripheral (device parsers + observer specs) gets
+// the same array each pass, so observers never starve each other. I2C
+// master reads raise `onRead(address)` at the address phase; the returned
+// (or self-pushed) bytes serve the following DR reads — keep step budgets
+// small around read transactions, and pre-fill byte 0 with pushRx when a
+// cold bus must answer exactly from the first byte.
 import { createEmulator } from './emulator.js';
 import { parseElf, parseIntelHex, parseMap } from './loaders.js';
 
@@ -177,12 +182,19 @@ function parseSpi(events, push, spec) {
 }
 
 // ── I2C event parsing ───────────────────────────────────────────────────────
-// events: combined u32 stream (master-written data bytes + START/STOP edges).
-// START edge = (1<<31)|(1<<30); STOP edge = (1<<31). The model does NOT push
-// the address+R/W byte (only data bytes written after the address), so onStart
+// events: combined u32 stream (master-written data bytes + START/STOP edges
+// + master-read request markers). START edge = (1<<31)|(1<<30); STOP edge =
+// (1<<31); read-request marker = (1<<30)|addr7, pushed at the address phase
+// of a master read from a tapped slave. The model does NOT push the
+// address+R/W byte (only data bytes written after the address), so onStart
 // is called with the device's configured `address` and every subsequent data
-// byte is delivered to onWrite. Master reads are served from the push_rx queue
-// (i2c_push_rx / onRead); there is no per-read event in the model.
+// byte is delivered to onWrite. Master reads are served from the push_rx
+// queue: on a marker, onRead(address) is asked for bytes NOW and anything
+// it returns (or pushes itself via mcu.i2c.pushRx) feeds i2c_push_rx for
+// the DR reads that follow. Fills land between steps, so back-to-back
+// reads inside ONE step still see the previous fill — run small step
+// budgets around read transactions, and note a cold bus answers 0xFF on
+// the very first byte (pre-fill with pushRx when byte 0 must be exact).
 //
 // Transfer state persists on `spec._st` across calls (event queue is drained
 // per step, splitting a transaction over multiple calls).
@@ -197,6 +209,11 @@ function parseI2c(events, push, spec) {
             } else { // STOP
                 if (st.started && spec.onStop) spec.onStop(periph);
                 st.started = false;
+            }
+        } else if (v & 0x40000000) { // read-request marker (never a data byte)
+            if (spec.onRead) {
+                const bytes = spec.onRead(spec.address);
+                if (bytes && bytes.length) push(bytes);
             }
         } else {
             if (!st.started) continue;

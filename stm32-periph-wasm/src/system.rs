@@ -558,6 +558,21 @@ pub fn i2c_tap_push_event(peri: &str, ev: u32) {
 pub fn i2c_tap_take_tx(peri: &str) -> Vec<u32> {
     i2c_tap_tx().lock().unwrap().get_mut(peri).map(std::mem::take).unwrap_or_default()
 }
+
+/// Drain every protocol-tap queue (I2C TX/RX, SPI events/MISO) plus the
+/// deferred fault channels, WITHOUT touching device registrations.
+/// Reset hygiene for `emu.reset()`: stale bus events observed before a
+/// reset must not leak into the fresh run (a leftover START edge would
+/// otherwise open a phantom transaction), and a latched fault flag must
+/// not survive it. Unlike `reset_globals` this keeps the registered
+/// devices — the instance keeps running with the same wiring.
+pub fn drain_tap_queues() {
+    i2c_tap_tx().lock().unwrap().clear();
+    i2c_tap_rx().lock().unwrap().clear();
+    spi_tap_events().lock().unwrap().clear();
+    spi_tap_miso().lock().unwrap().clear();
+    clear_fault_channels();
+}
 pub fn i2c_tap_rx_push(peri: &str, bytes: &[u8]) {
     i2c_tap_rx().lock().unwrap().entry(peri.to_string()).or_default().extend_from_slice(bytes);
 }

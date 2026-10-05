@@ -37,6 +37,7 @@ export const dma_set_completed: (a: number, b: number) => void;
 export const dma_stream_ct: (a: number, b: number, c: number) => number;
 export const dma_stream_feif: (a: number, b: number, c: number) => number;
 export const dma_stream_fifo_threshold: (a: number, b: number, c: number) => number;
+export const drain_tap_queues: () => void;
 export const eth_arm_collision: () => void;
 export const eth_backoff_slots: (a: number, b: number) => number;
 export const eth_check_wol: (a: number, b: number) => number;

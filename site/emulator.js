@@ -85,7 +85,7 @@ export async function createEmulator(opts) {
         spi_tap, spi_take_events, spi_push_miso,
         fsmc_tap, fsmc_take_events, fsmc_push_data,
         dcmi_feed_frame, dcmi_clear,
-        i2c_register_slave, i2c_take_events, i2c_push_rx,
+        i2c_register_slave, i2c_take_events, i2c_push_rx, drain_tap_queues,
         i2c_register_regfile, i2c_regfile_get, i2c_regfile_set,
          audio_take_capture, can_inject, tim_inject_capture,
         gpio_read_output, gpio_read_input, gpio_set_input,
@@ -495,10 +495,16 @@ export async function createEmulator(opts) {
     } : null;
     const oledI2C = ext_devices.oled ? (ext_devices.oled.i2c || 'I2C1') : null;
     const OLED_ARG_CMDS = { 0x20: 1, 0x21: 1, 0x22: 1, 0x81: 1, 0x8D: 1, 0xA8: 1, 0xD3: 1, 0xD5: 1, 0xD9: 1, 0xDA: 1, 0xDB: 1 };
-    const processOled = () => {
+    // Takes its event array as an argument: processI2cBus() takes each bus
+    // queue ONCE per pass and fans the same array out to every consumer on
+    // that peripheral (OLED parser + observer handlers). Separate take()
+    // calls per consumer starve each other (first drain wins).
+    const processOled = (events) => {
         if (!oled) return;
-        const events = i2c_take_events(oledI2C);
         for (const ev of events) {
+            // Read-request marker ((1<<30)|addr, no bit31): observer path,
+            // not display data — a data byte here would corrupt the frame.
+            if ((ev & 0x40000000) && !(ev & 0x80000000)) continue;
             if (ev & 0x80000000) {
                 // START: the next byte is a control byte (0x00 = command
                 // group, 0x40 = data group). STOP: group ends here.
@@ -537,9 +543,9 @@ export async function createEmulator(opts) {
     } : null;
     const tftSpi = ext_devices.tft ? (ext_devices.tft.spi || 'SPI2') : null;
     const TFT_ARG_CMDS = { 0x2A: 4, 0x2B: 4, 0x36: 1, 0x3A: 1, 0xC0: 2, 0xC1: 1, 0xC5: 2, 0xC7: 1, 0xE0: 15, 0xE1: 15, 0xF6: 3, 0x35: 1, 0x53: 1 };
-    const processTft = () => {
+    // Same fan-out contract as processOled (see above): events in, no take.
+    const processTft = (events) => {
         if (!tft) return;
-        const events = spi_take_events(tftSpi);
         for (const ev of events) {
             if (ev & 0x80000000) {
                 if (ev & 0x40000000) {          // CS asserted: fresh transaction
@@ -722,17 +728,39 @@ export async function createEmulator(opts) {
         }
     };
 
-    const processSpiDevices = () => {
-        for (const d of spiDevices) {
-            const events = spi_take_events(d.peripheral);
-            if (events.length) d.handler(events, (bytes) => spi_push_miso(d.peripheral, bytes));
+    // Bus fan-out tables, built once (consumers are fixed at creation:
+    // the model binds devices at init and never rescans). Each pass takes
+    // a bus queue ONCE and delivers the same array to every consumer on
+    // that peripheral, so an OLED parser and an observer on I2C1 (or two
+    // observers on one bus) never starve each other. One bad consumer
+    // can't break the rest: each delivery is guarded.
+    const spiGroups = new Map();
+    if (tft) spiGroups.set(tftSpi, [(events) => processTft(events)]);
+    for (const d of spiDevices) {
+        if (!spiGroups.has(d.peripheral)) spiGroups.set(d.peripheral, []);
+        spiGroups.get(d.peripheral).push(
+            (events) => d.handler(events, (bytes) => spi_push_miso(d.peripheral, bytes)));
+    }
+    const processSpiBus = () => {
+        for (const [peri, fns] of spiGroups) {
+            const events = spi_take_events(peri);
+            if (!events.length) continue;
+            for (const fn of fns) { try { fn(events); } catch {} }
         }
     };
 
-    const processI2cDevices = () => {
-        for (const d of i2cDevices) {
-            const events = i2c_take_events(d.peripheral);
-            if (events.length) d.handler(events, (bytes) => i2c_push_rx(d.peripheral, bytes));
+    const i2cGroups = new Map();
+    if (oled) i2cGroups.set(oledI2C, [(events) => processOled(events)]);
+    for (const d of i2cDevices) {
+        if (!i2cGroups.has(d.peripheral)) i2cGroups.set(d.peripheral, []);
+        i2cGroups.get(d.peripheral).push(
+            (events) => d.handler(events, (bytes) => i2c_push_rx(d.peripheral, bytes)));
+    }
+    const processI2cBus = () => {
+        for (const [peri, fns] of i2cGroups) {
+            const events = i2c_take_events(peri);
+            if (!events.length) continue;
+            for (const fn of fns) { try { fn(events); } catch {} }
         }
     };
 
@@ -763,9 +791,29 @@ export async function createEmulator(opts) {
         }
     };
 
+    // Reset hygiene for the observation plumbing (called by reset() and
+    // resetCpu()): drain stale bus events + latched fault flags so nothing
+    // observed pre-reset leaks into the fresh run, and re-arm the JS bus
+    // parsers (a reset mid-transaction must not leave a phantom group
+    // open). Display RAM (fb) and model registers persist — like silicon,
+    // where the panel keeps its pixels across an MCU reset. The frame
+    // counters DO reset (they are our instrumentation: a post-reset
+    // `frame > 0` must mean post-reset traffic). Facade spec._st lives in
+    // stm32f4.js caller specs; runners recreate specs per cell.
+    const resetBusState = () => {
+        try { if (typeof drain_tap_queues === 'function') drain_tap_queues(); } catch {}
+        if (oled) {
+            oled.inData = false; oled.needControl = false;
+            oled.col = 0; oled.page = 0; oled.cmdLeft = 0; oled.frame = 0;
+        }
+        if (tft) {
+            tft.mode = 'idle'; tft.cmdLeft = 0; tft.argBuf.length = 0; tft.frame = 0;
+        }
+    };
+
     const processDevices = () => {
-        if (oled) processOled();
-        if (tft) processTft();
+        processSpiBus();
+        processI2cBus();
         if (buzzer) processBuzzer();
         // Speaker drain is the only device DOOM enables: keep its per-step
         // cost as one guarded wasm call (the FIFO is usually empty; the
@@ -774,8 +822,6 @@ export async function createEmulator(opts) {
         if (speaker) processSpeaker();
         if (rtc) processRtc();
         if (gpioWatchers.length) processGpioWatchers();
-        if (spiDevices.length) processSpiDevices();
-        if (i2cDevices.length) processI2cDevices();
         if (fsmcDevices.length) processFsmcDevices();
         if (camera) processCamera();
     };
@@ -1421,14 +1467,16 @@ export async function createEmulator(opts) {
                 cpu.reset_cpu(sp, pc | 1);
                 instCount = 0;
                 nrstAsserted = false;
+                resetBusState();
             },
             close: () => { try { cpu.free(); } catch {} },
-            reset: () => { cpu.reset_cpu(sp0, pc0 | 1); },
+            reset: () => { cpu.reset_cpu(sp0, pc0 | 1); resetBusState(); },
             // Host reset/boot control (real-device Reset button semantics).
             resetCpu: () => {
                 try { cpu.reset_cpu(sp0, pc0 | 1); } catch {}
                 try { cpu.wake(); } catch {}
                 instCount = 0;
+                resetBusState();
             },
             setNrst, isNrstAsserted,
             bootPreset: (image) => {
@@ -1441,6 +1489,7 @@ export async function createEmulator(opts) {
                 cpu.reset_cpu(sp, pc | 1);
                 instCount = 0;
                 nrstAsserted = false;
+                resetBusState();
             },
             faultInfo: () => {
                 const fpc = cpu.fault_pc() >>> 0;
