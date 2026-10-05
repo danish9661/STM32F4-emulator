@@ -41,7 +41,7 @@ function findPython() {
     return null;
 }
 
-export async function runCdpSmoke({ fw, markers, failMarkers = [], domChecks = [], timeoutMs = 60000, httpPort = 8137, cdpPort = 9337 }) {
+export async function runCdpSmoke({ fw, markers, failMarkers = [], domChecks = [], sendText = null, sendExpect = null, timeoutMs = 60000, httpPort = 8137, cdpPort = 9337 }) {
     const python = findPython();
     if (!python) return { ok: false, reason: 'python not found (skipped)', pageErrors: [] };
     // Quick check that Chrome is actually reachable before starting the test
@@ -91,6 +91,7 @@ export async function runCdpSmoke({ fw, markers, failMarkers = [], domChecks = [
         await send('Page.navigate', { url: `http://127.0.0.1:${httpPort}/console.html?fw=${encodeURIComponent(fw)}` });
 
         const t0 = Date.now();
+        let sent = false;
         while (Date.now() - t0 < timeoutMs) {
             const r = await send('Runtime.evaluate', {
                 expression: "document.getElementById('uart') ? document.getElementById('uart').textContent : ''",
@@ -99,7 +100,19 @@ export async function runCdpSmoke({ fw, markers, failMarkers = [], domChecks = [
             const txt = (r && r.result && r.result.value) || '';
             const fail = failMarkers.find((f) => txt.includes(f));
             if (fail) { ok = false; reason = 'fail marker: ' + fail; break; }
-            const hit = markers.find((m) => txt.includes(m));
+            // Interactive send: once a boot marker is up, type into the
+            // console Send box and click Send exactly once, then wait for
+            // the firmware's own reply (sendExpect) instead of the boot
+            // markers. Powers the echo_test proof below.
+            if (sendText && sendExpect && !sent && markers.some((m) => txt.includes(m))) {
+                await send('Runtime.evaluate', {
+                    expression: `document.getElementById('rxInput').value = ${JSON.stringify(sendText)}; document.getElementById('btnSend').click();`,
+                    returnByValue: true,
+                });
+                sent = true;
+            }
+            const pool = (sendText && sendExpect && sent) ? [sendExpect] : markers;
+            const hit = pool.find((m) => txt.includes(m));
             if (hit) {
                 // Optional DOM assertions (e.g. device panels) once the
                 // UART marker proves the firmware got there.

@@ -4,7 +4,13 @@ All notable changes to `stm32f4-emu` are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/); this project uses
 date-based entries rather than strict SemVer until the first published release.
 
-## [Unreleased]
+## [1.6.0] — 2026-10-05
+
+- Engine-side I2C observer support: broadcast fan-out to co-located
+  consumers (OLED/TFT parsers + observer handlers no longer starve each
+  other), read-request marker + `onRead` feeding `pushRx`, reset hygiene
+  (`drain_tap_queues` on reset/boot); vendor + pkg wasm rebuilt
+  (VENDOR_V 45→46 with entry-tag bumps).
 
 - DOOM boot crash fixed: the MIT slim manifest dropped the `doom` blob
   from `site/firmware.js` while `site/doom.js` still read
@@ -25,6 +31,20 @@ date-based entries rather than strict SemVer until the first published release.
   process-global model state, so parallel threads flake in unrelated
   tests (`UNALIGNED` sticky 0, `RefCell already borrowed`); serial is
   243/243 green.
+- DOOM presentation + speed: Smooth upscale toggle (bilinear vs crisp,
+  presentation-only, `doomSmooth` localStorage); worker burst budget
+  24→28 ms; idle-burst render skip (only when the burst executed zero
+  steps — framecounter gating would freeze melt wipes). Browser-verified
+  11/11 incl. boot, menu walk to E1M1, smooth on/off, zero page errors
+  (35/35, 35 t/s, audio 1.01x on a quiet box).
+- Console device panels reset on boot: TFT/OLED/LTDC canvases blank when
+  the new firmware has no such device (same-page tft→oled switch left the
+  TFT image painted behind the label); `clearCanvas()` + `ltdcCacheKey`
+  boot reset.
+- UART echo demo coverage: `site/test_uart_echo.mjs` (UART4 `sendUartTo`
+  round-trip, wired into `npm test`), `sendText`/`sendExpect` step in
+  `site/cdp_smoke.mjs` driving the real Send box, and the `echo` case in
+  `site/test_browser.mjs`.
 
 ## [1.5.0] — 2026-09-30 (published release; syncs tree with the registry)
 

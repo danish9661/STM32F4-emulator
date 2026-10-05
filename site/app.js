@@ -526,7 +526,7 @@ const boot = async () => {
     $('btnRun').textContent = 'Run';
     setStatus('booting…', 'stop');
     if (emu) { try { emu.close(); } catch (e) {} emu = null; }
-    oledCacheKey = ''; tftCacheKey = ''; buzzerCacheKey = ''; rtcCacheKey = ''; ppsCacheKey = ''; TRACES.length = 0; { const cv = traceCanvas(); if (cv) cv._dma = []; } renderTraces();
+    oledCacheKey = ''; tftCacheKey = ''; buzzerCacheKey = ''; rtcCacheKey = ''; ppsCacheKey = ''; ltdcCacheKey = ''; TRACES.length = 0; { const cv = traceCanvas(); if (cv) cv._dma = []; } renderTraces();
     if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; audioQueued = 0; audioDropped = 0; if (window.__audioCtx) delete window.__audioCtx; }
     gpioDrivenHigh.clear();
 
@@ -1139,6 +1139,18 @@ const refreshStats = async () => {
 // each rAF once the guest enables the controller + layer. Cache-keyed so we
 // only repaint when the framebuffer content actually changes (the model
 // doesn't signal frame boundaries through a JS-readable counter change alone).
+// Stale-panel fix: a canvas keeps its last pixels when the next firmware has
+// no such device (tft_test, then oled_test → the TFT image stays up behind
+// a "no TFT firmware" label). Clearing is keyed like everything else — once
+// per absence ('none'), never every rAF — and boot() resets the keys below
+// so the first frame after a switch clears.
+const clearCanvas = (cv) => {
+    try {
+        const c = cv.getContext('2d');
+        c.fillStyle = '#000';
+        c.fillRect(0, 0, cv.width, cv.height);
+    } catch {}
+};
 const LTDC = 0x40016800;
 const ltdcCanvas = $('ltdcCanvas'), ltdcInfo = $('ltdcInfo');
 let ltdcCtx = ltdcCanvas.getContext('2d');
@@ -1154,7 +1166,10 @@ const renderLtdc = async () => {
             emu.read32(LTDC + 0x88), emu.read32(LTDC + 0x8C),
         ]);
         const gcrV = gcr >>> 0, l1crV = l1cr >>> 0;
-        if (!(gcrV & 1) || !(l1crV & 1)) { ltdcInfo.textContent = 'scanout idle'; return; }
+        if (!(gcrV & 1) || !(l1crV & 1)) {
+            if (ltdcCacheKey !== 'none') { ltdcCacheKey = 'none'; clearCanvas(ltdcCanvas); ltdcInfo.textContent = 'scanout idle'; }
+            return;
+        }
         const pf = pfRaw & 7;
         const cfbar = cfbarRaw >>> 0;
         const cfblr = cfblrRaw >>> 0;
@@ -1168,7 +1183,7 @@ const renderLtdc = async () => {
         const lines = Math.min(cfblnr || h, 640);
         const pitch = Math.min((cfblr >>> 16) || lineBytes, w * bpp + 8);
         if (!w || !lines || cfbar < 0x20000000 || cfbar >= 0x20040000) {
-            ltdcInfo.textContent = 'layer enabled, waiting for framebuffer…';
+            if (ltdcCacheKey !== 'none') { ltdcCacheKey = 'none'; clearCanvas(ltdcCanvas); ltdcInfo.textContent = 'layer enabled, waiting for framebuffer…'; }
             return;
         }
         const key = pf + ':' + w + 'x' + lines + ':' + cfbar + ':' + pitch + ':' + (bindings.ltdc_get_frame_count ? bindings.ltdc_get_frame_count() : 0);
@@ -1216,7 +1231,10 @@ const oledCanvas = $('oledCanvas'), oledInfo = $('oledInfo');
 const oledCtx = oledCanvas.getContext('2d');
 let oledCacheKey = '';
 const renderOled = () => {
-    if (!emu || !emu.oled) { oledInfo.textContent = 'no OLED firmware'; return; }
+    if (!emu || !emu.oled) {
+        if (oledCacheKey !== 'none') { oledCacheKey = 'none'; clearCanvas(oledCanvas); oledInfo.textContent = 'no OLED firmware'; }
+        return;
+    }
     const key = emu.oled.frame();
     if (key === oledCacheKey) return;
     oledCacheKey = key;
@@ -1234,7 +1252,10 @@ const tftCanvas = $('tftCanvas'), tftInfo = $('tftInfo');
 const tftCtx = tftCanvas.getContext('2d');
 let tftCacheKey = '';
 const renderTft = () => {
-    if (!emu || !emu.tft) { tftInfo.textContent = 'no TFT firmware'; return; }
+    if (!emu || !emu.tft) {
+        if (tftCacheKey !== 'none') { tftCacheKey = 'none'; clearCanvas(tftCanvas); tftInfo.textContent = 'no TFT firmware'; }
+        return;
+    }
     const { w, h, fb } = emu.tft;
     const key = emu.tft.frame() + ':' + w + 'x' + h;
     if (key === tftCacheKey) return;

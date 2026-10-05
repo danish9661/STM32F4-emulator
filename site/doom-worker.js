@@ -26,13 +26,17 @@ import { createEmulator } from './emulator.js?v=3';
 // title 722k/frame, E1M1 idle 1192k, E1M1 W-hold 1310k — so 35 fps needs
 // ~46 MIPS in gameplay while the page sustains ~35-37 (Node sweep 25k..400k
 // steps flat at ~38-39 MIPS: the ceiling is core-bound, not per-step
-// overhead — bigger batches do NOT help). The 16ms wall budget was therefore
+// overhead — bigger batches do NOT help). The wall budget was therefore
 // the binding constraint in E1M1 (pace wall-exits dominated, budget=0):
-// it capped each burst at ~0.56M inst (~16ms x 35 MIPS) while a gameplay
-// frame costs ~1.2-1.3M. RAF_MS_BUDGET=24 buys fps nearly 1:1 until the core
-// ceiling (~28-30 fps at 24ms) — at the cost of main-thread responsiveness
-// (input latency, paint). STEP_BUDGET=32 is never hit (kept as the TCI-gap
-// safety rail, not a throughput knob).
+// it capped each burst at ~0.56M inst (16ms x 35 MIPS) while a gameplay
+// frame costs ~1.2-1.3M. RAF_MS_BUDGET=28 buys fps nearly 1:1 until the core
+// ceiling (~30-32 fps at 28ms) — at the cost of worker input latency (key
+// messages queue behind the burst, up to ~28ms; paint is unaffected, the
+// main thread stays free). STEP_BUDGET=32 is never hit (kept as the TCI-gap
+// safety rail, not a throughput knob). Even at 100% duty a ~36 MIPS box
+// tops out ~29-30 t/s in E1M1-high (36/43 of 35) — the rest needs a faster
+// core or low detail; do NOT chase it with bigger budgets (duty already ~max)
+// or backlog chasing (fast-forward sprint, AGENTS §22).
 //
 // Audio consequence: the guest mixer emits exactly one frame's worth of
 // samples (11025/35 = 315) per RENDERED frame, so production scales with fps.
@@ -64,7 +68,7 @@ const STEP_BUDGET = 32;          // max steps per burst
 // which Chrome throttles to nothing). It runs a bigger burst because its
 // gap is the clamped 4ms and there is no frame to pace to.
 const YIELD_MS = 4;
-const RAF_MS_BUDGET = 24;       // page-driven: one animation frame of work
+const RAF_MS_BUDGET = 28;       // page-driven: one animation frame of work
 const SELF_MS_BUDGET = 44;      // self-driven: amortize the 4ms clamp
 const TICK_STALE_MS = 200;      // no tick for this long => rAF is dead
 let timer = null;
@@ -291,6 +295,14 @@ function drainAudio() {
 function loop(msBudget) {
     if (!booted || !emu) return;
     const t0 = performance.now();
+    // Steps actually executed this burst. renderFb is skipped on a zero-step
+    // burst: with no guest execution the framebuffer (and palette/fbAddr —
+    // all guest-written) cannot have changed, so the 64KB read + hash + any
+    // expand is pure waste. Done ONLY on steps===0, never on a frozen frame
+    // counter: the level-start melt wipe animates the fb while FRAMECOUNT
+    // stalls (it spins on I_GetTime), so counter-gating the repaint would
+    // freeze level transitions. Zero steps is the safe condition.
+    let burstSteps = 0;
     if (!paused && !loadPending) {
         try {
             flushUpPending();   // keyups land on the NEXT burst, after the guest consumed the down
@@ -345,6 +357,7 @@ function loop(msBudget) {
             else paceMs++;
             if (frames - burstStart > paceJump) paceJump = frames - burstStart;
             activeMs += performance.now() - t0;
+            burstSteps = steps;
         } catch (e) {
             status('emulator error: ' + e.message, 'error');
             post({ t: 'error', message: String(e && e.message || e) });
@@ -354,7 +367,7 @@ function loop(msBudget) {
         if (uart) post({ t: 'uart', text: uart });
         drainAudio();
         processSaves();
-        if (renderFb()) framesShown++;
+        if (burstSteps > 0 && renderFb()) framesShown++;
         reportStats();
     } else {
         paceFrames = -1;    // re-anchor on resume

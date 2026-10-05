@@ -6,6 +6,11 @@ import { runCdpSmoke } from './cdp_smoke.mjs';
 
 const CASES = [
     { label: 'blinky',  fw: 'blinky',    markers: ['LED=ON'],                         timeoutMs: 60000 },
+    // UART echo demo: boot banner, then the harness types into the console
+    // Send box and waits for the firmware's own echo ('\nhello' — the page
+    // also prints its '> hello' input-echo line, which is '\n> hello' and
+    // cannot match; same convention as site/test_uart_echo.mjs).
+    { label: 'echo',    fw: 'echo_test', markers: ['Echo ready'], sendText: 'hello', sendExpect: '\nhello', timeoutMs: 60000 },
     { label: 'eth_http flow', fw: 'eth_http', markers: ['TCP connected'],            timeoutMs: 120000 },
     { label: 'oled',    fw: 'oled_test', markers: ['OLED draw done'],                timeoutMs: 60000 },
     { label: 'tft',     fw: 'tft_test',  markers: ['TFT fill done'],                 timeoutMs: 60000 },

@@ -68,6 +68,10 @@
                 background: #000; position: relative; }
   canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000;
            display: block; }
+  /* Smooth upscale (optional, off by default): bilinear filtering instead of
+     crisp pixels — same 320x200 guest framebuffer, only the presentation
+     changes. Toggled by #btnSmooth (localStorage doomSmooth). */
+  canvas.smooth { image-rendering: auto; }
   #guide { flex: none; border-top: 1px solid #222; padding: 5px 12px; font-size: 12px;
            color: #999; display: flex; flex-wrap: wrap; gap: 3px 22px; line-height: 1.5; }
   #guide b { color: #eee; }
@@ -135,6 +139,7 @@
     <button id="btnClear" title="Clear the UART log">Clear</button>
     <button id="btnReHi" title="Headroom is back — reboot straight into high detail (auto never switches low->high live: the mid-game re-tune can leave the 3D view ~208px wide)" style="display:none">High detail</button>
     <button id="btnDetail" title="Cycle render detail: Auto -> High -> Low (low saves ~20% inst/frame; high->low applies live, low->high needs a reboot)">Detail: Auto</button>
+    <button id="btnSmooth" aria-pressed="false" title="Smooth upscale: bilinear filtering instead of crisp pixels (same 320x200 framebuffer, presentation only)">Smooth: Off</button>
     <button id="btnTouch" aria-pressed="false" title="Touch controls for phones/tablets (D-pad + buttons, retro-handheld deck)">Controls</button>
   </div>
 </div>
@@ -189,6 +194,6 @@
 <!-- Bump ?v= on every doom.js edit: the module is cached hard, and a stale
      copy looks exactly like the bug you thought you just fixed. The worker
      has its own ?v= inside doom.js. -->
-<script type="module" src="doom.js?v=87"></script>
+<script type="module" src="doom.js?v=88"></script>
 </body>
 </html>

@@ -4378,3 +4378,55 @@ deck auto-shows, START opens menu, dish down/up move `itemOn`,
 all 8 deck buttons + 4 dish zones advance the ring, desktop toggle
 works, zero pageerrors, deck screenshot readable. `?v=`: doom.js 85→86
 (doom.html), `__doomVer` 84→85, firmware-doom.js?v=1 (unchanged file).
+
+### Smooth upscale + budget 28 + idle render skip (2026-10-05)
+User report with two screenshots: ours (high manual, 26 FPS) vs a "WASM
+JIT" page with excellent detail. Controlled Node captures at E1M1 spawn
+(`.pw-scratch/cap_spawn.mjs`, fb+palette bins kept, PNGs deleted after
+viewing) prove high is true vanilla-high: guest `colfunc=R_DrawColumn`,
+`view=320`, crops show single-pixel features where low shows doubled
+pairs. The gap is presentation + position, not rendering: the other page
+bilinear-smooths its upscale (and screenshots a different spot), while our
+canvas is `image-rendering: pixelated`. Speed side is arithmetic the user's
+own stats confirm: 36.1 MIPS / ~1.4M inst per E1M1-high frame ≈ 25 t/s —
+high needs ~43 MIPS for 35, no setting prints MIPS (release already
+`opt-level=3`+LTO, batches measured flat). Shipped:
+- **Smooth toggle** (`#btnSmooth`, `canvas.smooth` rule, `doomSmooth`
+  localStorage): bilinear vs crisp, presentation only, guest fb stays
+  320x200.
+- **Budget 24→28** (worker): +~15% wall time when behind; input latency up
+  to ~28ms on the worker queue, paint unaffected (main thread free). Even
+  at 100% duty a ~36 MIPS box tops ~29-30 t/s E1M1-high — rest needs core
+  speed or low detail; never chase backlog (sprint) or bigger budgets.
+- **Idle-burst render skip**: `renderFb()` runs only when the burst
+  executed steps (`burstSteps > 0`). Zero-step ⇒ guest wrote nothing, so
+  the 64KB read+hash is pure waste. Deliberately NOT framecounter-gated:
+  the melt wipe animates the fb while FRAMECOUNT stalls (spins on
+  I_GetTime) — counter-gating would freeze level transitions.
+Verified `.pw-scratch/verify_doom.py` (chain_doomverify 11/11 incl. boot,
+menu walk to E1M1, stats, smooth on/off + persistence, zero pageerrors;
+rerun hit 35/35, 35t/s, audio 1.01x in auto-low at spawn). `?v=`:
+doom.js 87→88 (doom.html), worker 54→55, `__doomVer` 86→87. Vendor
+untouched (no wasm rebuild, no VENDOR_V bump).
+
+### Device-panel reset + UART echo demo (2026-10-05)
+User report: boot tft_test then oled_test on the same page — the TFT image
+stayed painted behind the "no TFT firmware" label (LED panel itself was
+fine; it reads live GPIO for any firmware). Root cause: `renderOled`/
+`renderTft`/`renderLtdc` only set the info text on the no-device path and
+never cleared the canvas; `boot()` reset the text keys but not
+`ltdcCacheKey`, and no path ever blanked a canvas. Fix (`site/app.js`):
+`clearCanvas()` helper (fill black) + once-per-absence `'none'`-keyed
+clearing in all three no-device/idle paths + `ltdcCacheKey` in the boot
+reset. Verified `.pw-scratch/verify_panels.py`: same-page tft→oled switch
+gives TFT canvas all-black + `no TFT firmware`, OLED lit, LED alive, zero
+pageerrors. `?v=`: app.js 55→56 (console.html).
+UART echo demo: `echo_test` (UART4 Arduino echo) was already bundled with
+dropdown + auto rxPort routing, but had zero tests. Added
+`site/test_uart_echo.mjs` (node: banner + `sendUartTo(UART4,'hello')` →
+`\nhello`, wired into `npm test`), a `sendText`/`sendExpect` step in
+`site/cdp_smoke.mjs` (types into `#rxInput`, clicks `#btnSend`, then waits
+for the firmware's own reply — `\nhello`, which the page's `\n> hello`
+input-echo cannot match), and the `echo` case in `site/test_browser.mjs`.
+Chain `chain_echopanels` (node + CDP + panels, then full `npm test`):
+ECHO-NODE / ECHO-CDP / PANELS PASS, NPMTEST PASS.

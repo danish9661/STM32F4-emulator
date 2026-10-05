@@ -78,7 +78,7 @@ window.__doomLog = () => dbgLog.slice();
 window.__pace = () => window.__lastPace || null;
 // Build stamp: type __doomVer in the console — if it doesn't print the
 // current number, the tab runs a cached copy (Ctrl+Shift+R).
-window.__doomVer = 86;
+window.__doomVer = 87;
 // Keys pressed before the worker boots would be eaten (nothing listens
 // yet) — the old "wait before touching anything" ritual. Instead they queue
 // here and flush on 'booted', so press ahead: the game catches up. The
@@ -423,6 +423,21 @@ $('btnReHi').addEventListener('click', () => {
     boot(true);   // headroom is back: reboot straight into high detail
 });
 applyDetailBtn();
+// Smooth upscale toggle (presentation only — the guest framebuffer stays
+// 320x200 either way; bilinear filtering just reads as more detailed on a
+// big screen, which is what the "other port looks better" report was).
+let smoothOn = localStorage.getItem('doomSmooth') === '1';
+function applySmooth() {
+    canvas.classList.toggle('smooth', smoothOn);
+    const b = $('btnSmooth');
+    if (b) { b.textContent = 'Smooth: ' + (smoothOn ? 'On' : 'Off'); b.setAttribute('aria-pressed', String(smoothOn)); }
+}
+$('btnSmooth').addEventListener('click', () => {
+    smoothOn = !smoothOn;
+    try { localStorage.setItem('doomSmooth', smoothOn ? '1' : '0'); } catch (e) {}
+    applySmooth();
+});
+applySmooth();
 
 function appendUart(chunk) {
     if (!chunk || window.__noUart) return;
@@ -599,7 +614,7 @@ async function boot(keepDetail) {
 
         // Bump ?v= on every doom-worker.js edit — worker scripts cache as hard
         // as module scripts, and a stale copy looks exactly like a bug.
-        worker = new Worker('doom-worker.js?v=54', { type: 'module' });
+        worker = new Worker('doom-worker.js?v=55', { type: 'module' });
         worker.onmessage = onWorkerMessage;
         worker.onerror = (e) => {
             setStatus('worker failed: ' + (e.message || 'load error'), 'error');

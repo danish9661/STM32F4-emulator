@@ -73,6 +73,17 @@ Sends `Hello\n` via `emu.sendUart` and requires the guest `USART1_IRQHandler`
   `INT CRC matches polling`)
 - Pass: each firmware prints its marker.
 
+### test_uart_echo.mjs — UART4 polling echo (echo_test)
+Boots the Arduino `echo_test` sketch (UART4, 115200 8N1 polling, no
+interrupts) and drives it exactly like the console Send box does
+(`sendUartTo(0x40004C00, …)` — rxPort auto resolves to UART4 for this
+preset):
+- `Echo ready` banner, then injected `hello` comes back as `\nhello` (the
+  banner ends `\n`; the page's own `> hello` input-echo line is `\n> hello`
+  and cannot match — same convention as the `sendExpect` browser case).
+- Pass: banner + echo present. Browser twin: `test_browser.mjs` `echo`
+  case (types into `#rxInput`, clicks `#btnSend`, waits for `\nhello`).
+
 ---
 
 ## Clocks, GPIO, interrupts
@@ -521,6 +532,7 @@ save-slot menu → name char 'a' (0x61) + Enter → asserts the firmware's
 | test_eth_irq | eth_irq_test | NVIC/DMA/ETH | `TX done via IRQ`, `ETH IRQ Test: done` |
 | test_doom_wasm | doom | ABI ring/EXTRAM/I2S | `SAVE ok slot=0 bytes=…`, fb changes ≥ 20, audio peak > 0 |
 | test_rx_interrupt | rx_interrupt_test, rx_crypto_test | USART1/NVIC | `CRC=`, `DONE` |
+| test_uart_echo | echo_test | UART4 (polling) | `Echo ready`, `\nhello` echo (+ browser Send-box twin in test_browser) |
 | test_blinky | blinky | GPIOA/RCC/USART | `tick 0 LED=ON`, `No ethernet required` |
 | test_exti | exti_test | EXTI/NVIC/GPIO | `EXTI TEST DONE` |
 | test_dma | comprehensive_test | DMA2/NVIC | `PASS DMA2 NDTR=0` |
@@ -541,7 +553,7 @@ save-slot menu → name char 'a' (0x61) + Enter → asserts the firmware's
 | test_arduino_boards | arduino_* (8 builds) | GPIO/USART/SysTick | boot banner + `tick 0 LED=ON` + `Arduino done` + ODR toggles, 8/8 |
 | test_board_matrix | 156 board+firmware pairs | all | `MATRIX pass=156 fail=0` |
 | test_qspi_cdp | qspi_test (browser CDP) | QSPI | `QSPI OK` on the page UART |
-| test_browser | 41 console presets (browser CDP) | all | 41 PASS incl. `WOKE FROM STANDBY`, `WOKE BY WOL` |
+| test_browser | 44 console presets (browser CDP) | all | 44 PASS incl. `WOKE FROM STANDBY`, `WOKE BY WOL`, Send-box `\nhello` echo |
 | test_wasm (separate script) | blinky/eth/d shown below | CPU/netsim | 7/7 (see `npm run test:wasm`) |
 | test_eth_mock_model | — (model unit) | ETH model | PASS |
 | test_eth_mock_consumer | — (mock consumer) | ETH/netsim | PASS |
