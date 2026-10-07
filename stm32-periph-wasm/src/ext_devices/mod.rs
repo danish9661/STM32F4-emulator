@@ -1,4 +1,5 @@
 pub mod spi_flash;
+pub mod sd_card;
 pub mod i2c_eeprom;
 pub mod spi_tap;
 pub mod i2c_tap;
@@ -6,6 +7,7 @@ pub mod i2c_regfile;
 pub mod fsmc_tap;
 
 pub use spi_flash::SpiFlash;
+pub use sd_card::SdCard;
 pub use i2c_eeprom::I2cEeprom;
 pub use spi_tap::SpiTap;
 pub use i2c_tap::I2cTap;
@@ -30,6 +32,9 @@ pub struct I2cDeviceEntry {
 #[derive(Default)]
 pub struct ExtDevices {
     pub spi_flashes: Vec<Rc<RefCell<SpiFlash>>>,
+    /// SD cards in SPI mode (synchronous model-side protocol engine —
+    /// see sd_card.rs for why the JS tap round-trip cannot serve them).
+    pub spi_sds: Vec<Rc<RefCell<SdCard>>>,
     pub i2c_eeproms: Vec<Rc<RefCell<I2cEeprom>>>,
     /// Protocol-agnostic SPI bus taps: every byte shifted while the device
     /// is CS-selected is queued for the JS hardware layer, and bytes pushed
@@ -61,6 +66,15 @@ impl ExtDevices {
                 });
             }
         }
+        for d in &self.spi_sds {
+            if d.borrow().config.peripheral == peri_name {
+                result.push(SpiDeviceEntry {
+                    cs: d.borrow().config.cs.as_ref().map(|s| parse_pin(s)),
+                    device: d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>,
+                    name: format!("{} sd-card", peri_name),
+                });
+            }
+        }
         for d in &self.spi_taps {
             if d.borrow().config.peripheral == peri_name {
                 result.push(SpiDeviceEntry {
@@ -78,6 +92,11 @@ impl ExtDevices {
             .filter(|d| d.borrow().config.peripheral == peri_name)
             .next()
             .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>)
+        .or_else(||
+        self.spi_sds.iter()
+            .filter(|d| d.borrow().config.peripheral == peri_name)
+            .next()
+            .map(|d| d.clone() as Rc<RefCell<dyn ExtDevice<(), u8>>>))
         .or_else(||
         self.spi_taps.iter()
             .filter(|d| d.borrow().config.peripheral == peri_name)

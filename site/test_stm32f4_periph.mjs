@@ -47,6 +47,9 @@ const mcu = await STM32F4.create();
 mcu.spi.pushMiso('SPI2', [0xAA]);
 mcu.i2c.pushRx('I2C1', [0x55]);
 check(true, 'spi.pushMiso / i2c.pushRx callable');
+mcu.spi.clearMiso('SPI2');
+mcu.spi.clearRx('SPI2');
+check(true, 'spi.clearMiso / spi.clearRx callable (F1 clearRx parity)');
 mcu.close();
 
 if (failures) { console.error(`\n${failures} FAILED`); process.exit(1); }

@@ -48,7 +48,7 @@ const {
     rng_seed_entropy, rng_entropy_avail,
     dcmi_set_sync, fsmc_bind_nand, fsmc_nand_erase,
     tim_encoder_step, rcc_inject_failure, adc_dual_latched,
-    spi_tap, spi_push_miso,
+    spi_tap, spi_push_miso, spi_clear_miso, add_spi_sd_card,
     uart_set_cts, uart_fault_rx, uart_tx_len, uart_idle, uart_break_tx, uart_break_pending, uart_muted, uart_rx_byte,
     tim_break_input, tim_moe, init_svd_chip,
     sdio_bind_card, sdio_read_block, sdio_card_blocks,
@@ -71,6 +71,9 @@ i2c_register_regfile('I2C1', 0x50, 16, new Uint8Array(16));
 // SPI1 MISO tap (no CS pin: always selected) so the CRCNEXT match path
 // can queue the peer's CRC byte (loopback 0xFF can never match otherwise).
 spi_tap('SPI1', null, null);
+// SPI SD card in SPI mode on SPI3/CS PB12 (synchronous model-side engine;
+// registered before init_svd like every other device binding).
+add_spi_sd_card('SPI3', 4, 'PB12');
 bindings.init_svd(svdXml);
 
 let pass = 0, fail = 0;
@@ -89,7 +92,7 @@ const I2C1 = 0x40005400, LTDC = 0x40016800;
 const USB = 0x50000000;
 const RCC = 0x40023800, RNG = 0x50060800, DAC = 0x40007400;
 const HASH = 0x50060400, CAN1 = 0x40006400;
-const USART1 = 0x40011000, SPI1 = 0x40013000;
+const USART1 = 0x40011000, SPI1 = 0x40013000, SPI3 = 0x40003C00;
 const FLASH = 0x40023C00, SDIO = 0x40012C00, RTC = 0x40002800;
 const ETH_MAC = 0x40028000, ETH_PTP = 0x40028700, ETH_DMA = 0x40029000;
 const GPIOA = 0x40020000, GPIOB = 0x40020400, GPIOC = 0x40020800;
@@ -1470,6 +1473,8 @@ const tests = [
     ['gap batch 9: ADC injected + TIM advanced + RTC shift/SS + USART mute (COMPLETE)', t_gap9],
     ['gap batch 10: SDIO CMD24 + QSPI mmap + LTDC CLUT + I2C slave + DMA FCR/DBM + DAC DMAUDR (COMPLETE)', t_gap10],
     ['gap batch 11: enhanced descs + chain walk + RDES4 + backoff (COMPLETE)', t_gap11],
+    ['spi SD card block read/write, synchronous engine (COMPLETE)', t_spi_sd],
+    ['spi MISO clear drops stale queue (COMPLETE)', t_spi_miso_clear],
 ];
 // ── Gap batch 9: ADC injected group + TIM advanced + RTC shift/SS + USART mute ─
 // COMPLETE: ADC JSWSTART/JAUTO injected sequences (JL/JOFR/JDR/JEOC/JSTRT,
@@ -1653,6 +1658,65 @@ function t_gap10() {
     W(DAC + 0x34, 1 << 13); // w1c clear DMAUDR1
     ok(dac_underrun(1) === false, 'dac: DMAUDR clears on 1-write');
     W(DAC + 0x00, 0); // clean
+}
+
+// ── SPI SD card, synchronous model-side engine (COMPLETE) ─────────────
+// WHY (not a tap): the JS tap round-trip (parseSpi/onByte + spi_push_miso)
+// drains AFTER cpu.step while the engine pops MISO DURING the step — a
+// whole CMD17 data phase fits one coarse batch, so JS replies land one
+// transfer late (init converges via retries; single-block reads don't).
+// The model-side SdCard answers per byte in the same transfer (SpiFlash
+// contract). `spi_clear_miso` is the F1 clearRx parity for across-step
+// tap transactions (covered below).
+function t_spi_sd() {
+    // 6-byte CMD frame; R1 rides the CRC byte's paired read (Ncr=0).
+    const cmd = (idx, arg) => {
+        const bytes = [0x40 | idx, (arg >>> 24) & 0xFF, (arg >>> 16) & 0xFF, (arg >>> 8) & 0xFF, arg & 0xFF, 0xFF];
+        let last = 0;
+        for (const b of bytes) { W(SPI3 + 0x0C, b); last = R(SPI3 + 0x0C) & 0xFF; }
+        return last;
+    };
+    const tr = (b) => { W(SPI3 + 0x0C, b); return R(SPI3 + 0x0C) & 0xFF; };
+    const moderSave = R(GPIOB), odrSave = R(GPIOB + 0x14);
+    W(GPIOB, (moderSave & ~(3 << 24)) | (1 << 24)); // PB12 output (CS)
+    W(SPI3, (1 << 2) | (1 << 6)); // MSTR + SPE
+    W(GPIOB + 0x14, 1 << 12); // CS high (idle)
+    W(GPIOB + 0x14, 1 << (12 + 16)); // CS low (ODR bit12 clear = asserted)
+    ok(cmd(0, 0) === 0x01, 'sd: CMD0 R1 idle');
+    ok(cmd(8, 0x1AA) === 0x01, 'sd: CMD8 R1');
+    ok(tr(0xFF) === 0x00 && tr(0xFF) === 0x00 && tr(0xFF) === 0x01 && tr(0xFF) === 0xAA, 'sd: CMD8 R7 echo');
+    ok(cmd(55, 0) === 0x01, 'sd: CMD55 R1');
+    ok(cmd(41, 0) === 0x01, 'sd: ACMD41 busy');
+    ok(cmd(55, 0) === 0x01, 'sd: CMD55 R1 again');
+    ok(cmd(41, 0) === 0x00, 'sd: ACMD41 ready');
+    // CMD24 block 2 with a ramp, then CMD17 reads it back exact.
+    ok(cmd(24, 2) === 0x00, 'sd: CMD24 R1');
+    tr(0xFF); tr(0xFE); // Nwr spacing + data token
+    for (let i = 0; i < 512; i++) tr(i ^ 0x5A);
+    tr(0xFF); tr(0xFF); // CRC pair (commit lands)
+    ok(tr(0xFF) === 0xE5, 'sd: CMD24 data accepted');
+    ok(cmd(17, 2) === 0x00, 'sd: CMD17 R1');
+    ok(tr(0xFF) === 0xFE, 'sd: CMD17 data token');
+    let good = 0;
+    for (let i = 0; i < 512; i++) if (tr(0xFF) === ((i ^ 0x5A) & 0xFF)) good++;
+    ok(good === 512, 'sd: CMD17 512-byte block reads back exact', `good=${good}`);
+    ok(tr(0xFF) === 0xFF && tr(0xFF) === 0xFF, 'sd: CMD17 CRC tail');
+    W(GPIOB + 0x14, 1 << 12); // CS high
+    W(GPIOB, moderSave); W(GPIOB + 0x14, odrSave); // clean
+}
+
+// ── SPI MISO clear (F1 clearRx parity, COMPLETE) ───────────────────────
+// Stale queued bytes must not leak into the next transfer: push, clear,
+// then the transfer reads idle (0xFF), not the pushed byte.
+function t_spi_miso_clear() {
+    W(SPI1, (1 << 2) | (1 << 6)); // MSTR + SPE (clean)
+    spi_push_miso('SPI1', Uint8Array.from([0xAA, 0xBB]));
+    W(SPI1 + 0x0C, 0x00);
+    ok((R(SPI1 + 0x0C) & 0xFF) === 0xAA, 'miso: pushed bytes pop in order');
+    spi_clear_miso('SPI1');
+    W(SPI1 + 0x0C, 0x00);
+    ok((R(SPI1 + 0x0C) & 0xFF) === 0xFF, 'miso: clear drops the stale 0xBB');
+    void R(SPI1 + 0x08); void R(SPI1 + 0x0C); // clean
 }
 
 // ── Gap batch 11: enhanced descriptors + chain walk + RDES4 + backoff ─

@@ -72,7 +72,11 @@ SVD + flash/RAM sizes + clock + IDCODE, resolved from the `CHIPS` table
   `i2c: [{peripheral, address, onStart?, onWrite?, onRead?, onStop?}]`
   create opts (taps snapshot at `init_svd` — post-create callback
   assignment cannot work; `spi1..3`/`i2c1..3` handles are call-shape compat
-  only). `spi.pushMiso()` / `i2c.pushRx()` inject reply bytes.
+  only). `spi.pushMiso()` / `i2c.pushRx()` inject reply bytes;
+  `spi.clearMiso()` (= `spi.clearRx`, F1 `clearRx` parity) drops stale
+  queued MISO bytes. Structural limit: prefills land one transfer late
+  for single-step transactions — protocol work belongs in a model-side
+  device (`ext_devices.spi_sd`, answered synchronously like SpiFlash).
 
 ## Peripheral-event callbacks (polled dispatch)
 

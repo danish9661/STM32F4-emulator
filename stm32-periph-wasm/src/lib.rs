@@ -1410,6 +1410,34 @@ pub fn spi_push_miso(peripheral: &str, bytes: &[u8]) {
     system::spi_tap_miso_push(peripheral, bytes);
 }
 
+/// Drop stale queued MISO bytes for one peripheral (F1 `clearRx` parity).
+/// Pair with `spi_push_miso`: clear at transfer start, then prefill the
+/// computed response. See `system::spi_tap_miso_clear` for the structural
+/// limit (single-step transactions need a model-side device instead).
+#[wasm_bindgen]
+pub fn spi_clear_miso(peripheral: &str) {
+    system::spi_tap_miso_clear(peripheral);
+}
+
+/// Add an SD card in SPI mode (synchronous model-side protocol engine).
+/// Must be called before init(). `blocks` = 512-byte blocks (erased 0xFF);
+/// the card answers CMD0/8/55/41/58/16/13/9/10/17/18/24 synchronously per
+/// byte, so CMD17 block reads land in the same transfer (the JS tap
+/// round-trip is structurally one transfer late — see sd_card.rs).
+/// `cs` optionally names the GPIO chip-select ("PA4").
+#[wasm_bindgen]
+pub fn add_spi_sd_card(peripheral: &str, blocks: u32, cs: Option<String>) {
+    use crate::ext_devices::sd_card::{SdCard, SdCardConfig};
+    let config = SdCardConfig {
+        peripheral: peripheral.to_string(),
+        blocks: (blocks.max(1)) as usize,
+        cs,
+    };
+    let card = SdCard::new(config);
+    system::get_ext_devices().lock().unwrap().spi_sds
+        .push(std::rc::Rc::new(std::cell::RefCell::new(card)));
+}
+
 // ── I2C bus taps (JS hardware layer) ───────────────────────────────────────
 
 /// Register a protocol-agnostic I2C slave on a peripheral. Must be called

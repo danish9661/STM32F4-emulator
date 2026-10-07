@@ -530,6 +530,18 @@ pub fn spi_tap_take_events(peri: &str) -> Vec<u32> {
 pub fn spi_tap_miso_push(peri: &str, bytes: &[u8]) {
     spi_tap_miso().lock().unwrap().entry(peri.to_string()).or_default().extend_from_slice(bytes);
 }
+/// Drop stale queued MISO bytes for one peripheral without touching
+/// registrations (F1 `clearRx` parity). Pair with `spi_push_miso`: clear
+/// at transfer start, then prefill the computed response. NOTE the
+/// structural limit this does NOT lift: the engine pops MISO
+/// synchronously per DR write DURING `cpu.step`, while JS tap handlers
+/// only run after the step — a prefill always lands one transfer late
+/// for single-step transactions. Protocol work (SD block reads) belongs
+/// in a model-side device (see `ext_devices/sd_card.rs`), which answers
+/// in the same transfer like SpiFlash.
+pub fn spi_tap_miso_clear(peri: &str) {
+    spi_tap_miso().lock().unwrap().remove(peri);
+}
 pub(crate) fn spi_tap_miso_pop(peri: &str) -> u8 {
     spi_tap_miso().lock().unwrap().get_mut(peri).and_then(|q| q.first().copied().map(|b| { q.remove(0); b })).unwrap_or(0xFF)
 }

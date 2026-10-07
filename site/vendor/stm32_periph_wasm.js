@@ -408,6 +408,25 @@ export function add_spi_flash(peripheral, jedec_id, data, cs) {
 }
 
 /**
+ * Add an SD card in SPI mode (synchronous model-side protocol engine).
+ * Must be called before init(). `blocks` = 512-byte blocks (erased 0xFF);
+ * the card answers CMD0/8/55/41/58/16/13/9/10/17/18/24 synchronously per
+ * byte, so CMD17 block reads land in the same transfer (the JS tap
+ * round-trip is structurally one transfer late — see sd_card.rs).
+ * `cs` optionally names the GPIO chip-select ("PA4").
+ * @param {string} peripheral
+ * @param {number} blocks
+ * @param {string | null} [cs]
+ */
+export function add_spi_sd_card(peripheral, blocks, cs) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len0 = WASM_VECTOR_LEN;
+    var ptr1 = isLikeNone(cs) ? 0 : passStringToWasm0(cs, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    var len1 = WASM_VECTOR_LEN;
+    wasm.add_spi_sd_card(ptr0, len0, blocks, ptr1, len1);
+}
+
+/**
  * Reset the audio source and capture FIFO.
  */
 export function audio_clear() {
@@ -1941,6 +1960,19 @@ export function sdio_read_block(block) {
  */
 export function set_intr_pending(irq) {
     wasm.set_intr_pending(irq);
+}
+
+/**
+ * Drop stale queued MISO bytes for one peripheral (F1 `clearRx` parity).
+ * Pair with `spi_push_miso`: clear at transfer start, then prefill the
+ * computed response. See `system::spi_tap_miso_clear` for the structural
+ * limit (single-step transactions need a model-side device instead).
+ * @param {string} peripheral
+ */
+export function spi_clear_miso(peripheral) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.spi_clear_miso(ptr0, len0);
 }
 
 /**

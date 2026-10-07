@@ -4430,3 +4430,37 @@ for the firmware's own reply — `\nhello`, which the page's `\n> hello`
 input-echo cannot match), and the `echo` case in `site/test_browser.mjs`.
 Chain `chain_echopanels` (node + CDP + panels, then full `npm test`):
 ECHO-NODE / ECHO-CDP / PANELS PASS, NPMTEST PASS.
+
+### SPI SD card: model-side engine + clearMiso contract (2026-10-07)
+User report: SPI writes proven (MAX7219), SD init green (CMD0/CMD8/R7),
+but CMD17 block reads return empty (`SD_INIT` … `SD_DONE`, file empty).
+Root cause is structural, not timing: the JS tap path (`spi_tap` +
+`parseSpi`/`onByte` + `spi_push_miso`) drains AFTER `cpu.step` while the
+Rust engine pops MISO synchronously per DR write DURING the step
+(`spi.rs` master path: `d.write()` then `d.read()` per byte). A whole
+CMD17 data phase fits one coarse execute batch, so JS-computed replies
+land one transfer late; init converges only via retries, single-block
+reads never retry. Proven unfixable by quanta (512: init green/read red;
+64/256: init itself breaks). Fix, mirroring SpiFlash (synchronous
+per-byte answers, no round-trip):
+- New `ext_devices/sd_card.rs`: SD SPI-mode card — CMD0/8/55/41/58/16/
+  13/9/10/17/18/24/12, R1/R7/OCR/CSD/CID, 0xFE token + 512B + CRC,
+  CMD24 commit on packet-complete (CS deassert drops partials), SDHC
+  block addressing (CCS=1), Ncr=0 (R1 on the CRC byte's paired read —
+  every poll loop tolerates it). CRC bytes consumed, never re-decoded
+  as command tokens (a CRC with 01xxxxxx bits would phantom-start a
+  command and desync the stream).
+- `add_spi_sd_card(peripheral, blocks, cs)` + `spi_clear_miso(peripheral)`
+  exports (F1 `clearRx` parity); `ext_devices.spi_sd` registration in
+  `site/emulator.js` (same before-init rule as spi_flash);
+  `spi.clearMiso`/`spi.clearRx` on the facade with the structural-limit
+  note (prefills stay one transfer late for single-step transactions —
+  protocol work belongs model-side).
+- Tests: 6 Rust unit tests (init, exact-512 CMD17 incl. through-SPI3-
+  registers GPIO-CS integration, CMD24 round-trip, erased/OOB, CS-drop)
+  + `t_spi_sd`/`t_spi_miso_clear` in `test_periph_mock_consumer.mjs`
+  (mock 351 checks) + `clearMiso` callable pin + `site/test_spi_sd.mjs`
+  (end-to-end through createEmulator `ext_devices.spi_sd`, wired into
+  the `npm test` chain next to `test_spi_flash`). Vendor wasm rebuilt
+  (`npm run build:wasm`). Full gate: cargo 254/254 + `npm test` green.
+  Left uncommitted per standing rule.

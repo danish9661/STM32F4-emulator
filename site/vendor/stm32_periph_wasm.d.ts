@@ -124,6 +124,16 @@ export function add_software_spi(name: string, cs: string | null | undefined, cl
 export function add_spi_flash(peripheral: string, jedec_id: number, data: Uint8Array, cs?: string | null): void;
 
 /**
+ * Add an SD card in SPI mode (synchronous model-side protocol engine).
+ * Must be called before init(). `blocks` = 512-byte blocks (erased 0xFF);
+ * the card answers CMD0/8/55/41/58/16/13/9/10/17/18/24 synchronously per
+ * byte, so CMD17 block reads land in the same transfer (the JS tap
+ * round-trip is structurally one transfer late — see sd_card.rs).
+ * `cs` optionally names the GPIO chip-select ("PA4").
+ */
+export function add_spi_sd_card(peripheral: string, blocks: number, cs?: string | null): void;
+
+/**
  * Reset the audio source and capture FIFO.
  */
 export function audio_clear(): void;
@@ -883,6 +893,14 @@ export function sdio_read_block(block: number): Uint8Array;
 export function set_intr_pending(irq: number): void;
 
 /**
+ * Drop stale queued MISO bytes for one peripheral (F1 `clearRx` parity).
+ * Pair with `spi_push_miso`: clear at transfer start, then prefill the
+ * computed response. See `system::spi_tap_miso_clear` for the structural
+ * limit (single-step transactions need a model-side device instead).
+ */
+export function spi_clear_miso(peripheral: string): void;
+
+/**
  * Harness = the faulty peer: corrupt the RX CRC so the next CRCNEXT
  * compare on the SPI block at `base` mismatches (latches CRCERR).
  */
@@ -1194,6 +1212,7 @@ export interface InitOutput {
     readonly add_i2c_eeprom: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly add_software_spi: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
     readonly add_spi_flash: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly add_spi_sd_card: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly audio_clear: () => void;
     readonly audio_load_wav: (a: number, b: number, c: number) => void;
     readonly audio_source_remaining: () => number;
@@ -1331,6 +1350,7 @@ export interface InitOutput {
     readonly sdio_fault_data_crc: () => void;
     readonly sdio_read_block: (a: number, b: number) => void;
     readonly set_intr_pending: (a: number) => void;
+    readonly spi_clear_miso: (a: number, b: number) => void;
     readonly spi_fault_crc: (a: number) => void;
     readonly spi_fault_modf: (a: number) => void;
     readonly spi_flash_debug: (a: number, b: number, c: number) => void;

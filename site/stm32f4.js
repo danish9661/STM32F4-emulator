@@ -471,6 +471,11 @@ export class SPI {
         const peri = `SPI${this.ch}`;
         this._mcu.spi.pushMiso(peri, bytes);
     }
+    clearMiso() {
+        const peri = `SPI${this.ch}`;
+        this._mcu.spi.clearMiso(peri);
+    }
+    clearRx() { this.clearMiso(); }
 }
 
 // F1 `i2c[ch]` parity: per-bus handle with onStart/onWrite/onRead/onStop +
@@ -621,6 +626,23 @@ export class STM32F4 {
                     this._bindings.spi_push_miso(peripheral, new Uint8Array(bytes));
                 }
             },
+            // Drop stale queued MISO bytes for one peripheral (F1 `clearRx`
+            // parity — `clearRx` is the same call). Pair with pushMiso:
+            // clear at transfer start, then prefill the computed response.
+            // STRUCTURAL LIMIT (not a bug): the Rust engine pops MISO
+            // synchronously per DR write DURING cpu.step, while tap events
+            // (and onByte) only run after the step — so a prefill always
+            // lands one transfer late for single-step transactions (a whole
+            // CMD17 data phase fits one coarse batch). Protocol work belongs
+            // in a model-side device (`ext_devices.spi_sd`, answered
+            // synchronously like SpiFlash); the tap prefill covers
+            // across-step transactions only.
+            clearMiso: (peripheral) => {
+                if (this._bindings && this._bindings.spi_clear_miso) {
+                    this._bindings.spi_clear_miso(peripheral);
+                }
+            },
+            clearRx: function (peripheral) { return this.clearMiso(peripheral); },
         };
         // Platform display surface ("DRM"): live OLED/TFT/LTDC framebuffers
         // for Wokwi/OpenHW/Velxio screen widgets (see the Display class).

@@ -83,6 +83,8 @@ export class SPI {
   onTransfer: ((channel: string, tx: number[], rx: number[]) => void) | null;
   constructor(mcu: STM32F4, ch: number);
   injectMiso(bytes: Uint8Array | number[]): void;
+  clearMiso(): void;
+  clearRx(): void;
 }
 export class I2C {
   readonly ch: number;
@@ -135,7 +137,7 @@ export class STM32F4 {
   readonly spiBus: Record<number, SPI>;
   readonly i2c1: I2C; readonly i2c2: I2C; readonly i2c3: I2C;
   readonly i2cBus: Record<number, I2C>;
-  readonly spi: { specs: any[]; pushMiso(peripheral: string, bytes: Uint8Array | number[]): void };
+  readonly spi: { specs: any[]; pushMiso(peripheral: string, bytes: Uint8Array | number[]): void; clearMiso(peripheral: string): void; clearRx(peripheral: string): void };
   readonly i2c: { specs: any[]; pushRx(peripheral: string, bytes: Uint8Array | number[]): void };
   readonly dma: { stream(index: number): DMAStream; controller(ctl: 1 | 2): DMAController };
   readonly display: Display;

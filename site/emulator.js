@@ -82,7 +82,7 @@ export async function createEmulator(opts) {
         get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, pwr_enter_standby, pwr_wakeup_standby, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
         dma2d_take_job, dma2d_job_done, dma2d_convert, dma2d_blend,
-        spi_tap, spi_take_events, spi_push_miso,
+        spi_tap, spi_take_events, spi_push_miso, add_spi_sd_card,
         fsmc_tap, fsmc_take_events, fsmc_push_data,
         dcmi_feed_frame, dcmi_clear,
         i2c_register_slave, i2c_take_events, i2c_push_rx, drain_tap_queues,
@@ -369,6 +369,19 @@ export async function createEmulator(opts) {
     if (typeof bindings.reset_state === 'function') bindings.reset_state();
     for (const cfg of (ext_devices.spi_flash || [])) {
         add_spi_flash(cfg.peripheral, cfg.jedec_id, cfg.data, cfg.cs ?? null);
+    }
+    // SD card in SPI mode (synchronous model-side protocol engine — the
+    // JS tap round-trip is structurally one transfer late for block reads,
+    // see ext_devices/sd_card.rs). Same before-init() rule as spi_flash:
+    // Spi::new snapshots the device list once at construction.
+    // `ext_devices.spi_sd: [{peripheral, blocks, cs}]` (default 4×512B).
+    // Guarded for older wasm bundles without the export.
+    for (const cfg of (ext_devices.spi_sd || [])) {
+        try {
+            if (typeof add_spi_sd_card === 'function') {
+                add_spi_sd_card(cfg.peripheral, cfg.blocks || 4, cfg.cs ?? null);
+            }
+        } catch {}
     }
     for (const cfg of (ext_devices.i2c_eeprom || [])) {
         add_i2c_eeprom(cfg.peripheral, cfg.address, cfg.data);
@@ -809,6 +822,39 @@ export async function createEmulator(opts) {
         if (tft) {
             tft.mode = 'idle'; tft.cmdLeft = 0; tft.argBuf.length = 0; tft.frame = 0;
         }
+    };
+
+    // Full peripheral-model reset (cross-cutting sync contract: reset
+    // clears everything, synchronously). Re-installs a fresh WasmSystem
+    // from the same SVD + chip hint used at creation (~30-60 ms), so all
+    // peripheral registers, NVIC (pending/enable/priority/SysTick period)
+    // and model latches return to reset values. Deliberately NOT cleared
+    // (silicon-faithful or host-owned): flash/RAM (reloaded only by
+    // loadImage/bootPreset), non-volatile device content (EEPROM/flash/
+    // regfile objects are re-attached, not re-seeded), the monotonic
+    // instruction clock (DWT/SysTick math is delta-based), watchdog
+    // reset-cause flags (silicon preserves them for RCC_CSR readout),
+    // ADC overrides + GPIO input levels (host-driven config, re-applied
+    // by the platform), link state (physical). JS-side queues (ETH RX,
+    // inject index) are cleared by fullReset below, not here.
+    const reinitModel = () => {
+        try {
+            if (svdXml) {
+                if (typeof init_svd_chip === 'function') {
+                    let hint = '';
+                    try {
+                        hint = String(opts.chipHint || opts.svdFile || '');
+                        hint = hint.split('/').pop().split('.').slice(0, -1).join('.') || hint;
+                    } catch {}
+                    if (!hint) hint = 'stm32f407';
+                    init_svd_chip(svdXml, hint);
+                } else init_svd(svdXml);
+            }
+            else bindings.init();
+            if (sdioBlocks > 0 && typeof sdio_bind_card === 'function') {
+                try { sdio_bind_card(sdioBlocks); } catch {}
+            }
+        } catch {}
     };
 
     const processDevices = () => {
@@ -1347,6 +1393,21 @@ export async function createEmulator(opts) {
             } catch {}
             try { dma2d_job_done(); } catch {}
         };
+        // Full reboot path shared by reset/resetCpu/loadImage/bootPreset:
+        // fresh peripheral model + drained JS queues + CPU back to the
+        // vector-table SP/PC (fault flags cleared by reset_cpu, tap/fault
+        // channels by resetBusState, instCount re-zeroed). Also fixes a
+        // latent bug where reset() never zeroed instCount.
+        const fullReset = (sp, pc) => {
+            try { reinitModel(); } catch {}
+            try { rxQueue.length = 0; } catch {}
+            try { E.rxInjectIdx = 0; } catch {}
+            lastTxLen = 0;
+            try { cpu.wake(); } catch {}
+            try { cpu.reset_cpu(sp, pc | 1); } catch {}
+            instCount = 0;
+            resetBusState();
+        };
         return {
             uc: wuc,
             read32: wread32, write32: wwrite32,
@@ -1463,21 +1524,13 @@ export async function createEmulator(opts) {
                 for (const seg of opts.extraMem || []) cpu.load_firmware(seg.data, seg.addr);
                 const sp = wread32(vector_table);
                 const pc = wread32(vector_table + 4);
-                try { cpu.wake(); } catch {}
-                cpu.reset_cpu(sp, pc | 1);
-                instCount = 0;
+                fullReset(sp, pc | 1);
                 nrstAsserted = false;
-                resetBusState();
             },
             close: () => { try { cpu.free(); } catch {} },
-            reset: () => { cpu.reset_cpu(sp0, pc0 | 1); resetBusState(); },
+            reset: () => { fullReset(sp0, pc0 | 1); },
             // Host reset/boot control (real-device Reset button semantics).
-            resetCpu: () => {
-                try { cpu.reset_cpu(sp0, pc0 | 1); } catch {}
-                try { cpu.wake(); } catch {}
-                instCount = 0;
-                resetBusState();
-            },
+            resetCpu: () => { fullReset(sp0, pc0 | 1); },
             setNrst, isNrstAsserted,
             bootPreset: (image) => {
                 const flash = (image && image.flash) || new Uint8Array(0);
@@ -1485,11 +1538,8 @@ export async function createEmulator(opts) {
                 for (const seg of (image && image.extraMem) || []) cpu.load_firmware(seg.data, seg.addr);
                 const sp = wread32(vector_table);
                 const pc = wread32(vector_table + 4);
-                try { cpu.wake(); } catch {}
-                cpu.reset_cpu(sp, pc | 1);
-                instCount = 0;
+                fullReset(sp, pc | 1);
                 nrstAsserted = false;
-                resetBusState();
             },
             faultInfo: () => {
                 const fpc = cpu.fault_pc() >>> 0;
