@@ -93,8 +93,8 @@ static void i2c_start(void) { I2C1_CR1 |= (1 << 8); }
 static void i2c_stop(void)  { I2C1_CR1 |= (1 << 9); }
 static void i2c_wait_sb(void) { while (!(I2C1_SR1 & 1)); }
 static void i2c_wait_addr(void) { while (!(I2C1_SR1 & (1 << 1))); }
-static void i2c_wait_txe(void) { while (!(I2C1_SR1 & (1 << 6))); }
-static void i2c_wait_rxne(void) { while (!(I2C1_SR1 & (1 << 5))); }
+static void i2c_wait_txe(void) { while (!(I2C1_SR1 & (1 << 7))); }
+static void i2c_wait_rxne(void) { while (!(I2C1_SR1 & (1 << 6))); }
 static void i2c_clear_addr(void) { volatile uint32_t sr = I2C1_SR2; (void)sr; }
 static void i2c_send_byte(uint8_t b) { I2C1_DR = b; }
 static uint8_t i2c_read_byte(void) { return I2C1_DR; }
@@ -111,7 +111,7 @@ static int i2c_eeprom_write_byte(uint8_t mem_addr, uint8_t data) {
     i2c_send_byte(data);
     i2c_wait_txe();
     i2c_stop();
-    return (I2C1_SR1 & (1 << 9)) ? -1 : 0;
+    return (I2C1_SR1 & (1 << 10)) ? -1 : 0;
 }
 
 static int i2c_eeprom_read_byte(uint8_t mem_addr, uint8_t *out) {
@@ -132,7 +132,7 @@ static int i2c_eeprom_read_byte(uint8_t mem_addr, uint8_t *out) {
     i2c_wait_rxne();
     *out = i2c_read_byte();
     i2c_stop();
-    return (I2C1_SR1 & (1 << 9)) ? -1 : 0;
+    return (I2C1_SR1 & (1 << 10)) ? -1 : 0;
 }
 
 void setup() {

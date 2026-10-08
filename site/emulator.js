@@ -82,7 +82,7 @@ export async function createEmulator(opts) {
         get_next_pending_interrupt, set_intr_pending, has_pending_interrupt, pwr_wakeup, pwr_enter_standby, pwr_wakeup_standby, uart_rx_byte,
         flash_is_programming, flash_take_erase, flash_erase_applied,
         dma2d_take_job, dma2d_job_done, dma2d_convert, dma2d_blend,
-        spi_tap, spi_take_events, spi_push_miso, add_spi_sd_card,
+        spi_tap, spi_take_events, spi_push_miso, add_spi_sd_card, spi_sd_load_image,
         fsmc_tap, fsmc_take_events, fsmc_push_data,
         dcmi_feed_frame, dcmi_clear,
         i2c_register_slave, i2c_take_events, i2c_push_rx, drain_tap_queues,
@@ -374,12 +374,18 @@ export async function createEmulator(opts) {
     // JS tap round-trip is structurally one transfer late for block reads,
     // see ext_devices/sd_card.rs). Same before-init() rule as spi_flash:
     // Spi::new snapshots the device list once at construction.
-    // `ext_devices.spi_sd: [{peripheral, blocks, cs}]` (default 4×512B).
+    // `ext_devices.spi_sd: [{peripheral, blocks, cs, data?}]` (default 4×512B).
+    // `data` (Uint8Array) seeds the card with a filesystem image after
+    // registration (see tools/make_sd_image.mjs) — block-RW tests use the
+    // default erased image; FS-level tests pass a FAT image here.
     // Guarded for older wasm bundles without the export.
     for (const cfg of (ext_devices.spi_sd || [])) {
         try {
             if (typeof add_spi_sd_card === 'function') {
                 add_spi_sd_card(cfg.peripheral, cfg.blocks || 4, cfg.cs ?? null);
+                if (cfg.data && typeof spi_sd_load_image === 'function') {
+                    spi_sd_load_image(cfg.peripheral, new Uint8Array(cfg.data));
+                }
             }
         } catch {}
     }

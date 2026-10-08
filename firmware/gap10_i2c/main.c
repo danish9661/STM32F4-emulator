@@ -56,7 +56,7 @@ int main(void) {
     }
     (void)I2C1_SR1; (void)I2C1_SR2; // clear ADDR (driver sequence)
     uart_puts("addr\r\n");
-    if (wait_sr1(1 << 5, 3000000)) { // RXNE: master wrote us a byte
+    if (wait_sr1(1 << 6, 3000000)) { // RXNE (silicon seat): master wrote us a byte
         volatile uint32_t b = I2C1_DR;
         (void)b;
         uart_puts("rx\r\n");

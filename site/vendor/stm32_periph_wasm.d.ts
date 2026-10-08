@@ -922,6 +922,13 @@ export function spi_flash_debug(peripheral: string): Uint32Array;
 export function spi_push_miso(peripheral: string, bytes: Uint8Array): void;
 
 /**
+ * Overwrite the SPI SD card image on `peripheral` with raw bytes
+ * (filesystem seeding for FS-level tests). Truncates to the card size;
+ * call after `add_spi_sd_card`, before or after init().
+ */
+export function spi_sd_load_image(peripheral: string, data: Uint8Array): void;
+
+/**
  * Harness = the SPI master clock: shift one frame through the slave at
  * `base` (returns the MISO word). No-op when the gate is closed.
  */
@@ -1355,6 +1362,7 @@ export interface InitOutput {
     readonly spi_fault_modf: (a: number) => void;
     readonly spi_flash_debug: (a: number, b: number, c: number) => void;
     readonly spi_push_miso: (a: number, b: number, c: number, d: number) => void;
+    readonly spi_sd_load_image: (a: number, b: number, c: number, d: number) => void;
     readonly spi_slave_clock: (a: number, b: number) => number;
     readonly spi_slave_gate: (a: number) => number;
     readonly spi_slave_select: (a: number, b: number) => void;

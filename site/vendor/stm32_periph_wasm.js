@@ -2027,6 +2027,21 @@ export function spi_push_miso(peripheral, bytes) {
 }
 
 /**
+ * Overwrite the SPI SD card image on `peripheral` with raw bytes
+ * (filesystem seeding for FS-level tests). Truncates to the card size;
+ * call after `add_spi_sd_card`, before or after init().
+ * @param {string} peripheral
+ * @param {Uint8Array} data
+ */
+export function spi_sd_load_image(peripheral, data) {
+    const ptr0 = passStringToWasm0(peripheral, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
+    const len1 = WASM_VECTOR_LEN;
+    wasm.spi_sd_load_image(ptr0, len0, ptr1, len1);
+}
+
+/**
  * Harness = the SPI master clock: shift one frame through the slave at
  * `base` (returns the MISO word). No-op when the gate is closed.
  * @param {number} base

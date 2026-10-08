@@ -77,7 +77,7 @@ static void i2c_write(const unsigned char *data, int len) {
     (void)I2C_SR1;                               // read SR1 (latch)
     (void)I2C_SR2;                               // read SR2 (Active)
     for (int i = 0; i < len; i++) {
-        while (!(I2C_SR1 & (1 << 6)));           // TXE
+        while (!(I2C_SR1 & (1 << 7)));           // TXE (silicon seat)
         I2C_DR = data[i];
     }
     I2C_CR1 |= (1 << 9);                         // STOP
@@ -94,7 +94,7 @@ static void i2c_read(unsigned char *buf, int len) {
     (void)I2C_SR1;                               // read SR1 (latch)
     (void)I2C_SR2;                               // read SR2 (Active, RXNE armed)
     for (int i = 0; i < len; i++) {
-        while (!(I2C_SR1 & (1 << 5)));           // RXNE
+        while (!(I2C_SR1 & (1 << 6)));           // RXNE (silicon seat)
         buf[i] = (unsigned char)I2C_DR;
     }
     I2C_CR1 |= (1 << 9);                         // STOP

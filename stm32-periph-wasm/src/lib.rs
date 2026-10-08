@@ -1438,6 +1438,22 @@ pub fn add_spi_sd_card(peripheral: &str, blocks: u32, cs: Option<String>) {
         .push(std::rc::Rc::new(std::cell::RefCell::new(card)));
 }
 
+/// Overwrite the SPI SD card image on `peripheral` with raw bytes
+/// (filesystem seeding for FS-level tests). Truncates to the card size;
+/// call after `add_spi_sd_card`, before or after init().
+#[wasm_bindgen]
+pub fn spi_sd_load_image(peripheral: &str, data: &[u8]) {
+    let ext = system::get_ext_devices();
+    let mut g = ext.lock().unwrap();
+    for card in g.spi_sds.iter() {
+        let mut c = card.borrow_mut();
+        if c.config.peripheral == peripheral {
+            c.load_image(data);
+            return;
+        }
+    }
+}
+
 // ── I2C bus taps (JS hardware layer) ───────────────────────────────────────
 
 /// Register a protocol-agnostic I2C slave on a peripheral. Must be called

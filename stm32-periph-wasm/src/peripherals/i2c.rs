@@ -15,6 +15,29 @@ fn i2c_irqs(name: &str) -> Option<(i32, i32)> {
     }
 }
 
+// SR1/SR2 flag seats (RM0090 §27.6.7/8, CMSIS-verified). A prior revision
+// had TXE/RXNE/BTF rotated (TXE@6, RXNE@5, BTF@7): owner bare-metal tests
+// passed against those seats while real HAL/Arduino firmware polling the
+// silicon seats (TXE@7, RXNE@6, BTF@2) stalled forever — Wire/LL transfers
+// never complete and manual flag-spins never exit. All seats below are the
+// silicon ones; firmware in this repo was re-based to match (2026-10-06).
+const SR1_SB: u32 = 1 << 0;
+const SR1_ADDR: u32 = 1 << 1;
+const SR1_BTF: u32 = 1 << 2;
+const SR1_STOPF: u32 = 1 << 4;
+const SR1_RXNE: u32 = 1 << 6;
+const SR1_TXE: u32 = 1 << 7;
+const SR1_BERR: u32 = 1 << 8;
+const SR1_ARLO: u32 = 1 << 9;
+const SR1_AF: u32 = 1 << 10;
+const SR1_OVR: u32 = 1 << 11;
+const SR1_PECERR: u32 = 1 << 12;
+const SR1_TIMEOUT: u32 = 1 << 14;
+const SR1_SMBALERT: u32 = 1 << 15;
+const SR2_MSL: u32 = 1 << 0;
+const SR2_BUSY: u32 = 1 << 1;
+const SR2_TRA: u32 = 1 << 2;
+
 #[derive(Clone)]
 pub struct I2c {
     name: String,
@@ -108,6 +131,30 @@ impl I2c {
         self.slave_active = None;
     }
 
+    /// STOP-condition unwind (guest-generated STOP on the master path).
+    /// Unlike `reset()` (SWRST/PE-clear: whole block to reset values), a
+    /// STOP only idles the bus — and it must preserve the transfer tail:
+    /// silicon keeps DR and the buffer flags readable after STOP, and HAL
+    /// tail flows read DR *after* generating STOP (the 2-byte RX BTF
+    /// handler does STOP then two DR reads; wiping active_device here
+    /// served both reads the same stale byte). So: BUSY/ADDR release,
+    /// latch/gencall/ticks/slave-address clear — but state, device
+    /// selection, DR and TXE/RXNE/BTF survive for post-STOP tail reads.
+    /// A non-Active transaction (StartSent/AddrSent) has no tail to
+    /// serve, so it falls back to Idle. The next START re-arms everything.
+    fn stop_unwind(&mut self) {
+        if !matches!(self.state, I2cState::Active { .. }) {
+            self.state = I2cState::Idle;
+            self.active_device = None;
+        }
+        self.sr1 &= !(SR1_ADDR | SR1_TIMEOUT);
+        self.sr1_read_with_addr = false;
+        self.smbus_gencall = false;
+        self.smbus_ticks = 0;
+        self.slave_active = None;
+        self.sr2 &= !SR2_BUSY;
+    }
+
     /// Own-address match (slave mode): the 7-bit address programmed in
     /// OAR1 (bits 7:1; bit 0 ADDMODE selects 10-bit, unmodeled — 7-bit
     /// only, like every firmware in this repo) or OAR2 (bits 7:1, DUAL
@@ -149,7 +196,7 @@ impl I2c {
         // not wipe pending RXNE/BTF from an already-received byte (the
         // gap10_i2c TX phase overwrote a live RXNE and the guest hung
         // in its RXNE wait — caught by firmware, not review).
-        self.sr1 |= 1 << 1; // ADDR
+        self.sr1 |= SR1_ADDR;
         self.sr2 = (1 << 0) | (1 << 1) | (if is_read { 1 << 2 } else { 0 });
         self.state = I2cState::AddrSent { is_read };
         self.fire_interrupts(sys);
@@ -165,11 +212,11 @@ impl I2c {
             return;
         }
         if !self.slave_rx.is_empty() {
-            self.sr1 |= 1 << 7; // BTF: byte still unread
+            self.sr1 |= SR1_BTF; // BTF: byte still unread
         }
         self.slave_rx.push_back(byte);
         self.dr = byte as u32;
-        self.sr1 |= 1 << 5; // RXNE
+        self.sr1 |= SR1_RXNE; // RXNE
         self.fire_interrupts(sys);
     }
 
@@ -184,9 +231,9 @@ impl I2c {
         }
         let b = self.slave_tx.pop_front().unwrap_or(0xFF);
         if self.slave_tx.is_empty() {
-            self.sr1 |= 1 << 7; // BTF: nothing left to send
+            self.sr1 |= SR1_BTF; // BTF: nothing left to send
         }
-        self.sr1 |= 1 << 6; // TXE: DR free for the next guest byte
+        self.sr1 |= SR1_TXE; // TXE: DR free for the next guest byte
         self.fire_interrupts(sys);
         b
     }
@@ -224,7 +271,7 @@ impl I2c {
     /// the master path). Also clears ADDR if still latched.
     pub fn slave_stop(&mut self) {
         self.slave_active = None;
-        self.sr1 &= !(1 << 1); // ADDR
+        self.sr1 &= !SR1_ADDR; // ADDR
     }
 
     /// CRC-8/SMBus step (poly 0x07, init 0 — the SMBus PEC polynomial):
@@ -258,13 +305,17 @@ impl I2c {
     }
 
     fn fire_interrupts(&mut self, sys: &System) {
-        let itevten = (self.cr2 >> 10) & 1;
-        let iterren = (self.cr2 >> 9) & 1;
-        let itbufen = (self.cr2 >> 8) & 1;
+        // CR2 IT seats (RM0090 §27.6.2, CMSIS-verified — a prior revision
+        // had these rotated and interrupt-gated firmware stalled).
+        let itevten = (self.cr2 >> 9) & 1;
+        let iterren = (self.cr2 >> 8) & 1;
+        let itbufen = (self.cr2 >> 10) & 1;
 
-        let ev_flags = self.sr1 & 0x17;
-        let buf_flags = self.sr1 & 0x60;
-        let err_flags = self.sr1 & 0x0E00;
+        // Silicon event classes: EVT covers SB/ADDR/BTF/STOPF (+ADD10,
+        // unmodeled here), BUF covers TXE/RXNE, ERR covers BERR/ARLO/AF/OVR.
+        let ev_flags = self.sr1 & (SR1_SB | SR1_ADDR | SR1_BTF | SR1_STOPF);
+        let buf_flags = self.sr1 & (SR1_RXNE | SR1_TXE);
+        let err_flags = self.sr1 & (SR1_BERR | SR1_ARLO | SR1_AF | SR1_OVR);
 
         if ev_flags != 0 && itevten != 0 {
             sys.p.nvic.borrow_mut().set_intr_pending(self.irq_ev);
@@ -295,8 +346,8 @@ impl I2c {
         if addr == 0x00 && self.cr1 & (1 << 6) != 0 {
             // General call: accept, flag GENCALL.
             self.active_device = None;
-            self.sr1 = 1 << 1; // ADDR
-            self.sr2 = (1 << 0) | (1 << 1) | (1 << 4); // MSL+BUSY+GENCALL
+            self.sr1 = SR1_ADDR;
+            self.sr2 = SR2_MSL | SR2_BUSY | (1 << 4) | SR2_TRA; // +GENCALL; broadcast is a write
             self.smbus_gencall = true;
             self.state = I2cState::AddrSent { is_read };
             self.fire_interrupts(sys);
@@ -306,8 +357,8 @@ impl I2c {
             // Alert Response Address: accept, flag SMBALERT, DR carries
             // the harness-armed alerting address (host-notify source).
             self.active_device = None;
-            self.sr1 = (1 << 1) | (1 << 15); // ADDR + SMBALERT
-            self.sr2 = (1 << 0) | (1 << 1);
+            self.sr1 = SR1_ADDR | SR1_SMBALERT;
+            self.sr2 = SR2_MSL | SR2_BUSY | (if is_read { 0 } else { SR2_TRA });
             if is_read {
                 self.dr = self.smbus_alert_addr as u32;
             }
@@ -318,8 +369,8 @@ impl I2c {
         if addr == 0x61 && self.cr1 & (1 << 4) != 0 {
             // ARP address: accept; firmware owns the command protocol.
             self.active_device = None;
-            self.sr1 = 1 << 1; // ADDR
-            self.sr2 = (1 << 0) | (1 << 1);
+            self.sr1 = SR1_ADDR;
+            self.sr2 = SR2_MSL | SR2_BUSY | (if is_read { 0 } else { SR2_TRA });
             self.state = I2cState::AddrSent { is_read };
             self.fire_interrupts(sys);
             return true;
@@ -343,14 +394,18 @@ impl Peripheral for I2c {
                 if self.slave_active == Some(false) {
                     let v = self.slave_rx.pop_front().map(|b| b as u32).unwrap_or(self.dr);
                     if self.slave_rx.is_empty() {
-                        self.sr1 &= !((1 << 5) | (1 << 7)); // RXNE+BTF
+                        self.sr1 &= !(SR1_RXNE | SR1_BTF);
                     }
                     self.dr = v;
                     self.fire_interrupts(sys);
                     return v;
                 }
                 let v = self.dr;
-                self.sr1 &= !(1 << 5);
+                // Consume the served byte, then immediately pull the next
+                // one: devices answer instantly (no clock stretch), so the
+                // double-buffer is always full while bytes remain — the
+                // refill below re-asserts RXNE (+BTF per the BUF rule).
+                self.sr1 &= !(SR1_RXNE | SR1_BTF);
                 if let Some(idx) = self.active_device {
                     if matches!(self.state, I2cState::Active { is_read: true }) {
                         // Drop the device borrow before feeding PEC (both
@@ -367,7 +422,7 @@ impl Peripheral for I2c {
                         if self.cr1 & (1 << 5) != 0 && self.cr1 & (1 << 12) != 0 {
                             self.cr1 &= !(1 << 12);
                             if nb != self.pec_acc {
-                                self.sr1 |= 1 << 12; // PECERR
+                                self.sr1 |= SR1_PECERR;
                             }
                         } else {
                             if self.cr1 & (1 << 5) != 0 {
@@ -375,19 +430,31 @@ impl Peripheral for I2c {
                             }
                             self.dr = nb as u32;
                         }
-                        self.sr1 |= 1 << 5;
+                        // RXNE: a fresh byte is in DR. BTF (double-buffered)
+                        // asserts only once the guest stops draining per byte:
+                        // with the BUF interrupt enabled the guest streams on
+                        // RXNE and BTF would misroute multi-byte tails into
+                        // the BTF handler early; with BUF off (HAL tail at
+                        // XferCount<=3, or plain polling) BTF is what the
+                        // guest waits on. One extra device pull per transfer
+                        // tail may occur (prefetch); pointer devices advance
+                        // past the last read byte like silicon does.
+                        self.sr1 |= SR1_RXNE;
+                        if self.cr2 & (1 << 10) == 0 {
+                            self.sr1 |= SR1_BTF;
+                        }
                     }
                 }
                 self.fire_interrupts(sys);
                 v
             }
             0x14 => {
-                self.sr1_read_with_addr = (self.sr1 & (1 << 1)) != 0;
+                self.sr1_read_with_addr = (self.sr1 & SR1_ADDR) != 0;
                 self.sr1
             }
             0x18 => {
                 if self.sr1_read_with_addr {
-                    self.sr1 &= !(1 << 1);
+                    self.sr1 &= !SR1_ADDR;
                     self.sr1_read_with_addr = false;
                     let is_read = match std::mem::replace(&mut self.state, I2cState::Idle) {
                         I2cState::AddrSent { is_read } => {
@@ -397,9 +464,18 @@ impl Peripheral for I2c {
                         s => { self.state = s; false }
                     };
                     if is_read {
-                        self.sr1 |= 1 << 5;
+                        // First byte was prefetched into DR at the address
+                        // phase. BTF (two bytes buffered) is claimed only
+                        // for POS-positioned reads (CR1 bit 11: the HAL sets
+                        // POS for its 2-byte BTF-wait flow); single-byte
+                        // reads complete on RXNE alone and a spurious BTF
+                        // would over-read them.
+                        self.sr1 |= SR1_RXNE;
+                        if self.cr1 & (1 << 11) != 0 {
+                            self.sr1 |= SR1_BTF;
+                        }
                     } else {
-                        self.sr1 |= 1 << 6;
+                        self.sr1 |= SR1_TXE;
                     }
                 }
                 self.fire_interrupts(sys);
@@ -452,7 +528,7 @@ impl Peripheral for I2c {
 
                 if start != 0 && prev_start == 0 {
                     self.state = I2cState::StartSent;
-                    self.sr1 = 1;
+                    self.sr1 = SR1_SB;
                     // AF (acknowledge failure, SR1 bit 10) is sticky until
                     // firmware clears it — but a fresh START begins a new
                     // transaction, so it must not inherit the previous
@@ -462,8 +538,8 @@ impl Peripheral for I2c {
                     // write then NACKed too and edge_test stalled at
                     // "--- I2C ---"). Assigned (=1), not ORed, so no
                     // earlier error bit can survive into the new attempt.
-                    self.sr1 &= !(1 << 10);
-                    self.sr2 = (1 << 0) | (1 << 1);
+                    self.sr1 &= !SR1_AF;
+                    self.sr2 = SR2_MSL | SR2_BUSY;
                     self.active_device = None;
                     // PEC counter resets at START (silicon behavior); a
                     // repeated START mid-transaction restarts it too.
@@ -474,8 +550,16 @@ impl Peripheral for I2c {
                 }
 
                 if stop != 0 {
-                    if matches!(self.state, I2cState::Active { .. } | I2cState::AddrSent { .. }) {
-                        self.reset();
+                    if matches!(self.state, I2cState::StartSent | I2cState::AddrSent { .. } | I2cState::Active { .. }) {
+                        self.stop_unwind();
+                    } else {
+                        // STOP idles the bus even when no transaction was
+                        // open (e.g. after a NACK abort, whose state is
+                        // already Idle): silicon clears BUSY on STOP, and
+                        // both HAL and bare-metal drivers wait BUSY==0
+                        // before the next START. Without this the bus reads
+                        // busy forever after one failed address phase.
+                        self.sr2 &= !SR2_BUSY;
                     }
                     self.cr1 &= !(1 << 9);
                     crate::system::i2c_tap_push_event(&self.name, 1 << 31);
@@ -483,9 +567,46 @@ impl Peripheral for I2c {
             }
             0x04 => {
                 self.cr2 = value & 0x07FF;
+                // Level-sensitive IRQ lines: silicon pends the event/
+                // buffer/error IRQ whenever flag AND enable are set,
+                // regardless of order. The HAL Seq_* IT drivers enable
+                // the ITs AFTER generating START (see
+                // HAL_I2C_Master_Seq_Transmit_IT), so a flag-first
+                // sequence would never IRQ without this re-evaluation
+                // (observed: Wire stuck at SB forever, zero EV pends).
+                //
+                // Idle bus hygiene on the same write: when BUSY is clear
+                // (post-STOP tail state) any TXE/RXNE/BTF still set is
+                // transfer residue, not live data — the completed HAL
+                // flows consumed exactly what they asked for, and the
+                // over-pulled prefetch byte must not outlive the
+                // transfer. Left set with BUF enabled it re-pends the EV
+                // IRQ on every handler return (the dispatcher reads SR2
+                // each entry), tail-chaining forever and starving the
+                // thread (observed: completed 2-byte read with RXNE
+                // residue + BUF on spinning EV with State==READY while
+                // requestFrom never returns). Silicon has no such
+                // residue (no new byte arrives after STOP/NACK), so
+                // drop it here; error flags (AF/BERR/...) are sticky by
+                // design and survive this. Mid-transfer (BUSY set) this
+                // is inert, so tails that legitimately need the flags
+                // (BTF wait with BUF freshly disabled) are unaffected.
+                if (self.sr2 & SR2_BUSY) == 0 {
+                    self.sr1 &= !(SR1_TXE | SR1_RXNE | SR1_BTF);
+                }
+                self.fire_interrupts(sys);
             }
             0x08 => self.oar1 = value,
             0x0C => self.oar2 = value,
+            // SR1 flag clear by software (RM0090: BERR/ARLO/AF/OVR/PECERR/
+            // TIMEOUT clear by writing 0; the HAL ER handler does exactly
+            // this). Only those error bits are writable — status bits
+            // (SB/ADDR/BTF/RXNE/TXE/...) clear by their hardware sequences,
+            // never by direct write, so they are preserved here.
+            0x14 => {
+                self.sr1 &= value | !(SR1_BERR | SR1_ARLO | SR1_AF | SR1_OVR | SR1_PECERR | SR1_TIMEOUT);
+                self.fire_interrupts(sys);
+            }
             0x10 => {
                 match self.state {
                     I2cState::StartSent => {
@@ -497,8 +618,8 @@ impl Peripheral for I2c {
                         // released (state Idle). One-shot: disarm.
                         if self.arb_lose_next {
                             self.arb_lose_next = false;
-                            self.sr1 = 1 << 9; // ARLO
-                            self.sr2 = (1 << 0) | (1 << 1);
+                            self.sr1 = SR1_ARLO;
+                            self.sr2 = SR2_MSL | SR2_BUSY;
                             self.state = I2cState::Idle;
                             self.active_device = None;
                             self.fire_interrupts(sys);
@@ -532,8 +653,12 @@ impl Peripheral for I2c {
                             if self.cr1 & (1 << 5) != 0 {
                                 self.pec_feed(value as u8);
                             }
-                            self.sr1 = 1 << 1;
-                            self.sr2 = (1 << 0) | (1 << 1);
+                            self.sr1 = SR1_ADDR;
+                            // TRA (SR2 bit 2) selects the HAL EV dispatch
+                            // branch: transmitter for writes, receiver for
+                            // reads. Without it the HAL takes the receiver
+                            // branch for a write transfer and stalls.
+                            self.sr2 = SR2_MSL | SR2_BUSY | (if is_read { 0 } else { SR2_TRA });
                             if is_read {
                                 // Tapped slave (JS-visible device): the
                                 // master is about to clock bytes OUT of us.
@@ -566,8 +691,8 @@ impl Peripheral for I2c {
                             // No ACK: AF (acknowledge failure, SR1 bit 10)
                             // latches — ARLO (bit 9) is arbitration loss
                             // only (see the armed-loss path above).
-                            self.sr1 = 1 << 10; // AF
-                            self.sr2 = (1 << 0) | (1 << 1);
+                            self.sr1 = SR1_AF;
+                            self.sr2 = SR2_MSL | SR2_BUSY | (if is_read { 0 } else { SR2_TRA });
                             self.state = I2cState::Idle;
                         }
                         self.fire_interrupts(sys);
@@ -596,8 +721,8 @@ impl Peripheral for I2c {
                         // periph_test SR1==0-after-reset check).
                         if self.slave_active == Some(true) {
                             self.slave_tx.push_back(value as u8);
-                            self.sr1 &= !(1 << 6); // TXE: staged, DR full
-                            self.sr1 &= !(1 << 7); // BTF: bytes waiting
+                            self.sr1 &= !SR1_TXE; // TXE: staged, DR full
+                            self.sr1 &= !SR1_BTF; // BTF: bytes waiting
                             self.fire_interrupts(sys);
                             return;
                         }
@@ -610,7 +735,7 @@ impl Peripheral for I2c {
                             if self.cr1 & (1 << 5) != 0 {
                                 self.pec_feed(value as u8);
                             }
-                            self.sr1 |= 1 << 6;
+                            self.sr1 |= SR1_TXE | SR1_BTF;
                             self.fire_interrupts(sys);
                             return;
                         }
@@ -626,7 +751,15 @@ impl Peripheral for I2c {
                         if self.cr1 & (1 << 5) != 0 {
                             self.pec_feed(value as u8);
                         }
-                        self.sr1 |= 1 << 6;
+                        // TXE: DR accepted the byte. BTF alongside it: the
+                        // model has no shift-register delay, so the byte is
+                        // transfer-complete the instant it lands in the tap
+                        // queue — this is what unblocks both HAL flows (the
+                        // IT BTF handler generates STOP + READY on the last
+                        // byte; the blocking flow waits BTF before STOP)
+                        // and manual `while(!BTF)` spins. TXE-first guests
+                        // are unaffected (TXE is still set with it).
+                        self.sr1 |= SR1_TXE | SR1_BTF;
                         self.fire_interrupts(sys);
                     }
                     _ => {}
@@ -639,6 +772,24 @@ impl Peripheral for I2c {
     }
 
     fn tick(&mut self, sys: &System) {
+        // Master-receiver lag BTF: silicon sets BTF once DR holds a byte
+        // while the shift register completes the next one (the guest is a
+        // byte behind). The model serves bytes instantly, so no lag forms
+        // on its own — but HAL flows WAIT on it: a 3-byte IT read parks in
+        // its RXNE handler (which handles only >3 and <=1) until BTF
+        // arrives. Emulate the lag in virtual time: an unread RXNE held
+        // across a peripheral tick means the next byte has "arrived", so
+        // latch BTF. Single-byte flows complete inside one step (no tick
+        // passes first), so they still observe RXNE-only.
+        if matches!(self.state, I2cState::Active { is_read: true })
+            && (self.sr1 & SR1_RXNE) != 0
+            && (self.sr1 & SR1_BTF) == 0
+            && (self.sr2 & SR2_BUSY) != 0
+            && !crate::peripherals::dbgmcu::dbgmcu_frozen(sys, &self.name)
+        {
+            self.sr1 |= SR1_BTF;
+            self.fire_interrupts(sys);
+        }
         // SMBus timeout: while SMBUS mode is on (CR1 bit 1), a transaction
         // held in Active with SCL effectively stuck latches TIMEOUT (SR1
         // bit 14). The model has no SCL line to watch, so the harness arms
@@ -649,11 +800,12 @@ impl Peripheral for I2c {
         // silicon rule; polled firmware observes the same flag.
         if self.cr1 & (1 << 1) != 0
             && matches!(self.state, I2cState::Active { .. })
+            && (self.sr2 & SR2_BUSY) != 0
             && !crate::peripherals::dbgmcu::dbgmcu_frozen(sys, &self.name)
         {
             self.smbus_ticks = self.smbus_ticks.wrapping_add(1);
             if self.smbus_ticks == 32 {
-                self.sr1 |= 1 << 14; // TIMEOUT
+                self.sr1 |= SR1_TIMEOUT;
                 self.fire_interrupts(sys);
             }
         } else {
@@ -739,6 +891,86 @@ mod tests {
         let _ = r(&sys, I2C1 + 0x10);
         assert_ne!(r(&sys, I2C1 + 0x14) & (1 << 12), 0, "PECERR on wrong PEC");
         w(&sys, I2C1, 1 | (1 << 1) | (1 << 5) | (1 << 9)); // STOP (clean)
+    }
+
+    /// Silicon SR1 seats (CMSIS: TXE=bit7, RXNE=bit6, BTF=bit2) + TRA in
+    /// SR2 on master writes. Guards the 2026-10-06 fix: the model previously
+    /// served TXE@6/RXNE@5/BTF@7, which real HAL/Arduino firmware polling
+    /// the silicon seats never observes (Wire stalled, manual spins hung).
+    #[test]
+    fn silicon_flag_seats_and_tra_on_master_write() {
+        let sys = system_with_regfile();
+        w(&sys, I2C1, 1); // PE
+        w(&sys, I2C1, 1 | (1 << 8)); // START
+        w(&sys, I2C1 + 0x10, 0xA0); // addr 0x50 write
+        assert_ne!(r(&sys, I2C1 + 0x14) & (1 << 1), 0, "ADDR set");
+        let _ = r(&sys, I2C1 + 0x14);
+        let sr2 = r(&sys, I2C1 + 0x18); // SR2 latch -> Active
+        assert_ne!(sr2 & (1 << 2), 0, "TRA set on master write");
+        // Post-ADDR: TXE (bit7) set, RXNE/BTF clear.
+        let sr1 = r(&sys, I2C1 + 0x14);
+        assert_ne!(sr1 & (1 << 7), 0, "TXE at bit7 after ADDR clear");
+        assert_eq!(sr1 & ((1 << 6) | (1 << 2)), 0, "no RXNE/BTF before first byte");
+        // Data write: TXE stays, BTF (bit2) joins; stale seats stay clear.
+        w(&sys, I2C1 + 0x10, 0x5A);
+        let sr1 = r(&sys, I2C1 + 0x14);
+        assert_ne!(sr1 & (1 << 7), 0, "TXE at bit7 after data write");
+        assert_ne!(sr1 & (1 << 2), 0, "BTF at bit2 after data write");
+        assert_eq!(sr1 & (1 << 6), 0, "bit6 is RXNE seat: clear on TX path");
+        assert_eq!(sr1 & (1 << 5), 0, "bit5 reserved: never set");
+        w(&sys, I2C1, 1 | (1 << 9)); // STOP (clean)
+    }
+
+    /// NACK (AF) followed by STOP must idle the bus: BUSY clears so the
+    /// next transfer's BUSY-wait (HAL + bare-metal) can proceed.
+    #[test]
+    fn stop_after_nack_clears_busy() {
+        let sys = system_with_regfile();
+        w(&sys, I2C1, 1); // PE
+        w(&sys, I2C1, 1 | (1 << 8)); // START
+        w(&sys, I2C1 + 0x10, 0x7E); // unregistered addr -> NACK
+        assert_ne!(r(&sys, I2C1 + 0x14) & (1 << 10), 0, "AF latched");
+        w(&sys, I2C1, 1 | (1 << 9)); // STOP
+        let sr2 = r(&sys, I2C1 + 0x18);
+        assert_eq!(sr2 & (1 << 1), 0, "BUSY clear after STOP");
+        // Bus usable again immediately.
+        w(&sys, I2C1, 1 | (1 << 8)); // START
+        w(&sys, I2C1 + 0x10, 0xA0);
+        assert_ne!(r(&sys, I2C1 + 0x14) & (1 << 1), 0, "ADDR set on retry");
+        w(&sys, I2C1, 1 | (1 << 9)); // STOP (clean)
+    }
+
+    /// Master read seats: RXNE at bit6 after ADDR clear; BTF joins only
+    /// for POS-positioned reads (the HAL 2-byte flow), never for plain
+    /// single-byte reads (a spurious BTF would over-read them).
+    #[test]
+    fn master_read_rxne_seat_and_pos_gated_btf() {
+        let sys = system_with_regfile();
+        w(&sys, I2C1, 1); // PE
+        // Plain read (no POS): RXNE only.
+        w(&sys, I2C1, 1 | (1 << 8)); // START
+        w(&sys, I2C1 + 0x10, 0xA1); // addr 0x50 read
+        assert_ne!(r(&sys, I2C1 + 0x14) & (1 << 1), 0, "ADDR set (read)");
+        let _ = r(&sys, I2C1 + 0x14);
+        let _ = r(&sys, I2C1 + 0x18);
+        let sr1 = r(&sys, I2C1 + 0x14);
+        assert_ne!(sr1 & (1 << 6), 0, "RXNE at bit6");
+        assert_eq!(sr1 & (1 << 2), 0, "no BTF without POS");
+        assert_eq!(sr1 & (1 << 7), 0, "no TXE on read path");
+        let sr2 = r(&sys, I2C1 + 0x18);
+        assert_eq!(sr2 & (1 << 2), 0, "no TRA on master read");
+        w(&sys, I2C1, 1 | (1 << 9)); // STOP (clean)
+        // POS read: RXNE + BTF together.
+        w(&sys, I2C1, 1 | (1 << 8)); // START
+        w(&sys, I2C1 + 0x10, 0xA1);
+        let _ = r(&sys, I2C1 + 0x14);
+        w(&sys, I2C1, 1 | (1 << 11)); // POS (no START/STOP action bits)
+        let _ = r(&sys, I2C1 + 0x14);
+        let _ = r(&sys, I2C1 + 0x18);
+        let sr1 = r(&sys, I2C1 + 0x14);
+        assert_ne!(sr1 & ((1 << 6) | (1 << 2)), 0, "RXNE+BTF with POS");
+        w(&sys, I2C1, 1 | (1 << 9)); // STOP (clean)
+        crate::system::drain_tap_queues();
     }
 
     #[test]

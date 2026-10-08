@@ -42,6 +42,12 @@ pub struct SdCard {
     /// CMD18 streaming: next block index to queue when the reply drains.
     stream_next: Option<u32>,
     cs_state: bool,
+    /// CMD32/33 erase window (block indices, SDHC). CMD38 accepted as a
+    /// no-op clearing the window (content untouched) — SdFat probes the
+    /// erase path during init on some cards; answering illegal (0x04)
+    /// makes it retry until its timeout looks like a hang.
+    erase_start: Option<u32>,
+    erase_end: Option<u32>,
 }
 
 struct WriteStage {
@@ -62,6 +68,8 @@ impl SdCard {
             idle: true, // powers up idle (needs CMD0 like silicon)
             app_cmd: false,
             acmd41_seen: false,
+            erase_start: None,
+            erase_end: None,
             wr: None,
             stream_next: None,
             cs_state: true,
@@ -70,6 +78,14 @@ impl SdCard {
 
     pub fn block_count(&self) -> usize {
         self.content.len() / 512
+    }
+
+    /// Overwrite card content with a filesystem image (FS-level tests).
+    /// Longer images are truncated to the card size; shorter ones leave
+    /// the tail erased (0xFF). The block count never changes.
+    pub fn load_image(&mut self, data: &[u8]) {
+        let n = data.len().min(self.content.len());
+        self.content[..n].copy_from_slice(&data[..n]);
     }
 
     fn push_r1(&mut self, v: u8) {
@@ -144,6 +160,26 @@ impl SdCard {
             58 => self.reply.extend([if self.idle { 0x01 } else { 0x00 }, 0xC0, 0xFF, 0x80, 0x00]),
             // CMD16 SET_BLOCKLEN: fixed 512 in this model.
             16 => self.push_r1(if arg == 512 { 0x00 } else { 0x40 }),
+            // CMD59 CRC_ON_OFF: CRC is never checked in this model, so
+            // both states are accepted (R1). SdFat disables CRC via
+            // CMD59(0) during init; answering illegal (0x04) makes it
+            // retry until its timeout looks like a hang.
+            59 => self.push_r1(if self.idle { 0x01 } else { 0x00 }),
+            // CMD32/33 ERASE_WR_BLK_START/END + CMD38 ERASE: accepted as
+            // a no-op (window latched, then cleared; content untouched).
+            32 => {
+                self.erase_start = Some(arg);
+                self.push_r1(if self.idle { 0x01 } else { 0x00 });
+            }
+            33 => {
+                self.erase_end = Some(arg);
+                self.push_r1(if self.idle { 0x01 } else { 0x00 });
+            }
+            38 => {
+                self.erase_start = None;
+                self.erase_end = None;
+                self.push_r1(if self.idle { 0x01 } else { 0x00 });
+            }
             // CMD13 SEND_STATUS: R2 (all clear).
             13 => self.reply.extend([0x00, 0x00]),
             // CMD9 SEND_CSD / CMD10 SEND_CID: R1 + token + 16 bytes + CRC.
@@ -415,6 +451,47 @@ mod tests {
         assert_eq!(xfer(&mut c, &sys, 0xFF), 0xFF, "no token after error");
         // Bare ACMD41 (no CMD55): illegal, stays idle.
         assert_eq!(cmd(&mut c, &sys, 41, 0)[5], 0x04, "illegal without prefix");
+    }
+
+    #[test]
+    fn crc_and_erase_cmds_answer_r1() {
+        // SdFat init probes CMD59 (CRC off) and the CMD32/33/38 erase
+        // path; illegal-command answers here made it retry into its
+        // timeout (the SdFat hang). Seeded-image content is untouched.
+        let (mut c, sys) = card();
+        assert_eq!(cmd(&mut c, &sys, 0, 0)[5], 0x01, "CMD0 idle");
+        assert_eq!(cmd(&mut c, &sys, 59, 0)[5], 0x01, "CMD59 accepted while idle");
+        assert_eq!(cmd(&mut c, &sys, 32, 0)[5], 0x01, "CMD32 accepted while idle");
+        assert_eq!(cmd(&mut c, &sys, 33, 1)[5], 0x01, "CMD33 accepted while idle");
+        assert_eq!(cmd(&mut c, &sys, 38, 0)[5], 0x01, "CMD38 accepted while idle");
+        // Ready state answers 0x00.
+        cmd(&mut c, &sys, 55, 0); cmd(&mut c, &sys, 41, 0);
+        cmd(&mut c, &sys, 55, 0);
+        assert_eq!(cmd(&mut c, &sys, 41, 0)[5], 0x00, "ACMD41 ready");
+        assert_eq!(cmd(&mut c, &sys, 59, 0)[5], 0x00, "CMD59 accepted when ready");
+        assert_eq!(cmd(&mut c, &sys, 32, 0)[5], 0x00, "CMD32 accepted when ready");
+        assert_eq!(cmd(&mut c, &sys, 33, 1)[5], 0x00, "CMD33 accepted when ready");
+        assert_eq!(cmd(&mut c, &sys, 38, 0)[5], 0x00, "CMD38 accepted when ready");
+        // Erase window is a no-op: content untouched, still erased.
+        assert_eq!(c.content.iter().all(|&x| x == 0xFF), true, "erase is a no-op");
+    }
+
+    #[test]
+    fn load_image_seeds_content() {
+        let (mut c, sys) = card();
+        let mut img = vec![0xFF; 4 * 512];
+        img[510] = 0x55; img[511] = 0xAA;
+        img[512] = 0x42;
+        c.load_image(&img);
+        assert_eq!(cmd(&mut c, &sys, 17, 0)[5], 0x00, "R1");
+        assert_eq!(xfer(&mut c, &sys, 0xFF), 0xFE, "token");
+        let mut blk = vec![];
+        for _ in 0..512 { blk.push(xfer(&mut c, &sys, 0xFF)); }
+        assert_eq!(blk[510], 0x55, "seeded signature byte");
+        assert_eq!(blk[511], 0xAA, "seeded signature byte");
+        // Longer images truncate to the card size (no panic, no growth).
+        c.load_image(&vec![0x11; 99 * 512]);
+        assert_eq!(c.content.len(), 4 * 512, "size unchanged after oversize load");
     }
 
     #[test]

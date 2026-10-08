@@ -69,7 +69,7 @@ static void i2c_oled_write(const unsigned char *data, int len) {
     (void)I2C_SR1;                               // read SR1 (latch)
     (void)I2C_SR2;                               // read SR2 (Active)
     for (int i = 0; i < len; i++) {
-        while (!(I2C_SR1 & (1 << 6)));           // model TX-complete bit
+        while (!(I2C_SR1 & (1 << 7)));           // TXE (silicon seat)
         I2C_DR = data[i];
     }
     I2C_CR1 |= (1 << 9);                         // STOP

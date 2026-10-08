@@ -152,6 +152,7 @@ export const spi_fault_crc: (a: number) => void;
 export const spi_fault_modf: (a: number) => void;
 export const spi_flash_debug: (a: number, b: number, c: number) => void;
 export const spi_push_miso: (a: number, b: number, c: number, d: number) => void;
+export const spi_sd_load_image: (a: number, b: number, c: number, d: number) => void;
 export const spi_slave_clock: (a: number, b: number) => number;
 export const spi_slave_gate: (a: number) => number;
 export const spi_slave_select: (a: number, b: number) => void;

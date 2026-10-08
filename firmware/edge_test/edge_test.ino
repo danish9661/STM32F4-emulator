@@ -97,11 +97,11 @@ static int i2c_write_eeprom(uint8_t addr, uint8_t data) {
     while (!(I2C_SR1 & 2));
     uint32_t sr2 = I2C_SR2;
     (void)sr2;
-    while (!(I2C_SR1 & (1 << 6)));
+    while (!(I2C_SR1 & (1 << 7)));
     I2C_DR = addr;
-    while (!(I2C_SR1 & (1 << 6)));
+    while (!(I2C_SR1 & (1 << 7)));
     I2C_DR = data;
-    while (!(I2C_SR1 & (1 << 6)));
+    while (!(I2C_SR1 & (1 << 7)));
     I2C_CR1 |= (1 << 9);
     return (I2C_SR1 & (1 << 10)) ? -1 : 0;
 }
@@ -113,9 +113,9 @@ static int i2c_read_eeprom(uint8_t addr, uint8_t *out) {
     while (!(I2C_SR1 & 2));
     uint32_t sr2 = I2C_SR2;
     (void)sr2;
-    while (!(I2C_SR1 & (1 << 6)));
+    while (!(I2C_SR1 & (1 << 7)));
     I2C_DR = addr;
-    while (!(I2C_SR1 & (1 << 6)));
+    while (!(I2C_SR1 & (1 << 7)));
     I2C_CR1 |= (1 << 8);
     while (!(I2C_SR1 & 1));
     I2C_DR = 0xA1;
@@ -123,7 +123,7 @@ static int i2c_read_eeprom(uint8_t addr, uint8_t *out) {
     I2C_CR1 &= ~(1 << 10);
     sr2 = I2C_SR2;
     (void)sr2;
-    while (!(I2C_SR1 & (1 << 5)));
+    while (!(I2C_SR1 & (1 << 6)));
     *out = I2C_DR;
     I2C_CR1 |= (1 << 9);
     return (I2C_SR1 & (1 << 10)) ? -1 : 0;

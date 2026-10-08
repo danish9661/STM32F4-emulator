@@ -4,6 +4,67 @@ All notable changes to `stm32f4-emu` are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/); this project uses
 date-based entries rather than strict SemVer until the first published release.
 
+## [Unreleased] — 2026-10-06
+
+- I2C master-model silicon correction (P0 — real HAL/Arduino firmware
+  stalled forever while owner bare-metal tests passed). Root cause: the
+  SR1 flag seats were rotated (model TXE@6/RXNE@5/BTF@7 vs silicon
+  TXE@7/RXNE@6/BTF@2), so HAL/LL/Arduino polls and IRQ dispatch never
+  observed a complete transfer; on top of that BTF was never set on the
+  master path, SR2 TRA was missing (HAL EV dispatch takes the receiver
+  branch for writes without it), CR2 IT seats were rotated
+  (ERR/EVT/BUF@8/9/10 read as 10/9/8), IRQs were edge-evaluated only
+  (the HAL Seq_* drivers enable ITs *after* START — silicon pends on
+  flag+enable in any order), STOP wiped DR/RXNE (the HAL 1-byte RX flow
+  generates STOP before reading DR), STOP left BUSY set after NACK
+  aborts, and SR1 error flags had no software-clear path. Evidence:
+  Arduino `Wire.endTransmission` returned 4 (timeout) with a registered
+  slave; manual `while(!TXE/BTF)` spins never exit; `requestFrom`
+  returned 0. Fixes in `stm32-periph-wasm/src/peripherals/i2c.rs`: named
+  SR1/SR2/CR2 seats everywhere; TXE|BTF on master writes (instant-
+  transfer semantics, documented); RXNE (+BTF when ITBUF is off, or
+  POS-positioned) on master reads with instant prefetch; TRA on
+  write-direction matches; BUSY clear on every STOP; STOP unwind
+  preserves the transfer tail (state/device/DR/flags) for post-STOP DR
+  reads instead of full reset; SR1 BERR/ARLO/AF/OVR/PECERR/TIMEOUT
+  clear-by-write-0; fire on CR2 writes; idle-bus residue drop
+  (TXE/RXNE/BTF cleared when a CR2 write lands with BUSY clear —
+  kills the post-completion EV tail-chain storm); RX lag-BTF in tick
+  for the 3-byte HAL flow. Verified with Arduino sketches (not mocks):
+  `endTransmission` 0, `requestFrom` 1/2/6 bytes exact
+  (`A0`/`A2 A3`/`A0..A5`), `millis()` in exact 200 ms steps.
+- Owner firmware re-based to the silicon seats (it had been written
+  against the rotated ones): `periph_test` (TXE/RXNE waits, AF check
+  9→10), `edge_test` (TXE/RXNE waits), `oled_test`/`rtc_test` (TXE
+  waits), `gap10_i2c` (RXNE wait). All bins rebuilt (base + f401/f411/
+  f429 + 8-board Arduino matrices for edge/periph_test; base Arduino
+  bins via GENERIC_F407VGTX per §40 precedent; `.map` path-churn
+  reverted), `site/firmware.js` regenerated. Matrix green: edge 8/8,
+  periph 8/8, oled 3/3, rtc 3/3, gap10_i2c 3/3, arduino_boards 8/8.
+- Full peripheral-model reset on reboot (cross-cutting sync
+  contract): `reset`/`resetCpu`/`loadImage`/`bootPreset` now share a
+  `fullReset` that re-installs a fresh WasmSystem from the creation
+  SVD + chip hint (~30 ms), drains JS queues, and re-zeroes instCount
+  (reset() previously never zeroed it). Deliberately preserved
+  (silicon/host-faithful): flash/RAM, EEPROM/flash/regfile content
+  (non-volatile), the monotonic instruction clock, watchdog
+  reset-cause flags, ADC overrides + GPIO inputs (host config), link
+  state. Verified: RCC/ODR/NVIC at reset values post-reset, banner
+  reboots clean.
+- New unit tests: silicon flag seats + TRA on master write, STOP-after-
+  NACK clears BUSY, master-read RXNE seat + POS-gated BTF
+  (`cargo test --lib peripherals::i2c`: 12/12 serial; the one parallel
+  failure is the known shared-queue flake, also red on baseline).
+- Runner note (simulator side, not this repo): `withAssets.i2c onRead`
+  must return a byte ARRAY (engine pushes what it returns); a bare
+  number has no `.length` and fills nothing.
+- Arduino Wire IRQ-driver regression test: `site/test_arduino_wire.mjs`
+  (`npm run test:wire`, also chained into `npm test` after
+  `test_arduino_boards`) with sketch `firmware/arduino_wire/`
+  (Disco F407VG build committed). Covers the reported hang shape —
+  manual 2-byte master-TX to 0x3C — plus repeated-START reads (1/2/6
+  bytes, exact data) and the 0x3C observer fan-out.
+
 ## [1.6.0] — 2026-10-05
 
 - Engine-side I2C observer support: broadcast fan-out to co-located
