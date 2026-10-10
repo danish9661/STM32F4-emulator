@@ -240,7 +240,7 @@ const setStatus = (text, cls) => {
 };
 
 let uartChunks = [], uartLen = 0;
-const appendUart = (chunk) => {
+const appendUart = (chunk, paint = true) => {
     if (!chunk) return;
     uartChunks.push(chunk);
     uartLen += chunk.length;
@@ -258,10 +258,35 @@ const appendUart = (chunk) => {
         }
     }
     uartBuf = uartChunks.join('');
+    uartDirty = true;
+    // DOM paint is throttled by the caller (per-frame full rewrites of a
+    // 200k string + autoscroll layout are the page's biggest UI cost);
+    // the buffer above stays current so markers never lag semantically.
+    if (!paint) return;
+    paintUart();
+};
+
+// Flush the buffered UART text to the terminal DOM (orig. inline in
+// appendUart; split out so the frame loop can throttle paints).
+const paintUart = () => {
+    if (!uartDirty) return;
+    uartDirty = false;
+    lastUartPaint = performance.now();
     const wasAtBottom = uartEl.scrollTop + uartEl.clientHeight >= uartEl.scrollHeight - 8;
     uartEl.textContent = uartBuf;
     if (wasAtBottom && $('chkAuto').checked) uartEl.scrollTop = uartEl.scrollHeight;
 };
+
+// Adaptive UI cadence (Step-1 page-speed work): full-rate UI for ~2 s after
+// any user interaction, throttled (every 4th frame + 500 ms UART ceiling)
+// while running unattended. Emulation steps are NEVER throttled — only DOM
+// paints and panel refreshes.
+let uiTick = 0, lastInteract = 0, lastUartPaint = 0, uartDirty = false;
+const uiBump = () => { lastInteract = performance.now(); };
+addEventListener('pointerdown', uiBump, { passive: true });
+addEventListener('keydown', uiBump);
+addEventListener('wheel', uiBump, { passive: true });
+const uiFullRate = () => performance.now() - lastInteract < 2000;
 
 // ── network capture + counters (pcap download, up/down speed) ─────────────
 // One funnel for every frame crossing the virtual wire, in both directions:
@@ -349,13 +374,21 @@ const pcapDownload = () => {
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     setStatus(`pcap: ${pcapFrames.length} frames downloaded`, 'run');
 };
+// Packet viewer is DOM-churn bound (createElement+prepend+trim per frame
+// stalls the main-thread event loop — measured 12 ms worker-message dispatch
+// latency on eth vs 1.6 ms on blinky from this churn alone). Buffer the
+// metadata; renderFrames() paints one batched list on UI cadence.
+const frameBuf = [];
 const addFrame = (dir, pkt) => {
-    const meta = describeFrame(dir, pkt);
-    const div = document.createElement('div');
-    div.className = 'frame ' + dir;
-    div.innerHTML = `<span class="tag">${dir === 'tx' ? 'TX' : 'RX'}</span> ${pkt.length}B ${meta}<pre style="margin:2px 0 0;font-size:11px;color:var(--dim);white-space:pre-wrap;word-break:break-all;">${hex(pkt, 32)}</pre>`;
-    framesEl.prepend(div);
-    while (framesEl.children.length > 40) framesEl.lastChild.remove();
+    frameBuf.unshift({ dir, len: pkt.length, meta: describeFrame(dir, pkt), head: hex(pkt, 32) });
+    if (frameBuf.length > 40) frameBuf.pop();
+};
+const renderFrames = () => {
+    let html = '';
+    for (const f of frameBuf) {
+        html += `<div class="frame ${f.dir}"><span class="tag">${f.dir === 'tx' ? 'TX' : 'RX'}</span> ${f.len}B ${f.meta}<pre style="margin:2px 0 0;font-size:11px;color:var(--dim);white-space:pre-wrap;word-break:break-all;">${f.head}</pre></div>`;
+    }
+    framesEl.innerHTML = html;
 };
 
 const describeFrame = (dir, pkt) => {
@@ -460,7 +493,7 @@ $('btnBoot').addEventListener('click', async () => {
         $('btnRun').textContent = 'Run';
         setStatus('loading firmware…', 'stop');
         uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0;
-        framesEl.textContent = '';
+        framesEl.textContent = ''; frameBuf.length = 0;
         totalInst = 0; stepsDone = 0;
         t0 = lastT = performance.now(); lastInst = 0;
         $('stFw').textContent = image.name;
@@ -519,6 +552,232 @@ const setBusy = (busy) => {
 const params = new URLSearchParams(location.search);
 const bridgeUrl = params.get('bridge');
 
+// ── worker thread driver (Step-2 page-speed work) ──────────────────────────
+// Local mode boots the emulator inside site/emu-worker.js unless ?noworker=1
+// (escape hatch: keeps the legacy main-thread loop for harnesses/debug).
+// The page keeps DOM/canvas/gateway socket/file parsing; the worker owns
+// stepping, netsim, usbhost, seeds and per-burst state. Renderers are
+// UNCHANGED: `emu` becomes the WorkerEmu adapter below, serving the same
+// sync API from burst-cached state.
+const useWorker = !bridgeUrl && !params.has('noworker');
+let emuWorker = null, workerActive = false, workerBooted = false, pipePrimed = false;
+let burstResolve = null, measureSeq = 0;
+const measureWaiters = new Map();
+// Burst-cached state (rebuilt on every worker burst):
+let wCache = new Map();       // addr -> u32 (gpio banks, probes, ltdc info)
+let wRegs = null;             // {PC,SP,XPSR,R0..R12}
+let wFault = null;
+let wOledFb = new Uint8Array(0), wOledFrame = -1;
+let wTftFb = new Uint8Array(0), wTftFrame = '', wTftW = 0, wTftH = 0;
+let wLtdcInfo = null, wLtdcPx = null, wLtdcFrame = -1;
+let wBuzzer = null, wRtc = null, wPps = null, wPpsLevel = null, wDma = 0;
+let wSpkQueue = [];
+const workerPost = (msg, transfer) => { if (emuWorker) emuWorker.postMessage(msg, transfer || []); };
+// Probe addresses the worker must read per burst: watch + trace + periph
+// panel united (worker returns them in state.watch; the page splits them).
+const pushProbes = () => {
+    if (!workerActive) return;
+    const addrs = [];
+    try { for (const w of WATCH) addrs.push(w.addr >>> 0); } catch {}
+    try { for (const t of TRACES) addrs.push(t.addr >>> 0); } catch {}
+    try { for (const [, a] of PERIPH_REGS) addrs.push(a >>> 0); } catch {}
+    workerPost({ t: 'watch', addrs });
+};
+const onWorkerMessage = (e) => {
+    const m = e.data;
+    if (!m || !m.t) return;
+    if (m.t === 'booted') {
+        workerBooted = true;
+        if (m.uart) appendUart(m.uart, true);
+        if (burstResolve) { const r = burstResolve; burstResolve = null; r(); }
+    } else if (m.t === 'burst') {
+        if (m.uart) appendUart(m.uart, true);
+        for (const pkt of (m.tx || [])) {
+            const buf = pkt instanceof Uint8Array ? pkt : new Uint8Array(pkt);
+            addFrame('tx', buf);
+            netRecordTx(buf);
+            if (gw.connected && gw.ws) {
+                gw.tx++;
+                refreshGwLabel();
+                try { gw.ws.send(buf); } catch {}
+            }
+        }
+        if (m.state) {
+            const st = m.state;
+            totalInst = st.inst >>> 0;
+            if (typeof st.steps === 'number') stepsDone += st.steps;
+            wRegs = st.regs ? { PC: st.pc >>> 0, SP: st.sp >>> 0, XPSR: st.xpsr >>> 0,
+                R0: st.regs[0], R1: st.regs[1], R2: st.regs[2], R3: st.regs[3], R4: st.regs[4],
+                R5: st.regs[5], R6: st.regs[6], R7: st.regs[7], R8: st.regs[8], R9: st.regs[9],
+                R10: st.regs[10], R11: st.regs[11], R12: st.regs[12] } : wRegs;
+            wFault = m.fault || null;
+            wCache = new Map();
+            if (st.gpio) {
+                for (let b = 0; b < st.gpio.length && b < 5; b++) {
+                    const base = 0x40020000 + b * 0x400;
+                    wCache.set(base, st.gpio[b][0] >>> 0);
+                    wCache.set(base + 0x14, st.gpio[b][1] >>> 0);
+                    wCache.set(base + 0x10, st.gpio[b][2] >>> 0);
+                }
+            }
+            if (st.watch) for (const k of Object.keys(st.watch)) wCache.set(Number(k) >>> 0, st.watch[k] >>> 0);
+            if (st.ltdcInfo) {
+                const offs = [0x18, 0x84, 0x94, 0xAC, 0xB0, 0xB4, 0x88, 0x8C];
+                for (let i = 0; i < 8; i++) wCache.set(0x40016800 + offs[i], st.ltdcInfo[i] >>> 0);
+                wLtdcInfo = st.ltdcInfo; wLtdcFrame = st.ltdcFrame;
+                if (st.ltdcPx) wLtdcPx = st.ltdcPx;
+            }
+            if (st.oledFb) { wOledFb = st.oledFb; wOledFrame = st.oledFrame; }
+            else if (typeof st.oledFrame === 'number') wOledFrame = st.oledFrame;
+            if (st.tftFb) { wTftFb = st.tftFb; wTftFrame = st.tftFrame; wTftW = st.tftW; wTftH = st.tftH; }
+            else if (typeof st.tftFrame === 'number') { wTftFrame = st.tftFrame; wTftW = st.tftW; wTftH = st.tftH; }
+            wBuzzer = st.buzzer || null; wRtc = st.rtc || null;
+            if (typeof st.pps === 'number') { wPps = st.pps; wPpsLevel = st.ppsLevel; }
+            if (typeof st.dma === 'number') wDma = st.dma;
+            if (st.spk && st.spk.length) wSpkQueue.push(st.spk);
+        }
+        if (burstResolve) { const r = burstResolve; burstResolve = null; r(); }
+    } else if (m.t === 'status') {
+        setStatus(m.text, m.cls);
+    } else if (m.t === 'measureResult') {
+        const w = measureWaiters.get(m.id);
+        if (w) { measureWaiters.delete(m.id); w(m); }
+    }
+};
+// Same sync/async surface the page renderers use against the local
+// emulator; reads come from burst caches (a miss throws — every caller
+// already falls back to '—').
+const workerAdapter = {
+    read32: (a) => {
+        a >>>= 0;
+        if (wCache.has(a)) return wCache.get(a);
+        throw new Error('worker: uncached read32');
+    },
+    write32: (a, v) => workerPost({ t: 'poke', addr: a >>> 0, value: v >>> 0 }),
+    getRegisters: () => wRegs || { PC: 0, SP: 0, XPSR: 0, R0: 0, R1: 0, R2: 0, R3: 0, R4: 0, R5: 0, R6: 0, R7: 0, R8: 0, R9: 0, R10: 0, R11: 0, R12: 0 },
+    drainUart: () => '',
+    step: () => { throw new Error('worker mode: stepping is loop-driven'); },
+    injectFrame: (buf) => workerPost({ t: 'gwrx', frame: buf }),
+    sendUart: (bytes) => workerPost({ t: 'uartRx', bytes }),
+    sendUartTo: (addr, bytes) => workerPost({ t: 'uartRxTo', addr: addr >>> 0, bytes }),
+    canInject: (id, dlc, data) => workerPost({ t: 'can', id, dlc, data }),
+    takeSpeakerSamples: () => (wSpkQueue.length ? wSpkQueue.shift() : new Float32Array(0)),
+    oled: null, // assigned at bootWorker (null = no device, like legacy emu)
+    tft: null, // assigned at bootWorker
+    buzzer: null, // assigned at bootWorker
+    rtc: null, // assigned at bootWorker
+    uc: { mem_read: (addrBig, len) => {
+        // LTDC scanout window only (the one mem_read render path).
+        const addr = Number(addrBig >>> 0), n = Number(len);
+        if (wLtdcInfo && wLtdcPx) {
+            const cfbar = wLtdcInfo[3] >>> 0;
+            const pitch = (wLtdcInfo[4] >>> 16) || 0;
+            const lineBytes = (wLtdcInfo[4] & 0xFFFF) || 0;
+            if (pitch && lineBytes && addr >= cfbar) {
+                const row = Math.floor((addr - cfbar) / pitch);
+                const off = (addr - cfbar) % pitch;
+                if (off + n <= lineBytes) return wLtdcPx.slice(row * lineBytes + off, row * lineBytes + off + n);
+            }
+        }
+        throw new Error('worker: uncached mem_read');
+    } },
+    faultInfo: () => wFault,
+    reset: () => workerPost({ t: 'reset', mode: 0 }),
+    resetCpu: () => workerPost({ t: 'reset', mode: 0 }),
+    setNrst: (asserted) => { workerPost({ t: 'nrst', asserted: !!asserted }); return !!asserted; },
+    close: () => { try { if (emuWorker) emuWorker.terminate(); } catch {} emuWorker = null; workerActive = false; },
+    stop: () => workerPost({ t: 'stop', paused: true }),
+};
+// Async MIPS probe helper (worker-aware cdp_mips path).
+window.__emuMeasure = (steps, size) => new Promise((resolve) => {
+    if (!workerActive) { resolve(null); return; }
+    const id = ++measureSeq;
+    measureWaiters.set(id, resolve);
+    workerPost({ t: 'measure', id, steps, size });
+});
+
+// Worker-thread boot: resolve board/SVD like the legacy path, then hand
+// everything to emu-worker.js (firmware + image buffers transferred,
+// zero-copy). Resolves true when the worker reports booted.
+const bootWorker = async (id) => {
+    const { key: boardKey, board } = boardForSelection(image.name, boardSelectEl ? boardSelectEl.value : 'all');
+    setStatus('booting (worker)…', 'stop');
+    let svdXml = '';
+    try {
+        svdXml = await fetch('vendor/' + board.svd + '?v=48').then((r) => r.text());
+    } catch (e) { setStatus('boot: SVD fetch failed', 'err'); return false; }
+    if (id !== session) return false;
+    try { if (emuWorker) emuWorker.terminate(); } catch {}
+    emuWorker = null; workerActive = false; workerBooted = false; pipePrimed = false;
+    wCache = new Map(); wRegs = null; wFault = null;
+    wOledFb = new Uint8Array(0); wOledFrame = -1;
+    wTftFb = new Uint8Array(0); wTftFrame = ''; wTftW = 0; wTftH = 0;
+    wLtdcInfo = null; wLtdcPx = null; wLtdcFrame = -1;
+    wBuzzer = null; wRtc = null; wPps = null; wPpsLevel = null; wDma = 0;
+    wSpkQueue = [];
+    const dev = Object.assign({}, DEVICE_FIRMWARES[image.name] || {});
+    if (dev.fsmcDevices) { delete dev.fsmcDevices; dev.fsmc = true; }
+    // Adapter device slots mirror the legacy emu handle: null when the
+    // firmware has no such device (renderers early-return on null).
+    workerAdapter.oled = dev.oled ? { get fb() { return wOledFb; }, frame: () => wOledFrame } : null;
+    workerAdapter.tft = dev.tft ? { get fb() { return wTftFb; }, get w() { return wTftW; }, get h() { return wTftH; }, frame: () => (typeof wTftFrame === 'number' ? wTftFrame : -1) } : null;
+    workerAdapter.buzzer = dev.buzzer ? { get freq() { return wBuzzer ? wBuzzer.f : 0; }, get duty() { return wBuzzer ? wBuzzer.duty : 0; }, get change() { return wBuzzer ? wBuzzer.ch : 0; } } : null;
+    workerAdapter.rtc = (dev.rtc || dev.regfile) ? { get time() { return wRtc ? wRtc.t : null; }, get temp() { return wRtc ? wRtc.temp : 0; }, get change() { return wRtc ? wRtc.ch : 0; } } : null;
+    const transfers = [];
+    const fwBuf = image.flash;
+    transfers.push(fwBuf.buffer);
+    const extraMem = (image.extraMem || []).map((s) => {
+        transfers.push(s.data.buffer);
+        return { addr: s.addr, data: s.data };
+    });
+    const cfg = {
+        fw: fwBuf, svdXml, svdFile: board.svd,
+        flash_size: board.flash_size, ram_size: board.ram_size,
+        extraMem, uartAddr: image.uartAddr, name: image.name,
+        enable_irqs: IRQ_FIRMWARES.has(image.name),
+        irq_eth: IRQ_ETH_FIRMWARES.has(image.name),
+        freertos: FREERTOS_FIRMWARES.has(image.name),
+        lowpower: LOWPOWER_FIRMWARES.has(image.name),
+        eth: ETH_RX_MAP[image.name],
+        ext_devices: dev,
+        gateway: !!(gw.connected && gw.ws),
+        useNetsim: !(gw.connected && gw.ws),
+        audioWav: image.name.startsWith('audio_test') ? makeAudioTestWav() : null,
+        dcmiPhase1: image.name.startsWith('dcmi_test'),
+        dcmiPhases: image.name.startsWith('dcmi_test'),
+        dcmiBig: DCMI_BIG,
+        camPrefeed: (image.name === 'new_periph_test' || image.name === 'deep_periph_test')
+            ? DEVICE_FIRMWARES[image.name].camera : null,
+        usbhost: image.name.startsWith('usb_cdc_test') || image.name.startsWith('usb_cdc_live'),
+        featHooks: !!(!bridgeUrl && bindings && typeof bindings.eth_arm_collision === 'function'
+            && (image.name.startsWith('eth_feat_test') || image.name.startsWith('eth_pins_test'))),
+        fineSteps: image.name.startsWith('eth_feat_test') || image.name.startsWith('eth_adv') || image.name.startsWith('eth_pins_test'),
+        probes: [],
+    };
+    try { for (const w of WATCH) cfg.probes.push(w.addr >>> 0); } catch {}
+    try { for (const t of TRACES) cfg.probes.push(t.addr >>> 0); } catch {}
+    try { for (const [, a] of PERIPH_REGS) cfg.probes.push(a >>> 0); } catch {}
+    emuWorker = new Worker('emu-worker.js?v=3', { type: 'module' });
+    emuWorker.onmessage = onWorkerMessage;
+    emu = workerAdapter;
+    netsim = null; usbhost = null; featHooks = null;
+    gw.tx = 0; gw.rx = 0;
+    if (gw.connected) setGwStatus(true, gwLabel());
+    const bootedP = new Promise((resolve) => { burstResolve = resolve; });
+    emuWorker.postMessage({ t: 'boot', cfg }, transfers);
+    await bootedP;
+    if (id !== session) { try { emuWorker.terminate(); } catch {} emuWorker = null; emu = null; return false; }
+    workerActive = true;
+    window.__emu = emu;          // debug handle (CDP smoke tests)
+    appendUart(`── booted ${image.name} ${gw.connected ? '(gateway)' : '(netsim)'} ──\r\n`, true);
+    syncRxPort();
+    setStatus('running', 'run');
+    $('btnRun').textContent = 'Stop';
+    running = true;
+    loop(id);
+    return true;
+};
+
 const boot = async () => {
     const id = ++session;
     running = false;
@@ -532,7 +791,7 @@ const boot = async () => {
 
     const fw = image.flash;
     uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0;
-    framesEl.textContent = '';
+    framesEl.textContent = ''; frameBuf.length = 0;
     totalInst = 0; stepsDone = 0;
     t0 = lastT = performance.now(); lastInst = 0;
     // Fresh network session per boot: counters restart, capture restarts
@@ -590,6 +849,7 @@ const boot = async () => {
         }
     } else {
         // ── local mode: WASM runs in the browser (default) ──
+        if (useWorker) { await bootWorker(id); return; }
         // Board variant per firmware preset (SVD + flash/RAM sizes), honoring
         // the board selector when the preset supports the selected board.
         // NOTE (VENDOR_V): vendor asset versions (?v=48) must be bumped together
@@ -685,6 +945,32 @@ const boot = async () => {
 const loop = async (id) => {
     while (session === id) {
         if (!running) { await raf(); continue; }
+        // Adaptive UI cadence: emulation always steps; DOM/panels paint at
+        // full rate only shortly after user interaction, else every 4th
+        // frame (see uiFullRate above).
+        uiTick++;
+        const uiDue = uiFullRate() || (uiTick % 4 === 0);
+        let skipRaf = false;
+        if (workerActive) {
+            // Pipelined worker driving: one burst is always in flight, so
+            // the worker steps WHILE the page paints (true overlap — the
+            // serial post-then-await left worker and page idle in turns).
+            // The message round trip + UI work between bursts is the TCI
+            // gap (doom-worker pattern); bursts are never batched
+            // back-to-back. No raf wait here: the message await IS the
+            // yield, and raf slack was pure idle (up to a full frame).
+            if (!pipePrimed) { workerPost({ t: 'tick' }); pipePrimed = true; }
+            await new Promise((resolve) => { burstResolve = resolve; });
+            if (id !== session || !workerActive || !emu) { pipePrimed = false; await raf(); continue; }
+            workerPost({ t: 'tick' });   // N+1 overlaps the UI work below
+            skipRaf = true;
+        } else {
+        // Steps-per-frame (Step-1 page-speed work): the loop was capped at
+        // rAF_rate x step_size (~6 MIPS at 60 Hz x 100k) — UI throttling
+        // alone cannot move it. Burst several steps per frame and refresh
+        // UI once: 6 x 100k ~= 13 ms emulate + ~2 ms UI, still inside a
+        // 16.7 ms frame. Fine-step firmware keeps its 20k granularity
+        // (burst count, not size, changed — bands unaffected).
         try {
             // eth_feat_test/eth_adv/eth_pins_test run at 20k-inst steps:
             // their wire-rate bands and race windows are calibrated for
@@ -694,7 +980,14 @@ const loop = async (id) => {
             // while 20k passes 13/13; eth_pins_test COL needs the arm to
             // land inside the TX window; the node matrix runs all at 20k).
             const fineSteps = image && (image.name.startsWith('eth_feat_test') || image.name.startsWith('eth_adv') || image.name.startsWith('eth_pins_test'));
-            const res = await emu.step(fineSteps ? 20000 : undefined);
+            // Bridge mode: each step() is a WS round trip — bursting would
+            // stack latencies past the frame budget. Burst only locally.
+            const burst = bridgeUrl ? 1 : 6;
+            let res = null;
+            for (let s = 0; s < burst; s++) {
+                res = await emu.step(fineSteps ? 20000 : undefined);
+                if (res.stopped) break;
+            }
             totalInst = res.instCount;
             stepsDone++;
         } catch (e) {
@@ -703,25 +996,28 @@ const loop = async (id) => {
             $('btnRun').textContent = 'Run';
             return;
         }
-        appendUart(emu.drainUart());
-        // Scripted USB host for the usb_cdc_test preset (local mode only —
+        }
+        appendUart(emu.drainUart(), uiDue);
+        // UART paint ceiling: even off-cadence, never let the terminal lag
+        // more than ~500 ms behind the buffer (test-marker + eyeball bound).
+        if (uartDirty && performance.now() - lastUartPaint > 500) paintUart();        // Scripted USB host for the usb_cdc_test preset (local mode only —
         // USB has no gateway backend; this is the netsim equivalent).
         // NOTE: no .done gate — frame() also drains the live bulk-OUT tap
         // (serial-input box → EP1 OUT), which must stay live after the
         // scripted enum+echoes complete.
         try {
-            if (usbhost) usbhost.frame(uartBuf);
+            if (!workerActive && usbhost) usbhost.frame(uartBuf);
         } catch (e) {}
         // Scripted DCMI camera for dcmi_test (local mode only): phase 1 was
         // fed at boot; feed the oversized frame when PHASE2 prints (the
         // firmware retries, so landing anywhere after the marker works) and
         // re-feed it for the phase-3 DMA capture after OVR is confirmed.
         try {
-            if (!bridgeUrl && image && image.name.startsWith('dcmi_test') && bindings.dcmi_feed_frame) driveDcmi();
+            if (!workerActive && !bridgeUrl && image && image.name.startsWith('dcmi_test') && bindings.dcmi_feed_frame) driveDcmi();
         } catch (e) {}
         // Harness arms for collision tests (local mode only; see boot).
         try {
-            if (featHooks) {
+            if (!workerActive && featHooks) {
                 const arms = uartBuf.split('COLLIDE ARM').length - 1;
                 while (featHooks.collideDone < arms) {
                     featHooks.collideDone++;
@@ -737,10 +1033,17 @@ const loop = async (id) => {
                 }
             }
         } catch (e) {}
-        await refreshStats();
-        await renderLtdc();
-        renderDevices();
-        await raf();
+        if (uiDue) {
+            // A throwing renderer must not kill the stepping loop (a
+            // frozen loop looks exactly like a wedged emulator).
+            try {
+                await refreshStats();
+                await renderLtdc();
+                renderDevices();
+                renderFrames();
+            } catch (err) { setStatus('render: ' + (err && err.message || err), 'err'); }
+        }
+        if (!skipRaf) await raf();
     }
 };
 
@@ -750,10 +1053,15 @@ $('btnRun').addEventListener('click', () => {
         running = false;
         $('btnRun').textContent = 'Run';
         setStatus('stopped', 'stop');
+        // Worker self-drives when ticks go stale — an explicit pause is
+        // required or Stop won't stop (stale fallback keeps stepping).
+        if (workerActive) workerPost({ t: 'stop', paused: true });
     } else {
         running = true;
         $('btnRun').textContent = 'Stop';
         setStatus('running', 'run');
+        if (workerActive) workerPost({ t: 'stop', paused: false });
+        pipePrimed = false;   // no burst in flight after a pause; re-prime
         loop(session);
     }
 });
@@ -845,6 +1153,7 @@ const sendRx = (term) => {
     appendUart('> ' + text + (term === 0x0D ? '\r' : term === 0x0A ? '\n' : '') + '\r\n');
     if (port === 'usb') {
         if (usbhost && typeof usbhost.bulkOut === 'function') usbhost.bulkOut(bytes);
+        else if (workerActive) workerPost({ t: 'usbOut', bytes });
         else appendUart('(no USB CDC firmware booted — bulk OUT dropped)\r\n');
     } else {
         const addr = port === 'auto' ? image.uartAddr : parseInt(port, 16) >>> 0;
@@ -959,6 +1268,7 @@ const addWatch = () => {
     };
     row.append(lbl, val, poke, setBtn, rm);
     WATCH.push(w);
+    pushProbes();
     if (watchListEl.querySelector('.empty')) watchListEl.innerHTML = '';
     watchListEl.appendChild(row);
     $('watchAddr').value = ''; $('watchLabel').value = '';
@@ -966,6 +1276,7 @@ const addWatch = () => {
 
 const clearWatch = () => {
     WATCH.length = 0;
+    pushProbes();
     watchListEl.innerHTML = '<div class="empty">No watches yet — add an address above.</div>';
 };
 
@@ -995,7 +1306,11 @@ const sampleTraces = async () => {
     if (!emu) return;
     let dma = 0;
     try {
-        if (bindings && typeof bindings.dma_get_pending_count === 'function') dma = bindings.dma_get_pending_count() >>> 0;
+        // Worker owns the model instance — take the per-burst count it
+        // sampled next to the trace reads (same instant, unlike a separate
+        // page-side call which would also hit a dead instance).
+        if (workerActive) dma = wDma >>> 0;
+        else if (bindings && typeof bindings.dma_get_pending_count === 'function') dma = bindings.dma_get_pending_count() >>> 0;
     } catch {}
     for (const t of TRACES) {
         try {
@@ -1065,10 +1380,12 @@ const addTrace = () => {
     if (TRACES.length >= 4) { setStatus('trace: at most 4 channels', 'err'); return; }
     const label = $('traceLabel').value.trim() || ('0x' + parsed.addr.toString(16));
     TRACES.push({ addr: parsed.addr, bit: parsed.bit, label, buf: [] });
+    pushProbes();
     $('traceAddr').value = ''; $('traceLabel').value = '';
     renderTraces();
 };
-const clearTraces = () => { TRACES.length = 0; const cv = traceCanvas(); if (cv) cv._dma = []; renderTraces(); };
+const clearTraces = () => { TRACES.length = 0;
+    pushProbes(); const cv = traceCanvas(); if (cv) cv._dma = []; renderTraces(); };
 $('btnTraceAdd').addEventListener('click', addTrace);
 $('traceAddr').addEventListener('keydown', (e) => { if (e.key === 'Enter') addTrace(); });
 $('btnTraceClear').addEventListener('click', clearTraces);
@@ -1186,7 +1503,7 @@ const renderLtdc = async () => {
             if (ltdcCacheKey !== 'none') { ltdcCacheKey = 'none'; clearCanvas(ltdcCanvas); ltdcInfo.textContent = 'layer enabled, waiting for framebuffer…'; }
             return;
         }
-        const key = pf + ':' + w + 'x' + lines + ':' + cfbar + ':' + pitch + ':' + (bindings.ltdc_get_frame_count ? bindings.ltdc_get_frame_count() : 0);
+        const key = pf + ':' + w + 'x' + lines + ':' + cfbar + ':' + pitch + ':' + (workerActive ? (wLtdcFrame | 0) : (bindings.ltdc_get_frame_count ? bindings.ltdc_get_frame_count() : 0));
         if (key === ltdcCacheKey) return;
         ltdcCacheKey = key;
         // Bridge mode has no direct uc.mem_read — skip framebuffer blit
@@ -1355,7 +1672,10 @@ let ppsCacheKey = '';
 const renderPps = () => {
     let level = null, count = null;
     try {
-        if (typeof bindings !== 'undefined' && bindings && typeof bindings.eth_pps_count === 'function') {
+        if (workerActive) {
+            if (wPps === null) throw 0;
+            count = wPps >>> 0; level = !!wPpsLevel;
+        } else if (typeof bindings !== 'undefined' && bindings && typeof bindings.eth_pps_count === 'function') {
             count = bindings.eth_pps_count() >>> 0;
             level = !!bindings.eth_pps_level();
         }
@@ -1445,6 +1765,9 @@ const buildGpio = () => {
         const key = bank + pin;
         const high = !gpioDrivenHigh.has(key);
         if (high) gpioDrivenHigh.add(key); else gpioDrivenHigh.delete(key);
+        // Worker owns the model instance (page-side bindings are a dead
+        // instance in worker mode) — route input drives through it.
+        if (workerActive) { workerPost({ t: 'gpioIn', bank: bankIdx, pin, high }); return; }
         try { bindings.gpio_set_input(bankIdx, pin, high); } catch (err) {}
     });
 };

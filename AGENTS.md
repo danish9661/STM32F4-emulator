@@ -4580,7 +4580,7 @@ numbers were blinky ~43 / heavy ~30-37, HEAD ~18 — same ratios, all
 binaries move together, so only back-to-back comparisons count).
 Rule: only ever compare back-to-back on the same box state;
 absolute MIPS expires fast here. `VENDOR_V ?v=48` + `__doomVer`
-89 + app.js?v=58 / doom.js?v=90 / worker?v=57 for the rebuilt vendor.
+89 + app.js?v=62 / doom.js?v=90 / worker?v=57 + emu-worker.js?v=3 for the rebuilt vendor.
 Page-side (headless Chrome, rAF loop stopped, `.pw-scratch/cdp_mips.mjs`):
 blinky ~45 / eth_http ~45 / tft_test ~47 (Node same tree: 78/68/43) —
 i.e. ~0.6x Node for compute/ETH, ~1x for display-bound (JS parser
@@ -4588,6 +4588,11 @@ dominates both). Interactive page runs slightly LOWER (DOM/canvas per
 frame not included in the probe). No >50 MIPS browser guarantee exists.
 
 ## 42. Future plan: page-side 80+ MIPS (prepared 2026-10-10, NOT started)
+
+PRIORITY (user, 2026-10-10): WASM-in-browser is the first-priority metric,
+always. Node MIPS is diagnostic only (tells whether a change helped the
+engine); acceptance is ALWAYS the page-side `cdp_mips.mjs` probe. Never
+present a Node number as a result without its page-side counterpart.
 
 Target as defined by the user: browser page-side 80+ MIPS (Node already
 clears ~82; page sits ~45). Acceptance harness EXISTS:
@@ -4601,15 +4606,43 @@ the moment the target is met (revert-if-neutral at every step).
    viewer) to every Nth frame. Drawback: livelier UI gets coarser.
    Overcome: adaptive refresh — full rate while interacting, throttled
    while running flat (the doom worker already renders change-gated).
+   VERDICT 2026-10-10, SHIPPED in app.js: UI throttling alone did NOTHING
+   (6.0→6.0 — the loop was never UI-bound). The real cap was
+   rAF_rate x step_size (1 step/frame = 6 MIPS @60 Hz). Fix: burst 6
+   steps/frame, UI refresh once (fine-step firmware keeps 20k
+   granularity; bridge mode stays burst=1 — WS round trips). Measured
+   live-UI with full UI: blinky/eth_http 6.0 → **35.9 MIPS** (6x),
+   browser suite EXIT=0 / 0 FAILs. New live cap ~= rAF x 600k.
 2. **Console-page worker (mirror doom-worker).** Move stepping off the
    main thread; page posts ticks like doom.js. Drawback: GPIO panel,
    memory-watch pokes, and UART RX need round trips (latency + complexity).
    Overcome: async batched state transfer per burst; keep pokes on a
    priority channel. Doom's worker is the working template.
+   VERDICT 2026-10-10, SHIPPED (`site/emu-worker.js`, `?noworker=1`
+   escape keeps the legacy loop): page boots everything in the worker
+   by default (bridge mode stays main-thread). Same-API adapter so all
+   renderers are unchanged; netsim/usbhost/seeds/feat-hooks moved
+   worker-side; gateway frames relay via page socket. Measured:
+   engine parity (loop-stopped worker 46 ≈ main-thread 45 all classes),
+   live-UI blinky 35.9→**40.5**, eth 35.9→21.5 (traffic-message toll —
+   worker→page dispatch ~13 ms on eth vs ~2 ms blinky on this loaded
+   box; main thread free either way, which was the goal). Suite EXIT=0
+   / 0 FAILs. Bugs caught by the suite, both fixed: (a) adapter
+   device slots must be null when absent (a dead TFT object crashed
+   renderTft and froze the loop — plus a render-guard so no renderer
+   can freeze stepping again); (b) worker driveDcmi used boot-param
+   `c` out of scope (silent ReferenceError → phases never fed) + the
+   missing `dcmiPhases` cfg flag.
 3. **Wasm build re-tune.** Re-run the -Oz vs -O3 A/B per workload class
    (the §41 verdict was DOOM-pill-specific; blinky-class may prefer -O3
    inlining). Drawback: -O3 grows the binary (slower page loads).
    Overcome: ship per-page builds only if a class wins >8% (else keep one).
+   VERDICT 2026-10-10, single-variable A/B (same source+flags, one
+   wasm-pack base): -O3 is +1.4% bytes (23 KB) and wins NOTHING —
+   page probe blinky/eth/tft all within ±3% (46ish across the board),
+   Node blinky flat; heavy-Node +9% noted but single-run on the
+   high-variance pill and Node is diagnostic-only. KEEP -Oz (shipped
+   binary restored byte-identical after the test).
 4. **Decoder fusion (last resort).** Counting build first:
    (prev_opclass, opclass) histogram at exec16/exec32 entry over
    representative workloads; fuse only top pairs covering >50% of dynamic
@@ -4618,6 +4651,23 @@ the moment the target is met (revert-if-neutral at every step).
    are the whole safety net). Drawback: silent-divergence risk +
    binary bloat + harder census. Overcome: fuse one pair per commit,
    pill + full battery each, revert-if-neutral; never hand-pick pairs.
+   DATA COLLECTED 2026-10-10 (temp counting build, native release,
+   fully reverted after — zero instrumentation ships): objdump-verified
+   against the firmware ELFs (example PCs disassembled, never decoded
+   from memory):
+   - blinky 10M: 6 pairs = 100% — one delay loop
+     LDR→CMP.W→BGE→LDR→ADDS→STR (`for(n=0;n<4000;n++)` @0x190-0x19E).
+   - eth DHCP 17.6M: 7 pairs = 98.4% — countdown spin SUBS→BNE→NOP
+     (74%: 5.08M+4.0M+4.0M) + flag-poll LDR→LSLS→BPL (~13%).
+   - freertos 5M: 5 pairs = 99.9% — pvPortMalloc heap walk
+     (LDR→MOVhi/ALU) + timeout-list walk (CMP→BLS).
+   FUSION CANDIDATES (each >50% of its workload by the rule): the
+   countdown-spin triple, the flag-poll triple, the blinky sextuple,
+   the malloc-walk chain. Honest math: these loops are dispatch-heavy
+   (1-2-cycle bodies), so fusing a 3-cycle ~triples that stretch's
+   dispatch efficiency — but dispatch is only ~40% of total profile,
+   so whole-workload gains stay single-digit per fusion. Implementation
+   NOT started (still needs the hard fps target to justify the risk).
 5. **Explicitly OUT:** bigger step batches (proven harmful — MIPS flat,
    rounds 124→24, §41), variable virtual clock as a speedup (fidelity
    knob, not speed — same section), chasing box-state noise.

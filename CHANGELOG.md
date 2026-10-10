@@ -151,6 +151,16 @@ date-based entries rather than strict SemVer until the first published release.
   page-side plan recorded in AGENTS §42 (page overhead → console worker
   → build re-tune → fusion last resort). `VENDOR_V ?v=48`, app.js?v=58,
   doom.js?v=90, worker?v=57, `__doomVer` 89.
+- Console page emulation moved to a worker thread (2026-10-10,
+  `site/emu-worker.js`, `?noworker=1` keeps the legacy main-thread
+  loop; bridge mode unchanged). Same-API page adapter so renderers are
+  untouched; netsim/USB host/boot seeds/feat hooks run worker-side,
+  gateway frames relay through the page socket. Live-UI throughput
+  6.0 → ~36 MIPS (blinky; pipelined 6-step bursts — the loop was
+  rAF×step capped, not UI-bound) with the main thread free; engine
+  parity loop-stopped (~46 all classes); browser suite green.
+  `?v=`: app.js 62, emu-worker.js 3. Debug pacing telemetry used
+  during bring-up removed before ship.
 
 ## [1.6.0] — 2026-10-05
 
