@@ -984,6 +984,151 @@ fn shift_op(v: u32, typ: u32, amt: u32, ci: u32, reg: bool) -> (u32, u32) {
     }
 }
 
+/// Fused countdown-spin triple: [SUBS Rd,#imm8 @P] [B.cond -> P-2 @P+2]
+/// (the NOP in the measured pairs sits at the loop top P-2 and executes
+/// normally — the fuse covers SUBS+BNE only). Measured 74% of eth DHCP
+/// dynamic (objdump-verified: `while(--r3){}` + nop padding: NOP@0xAA0,
+/// SUBS@0xAA2, BNE->0xAA0@0xAA4; exit falls to normal code at P+4).
+/// Fuses SUBS+BNE into one dispatch; taken lands on NOP@P-2, exit falls
+/// to P+4, both executing normally — 3 dispatches become 2 per loop
+/// iteration, and the fused members skip their bank syncs (r13
+/// provably untouched — exact) and 2 of 3 delivery points (documented
+/// ns-scale jitter; SysTick-scale timing unaffected).
+///
+/// Exactness case (each verified, bail to the normal path otherwise):
+/// - it_n == 0 AND !it_pred at entry (SUBS flag write + B.cond read the
+///   live flags; predicated forms preserve — never fuse those).
+/// - TRACE_ON clear (tracing needs per-pc records).
+/// - P..P+5 all mapped (fetch slow path can pend bus faults / touch the
+///   model — the fused check must be side-effect free).
+/// - op2 is B.cond targeting exactly P-2; mem[P+4] is NOP (the shape).
+/// - MPU XN re-checked for P+2/P+4 when the MPU is on (loop-top owns P).
+/// - Register-only members (SUBS Rd is r0-r7 by encoding, B/NOP touch
+///   nothing): no MPU data path, no fault arm reachable — and r13 is
+///   provably untouched, so the caller's per-instruction bank sync stays
+///   exact when skipped. Interrupt delivery skips 2 points (documented
+///   ns-scale jitter; SysTick-scale timing unaffected).
+/// SUBS/B semantics are arm-for-arm with the exec16 arms (sub_flags,
+/// cond_ok, same target math); the taken branch writes r15 directly,
+/// which is exactly what branch() does for an odd non-EXC_RETURN target
+/// (proven: target = P-2|1, mapped by the fetch-range check above).
+/// Returns true when fused (pc advanced; caller adds done/cycles).
+pub(crate) fn fused_spin(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc: u32, op: u16) -> u32 {
+    if op & 0xF800 != 0x3800 {
+        return 0;
+    }
+    let p2 = pc.wrapping_add(2);
+    let p4 = pc.wrapping_add(4);
+    if !(mem.is_mapped(pc) && mem.is_mapped(p2) && mem.is_mapped(p4)) {
+        return 0;
+    }
+    let o2 = mem.fetch16(p2);
+    if o2 & 0xF000 != 0xD000 {
+        return 0;
+    }
+    // NOTE: no check on mem[P+4] — the exit path falls through to
+    // whatever is there and it executes normally (the measured loop
+    // exits to an LDR, not a NOP; requiring NOP here fused nothing —
+    // caught by objdump, not by review).
+    let cc = (o2 >> 8) & 0xF;
+    let target = pc.wrapping_add(4).wrapping_add(sx(((o2 & 0xFF) << 1) as u32, 9));
+    if target != pc.wrapping_sub(2) {
+        return 0;
+    }
+    if crate::system::is_mpu_enabled() {
+        if sys.p.mpu_check(p2, 2, false, true).is_some()
+            || sys.p.mpu_check(p4, 2, false, true).is_some()
+        {
+            return 0;
+        }
+    }
+    // SUBS Rd,#imm8 (arm-for-arm with the 0x3800 exec16 arm; Rd < 8 by
+    // encoding so rr()'s PC semantics never apply — direct read exact).
+    let rd = ((op >> 8) & 7) as usize;
+    let a = c.regs.r[rd];
+    let imm = (op & 0xFF) as u32;
+    c.regs.r[rd] = a.wrapping_sub(imm);
+    let _ = sub_flags(c, a, imm, 1);
+    // B.cond (arm-for-arm with the 0xD000 exec16 arm).
+    if cond_ok(c, cc as u32) {
+        // Taken: back to the NOP@P-2, which executes normally next (so a
+        // loop iteration costs one fused dispatch + one NOP dispatch).
+        c.regs.r[15] = target | 1;
+    } else {
+        // Not taken: fall through to P+4 (verified NOP above), which
+        // executes normally — the fused step accounts SUBS+BNE only.
+        adv(c, pc, 4);
+    }
+    2
+}
+
+/// Fused flag-poll triple: [LDR Rd,[Rn,#imm] @P] [LSLS Rd2,Rs,#n @P+2]
+/// [B.cond -> P @P+4] — measured ~13% of eth DHCP dynamic
+/// (objdump-verified flag poll: LDR r3,[r2,#0] / LSLS r4,r3,#24 /
+/// BPL->top). Executes all three members with one dispatch instead of
+/// three. Same exactness case as fused_spin (shape/mapped/MPU/trace/IT
+/// bails; r13 untouched so bank-sync skip is exact; 2 delivery points
+/// skipped, documented jitter) with one addition: the LDR goes through
+/// mem.read32, so the MPU data path, MMIO side effects and deferred
+/// faults behave exactly as the unfused arm (a faulting load pends and
+/// raises at the next loop-top, same as normal). LSLS/B semantics are
+/// arm-for-arm (shift_op/carry/nz/C-bit, cond_ok). Taken branches to P
+/// (loop top executes normally next); exit falls to P+6. done+=3.
+pub(crate) fn fused_poll(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc: u32, op: u16) -> u32 {
+    if op & 0xF800 != 0x6800 {
+        return 0;
+    }
+    let p2 = pc.wrapping_add(2);
+    let p4 = pc.wrapping_add(4);
+    if !(mem.is_mapped(pc) && mem.is_mapped(p2) && mem.is_mapped(p4)) {
+        return 0;
+    }
+    let o2 = mem.fetch16(p2);
+    // LSLS-imm T1 shape (0x0000 mask). Dataflow needs no check: sequential
+    // execution is exact for any registers, fused or not.
+    if o2 & 0xF800 != 0x0000 {
+        return 0;
+    }
+    let o3 = mem.fetch16(p4);
+    if o3 & 0xF000 != 0xD000 {
+        return 0;
+    }
+    let cc = (o3 >> 8) & 0xF;
+    let target = pc.wrapping_add(4).wrapping_add(sx(((o3 & 0xFF) << 1) as u32, 9));
+    if target != pc {
+        return 0;
+    }
+    if crate::system::is_mpu_enabled() {
+        if sys.p.mpu_check(p2, 2, false, true).is_some()
+            || sys.p.mpu_check(p4, 2, false, true).is_some()
+        {
+            return 0;
+        }
+    }
+    // LDR Rd,[Rn,#imm] (arm-for-arm with the 0x6800 exec16 arm; Rn/Rt < 8
+    // by encoding so rr()'s PC semantics never apply — direct reads exact).
+    let rn = ((op >> 3) & 7) as usize;
+    let rt = (op & 7) as usize;
+    let addr = c.regs.r[rn].wrapping_add((((op >> 6) & 0x1F) as u32) * 4);
+    c.regs.r[rt] = mem.read32(addr);
+    // LSLS Rd,Rs,#n (arm-for-arm with the 0x0000 exec16 arm).
+    let rd = ((o2 & 7) & 7) as usize;
+    let rs = ((o2 >> 3) & 7) as usize;
+    let im = ((o2 >> 6) & 0x1F) as u32;
+    let v = c.regs.r[rs];
+    let (r, co) = shift_op(v, 0, im, carry(c), false);
+    c.regs.r[rd] = r;
+    nz(c, r);
+    c.regs.xpsr = (c.regs.xpsr & !0x20000000) | (co << 29);
+    // B.cond (arm-for-arm with the 0xD000 exec16 arm).
+    if cond_ok(c, cc as u32) {
+        c.regs.r[15] = target | 1;
+    } else {
+        adv(c, pc, 6);
+    }
+    3
+}
+
 pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, op: u16, pc: u32) -> bool {
     let o = op as u32;
     // Snapshot predication BEFORE it_ok consumes/resets the slot.

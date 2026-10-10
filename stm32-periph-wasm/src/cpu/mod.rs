@@ -1036,7 +1036,37 @@ impl Cpu {
                     continue;
                 }
             }
-            let ok = if l == 2 {
+            // Fused hot loops (see thumb::fused_spin/fused_poll): multiple
+            // members in one dispatch on measured shapes. Bail to the
+            // normal path on any mismatch (zero behavioral delta when
+            // bailing). Fused members skip bank sync (r13 untouched —
+            // exact); delivery below still runs once per fused step like
+            // every other step.
+            // Guard order: opcode mask first (cheapest, filters ~everything;
+            // the atomic + call below run only on SUBS-imm8 / LDR-imm).
+            // Fused members return their instruction count (spin 2, poll
+            // 3), else 0. done/cycles scale by it — the chunk publisher
+            // and model clock stay exact.
+            let fused_n = if (op & 0xF800) == 0x3800
+                && self.it_n == 0
+                && !self.it_pred
+                && !TRACE_ON.load(Ordering::Relaxed)
+            {
+                thumb::fused_spin(self, sys, mem, pc, op)
+            } else if (op & 0xF800) == 0x6800
+                && self.it_n == 0
+                && !self.it_pred
+                && !TRACE_ON.load(Ordering::Relaxed)
+            {
+                thumb::fused_poll(self, sys, mem, pc, op)
+            } else {
+                0
+            };
+            let ok = if fused_n > 0 {
+                done += fused_n;
+                self.cycles += fused_n as u64;
+                true
+            } else if l == 2 {
                 thumb::exec16(self, sys, mem, op, pc)
             } else {
                 let o2 = mem.fetch16(pc + 2);
@@ -1048,7 +1078,13 @@ impl Cpu {
                 }
                 break;
             }
-            done += 1;
+            // Fused steps already added done/cycles above; the normal tail
+            // (count/bank-sync/cycle) runs only for unfused instructions.
+            // The fused members provably leave r13 untouched, so skipping
+            // the bank sync is exact, not an optimization shortcut.
+            if fused_n == 0 {
+                done += 1;
+            }
             if done & 15 == 0 {
                 crate::system::INSTRUCTION_COUNT.fetch_add(16u64, Ordering::Relaxed);
             }
@@ -1060,14 +1096,16 @@ impl Cpu {
             // wedged FreeRTOS: high_top saved as stale_psp-32). Handler mode
             // (ipsr != 0) is skipped: take_exception/exception_return manage
             // the banks explicitly there, and r13 == MSP throughout.
-            if self.ipsr == 0 {
-                if self.regs.control & 2 != 0 {
-                    self.regs.psp = self.regs.r[13];
-                } else {
-                    self.regs.msp = self.regs.r[13];
+            if fused_n == 0 {
+                if self.ipsr == 0 {
+                    if self.regs.control & 2 != 0 {
+                        self.regs.psp = self.regs.r[13];
+                    } else {
+                        self.regs.msp = self.regs.r[13];
+                    }
                 }
+                self.cycles += 1;
             }
-            self.cycles += 1;
             // Inline interrupt delivery with priority preemption (no ISR
             // pump needed): after every instruction, take the best pending
             // exception that is enabled, unmasked, and urgent enough to

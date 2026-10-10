@@ -2,7 +2,7 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=48';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=49';
 import { createEmulator } from './emulator.js?v=3';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
@@ -564,7 +564,7 @@ const bridgeUrl = params.get('bridge');
 // UNCHANGED: `emu` becomes the WorkerEmu adapter below, serving the same
 // sync API from burst-cached state.
 const useWorker = !bridgeUrl && !params.has('noworker');
-let emuWorker = null, workerActive = false, workerBooted = false, pipePrimed = false;
+let emuWorker = null, workerActive = false, workerBooted = false, inflight = 0;
 let burstResolve = null, measureSeq = 0;
 const measureWaiters = new Map();
 // Burst-cached state (rebuilt on every worker burst):
@@ -593,8 +593,9 @@ const onWorkerMessage = (e) => {
     if (m.t === 'booted') {
         workerBooted = true;
         if (m.uart) appendUart(m.uart, true);
-        if (burstResolve) { const r = burstResolve; burstResolve = null; r(); }
+        if (burstResolve) { const r = burstResolve; burstResolve = null; r(m); }
     } else if (m.t === 'burst') {
+        if (inflight > 0) inflight--;
         if (m.uart) appendUart(m.uart, true);
         for (const pkt of (m.tx || [])) {
             const buf = pkt instanceof Uint8Array ? pkt : new Uint8Array(pkt);
@@ -640,7 +641,7 @@ const onWorkerMessage = (e) => {
             if (typeof st.dma === 'number') wDma = st.dma;
             if (st.spk && st.spk.length) wSpkQueue.push(st.spk);
         }
-        if (burstResolve) { const r = burstResolve; burstResolve = null; r(); }
+        if (burstResolve) { const r = burstResolve; burstResolve = null; r(m); }
     } else if (m.t === 'status') {
         setStatus(m.text, m.cls);
     } else if (m.t === 'measureResult') {
@@ -708,11 +709,12 @@ const bootWorker = async (id) => {
     setStatus('booting (worker)…', 'stop');
     let svdXml = '';
     try {
-        svdXml = await fetch('vendor/' + board.svd + '?v=48').then((r) => r.text());
+        svdXml = await fetch('vendor/' + board.svd + '?v=49').then((r) => r.text());
     } catch (e) { setStatus('boot: SVD fetch failed', 'err'); return false; }
     if (id !== session) return false;
     try { if (emuWorker) emuWorker.terminate(); } catch {}
-    emuWorker = null; workerActive = false; workerBooted = false; pipePrimed = false;
+    emuWorker = null; workerActive = false; workerBooted = false; inflight = 0;
+    if (burstResolve) { try { burstResolve(null); } catch {} burstResolve = null; }
     wCache = new Map(); wRegs = null; wFault = null;
     wOledFb = new Uint8Array(0); wOledFrame = -1;
     wTftFb = new Uint8Array(0); wTftFrame = ''; wTftW = 0; wTftH = 0;
@@ -761,7 +763,7 @@ const bootWorker = async (id) => {
     try { for (const w of WATCH) cfg.probes.push(w.addr >>> 0); } catch {}
     try { for (const t of TRACES) cfg.probes.push(t.addr >>> 0); } catch {}
     try { for (const [, a] of PERIPH_REGS) cfg.probes.push(a >>> 0); } catch {}
-    emuWorker = new Worker('emu-worker.js?v=4', { type: 'module' });
+    emuWorker = new Worker('emu-worker.js?v=8', { type: 'module' });
     emuWorker.onmessage = onWorkerMessage;
     emu = workerAdapter;
     netsim = null; usbhost = null; featHooks = null;
@@ -856,10 +858,10 @@ const boot = async () => {
         if (useWorker) { await bootWorker(id); return; }
         // Board variant per firmware preset (SVD + flash/RAM sizes), honoring
         // the board selector when the preset supports the selected board.
-        // NOTE (VENDOR_V): vendor asset versions (?v=48) must be bumped together
+        // NOTE (VENDOR_V): vendor asset versions (?v=49) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
         const { key: boardKey, board } = boardForSelection(image.name, boardSelectEl ? boardSelectEl.value : 'all');
-        const svdXml = await fetch('vendor/' + board.svd + '?v=48').then((r) => r.text());
+        const svdXml = await fetch('vendor/' + board.svd + '?v=49').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
@@ -884,7 +886,7 @@ const boot = async () => {
             svdFile: board.svd,
             flash_size: board.flash_size,
             ram_size: board.ram_size,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=48',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=49',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),
@@ -956,17 +958,16 @@ const loop = async (id) => {
         const uiDue = uiFullRate() || (uiTick % 4 === 0);
         let skipRaf = false;
         if (workerActive) {
-            // Pipelined worker driving: one burst is always in flight, so
-            // the worker steps WHILE the page paints (true overlap — the
-            // serial post-then-await left worker and page idle in turns).
-            // The message round trip + UI work between bursts is the TCI
-            // gap (doom-worker pattern); bursts are never batched
-            // back-to-back. No raf wait here: the message await IS the
-            // yield, and raf slack was pure idle (up to a full frame).
-            if (!pipePrimed) { workerPost({ t: 'tick' }); pipePrimed = true; }
-            await new Promise((resolve) => { burstResolve = resolve; });
-            if (id !== session || !workerActive || !emu) { pipePrimed = false; await raf(); continue; }
-            workerPost({ t: 'tick' });   // N+1 overlaps the UI work below
+            // Depth-2 pipeline: two bursts are always in flight, so worker
+            // stepping overlaps page UI work (serial post-then-await left
+            // worker and page idle in turns and the toll dominated
+            // traffic-heavy frames). Replies arrive in tick order (single
+            // worker thread, FIFO channel), so one waiter slot suffices.
+            // The round trip + UI work is the TCI gap (doom-worker
+            // pattern); bursts are never batched back-to-back.
+            while (inflight < 2) { workerPost({ t: 'tick' }); inflight++; }
+            const reply = await new Promise((resolve) => { burstResolve = resolve; });
+            if (id !== session || !workerActive || !emu || !reply) { await raf(); continue; }
             skipRaf = true;
         } else {
         // Steps-per-frame (Step-1 page-speed work): the loop was capped at
@@ -1065,7 +1066,6 @@ $('btnRun').addEventListener('click', () => {
         $('btnRun').textContent = 'Stop';
         setStatus('running', 'run');
         if (workerActive) workerPost({ t: 'stop', paused: false });
-        pipePrimed = false;   // no burst in flight after a pause; re-prime
         loop(session);
     }
 });

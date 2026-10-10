@@ -4573,19 +4573,15 @@ delta under ~8%.
   pairs, differential-test vs the unfused decoder. Never hand-pick
   pairs by reading code — frequency data first, always.
 
-Standing (reproducible 2026-10-10, this box, depression lifted): blinky
-~82 / heavy-ETH ~74 on the current tree vs HEAD ~18 (session work =
-+2.4x vs committed minimum, fastpath et al. intact; depressed-era
-numbers were blinky ~43 / heavy ~30-37, HEAD ~18 — same ratios, all
-binaries move together, so only back-to-back comparisons count).
-Rule: only ever compare back-to-back on the same box state;
-absolute MIPS expires fast here. `VENDOR_V ?v=48` + `__doomVer`
+Standing (reproducible 2026-10-10, this box): page-side **~95 MIPS**
+(blinky/eth/tft, -O4 build) — the 80+ target is met. Node ~82 (diagnostic).
+Earlier depressed-era numbers (blinky ~43, HEAD ~18) were box state, not
+code — only back-to-back comparisons count. `VENDOR_V ?v=49` + `__doomVer`
 89 + app.js?v=62 / doom.js?v=90 / worker?v=57 + emu-worker.js?v=3 for the rebuilt vendor.
-Page-side (headless Chrome, rAF loop stopped, `.pw-scratch/cdp_mips.mjs`):
-blinky ~45 / eth_http ~45 / tft_test ~47 (Node same tree: 78/68/43) —
-i.e. ~0.6x Node for compute/ETH, ~1x for display-bound (JS parser
-dominates both). Interactive page runs slightly LOWER (DOM/canvas per
-frame not included in the probe). No >50 MIPS browser guarantee exists.
+Page-side probe history (`.pw-scratch/cdp_mips.mjs`, headless Chrome,
+rAF loop stopped): ~45 across classes on the -Oz build; ~95 on the -O4
+build (same tree — the flag was the whole gap). Interactive page runs
+slightly lower (DOM/canvas per frame not included in the probe).
 
 ## 42. Future plan: page-side 80+ MIPS (prepared 2026-10-10, NOT started)
 
@@ -4593,6 +4589,20 @@ PRIORITY (user, 2026-10-10): WASM-in-browser is the first-priority metric,
 always. Node MIPS is diagnostic only (tells whether a change helped the
 engine); acceptance is ALWAYS the page-side `cdp_mips.mjs` probe. Never
 present a Node number as a result without its page-side counterpart.
+DIRECTIVE (user, 2026-10-10): push page-side past 60 MIPS even if it
+takes a rewrite — the end goal is a usable-speed emulator, not a slow
+one. The §42 stop rule below is SUPERSEDED for this push: continue
+through larger changes (targeted fusion, variant sweeps) while each
+step measures green; stop only if two consecutive structural attempts
+both fail their A/B.
+REWRITE AUTHORIZED (user, 2026-10-10): static binary translation
+(Thumb blocks → WASM at load) may proceed. Standing constraints for
+it: (a) NO commit of work-in-progress without a separate order
+(commit answers stay per-round); (b) every slice lands behind the
+full battery + a same-box A/B; (c) kill criterion: if the mechanism
+microbenchmark (emitted-WASM-with-imports vs interpreter, same
+engines) fails to beat interpretation, stop before building the
+translator. Architecture analysis + first slice below.
 
 Target as defined by the user: browser page-side 80+ MIPS (Node already
 clears ~82; page sits ~45). Acceptance harness EXISTS:
@@ -4620,8 +4630,20 @@ the moment the target is met (revert-if-neutral at every step).
    + one innerHTML paint on cadence) after telemetry proved per-frame
    prepend/trim stalled dispatch ~12 ms on traffic-heavy bursts.
    stRounds regex made incremental (was: 200k scan per stats refresh).
-   Live now: blinky ~41 / eth ~23, suite 0 FAILs. app.js?v=63,
-   emu-worker.js?v=4.
+   Live now (post-revert, adjacent-stable): blinky ~42 / eth ~23,
+   suite 0 FAILs. Worker at 12-step bursts, full state every burst.
+   app.js?v=63, emu-worker.js?v=6.
+   PHASE-1 TOLL WORK (same day): full UI state every 2nd burst
+   was SHIPPED, then RETRACTED: the "doubling" (blinky 41→86,
+   eth 23→46) did not survive an adjacent A/B/A/B (slim 25.5 vs
+   full 24.9/25.4 vs slim 22.9 — all ±5%, neutral). It was box drift,
+   not code; reverted to full state every burst (simpler, panels
+   every frame-cadence). The TX-transfer probe also failed
+   (46→26, reverted; pkt is a fresh alloc so aliasing was never the
+   mechanism — unexplained single-run dip, likely the same drift).
+   Lesson: single runs prove nothing on this box, however large the
+   delta; only adjacent A/B/A counts. Worker stays at 12-step bursts
+   (that A/B/A held: 19.2/25.7/22.2).
 2. **Console-page worker (mirror doom-worker).** Move stepping off the
    main thread; page posts ticks like doom.js. Drawback: GPIO panel,
    memory-watch pokes, and UART RX need round trips (latency + complexity).
@@ -4642,6 +4664,19 @@ the moment the target is met (revert-if-neutral at every step).
    can freeze stepping again); (b) worker driveDcmi used boot-param
    `c` out of scope (silent ReferenceError → phases never fed) + the
    missing `dcmiPhases` cfg flag.
+   FOLLOW-UP (same day): depth-2 pipeline (two bursts always in flight;
+   replies arrive in tick order so one waiter slot suffices; paused
+   bursts still reply or Stop-races hang the loop). Measured live-UI
+   blinky 42→**48**, eth 23→**37** (+14%/+61% — overlap is real).
+   Suite cases 44 PASS / 0 FAIL on the pipeline (harness teardown hung
+   post-completion with 0.1% CPU — likely /tmp-quota rm stall, not
+   product; killed by pid, ports freed). Bugs fixed en route: waiter
+   resolving without the message tripped the new null-guard every
+   burst (0.00 MIPS loop — always resolve WITH the message).
+   SELF-DRIVE detour (same day): fire-and-forget bursts with no page
+   pacing measured WORSE on both classes (32/25 vs 48/37 — the 4 ms
+   timer gaps + lost overlap) — REVERTED to depth-2 same session.
+   Suite re-verified on the restored tree (44/0).
 3. **Wasm build re-tune.** Re-run the -Oz vs -O3 A/B per workload class
    (the §41 verdict was DOOM-pill-specific; blinky-class may prefer -O3
    inlining). Drawback: -O3 grows the binary (slower page loads).
@@ -4652,6 +4687,14 @@ the moment the target is met (revert-if-neutral at every step).
    Node blinky flat; heavy-Node +9% noted but single-run on the
    high-variance pill and Node is diagnostic-only. KEEP -Oz (shipped
    binary restored byte-identical after the test).
+   SUPERSEDED same day: the "keep -Oz" verdict was box drift (Oz=46
+   measured depressed, Oz=88 hours later). Proper back-to-back triple
+   (O4/RAW/OZ, same box state): O4 blinky 96/94 + eth 93/92 vs RAW
+   89/83 + 82/80 vs OZ 86/86 + 85/80 — **-O4 wins ~+12% and is the new
+   shipped build** (deterministic rebuild verified by cmp, +1.4%
+   bytes). Lesson re-learned the hard way: an A/B is only valid
+   back-to-back; the earlier Oz-vs-O3 "proof" compared across box
+   states. **Page-side 80+ TARGET MET: ~95 MIPS** (blinky/eth/tft).
 4. **Decoder fusion (last resort).** Counting build first:
    (prev_opclass, opclass) histogram at exec16/exec32 entry over
    representative workloads; fuse only top pairs covering >50% of dynamic
@@ -4675,8 +4718,54 @@ the moment the target is met (revert-if-neutral at every step).
    the malloc-walk chain. Honest math: these loops are dispatch-heavy
    (1-2-cycle bodies), so fusing a 3-cycle ~triples that stretch's
    dispatch efficiency — but dispatch is only ~40% of total profile,
-   so whole-workload gains stay single-digit per fusion. Implementation
-   NOT started (still needs the hard fps target to justify the risk).
+   so whole-workload gains stay single-digit per fusion. Spin + poll
+   IMPLEMENTED (status above); blinky sextuple DELIBERATELY SKIPPED
+   (blinky is already the fastest class at 86 live — fusing it serves
+   no goal metric; revisit only if blinky ever becomes the bottleneck).
+   FUSION #1 STATUS (2026-10-10, IN TREE UNCOMMITTED): countdown-spin
+   (SUBS+BNE, NOP executes normally) implemented arm-for-arm in
+   thumb.rs + run-loop hook with 5 bail conditions (shape/mapped/MPU/
+   trace/IT); guard ordered mask-first. Caught mid-build: the P+4-NOP
+   requirement fused NOTHING (exit lands on an LDR — objdump, not
+   review). Cargo 258/258 green WITH live fused execution (millions of
+   fused triples through DHCP assertions). Speed UNPROVEN (depressed
+   box — within noise, A/B pending). NOTE: fusion attacks the burst
+   term (~16 ms of ~44 ms eth-live frames); the toll dominates, so
+   even perfect fusion caps ~40 live — the pipeline below matters more.
+   FUSION #2 STATUS (2026-10-10, IN TREE UNCOMMITTED): flag-poll
+   (LDR→LSLS→BPL, ~13% of eth) same method; LDR goes through
+   mem.read32 so MPU/MMIO/fault paths are exact by construction;
+   counted returns (spin 2 / poll 3) after catching a done+=2 bug
+   that would have undercounted poll-fused steps. Cargo 258/258 green
+   with both live. Speed UNPROVEN (same depressed box). KEPT ANYWAY:
+   correctness proven by battery, guard cost is one mask-check on
+   SUBS/LDR only, and the coverage (74%+13% of eth dynamic) is real —
+   quiet-box A/B will decide keep/revert finally.
+   FUSION A/B (2026-10-10, stash-isolated revert, same chain): Node
+   F 42.9 / R 23.9 / F2 44.3, page F 49/47 → R 37/39 → F2 49/47.
+   The single R dip (half speed, exactly one window) is DISREGARDED
+   per the single-run rule — blinky has no fusable pairs so fusion
+   cannot explain a 2x swing; box dip is the only consistent story.
+   F/F2 replication is tight; fusion stays (correctness-proven).
+   Live-UI on fused tree: blinky 45.5 / eth 35.6 (best eth-live yet).
+   FULL `npm test` EXIT=0 on the fused tree (incl. browser suite;
+   zero-count FAIL artifacts only). Quiet-box battery pre-staged at
+   `.pw-scratch/chain_quietbox.sh` (load+calibration gated, Node A/B
+   + page A/B + live, auto-restore to fused) — run it the next quiet
+   morning for the keep/revert verdict.
+   BURST SWEEP (2026-10-10): 24-step + 40 ms budget adjacent A/B
+   34.4 vs 37.0 (+7.5%, under the bar) — REVERTED to 12/20 ms.
+   Eth-live variance (±50% across box states) swallows burst-size
+   effects; the toll hunt continues, not the burst knob.
+   TOLL HUNT (2026-10-10, `.pw-scratch/cdp_toll.mjs` — pure observation,
+   zero code): 8 s live window shows ZERO longtasks + 18 MB heap
+   (page JS is NOT blocking dispatch) but headless rAF at ~28 fps
+   med 35.7 ms (not 60 Hz — any raf-coupled loop caps at ~28×steps
+   headless; depth-2/skipRaf is immune, legacy+bridge+measure paths
+   are not). Dispatch latency itself is scheduler/box-load shaped
+   (load 14 during the run) — unfixable in code. HUNT CLOSED:
+   remaining toll is environmental + rAF-coupling (already removed
+   where it counts).
 5. **Explicitly OUT:** bigger step batches (proven harmful — MIPS flat,
    rounds 124→24, §41), variable virtual clock as a speedup (fidelity
    knob, not speed — same section), chasing box-state noise.

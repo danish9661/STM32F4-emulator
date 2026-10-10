@@ -61,7 +61,9 @@ import { createUsbHost } from './usbhost.js';
 // interactive latency like doom-worker's 28 ms.
 const BURST_STEPS = 12;
 const BURST_FINE_STEPS = 6;
-const WALL_BUDGET_MS = 20;
+const WALL_BUDGET_MS = 20; // 24-step bursts tried 2026-10-10: adjacent
+// A/B 34.4 vs 37.0 (+7.5%, under the bar) — reverted to 12 for lower
+// latency on identical throughput
 const TICK_STALE_MS = 200;
 const YIELD_MS = 4;
 
@@ -103,6 +105,10 @@ function pushUart(chunk) {
 function scheduleLoop(delay) {
     if (timer === null) timer = setTimeout(selfTick, delay === undefined ? YIELD_MS : delay);
 }
+// Fallback driver: steps only when the page's ticks go stale (hidden
+// tab, stopped loop). While ticks arrive the page paces bursts; the
+// message round trip + UI work between bursts is the TCI breather
+// (doom-worker pattern — never batch bursts back-to-back).
 function selfTick() {
     timer = null;
     if (!booted || paused) return;
@@ -218,6 +224,7 @@ function driveFeatHooks() {
 // framebuffers only on frame change (transfer = zero-copy); speaker
 // samples drained every burst (transfer).
 let lastOledFrame = -1, lastTftFrame = '', lastLtdcFrame = -1;
+
 function gatherState() {
     const st = { inst: 0, pc: 0, sp: 0, xpsr: 0, stopped: false, gpio: null, watch: {}, regs: null };
     try {
@@ -239,7 +246,13 @@ function gatherState() {
 }
 
 function burst() {
-    if (!emu || !booted || paused) return;
+    // Always reply, even when paused: the page may be awaiting this burst
+    // (Stop clicked mid-flight). A null state resolves the waiter; the
+    // loop then sees running=false and raf-spins without ticking.
+    if (!emu || !booted || paused) {
+        post({ t: 'burst', state: null, uart: '', tx: [], fault: null });
+        return;
+    }
     const t0 = performance.now();
     const fine = !!cfg.fineSteps;
     const maxSteps = fine ? BURST_FINE_STEPS : BURST_STEPS;
@@ -339,9 +352,9 @@ function burst() {
         }
     } catch {}
     const tx = txFrames; txFrames = [];
-    // TX frames are small (a few per burst) — plain clone, no transfer
-    // (the page needs the bytes twice in gateway mode: viewer + ws.send,
-    // and a transfer would neuter the second use).
+    // TX frames are cloned (a transfer probe halved live throughput on
+    // one run and was reverted; pkt is a fresh alloc so aliasing was
+    // never the mechanism — likely box drift; clone cost is small).
     const txBytes = [];
     for (const f of tx) txBytes.push(f instanceof Uint8Array ? Uint8Array.from(f) : new Uint8Array(f));
     let fault = null;

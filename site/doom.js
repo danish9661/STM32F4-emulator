@@ -600,7 +600,7 @@ async function boot(keepDetail) {
 
     try {
         const [svdXml, wad] = await Promise.all([
-            fetch('vendor/stm32f407.svd?v=48').then((r) => r.text()),
+            fetch('vendor/stm32f407.svd?v=49').then((r) => r.text()),
             fetch('doom1.wad').then((r) => r.arrayBuffer()),
         ]);
         const firmware = new Uint8Array(atob(FIRMWARES.doom.bytes).split('').map((c) => c.charCodeAt(0)));
