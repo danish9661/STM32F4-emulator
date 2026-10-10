@@ -59,7 +59,7 @@ import { createUsbHost } from './usbhost.js';
 // hosts: the worker thread being busy does NOT jank the page, but message
 // round trips (UI state, pokes) queue behind the burst — 20 ms bounds
 // interactive latency like doom-worker's 28 ms.
-const BURST_STEPS = 6;
+const BURST_STEPS = 12;
 const BURST_FINE_STEPS = 6;
 const WALL_BUDGET_MS = 20;
 const TICK_STALE_MS = 200;

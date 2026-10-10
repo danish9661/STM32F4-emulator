@@ -239,9 +239,13 @@ const setStatus = (text, cls) => {
     dotEl.className = 'dot ' + cls;
 };
 
-let uartChunks = [], uartLen = 0;
+let uartChunks = [], uartLen = 0, httpRounds = 0;
 const appendUart = (chunk, paint = true) => {
     if (!chunk) return;
+    // Incremental HTTP-round count (was: full-buffer regex every stats
+    // refresh — a 200k scan per frame on UART-heavy firmware).
+    const m = chunk.match(/=== HTTP \d+b ===/g);
+    if (m) httpRounds += m.length;
     uartChunks.push(chunk);
     uartLen += chunk.length;
     // Keep last 200k chars without repeatedly copying 200k string (old: uartBuf+=chunk; slice)
@@ -492,7 +496,7 @@ $('btnBoot').addEventListener('click', async () => {
         setBusy(false);
         $('btnRun').textContent = 'Run';
         setStatus('loading firmware…', 'stop');
-        uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0;
+        uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0; httpRounds = 0;
         framesEl.textContent = ''; frameBuf.length = 0;
         totalInst = 0; stepsDone = 0;
         t0 = lastT = performance.now(); lastInst = 0;
@@ -757,7 +761,7 @@ const bootWorker = async (id) => {
     try { for (const w of WATCH) cfg.probes.push(w.addr >>> 0); } catch {}
     try { for (const t of TRACES) cfg.probes.push(t.addr >>> 0); } catch {}
     try { for (const [, a] of PERIPH_REGS) cfg.probes.push(a >>> 0); } catch {}
-    emuWorker = new Worker('emu-worker.js?v=3', { type: 'module' });
+    emuWorker = new Worker('emu-worker.js?v=4', { type: 'module' });
     emuWorker.onmessage = onWorkerMessage;
     emu = workerAdapter;
     netsim = null; usbhost = null; featHooks = null;
@@ -790,7 +794,7 @@ const boot = async () => {
     gpioDrivenHigh.clear();
 
     const fw = image.flash;
-    uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0;
+    uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0; httpRounds = 0;
     framesEl.textContent = ''; frameBuf.length = 0;
     totalInst = 0; stepsDone = 0;
     t0 = lastT = performance.now(); lastInst = 0;
@@ -1136,7 +1140,7 @@ if (btnPcapStop) btnPcapStop.addEventListener('click', () => {
     setStatus(`pcap: stopped — ${pcapFrames.length} frames buffered`, 'stop');
 });
 if (btnPcapDl) btnPcapDl.addEventListener('click', () => pcapDownload());
-$('btnClear').addEventListener('click', () => { uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0; });
+$('btnClear').addEventListener('click', () => { uartEl.textContent = uartBuf = ''; uartChunks = []; uartLen = 0; httpRounds = 0; });
 $('btnGw').addEventListener('click', connectGateway);
 
 const sendRx = (term) => {
@@ -1418,7 +1422,7 @@ const refreshStats = async () => {
     }
     $('stInst').textContent = totalInst.toLocaleString();
     $('stSteps').textContent = stepsDone.toLocaleString();
-    $('stRounds').textContent = (uartBuf.match(/=== HTTP \d+b ===/g) || []).length;
+    $('stRounds').textContent = httpRounds;
     $('stPc').textContent = regs ? hex32(regs.PC) : '—';
     $('stSp').textContent = regs ? hex32(regs.SP) : '—';
     $('stXpsr').textContent = regs ? hex32(regs.XPSR) : '—';

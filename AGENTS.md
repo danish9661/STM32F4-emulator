@@ -4613,6 +4613,15 @@ the moment the target is met (revert-if-neutral at every step).
    granularity; bridge mode stays burst=1 — WS round trips). Measured
    live-UI with full UI: blinky/eth_http 6.0 → **35.9 MIPS** (6x),
    browser suite EXIT=0 / 0 FAILs. New live cap ~= rAF x 600k.
+   FOLLOW-UP (same day): worker BURST_STEPS 6→12 confirmed by A/B/A
+   sandwich (eth 19.2/22.2 vs 25.7 → ~+24%, blinky flat) — bigger
+   bursts amortize the worker→page message toll without touching
+   per-step RX granularity. Packet-viewer DOM batched (metadata buffer
+   + one innerHTML paint on cadence) after telemetry proved per-frame
+   prepend/trim stalled dispatch ~12 ms on traffic-heavy bursts.
+   stRounds regex made incremental (was: 200k scan per stats refresh).
+   Live now: blinky ~41 / eth ~23, suite 0 FAILs. app.js?v=63,
+   emu-worker.js?v=4.
 2. **Console-page worker (mirror doom-worker).** Move stepping off the
    main thread; page posts ticks like doom.js. Drawback: GPIO panel,
    memory-watch pokes, and UART RX need round trips (latency + complexity).
