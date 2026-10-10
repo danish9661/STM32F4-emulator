@@ -13,9 +13,11 @@ pub struct Sdio {
     sd_state: SdState, rca: u16, data_xfer_active: bool,
     /// Card image for block read/write (harness = the flash array):
     /// 512-byte blocks, indexed by block number (ARG for CMD17/18/24).
-    /// Seeded by `sdio_bind_card` before init (mirrors the QSPI/FSMC
-    /// image pattern). Reads return the stored block (erased = 0xFF);
-    /// CMD24 writes land here, so a write-then-read round-trips.
+    /// Bound by `sdio_bind_card` AFTER init on the live model (emulator.js
+    /// binds after init_svd and re-binds after every model reset — the
+    /// model boots slot-empty like silicon boots with no card). Reads
+    /// return the stored block (erased = 0xFF when unbound); CMD24 writes
+    /// land here, so a write-then-read round-trips.
     card: Option<Vec<u8>>,
     /// TX staging for CMD24 (host-to-card): words the guest pushed to
     /// the FIFO port while the transfer is armed. Drained into `card`
@@ -118,9 +120,14 @@ impl Sdio {
     }
 
     /// Bind a card image (harness = the flash array): `blocks` 512-byte
-    /// blocks, erased 0xFF. Called before init (mirrors the QSPI/FSMC
-    /// image pattern). CMD17/18 read from it; CMD24 writes land in it,
-    /// so a guest write-then-read round-trips through the image.
+    /// blocks, erased 0xFF. Call AFTER init on the live model (emulator.js
+    /// binds after init_svd and re-binds after every model reset — unlike
+    /// QSPI/FSMC there is no pre-init global to seed; a bind before init
+    /// is lost when init installs the fresh peripheral tree). The model
+    /// boots slot-empty (card_blocks() == 0, reads erased 0xFF) like
+    /// silicon boots with no card in the slot. CMD17/18 read from the
+    /// image; CMD24 writes land in it, so a guest write-then-read
+    /// round-trips through the image.
     pub fn bind_card(&mut self, blocks: u32) {
         let n = (blocks.max(1) as usize) * 512;
         self.card = Some(vec![0xFF; n]);
@@ -326,7 +333,6 @@ impl Peripheral for Sdio {
                 self.cmd = value & 0xFFFF;
                 if value & 0x40 != 0 {
                     let cmd_index = value as u8 & 0x3F;
-                    let wait_type = (value >> 6) & 3;
                     self.respcmd = cmd_index as u32;
                     self.resp = [0; 4];
                     // ACMD prefix: this command arrived under APP_CMD.
@@ -409,8 +415,16 @@ impl Peripheral for Sdio {
                         self.app_pending = true;
                     }
 
+                    // CMDREND latches at CMD time (the response path is
+                    // immediate in the model). DBCKEND/DATAEND latch ONLY
+                    // at data-block completion (poll_data_done) — never
+                    // here: an earlier revision set DBCKEND from the CMD
+                    // wait-type bits, so every command arrived with
+                    // DBCKEND pre-set and drivers polling DBCKEND exited
+                    // before the completion window elapsed (CMD24 commits
+                    // never ran — the write vanished while flags looked
+                    // normal).
                     self.sta |= 1 << 6;
-                    if wait_type != 0 { self.sta |= 1 << 10; }
 
                     if cmd_index == 17 || cmd_index == 18 || cmd_index == 24 {
                         // Latch the direction NOW (see xfer_is_write docs)
@@ -431,10 +445,14 @@ impl Peripheral for Sdio {
                         self.data_done_at = now.wrapping_add(cost);
                         self.data_xfer_active = true;
                         self.dcount = self.dlen;
-                        // RXACT/TXACT + FIFO level reflect an ARMED transfer
-                        // at once (firmware polls these before DATAEND);
-                        // DBCKEND/DATAEND wait for the window.
-                        self.sta |= (1 << 1) | (1 << 3) | (1 << 11);
+                        // CMDACT + TXACT/RXACT reflect an ARMED transfer at
+                        // once (firmware polls these before DATAEND);
+                        // DBCKEND/DATAEND wait for the window. Error flags
+                        // NEVER latch here — only the completion, timeout,
+                        // and fault paths set them (an earlier revision
+                        // ORed DCRCFAIL + DTIMEOUT at arm, poisoning every
+                        // transfer's status from issue time).
+                        self.sta |= 1 << 11; // CMDACT
                         self.sta |= (1 << 12) | (1 << 13); // TXACT+RXACT
                         self.fifocnt = self.dlen.min(512);
                         // Overrun/underrun staging: a zero-length transfer
@@ -458,13 +476,19 @@ impl Peripheral for Sdio {
             0x28 => { self.dlen = value & 0x1FF_FFFF; self.dcount = value & 0x1FF_FFFF; }
             0x2C => {
                 self.dctrl = value & 0x1F3F;
-                if value & 1 != 0 {
-                    self.sta &= !0x3F;
+                // DTEN clear while a transfer is in flight aborts it
+                // (silicon: the data path stops, TXACT/RXACT drop). A
+                // clean halt latches no error flags — only ICR clears
+                // flags, and only the completion/timeout/fault paths set
+                // them (an earlier revision treated DTEN *set* as the
+                // abort and latched DTIMEOUT + RXOVERR, so every normal
+                // pre-CMD DCTRL configuration poisoned STA with errors).
+                // DTEN set is the normal pre-CMD enable; the transfer
+                // itself arms at CMD time.
+                if value & 1 == 0 && self.data_xfer_active {
                     self.data_xfer_active = false;
+                    self.sta &= !((1 << 12) | (1 << 13));
                     self.fifocnt = 0;
-                    self.sta |= 1 << 3;
-                    self.sta |= 1 << 5;
-                    self.fire_interrupts(sys);
                 }
             }
             0x38 => {

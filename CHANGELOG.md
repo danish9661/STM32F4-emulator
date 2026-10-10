@@ -6,6 +6,55 @@ date-based entries rather than strict SemVer until the first published release.
 
 ## [Unreleased] — 2026-10-06
 
+- SDIO status-flag silicon correction (P0 — guest CMD17→CMD24→CMD17
+  round-trip lost the write while flags looked normal: re-read returned
+  erased 0xFF, not zeros). Root cause (all in
+  `stm32-periph-wasm/src/peripherals/sdio.rs`, single live instance —
+  the card bind was never split): (1) DBCKEND latched at *every* CMD
+  issue from the CMD wait-type bits, so drivers polling DBCKEND exited
+  before the completion window elapsed and the CMD24 commit never ran;
+  (2) the data-transfer arm ORed DCRCFAIL + DTIMEOUT error bits,
+  poisoning every transfer's status from issue time; (3) DCTRL treated
+  DTEN *set* as the abort (inverted polarity) and latched DTIMEOUT +
+  RXOVERR, so every normal pre-CMD DCTRL configuration poisoned STA —
+  abort is now DTEN *clear* while a transfer is in flight, a clean halt
+  with no flag side effects (only ICR clears flags). DBCKEND/DATAEND
+  now latch only at data-block completion; sticky-flag behavior is
+  otherwise unchanged (firmware must clear via ICR, like silicon).
+  Also corrected the `bind_card`/`sdio_bind_card` docs (bind AFTER init
+  on the live model — emulator.js binds after init_svd and re-binds
+  after every model reset; a pre-init bind is lost with the old tree).
+  Verified with real guest firmware: `gap10_sdio` extended to the full
+  hardware init (CMD0/8, CMD55+ACMD41 OCR poll, CMD2/3/7, CMD16), a
+  CMD17 erased pre-read, a 128-word CMD24 (words `A5A5A5A5`/
+  `7F7F7FDA`/counter, ICR discipline, arm-cleanliness + DCOUNT asserts)
+  and a CMD17 re-read compare — `SDIO GAP10 OK` on f401/f411/f407/f429
+  (all bins rebuilt + `site/firmware.js` regenerated); model-level pins
+  in `test_periph_mock_consumer.mjs` (no DATAEND/DBCKEND/DCRCFAIL/
+  DTIMEOUT pre-set at CMD24 arm, ICR hygiene entering the gap test).
+  cargo 258/258 + node suites green.
+- SDIO instance-wiring exoneration + guest-shaped regression (2026-10-09
+  follow-up: the consumer cell stayed red on the rebuilt bytes with a
+  two-instance-split diagnosis). Verified in-engine there is no split:
+  the two `Sdio::new` call sites are alternative constructors, not two
+  live instances — `from_svd` (via `init_svd`/`init_svd_chip`) builds at
+  most one Sdio for the single SVD "SDIO", while the legacy hardcoded
+  `new_wasm` map (via `init()`) has no SDIO slot at all; `with_sdio`
+  and the 0x40012C00 address dispatch resolve to the same struct, and
+  `Sdio::new` boots `card: None` (unbound reads 0xFF). The consumer's
+  remaining failure reproduces byte-exactly when its driver "clears"
+  flags via 0x3C — which is MASK on silicon (ICR is 0x38, SVD-verified),
+  so the pre-read's DATAEND stays sticky and the CMD24 DATAEND wait
+  exits before the commit window (DIAG_ARM 7E483D40/DC:200,
+  DIAG_END wend=1/DC:0, re-read 0xFF — all matched locally). No engine
+  change: remapping MASK writes would corrupt interrupt-mask
+  programming for correct drivers; the consumer-side fix is one header
+  word (`SDIO_ICR` +0x3C → +0x38). New `site/test_sdio_guest_roundtrip.mjs`
+  (in the `npm test` chain) pins the single-instance contract through
+  the guest register block — 16-block bind, full init, erased pre-read,
+  128-word CMD24 with needle words A5/7F7F7FDA, probe-image vs guest-FIFO
+  agreement — plus the MASK/ICR map fidelity (MASK writes must not clear
+  STA, ICR writes must).
 - I2C master-model silicon correction (P0 — real HAL/Arduino firmware
   stalled forever while owner bare-metal tests passed). Root cause: the
   SR1 flag seats were rotated (model TXE@6/RXNE@5/BTF@7 vs silicon
@@ -64,6 +113,44 @@ date-based entries rather than strict SemVer until the first published release.
   (Disco F407VG build committed). Covers the reported hang shape —
   manual 2-byte master-TX to 0x3C — plus repeated-START reads (1/2/6
   bytes, exact data) and the 0x3C observer fan-out.
+- SPI SD Arduino-filesystem hang (FS cell printed FS_READY then stalled).
+  Exact stall: CMD0 — the model answered R1 on the command frame's own
+  CRC-byte paired read (Ncr=0), which poll-style drivers (classic Arduino
+  SD `Sd2Card::cardCommand`, SdFat) discard, so every command returned
+  0xFF and init spun to its timeout while raw block-RW firmware (which
+  samples R1 on the last command byte) stayed green. Fix in
+  `stm32-periph-wasm/src/ext_devices/sd_card.rs`: Ncr=2 (the CRC-paired
+  read and one driver discard each eat a pad; poll loops skip both),
+  CMD59/32/33/38 answer R1 (not illegal — the init/erase probes retried
+  into timeout otherwise), CMD25 multi-block write (0xFC packets,
+  auto-increment, 0xFD STOP_TRAN) plus CMD55-gated ACMD23 pre-erase
+  count (the writeStart path). Verified against the exact library source
+  the STM32 core resolves for `#include <SD.h>` (classic Arduino SD,
+  `~/Arduino/libraries/SD`: no discard read, CMD17-only reads,
+  CMD24 + CMD13/R2 write check, superfloppy fallback mount): new
+  `site/test_spi_sd_arduino.mjs` (27 checks through the SPI1 wire path:
+  CMD0/8/55/41(HCS)/58 + OCR CCS, MBR-invalid-then-superfloppy mount,
+  FAT walk to byte-exact HELLO.TXT, CSD capacity, CMD24 write + read
+  back, ACMD23 + CMD25 + STOP_TRAN) chained into `npm test` after
+  `test_spi_sd_fs.mjs`. Raw block-RW, FS walk, Disco I2C OLED all stay
+  green; vendor wasm rebuilt.
+- Interpreter speed run (2026-10-10, all measured back-to-back best-of-5,
+  deltas under ~8% distrusted): MMIO fast path (`fast_plain` + direct
+  flash/RAM slices, fetch16 gateless) adopted (~2-3x combined with the
+  `wasm-opt -Oz` switch, which beat -O3 and is smaller); `&mut dyn
+  Memory` → `&mut FlatMemory` devirtualization kept (neutral, locks the
+  invariant); fault-channel peek-gating kept on mechanism (3 plain loads
+  + conditional take, identical semantics). Dispatch-table rewrite and 9
+  hand-placed `#[inline]` attributes all measured neutral-or-negative and
+  were reverted; bigger step batches proven harmful (MIPS flat, HTTP
+  rounds 124→24 — RX servicing latency, never an optimization).
+  Standing: Node blinky ~82 / heavy-ETH ~74 (124 rounds, ~61/s) vs
+  committed ~18; page-side (headless Chrome probe
+  `.pw-scratch/cdp_mips.mjs`) ~45 across blinky/ETH/TFT. Variable virtual
+  clock rejected as a speedup (fidelity knob, not speed). Future 80+
+  page-side plan recorded in AGENTS §42 (page overhead → console worker
+  → build re-tune → fusion last resort). `VENDOR_V ?v=48`, app.js?v=58,
+  doom.js?v=90, worker?v=57, `__doomVer` 89.
 
 ## [1.6.0] — 2026-10-05
 

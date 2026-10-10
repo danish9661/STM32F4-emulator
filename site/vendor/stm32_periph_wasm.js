@@ -1891,8 +1891,11 @@ export function rtc_timestamp() {
 
 /**
  * Bind an SD-card image of `blocks` 512-byte blocks (erased 0xFF) for
- * CMD17/18 reads and CMD24 writes. Call before init (mirrors the
- * QSPI/FSMC image pattern).
+ * CMD17/18 reads and CMD24 writes. Call AFTER init on the live model
+ * (emulator.js binds after init_svd and re-binds after every model
+ * reset): the card lives in the SDIO peripheral, so a bind before init
+ * is lost when init installs the fresh tree. The model boots slot-empty
+ * (card_blocks() == 0, reads erased) like silicon with no card.
  * @param {number} blocks
  */
 export function sdio_bind_card(blocks) {

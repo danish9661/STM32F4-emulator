@@ -100,6 +100,41 @@ impl FlatMemory {
             .position(|r| addr >= r.base && (addr - r.base) < r.data.len() as u32)
     }
 
+    /// Fast-path gate: plain flash/RAM access with the MPU off and no
+    /// unaligned trap. Two relaxed atomic loads, zero global-SYS touches
+    /// (no peripheral-slot borrow, no QSPI liveness probe). Everything
+    /// else — periph, QSPI window, extra regions, MPU-on, UNALIGN_TRP —
+    /// takes the slow path unchanged. Ranges are disjoint by construction
+    /// (flash 0x08.., RAM 0x20.. vs QSPI 0x90.. / periph windows), so
+    /// checking flash/RAM first cannot steal a device access.
+    #[inline]
+    fn fast_plain(&self) -> bool {
+        !crate::system::is_mpu_enabled() && !crate::system::unalign_trp()
+    }
+
+    /// Byte offset of `[addr, addr+size)` inside flash, or None (u64 math
+    /// so a below-base address wraps huge and fails instead of panicking).
+    #[inline]
+    fn flash_range(&self, addr: u32, size: u32) -> Option<usize> {
+        let off = (addr as u64).wrapping_sub(self.flash_base as u64);
+        if off + size as u64 <= self.flash.len() as u64 {
+            Some(off as usize)
+        } else {
+            None
+        }
+    }
+
+    /// Same for main SRAM.
+    #[inline]
+    fn ram_range(&self, addr: u32, size: u32) -> Option<usize> {
+        let off = (addr as u64).wrapping_sub(self.ram_base as u64);
+        if off + size as u64 <= self.ram.len() as u64 {
+            Some(off as usize)
+        } else {
+            None
+        }
+    }
+
     /// Map a zeroed extra region in bulk. `load()` builds regions byte by
     /// byte (quadratic for megabyte images); pre-mapping makes WAD/EXTRAM
     /// setup O(size) with a fast fill. Matches the JS driver, which zeroes
@@ -273,6 +308,16 @@ impl FlatMemory {
 
 impl Memory for FlatMemory {
     fn read8(&self, addr: u32) -> u8 {
+        // Fast path first (flash/RAM only — disjoint from every device
+        // window, so no device access can be stolen here).
+        if self.fast_plain() {
+            if let Some(o) = self.flash_range(addr, 1) {
+                return self.flash[o];
+            }
+            if let Some(o) = self.ram_range(addr, 1) {
+                return self.ram[o];
+            }
+        }
         // QSPI memory-mapped window wins over the FSMC inert-0 inside
         // 0x90000000..0xA0000000 while the mmap mode is live.
         if is_qspi_mmap(addr) {
@@ -320,6 +365,15 @@ impl Memory for FlatMemory {
         }
     }
     fn fetch16(&self, addr: u32) -> u16 {
+        // Fast path needs NO gate: the slow path performs no MPU or
+        // unaligned checks either (execute permission belongs to the
+        // loop-top XN check). Pure range math, zero global touches.
+        if let Some(o) = self.flash_range(addr, 2) {
+            return u16::from_le_bytes([self.flash[o], self.flash[o + 1]]);
+        }
+        if let Some(o) = self.ram_range(addr, 2) {
+            return u16::from_le_bytes([self.ram[o], self.ram[o + 1]]);
+        }
         if is_periph(addr) {
             // No MPU data check: the loop-top XN check owns execute
             // permission (and reports the correct IACCVIOL-class fault).
@@ -333,9 +387,22 @@ impl Memory for FlatMemory {
         }
     }
     fn is_mapped(&self, addr: u32) -> bool {
+        // Fast path skips the QSPI liveness probe (global SYS borrow) for
+        // the two ranges that cover ~every fetch and data access.
+        if self.flash_range(addr, 1).is_some() || self.ram_range(addr, 1).is_some() {
+            return true;
+        }
         self.mapped(addr)
     }
     fn read16(&self, addr: u32) -> u16 {
+        if self.fast_plain() {
+            if let Some(o) = self.flash_range(addr, 2) {
+                return u16::from_le_bytes([self.flash[o], self.flash[o + 1]]);
+            }
+            if let Some(o) = self.ram_range(addr, 2) {
+                return u16::from_le_bytes([self.ram[o], self.ram[o + 1]]);
+            }
+        }
         if is_qspi_mmap(addr) {
             if self.mpu_deny(addr, 2, false) {
                 return 0;
@@ -360,6 +427,16 @@ impl Memory for FlatMemory {
         lo | (hi << 8)
     }
     fn read32(&self, addr: u32) -> u32 {
+        // Single range check + one LE load replaces four read8 calls
+        // (each with its own region walk + MPU probe).
+        if self.fast_plain() {
+            if let Some(o) = self.flash_range(addr, 4) {
+                return u32::from_le_bytes([self.flash[o], self.flash[o + 1], self.flash[o + 2], self.flash[o + 3]]);
+            }
+            if let Some(o) = self.ram_range(addr, 4) {
+                return u32::from_le_bytes([self.ram[o], self.ram[o + 1], self.ram[o + 2], self.ram[o + 3]]);
+            }
+        }
         if is_periph(addr) {
             if self.mpu_deny(addr, 4, false) {
                 return 0;
@@ -376,6 +453,15 @@ impl Memory for FlatMemory {
         b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     }
     fn write8(&mut self, addr: u32, v: u8) {
+        // Fast path is RAM-only: flash stores need the protection +
+        // program-error arms below, so they stay on the slow path (flash
+        // writes are erase/program events, never hot).
+        if self.fast_plain() {
+            if let Some(o) = self.ram_range(addr, 1) {
+                self.ram[o] = v;
+                return;
+            }
+        }
         if is_periph(addr) {
             if self.mpu_deny(addr, 1, true) {
                 return;
@@ -427,6 +513,14 @@ impl Memory for FlatMemory {
         }
     }
     fn write16(&mut self, addr: u32, v: u16) {
+        if self.fast_plain() {
+            if let Some(o) = self.ram_range(addr, 2) {
+                let b = v.to_le_bytes();
+                self.ram[o] = b[0];
+                self.ram[o + 1] = b[1];
+                return;
+            }
+        }
         if is_periph(addr) {
             if self.mpu_deny(addr, 2, true) {
                 return;
@@ -445,6 +539,16 @@ impl Memory for FlatMemory {
         self.write8(addr + 1, (v >> 8) as u8);
     }
     fn write32(&mut self, addr: u32, v: u32) {
+        if self.fast_plain() {
+            if let Some(o) = self.ram_range(addr, 4) {
+                let b = v.to_le_bytes();
+                self.ram[o] = b[0];
+                self.ram[o + 1] = b[1];
+                self.ram[o + 2] = b[2];
+                self.ram[o + 3] = b[3];
+                return;
+            }
+        }
         if is_periph(addr) {
             if self.mpu_deny(addr, 4, true) {
                 return;

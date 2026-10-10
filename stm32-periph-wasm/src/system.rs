@@ -90,6 +90,12 @@ pub fn take_align_fault() -> Option<u32> {
         None
     }
 }
+/// Non-consuming probe for the hot path: a plain load lets the run loop
+/// skip the swap below when no fault is latched (the overwhelmingly common
+/// case). Semantics unchanged — the take still test-and-consumes.
+pub fn align_fault_pending() -> bool {
+    ALIGN_FAULT_VALID.load(Ordering::Relaxed)
+}
 // Deferred bus-fault channel (unmapped access = precise BusFault on
 // silicon): same deferred shape as the MPU/align paths (access completes
 // dummy, flags exact, PC one behind). Peripheral-space holes are NOT
@@ -113,6 +119,10 @@ pub fn take_bus_fault() -> Option<(u32, bool)> {
     } else {
         None
     }
+}
+/// Non-consuming probe for the hot path (see `align_fault_pending`).
+pub fn bus_fault_pending() -> bool {
+    BUS_FAULT_VALID.load(Ordering::Relaxed)
 }
 // Deferred MPU data-fault channel (see cpu/mod.rs): FlatMemory latches a
 // violation (returning dummy/dropping the access); the run loop raises it
@@ -138,6 +148,10 @@ pub fn take_mpu_fault() -> Option<(u32, bool)> {
     } else {
         None
     }
+}
+/// Non-consuming probe for the hot path (see `align_fault_pending`).
+pub fn mpu_fault_pending() -> bool {
+    MPU_FAULT_VALID.load(Ordering::Relaxed)
 }
 /// Latch MemManage fault state (CFSR MMFSR bits + MMFAR) via read-modify-
 /// write, preserving any BusFault/UsageFault bits already latched.

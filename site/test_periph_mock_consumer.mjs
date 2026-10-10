@@ -1591,12 +1591,23 @@ function t_gap10() {
     // SDIO CMD24: bind 4 blocks, walk Idle→Tran, write block 2, read back.
     sdio_bind_card(4);
     ok(sdio_card_blocks() === 4, 'sdio: card bound, 4 blocks');
+    // Sticky-flag hygiene (silicon rule: DATAEND/DBCKEND/CMDREND persist
+    // until ICR clears them — an earlier suite section's transfer may have
+    // completed during intervening tests' ticks and latched DATAEND here).
+    // Real drivers clear ICR before each transfer; the gap test does too.
+    W(SDIO + 0x38, 0xFFFFFFFF);
     W(SDIO + 0x0C, 0x40 | 0);
     W(SDIO + 0x0C, 0x40 | 2);
     W(SDIO + 0x0C, 0x40 | 3);
     W(SDIO + 0x08, 0x01D00000); W(SDIO + 0x0C, 0x40 | 7);
     W(SDIO + 0x24, 0xFFFFF); W(SDIO + 0x28, 512);
     W(SDIO + 0x08, 2); W(SDIO + 0x0C, 0x40 | 24);
+    // No completion/error flag may be pre-set at arm: a pre-set DBCKEND
+    // (or DATAEND) ends the driver's wait before the commit window, so
+    // the CMD24 write vanishes while flags look normal; pre-set
+    // DCRCFAIL/DTIMEOUT poison the status from issue time.
+    ok((R(SDIO + 0x34) & ((1 << 8) | (1 << 10))) === 0, 'sdio: no DATAEND/DBCKEND pre-set at CMD24 arm');
+    ok((R(SDIO + 0x34) & ((1 << 1) | (1 << 3))) === 0, 'sdio: no DCRCFAIL/DTIMEOUT pre-set at CMD24 arm');
     for (const w of [0x11111111, 0x22222222, 0x33333333, 0x44444444]) W(SDIO + 0x80, w);
     for (let i = 0; i < 2000 && !(R(SDIO + 0x34) & (1 << 8)); i++) tick_n(100);
     ok((R(SDIO + 0x34) & (1 << 8)) !== 0, 'sdio: DATAEND after CMD24');
@@ -1670,13 +1681,17 @@ function t_gap10() {
 // tap transactions (covered below).
 function t_spi_sd() {
     // 6-byte CMD frame; R1 rides the CRC byte's paired read (Ncr=0).
+    const tr = (b) => { W(SPI3 + 0x0C, b); return R(SPI3 + 0x0C) & 0xFF; };
+    // SdFat-shaped command: 6-byte frame, one discard read, then poll
+    // for R1 (Ncr=2: the CRC-paired read and the discard each eat one
+    // pad byte — see sd_card.rs).
     const cmd = (idx, arg) => {
         const bytes = [0x40 | idx, (arg >>> 24) & 0xFF, (arg >>> 16) & 0xFF, (arg >>> 8) & 0xFF, arg & 0xFF, 0xFF];
-        let last = 0;
-        for (const b of bytes) { W(SPI3 + 0x0C, b); last = R(SPI3 + 0x0C) & 0xFF; }
-        return last;
+        for (const b of bytes) tr(b);
+        tr(0xFF); // discard
+        for (let i = 0; i < 10; i++) { const r = tr(0xFF); if (r !== 0xFF) return r; }
+        return 0xFF;
     };
-    const tr = (b) => { W(SPI3 + 0x0C, b); return R(SPI3 + 0x0C) & 0xFF; };
     const moderSave = R(GPIOB), odrSave = R(GPIOB + 0x14);
     W(GPIOB, (moderSave & ~(3 << 24)) | (1 << 24)); // PB12 output (CS)
     W(SPI3, (1 << 2) | (1 << 6)); // MSTR + SPE

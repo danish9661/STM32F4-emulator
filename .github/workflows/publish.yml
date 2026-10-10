@@ -62,6 +62,13 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
       - name: Install dependencies
         run: npm ci
+      - name: Install wasm-opt (pinned v117, matches local builds)
+        run: |
+          curl -sL https://github.com/WebAssembly/binaryen/releases/download/version_117/binaryen-version_117-x86_64-linux.tar.gz -o /tmp/binaryen.tgz
+          tar -xzf /tmp/binaryen.tgz -C /tmp
+          echo "/tmp/binaryen-version_117/bin" >> "$GITHUB_PATH"
+      - name: Optimize vendored wasm (-Oz, runs via prepack too)
+        run: npm run build:wasm:opt
       - name: Validate version
         if: github.event_name == 'workflow_dispatch'
         run: |

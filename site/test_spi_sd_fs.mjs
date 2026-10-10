@@ -24,14 +24,17 @@ const SPI1 = 0x40013000;
 const W = (a, v) => emu.write32(a, v >>> 0);
 const R = (a) => emu.read32(a) >>> 0;
 W(SPI1, (1 << 2) | (1 << 6)); // MSTR + SPE
-const cmd = (idx, arg) => {
-    let last = 0;
-    for (const b of [0x40 | idx, (arg >>> 24) & 0xFF, (arg >>> 16) & 0xFF, (arg >>> 8) & 0xFF, arg & 0xFF, 0xFF]) {
-        W(SPI1 + 0x0C, b); last = R(SPI1 + 0x0C) & 0xFF;
-    }
-    return last;
-};
 const tr = (b) => { W(SPI1 + 0x0C, b); return R(SPI1 + 0x0C) & 0xFF; };
+// SdFat-shaped command: 6-byte frame, one discard read, then poll for
+// R1 (Ncr=2 — see sd_card.rs).
+const cmd = (idx, arg) => {
+    for (const b of [0x40 | idx, (arg >>> 24) & 0xFF, (arg >>> 16) & 0xFF, (arg >>> 8) & 0xFF, arg & 0xFF, 0xFF]) {
+        W(SPI1 + 0x0C, b); R(SPI1 + 0x0C);
+    }
+    tr(0xFF); // discard first fill (SdFat drops one byte)
+    for (let i = 0; i < 10; i++) { const r = tr(0xFF); if (r !== 0xFF) return r; }
+    return 0xFF;
+};
 const readBlock = (n) => {
     if (cmd(17, n) !== 0x00) return null;
     if (tr(0xFF) !== 0xFE) return null;

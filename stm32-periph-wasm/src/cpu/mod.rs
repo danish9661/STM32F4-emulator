@@ -5,6 +5,7 @@ pub(crate) mod thumb;
 mod tests;
 pub use regs::Regs;
 pub use mem::Memory;
+use mem::FlatMemory;
 use crate::system::WasmSystem;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -368,7 +369,7 @@ impl Cpu {
     /// that). A blocked HardFault is lockup: loud halt. With delivery off
     /// everything halts loudly (polling firmware never raises).
     /// `pub(crate)` for the thumb decoder's SVC/NOCP arms.
-    pub(crate) fn raise_sync(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, irq: i32) {
+    pub(crate) fn raise_sync(&mut self, sys: &WasmSystem, mem: &mut FlatMemory, irq: i32) {
         if !self.deliver_irqs {
             self.fault = Some(CpuFault { pc: self.regs.r[15] & !1, op1: 0xDEAD, op2: 0, len: 2 });
             return;
@@ -406,7 +407,7 @@ impl Cpu {
     /// vector table (via VTOR), set EXC_RETURN. Works for system exceptions
     /// (negative irq) and external IRQs, thread or nested (an IRQ taken in
     /// handler mode runs on MSP and returns via F1 to the outer handler).
-    pub fn take_exception(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, irq: i32) {
+    pub fn take_exception(&mut self, sys: &WasmSystem, mem: &mut FlatMemory, irq: i32) {
         let vector = (16 + irq) as u32;
         // Bank the thread stack, then run the handler on MSP. The frame
         // goes onto the CURRENT stack (PSP if thread+PSP, else MSP) — this
@@ -567,7 +568,7 @@ impl Cpu {
     pub fn exception_return(
         &mut self,
         sys: &WasmSystem,
-        mem: &mut dyn Memory,
+        mem: &mut FlatMemory,
         exc: u32,
         pc: u32,
     ) -> bool {
@@ -854,7 +855,7 @@ impl Cpu {
     fn enter_chained(
         &mut self,
         sys: &WasmSystem,
-        mem: &mut dyn Memory,
+        mem: &mut FlatMemory,
         irq: i32,
         to_psp: bool,
         fp_ext: bool,
@@ -918,7 +919,7 @@ impl Cpu {
     /// Raise a bus fault: latch BFSR (PRECISERR for data, IACCVIOL for
     /// fetch) + BFARVALID + BFAR, then route by SHCSR.BUSFAULTENA
     /// (default escalates to HardFault).
-    fn raise_bus(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, addr: u32, exec: bool) {
+    fn raise_bus(&mut self, sys: &WasmSystem, mem: &mut FlatMemory, addr: u32, exec: bool) {
         let bfsr = if exec { (1 << 8) | (1 << 15) } else { (1 << 9) | (1 << 15) };
         let cfsr = sys.p.read(sys, 0xE000ED28, 4);
         sys.p.write(sys, 0xE000ED28, 4, cfsr | bfsr);
@@ -934,7 +935,7 @@ impl Cpu {
     /// priority gating/escalation runs through raise_sync. With delivery
     /// off this is a loud CPU halt like SVC/NOCP. Any stale deferred fault
     /// is discarded first (a synchronous raise supersedes it).
-    fn raise_memmanage(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, addr: u32, exec: bool) {
+    fn raise_memmanage(&mut self, sys: &WasmSystem, mem: &mut FlatMemory, addr: u32, exec: bool) {
         let _ = crate::system::take_mpu_fault();
         let (bits, mar) = if exec {
             (1 << 0, Some(addr)) // IACCVIOL + MMARVALID
@@ -947,7 +948,7 @@ impl Cpu {
         self.raise_sync(sys, mem, irq);
     }
 
-    pub fn run(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, budget: u32) -> u32 {
+    pub fn run(&mut self, sys: &WasmSystem, mem: &mut FlatMemory, budget: u32) -> u32 {
         let mut done = 0;
         // Publish executed-instruction progress to the shared virtual clock
         // in small chunks, so model reads mid-step (polled timer counters,
@@ -966,38 +967,44 @@ impl Cpu {
             // Deferred MPU data fault from the previous instruction (see
             // mem.rs): raise before fetching the next one. Takes precedence
             // over new interrupt delivery (the fault is older).
-            // Single take(): the channel is first-wins latched, so one swap
-            // both tests and consumes (a separate is-set peek would cost a
-            // second atomic per instruction on the hot path).
-            if let Some((addr, exec)) = crate::system::take_mpu_fault() {
-                self.raise_memmanage(sys, mem, addr, exec);
-                // raise_memmanage either takes an exception (continues
-                // below) or records a loud halt (breaks next check).
-                if self.fault.is_some() {
-                    break;
+            // Peek-then-take: three plain loads in the common no-fault
+            // case instead of three atomic swaps (LOCK XCHG on x86); the
+            // take still test-and-consumes, so semantics are identical.
+            if crate::system::mpu_fault_pending() {
+                if let Some((addr, exec)) = crate::system::take_mpu_fault() {
+                    self.raise_memmanage(sys, mem, addr, exec);
+                    // raise_memmanage either takes an exception (continues
+                    // below) or records a loud halt (breaks next check).
+                    if self.fault.is_some() {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
             }
             // Same channel for CCR.UNALIGN_TRP: latch UNALIGNED and raise
             // through the UsageFault/HardFault routing (UsageFaults carry
             // no fault address register, so only presence matters).
-            if crate::system::take_align_fault().is_some() {
-                let cfsr = sys.p.read(sys, 0xE000ED28, 4);
-                sys.p.write(sys, 0xE000ED28, 4, cfsr | (1 << 24));
-                self.raise_sync(sys, mem, Self::usage_target(sys));
-                if self.fault.is_some() {
-                    break;
+            if crate::system::align_fault_pending() {
+                if crate::system::take_align_fault().is_some() {
+                    let cfsr = sys.p.read(sys, 0xE000ED28, 4);
+                    sys.p.write(sys, 0xE000ED28, 4, cfsr | (1 << 24));
+                    self.raise_sync(sys, mem, Self::usage_target(sys));
+                    if self.fault.is_some() {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
             }
             // Deferred wild access (data path, or a straddling/o2 fetch the
             // pre-check below could not see): raise with the latched class.
-            if let Some((addr, exec)) = crate::system::take_bus_fault() {
-                self.raise_bus(sys, mem, addr, exec);
-                if self.fault.is_some() {
-                    break;
+            if crate::system::bus_fault_pending() {
+                if let Some((addr, exec)) = crate::system::take_bus_fault() {
+                    self.raise_bus(sys, mem, addr, exec);
+                    if self.fault.is_some() {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
             }
             let pc = self.regs.r[15] & !1;
             if TRACE_ON.load(Ordering::Relaxed) {

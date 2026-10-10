@@ -4444,23 +4444,185 @@ reads never retry. Proven unfixable by quanta (512: init green/read red;
 64/256: init itself breaks). Fix, mirroring SpiFlash (synchronous
 per-byte answers, no round-trip):
 - New `ext_devices/sd_card.rs`: SD SPI-mode card — CMD0/8/55/41/58/16/
-  13/9/10/17/18/24/12, R1/R7/OCR/CSD/CID, 0xFE token + 512B + CRC,
+  13/9/10/17/18/24/25/12, ACMD23 (CMD55-gated pre-erase count for
+  writeStart; bare CMD23 illegal like silicon), R1/R7/OCR/CSD/CID, 0xFE
+  token + 512B + CRC,
   CMD24 commit on packet-complete (CS deassert drops partials), SDHC
-  block addressing (CCS=1), Ncr=0 (R1 on the CRC byte's paired read —
-  every poll loop tolerates it). CRC bytes consumed, never re-decoded
-  as command tokens (a CRC with 01xxxxxx bits would phantom-start a
-  command and desync the stream).
+  block addressing (CCS=1), Ncr=2 (TWO idle pads before every response:
+  the CRC byte's paired read AND the driver's discard each eat one —
+  Ncr=1 still starved SdFat, whose discard ate R1; poll-until-non-FF
+  drivers skip both pads harmlessly). CRC bytes consumed, never
+  re-decoded as command tokens (a CRC with 01xxxxxx bits would
+  phantom-start a command and desync the stream). CMD25 multi-block
+  write (0xFC packets, block auto-increment, 0xFD STOP_TRAN — SdFat
+  DEDICATED_SPI routes EVERY write through CMD25, so the Arduino path
+  failed at writeStart with ec=0xE while raw CMD24 tests stayed green;
+  verified against SdFat 2.3.0 source: R1B/CMD12 only on the read
+  path, no ACMD23 in this version).
 - `add_spi_sd_card(peripheral, blocks, cs)` + `spi_clear_miso(peripheral)`
   exports (F1 `clearRx` parity); `ext_devices.spi_sd` registration in
   `site/emulator.js` (same before-init rule as spi_flash);
   `spi.clearMiso`/`spi.clearRx` on the facade with the structural-limit
   note (prefills stay one transfer late for single-step transactions —
   protocol work belongs model-side).
-- Tests: 6 Rust unit tests (init, exact-512 CMD17 incl. through-SPI3-
-  registers GPIO-CS integration, CMD24 round-trip, erased/OOB, CS-drop)
+- Tests: 10 Rust unit tests (init incl. raw wire-order pin, exact-512
+  CMD17 incl. through-SPI3-registers GPIO-CS integration, CMD24
+  round-trip, CMD25 multi-until-STOP, ACMD23 CMD55-gating, erased/OOB,
+  CRC/erase answers, image seeding, CS-drop)
   + `t_spi_sd`/`t_spi_miso_clear` in `test_periph_mock_consumer.mjs`
   (mock 351 checks) + `clearMiso` callable pin + `site/test_spi_sd.mjs`
   (end-to-end through createEmulator `ext_devices.spi_sd`, wired into
-  the `npm test` chain next to `test_spi_flash`). Vendor wasm rebuilt
+  the `npm test` chain next to `test_spi_flash`) +
+  `site/test_spi_sd_arduino.mjs` (classic-Arduino-SD exact wire sequence:
+  poll-only cardCommand, CMD0/8/55/41(HCS)/58, MBR-then-superfloppy
+  mount, FAT walk to HELLO.TXT bytes, CMD24+CMD13 write, ACMD23+CMD25+
+  STOP_TRAN). Vendor wasm rebuilt
   (`npm run build:wasm`). Full gate: cargo 254/254 + `npm test` green.
   Left uncommitted per standing rule.
+
+## 41. Interpreter speed run: wasm-opt + MMIO fast path (2026-10-10)
+
+Pill: `.pw-scratch/pill_mips.mjs` (blinky nop-loop, median-of-5) +
+`.pw-scratch/doom_pill.mjs` (title attract). Box is noisy (±10% with
+other tenants) — compare back-to-back, best-of-5, and distrust any
+delta under ~8%.
+
+- **wasm-opt -Oz: +14%, adopted.** Standalone wasm-opt needs explicit
+  feature flags or validation fails on bulk-memory (`--enable-bulk-
+  memory --enable-nontrapping-float-to-int --enable-sign-ext
+  --enable-mutable-globals --enable-multivalue`). A/B: orig 31.3,
+  -Oz 35.9, -O3 35.0 → -Oz wins and is smaller. wasm-opt symlinked
+  into `~/.local/bin`; `build:wasm`/`build:wasm:opt` tails pinned to
+  the -Oz invocation (keep `wasm-opt = false` in Cargo.toml so
+  wasm-pack never runs its own default pass).
+- **MMIO fast path (cpu/mem.rs): +2-3x combined, adopted.** Every access
+  used to touch the SYS global (QSPI liveness borrow), walk regions
+  repeatedly (read32 = 4× read8 = 4× full checks), and probe MPU/
+  unaligned per byte. Now: `fast_plain()` gate (MPU off + no
+  UNALIGN_TRP, two atomics) + direct flash/RAM slice access; fetch16
+  needs no gate at all (its slow path never checked MPU/unalign).
+  Ranges are disjoint from all device windows by construction.
+  cargo 258/258 green.
+- **Dispatch table: implemented, validated, REVERTED.** exec16 +
+  exec32 converted to top-byte match (B-range order verified arm by
+  arm; F3 cascade kept ahead of the F-bucket). 258/258 green, compiles
+  warning-free — but same-window A/B says if-chain wins or ties
+  (blinky 86.28 vs 83.6 best, DOOM 62.84 vs ~59.7). V8 handles the
+  predictable branches fine; the bigger function tiers up worse. If
+  this ever gets revisited, the failure to beat is documented here,
+  not in the code.
+- **RefCell (task 3): declined with numbers.** `Peripherals::read/
+  write` already binary-searches sorted slots with exactly ONE borrow
+  per access; periph_read measures 0.1µs total per call, of which the
+  borrow is ~1ns. Restructuring GPIO/USART/RCC buys ~0.1-0.3% on
+  eth_http for real reentrancy risk. Not done.
+- **Tick batching (task 5): confirmed optimal, no change.** No
+  per-instruction tick exists (run() only publishes INSTRUCTION_COUNT
+  in +16 chunks); tick runs once per JS step at 1.1µs/call (0.007%
+  of a 500k-inst step).
+- **Follow-up (done): `&mut dyn Memory` → `&mut FlatMemory`** (11
+  sites, sole implementor) — validated green, measured NEUTRAL on
+  both pills (V8 already devirtualizes the monomorphic indirect
+  call). Kept: tiny, locks in the invariant.
+- **Follow-up (done): fault-channel peek-gating** — 3 atomic swaps per
+  instruction → 3 plain loads + conditional take (identical semantics,
+  single-thread safe by construction). Green suites. Measured WITHIN
+  NOISE (±4 MIPS run variance both sides; blinky 86.3→82-86,
+  heavy-ETH 72.2→71.7): kept on mechanism (15 lines, zero risk), NOT
+  claimed as a win. If a future clean A/B shows negative, revert.
+- **Inline audit #1 (done 2026-10-10): `fetch16 #[inline]` — NEUTRAL,
+  reverted.** Same-box-state A/B (box depression lifted mid-session:
+  ~80 both sides): with 79.23/70.75 vs without 79.95/67.79 (blinky ±1%,
+  heavy +4.4% < 8% bar). rustc inlines it on its own heuristics; the
+  attribute adds nothing. Remaining queue: read8, is_periph/is_qspi_mmap,
+  cond_ok, read16/32, write8, branch — one at a time, pill each.
+- **Inline audit #2 (done 2026-10-10): `read8 #[inline]` — NEUTRAL,
+  reverted.** With-inline 81.74/75.68 vs without-inline 81.43/73.29
+  (blinky ±0.4%, heavy +3.3% < 8% bar). The raw +11.6% vs the older
+  67.79 baseline was box drift, not the attribute — the A/B caught it
+  (that baseline re-measured 73.29 with zero source change; heavy-pill
+  variance exceeds blinky's since it includes JS driver work per step).
+  rustc inlines hot call sites on its own; attributes add nothing so far.
+- **Inline audits #3–#9 (done 2026-10-10, group-tested): `is_qspi_mmap`,
+  `is_periph`, `read16`, `read32`, `write8`, `cond_ok`, `branch` —
+  ALL NEUTRAL, all reverted.** Cargo 258/258 green with the group in.
+  Group build 79.55/74.17 vs no-inline 81.43/73.29 (blinky -2.3%, heavy
+  +1.2%, both noise) → no bisect (a hidden win would need exact
+  cancellation across members — implausible for pure hints). Final
+  reverted tree rebuilt + confirmed: 82.35/74.58, binary matches source.
+  Audit closed: rustc's own heuristics already inline every hot call
+  site; hand-placed `#[inline]` on this interpreter is exhausted as a
+  lever. Pre-existing attributes (rr/adv/fast_plain/mapped/...) untouched.
+- **Heavy-ETH gap root-caused (done 2026-10-10, no rebuild): per-step
+  servicing is NOT the gap.** 100k vs 500k batches back-to-back: MIPS
+  identical (70.30 vs 70.33) but rounds collapse 124→24 (58.1/s →
+  11.3/s) — the documented trap in miniature (MIPS flat, work 5x down:
+  RX is serviced between steps, so big batches spin in recv-wait). The
+  80→70 gap is per-instruction MMIO slow-path cost (model call per
+  access), and bigger batches are actively harmful, never an
+  optimization. No safe change; servicing stays as-is.
+- **Heavy firmware (eth_http netsim, no DOOM): 72.2 MIPS, 124 rounds
+  (59.7/s)** — I/O-bound workloads sit ~16% under the compute pill
+  (MMIO slow path + per-step driver servicing), as expected.
+- Superfusing deferred: with dispatch+devirt both neutral, no
+  profiled pair justifies hand-fusing; revisit only for a hard fps
+  target with pair-frequency data. Concrete method when that day comes
+  (no instrumentation exists today): counting build with a
+  (prev_opclass, opclass) histogram at exec16/exec32 entry over a
+  representative workload, fuse top pairs covering >50% of dynamic
+  pairs, differential-test vs the unfused decoder. Never hand-pick
+  pairs by reading code — frequency data first, always.
+
+Standing (reproducible 2026-10-10, this box, depression lifted): blinky
+~82 / heavy-ETH ~74 on the current tree vs HEAD ~18 (session work =
++2.4x vs committed minimum, fastpath et al. intact; depressed-era
+numbers were blinky ~43 / heavy ~30-37, HEAD ~18 — same ratios, all
+binaries move together, so only back-to-back comparisons count).
+Rule: only ever compare back-to-back on the same box state;
+absolute MIPS expires fast here. `VENDOR_V ?v=48` + `__doomVer`
+89 + app.js?v=58 / doom.js?v=90 / worker?v=57 for the rebuilt vendor.
+Page-side (headless Chrome, rAF loop stopped, `.pw-scratch/cdp_mips.mjs`):
+blinky ~45 / eth_http ~45 / tft_test ~47 (Node same tree: 78/68/43) —
+i.e. ~0.6x Node for compute/ETH, ~1x for display-bound (JS parser
+dominates both). Interactive page runs slightly LOWER (DOM/canvas per
+frame not included in the probe). No >50 MIPS browser guarantee exists.
+
+## 42. Future plan: page-side 80+ MIPS (prepared 2026-10-10, NOT started)
+
+Target as defined by the user: browser page-side 80+ MIPS (Node already
+clears ~82; page sits ~45). Acceptance harness EXISTS:
+`.pw-scratch/cdp_mips.mjs` (headless Chrome, rAF loop stopped, 5x5M-inst
+best-of-5 inside one evaluate). Any future push is judged ONLY by that
+probe, back-to-back, same box state. Order below is cheapest-first; stop
+the moment the target is met (revert-if-neutral at every step).
+
+1. **Page overhead reduction (no wasm change).** Batch UART DOM appends,
+   throttle panel/canvas refreshes (GPIO grid, periph/watch, packet
+   viewer) to every Nth frame. Drawback: livelier UI gets coarser.
+   Overcome: adaptive refresh — full rate while interacting, throttled
+   while running flat (the doom worker already renders change-gated).
+2. **Console-page worker (mirror doom-worker).** Move stepping off the
+   main thread; page posts ticks like doom.js. Drawback: GPIO panel,
+   memory-watch pokes, and UART RX need round trips (latency + complexity).
+   Overcome: async batched state transfer per burst; keep pokes on a
+   priority channel. Doom's worker is the working template.
+3. **Wasm build re-tune.** Re-run the -Oz vs -O3 A/B per workload class
+   (the §41 verdict was DOOM-pill-specific; blinky-class may prefer -O3
+   inlining). Drawback: -O3 grows the binary (slower page loads).
+   Overcome: ship per-page builds only if a class wins >8% (else keep one).
+4. **Decoder fusion (last resort).** Counting build first:
+   (prev_opclass, opclass) histogram at exec16/exec32 entry over
+   representative workloads; fuse only top pairs covering >50% of dynamic
+   pairs; differential-test vs unfused (cargo + npm + matrix + browser +
+   old-vs-new lockstep — the Unicorn oracle is gone, so lockstep + suites
+   are the whole safety net). Drawback: silent-divergence risk +
+   binary bloat + harder census. Overcome: fuse one pair per commit,
+   pill + full battery each, revert-if-neutral; never hand-pick pairs.
+5. **Explicitly OUT:** bigger step batches (proven harmful — MIPS flat,
+   rounds 124→24, §41), variable virtual clock as a speedup (fidelity
+   knob, not speed — same section), chasing box-state noise.
+
+Preconditions before starting: quiet box, green `npm test` baseline,
+fresh `cdp_mips` baseline trio on the same day. Expected total IF every
+step pays (unlikely): page 45 → ~60-70. 80+ is NOT promised — if steps
+1-3 stall below target, stop and say so rather than fusing blindly.

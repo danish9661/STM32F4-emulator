@@ -27,7 +27,10 @@ pub struct SdCardConfig {
 ///
 /// SDHC block addressing only (CCS=1 in the ACMD41/CMD58 OCR): CMD17/24
 /// ARG is a block index. Out-of-range blocks answer R1 address-error
-/// (0x20) with no token, like silicon.
+/// (0x20) with no token, like silicon. Ncr=1: every command response is
+/// preceded by one idle byte (silicon's 1-8 Ncr window, deterministic) —
+/// discard-first drivers (SdFat) drop it, poll-until-non-FF drivers skip
+/// it; Ncr=0 starved SdFat because its discard ate the R1 itself.
 pub struct SdCard {
     pub config: SdCardConfig,
     name: String,
@@ -39,6 +42,13 @@ pub struct SdCard {
     acmd41_seen: bool,   // first ACMD41 answers busy (0x01), later ones ready
     /// CMD24 host-to-card collection: token + 512 data + 2 CRC.
     wr: Option<WriteStage>,
+    /// CMD25 multi-block write: after each packet commits, a fresh stage
+    /// re-arms at block+1 (silicon auto-increments) until the 0xFD
+    /// STOP_TRAN token ends the stream. SdFat DEDICATED_SPI routes EVERY
+    /// write (even single-sector) through CMD25, so without this the
+    /// Arduino path fails at writeStart (R1 illegal 0x04) while raw
+    /// CMD24 tests stay green — exactly the observed split.
+    multi_write: bool,
     /// CMD18 streaming: next block index to queue when the reply drains.
     stream_next: Option<u32>,
     cs_state: bool,
@@ -71,6 +81,7 @@ impl SdCard {
             erase_start: None,
             erase_end: None,
             wr: None,
+            multi_write: false,
             stream_next: None,
             cs_state: true,
         }
@@ -124,6 +135,16 @@ impl SdCard {
     }
 
     fn decode(&mut self, idx: u8, args: &[u8]) {
+        // Ncr=2: every command response is preceded by TWO idle bytes.
+        // Silicon answers 1-8 bytes after the command, and TWO consumers
+        // each eat one byte before R1: (1) the CRC byte's own paired read
+        // (decode runs during that write, so its read pops the queue
+        // head), and (2) the driver's discard-first read (SdFat drops one
+        // fill byte after every command). Ncr=1 starved SdFat: its discard
+        // ate the R1 itself and init could never succeed. Poll-until-
+        // non-FF drivers skip both pads harmlessly.
+        self.reply.push_back(0xFF);
+        self.reply.push_back(0xFF);
         let arg = ((args[0] as u32) << 24) | ((args[1] as u32) << 16)
             | ((args[2] as u32) << 8) | args[3] as u32;
         let in_range = (arg as usize) < self.block_count();
@@ -134,6 +155,7 @@ impl SdCard {
                 self.app_cmd = false;
                 self.acmd41_seen = false;
                 self.wr = None;
+                self.multi_write = false;
                 self.stream_next = None;
                 self.push_r1(0x01);
             }
@@ -214,9 +236,12 @@ impl SdCard {
                     self.stream_next = Some(arg + 1);
                 }
             }
-            // CMD12 STOP_TRANSMISSION: ends a CMD18 stream.
+            // CMD12 STOP_TRANSMISSION: ends a CMD18 stream (and defensively
+            // any write stream — the write path normally ends via 0xFD).
             12 => {
                 self.stream_next = None;
+                self.wr = None;
+                self.multi_write = false;
                 self.push_r1(0x00);
             }
             // CMD24 WRITE_BLOCK: R1, then collect token + 512 + CRC.
@@ -225,11 +250,35 @@ impl SdCard {
                     self.push_r1(0x20);
                 } else {
                     self.push_r1(0x00);
+                    self.multi_write = false;
+                    self.wr = Some(WriteStage { block: arg, buf: Vec::new(), got_token: false });
+                }
+            }
+            // CMD25 WRITE_MULTIPLE_BLOCK: R1, then per-packet [token +
+            // 512 + CRC] until the 0xFD STOP_TRAN token (no CMD12 on the
+            // write path — SdFat ends with the token, then CS high).
+            25 => {
+                if !in_range {
+                    self.push_r1(0x20);
+                } else {
+                    self.push_r1(0x00);
+                    self.multi_write = true;
                     self.wr = Some(WriteStage { block: arg, buf: Vec::new(), got_token: false });
                 }
             }
             // Bare ACMD41 (no CMD55 prefix): illegal-command, no state change.
             41 => self.push_r1(0x04),
+            // ACMD23 SET_WR_BLK_ERASE_COUNT (requires CMD55 prefix):
+            // pre-erase count preceding a CMD25 stream. writeStart sends
+            // CMD55 + CMD23 before CMD25; answering illegal (0x04) here
+            // fails the open-for-write path while single-block CMD24
+            // writes stay green — the same split shape as CMD25.
+            23 if self.app_cmd => {
+                self.app_cmd = false;
+                self.push_r1(if self.idle { 0x01 } else { 0x00 });
+            }
+            // Bare CMD23 (no CMD55 prefix): illegal-command, like silicon.
+            23 => self.push_r1(0x04),
             _ => self.push_r1(0x04), // illegal command
         }
     }
@@ -257,12 +306,20 @@ impl ExtDevice<(), u8> for SdCard {
     }
 
     fn write(&mut self, _sys: &System, _addr: (), v: u8) {
-        // CMD24 data collection: skip leading 0xFF, take 0xFE token,
-        // then 512 data + 2 CRC bytes.
+        // Host-to-card data collection: skip leading 0xFF, take a start
+        // token (0xFE single-block, 0xFC multi-block — the latter only
+        // inside a CMD25 stream), then 512 data + 2 CRC bytes. 0xFD ends
+        // a CMD25 stream (STOP_TRAN — no CMD12 on the write path).
         if let Some(wr) = self.wr.as_mut() {
             if !wr.got_token {
-                if v == 0xFE {
+                if v == 0xFE || (v == 0xFC && self.multi_write) {
                     wr.got_token = true;
+                } else if v == 0xFD && self.multi_write {
+                    self.wr = None;
+                    self.multi_write = false;
+                    for _ in 0..4 {
+                        self.reply.push_back(0x00); // post-STOP busy
+                    }
                 }
                 return; // token wait reads idle-high via reply-empty path
             }
@@ -275,7 +332,14 @@ impl ExtDevice<(), u8> for SdCard {
                     }
                 }
                 let accepted = wr.block as usize * 512 < self.content.len();
-                self.wr = None;
+                let next = wr.block + 1;
+                let multi = self.multi_write;
+                self.wr = if multi {
+                    // Silicon auto-increments: re-arm for the next packet.
+                    Some(WriteStage { block: next, buf: Vec::new(), got_token: false })
+                } else {
+                    None
+                };
                 // Data-response token + busy clocks, then idle-high.
                 // One leading 0xFF: the CRC-byte-paired read must not eat
                 // the response (silicon answers on the NEXT clock).
@@ -318,6 +382,7 @@ impl ExtDevice<(), u8> for SdCard {
             self.cmd = None;
             self.reply.clear();
             self.wr = None;
+            self.multi_write = false;
             self.stream_next = None;
         }
     }
@@ -346,44 +411,53 @@ mod tests {
         c.read(sys, ())
     }
 
-    /// Clock a 6-byte command frame. Returns the 6 paired reads; the
-    /// frame bytes themselves read idle-high EXCEPT the 6th (CRC) byte,
-    /// whose paired read already pops R1 (Ncr=0: the reply is queued at
-    /// decode time, during that write). Multi-byte responses (R7/OCR/
-    /// data) follow on subsequent reads.
-    fn cmd(c: &mut SdCard, sys: &RcTestSys, idx: u8, arg: u32) -> Vec<u8> {
-        let mut out = Vec::new();
+    /// Clock a 6-byte command frame exactly like SdFat's cardCommand:
+    /// 6 paired reads (ignored, like spiSend's), one discard read, then
+    /// poll up to 10 reads for the first non-0xFF byte. Returns that byte
+    /// (R1). This shape is the regression pin for the discard-eats-R1
+    /// class: with Ncr<2 the discard would eat R1 and this helper could
+    /// never observe anything but 0xFF.
+    fn cmd(c: &mut SdCard, sys: &RcTestSys, idx: u8, arg: u32) -> u8 {
         for b in [0x40 | idx,
             (arg >> 24) as u8, (arg >> 16) as u8, (arg >> 8) as u8, arg as u8,
             0xFF] {
-            out.push(xfer(c, sys, b));
+            xfer(c, sys, b);
         }
-        out
+        xfer(c, sys, 0xFF); // discard first fill (SdFat drops one byte)
+        for _ in 0..10 {
+            let r = xfer(c, sys, 0xFF);
+            if r != 0xFF {
+                return r;
+            }
+        }
+        0xFF
     }
 
     #[test]
     fn init_sequence_goes_ready() {
         let (mut c, sys) = card();
-        // CMD0 -> idle (R1 on the CRC byte's paired read).
-        let r = cmd(&mut c, &sys, 0, 0);
-        assert_eq!(&r[..5], &[0xFF; 5], "cmd bytes idle-high");
-        assert_eq!(r[5], 0x01, "CMD0 R1 idle");
+        // Raw wire order pin: 6 frame clocks idle-high, Ncr pads, then R1.
+        let mut raw = vec![];
+        for b in [0x40u8, 0, 0, 0, 0, 0x95] {
+            raw.push(xfer(&mut c, &sys, b));
+        }
+        assert_eq!(raw, vec![0xFF; 6], "frame clocks idle-high");
+        assert_eq!(xfer(&mut c, &sys, 0xFF), 0xFF, "Ncr pad (discard position)");
+        assert_eq!(xfer(&mut c, &sys, 0xFF), 0x01, "CMD0 R1 follows Ncr");
         // CMD8 -> R1 + R7 echo.
-        let r = cmd(&mut c, &sys, 8, 0x1AA);
-        assert_eq!(r[5], 0x01, "CMD8 R1");
+        assert_eq!(cmd(&mut c, &sys, 8, 0x1AA), 0x01, "CMD8 R1");
         let mut r7 = vec![];
         for _ in 0..4 {
             r7.push(xfer(&mut c, &sys, 0xFF));
         }
         assert_eq!(r7, vec![0x00, 0x00, 0x01, 0xAA], "CMD8 R7 echo");
         // CMD55 + ACMD41 -> busy once, then ready.
-        assert_eq!(cmd(&mut c, &sys, 55, 0)[5], 0x01, "CMD55 R1 idle");
-        assert_eq!(cmd(&mut c, &sys, 41, 0)[5], 0x01, "ACMD41 busy");
-        assert_eq!(cmd(&mut c, &sys, 55, 0)[5], 0x01, "CMD55 R1");
-        assert_eq!(cmd(&mut c, &sys, 41, 0)[5], 0x00, "ACMD41 ready");
+        assert_eq!(cmd(&mut c, &sys, 55, 0), 0x01, "CMD55 R1 idle");
+        assert_eq!(cmd(&mut c, &sys, 41, 0), 0x01, "ACMD41 busy");
+        assert_eq!(cmd(&mut c, &sys, 55, 0), 0x01, "CMD55 R1");
+        assert_eq!(cmd(&mut c, &sys, 41, 0), 0x00, "ACMD41 ready");
         // CMD58 OCR carries CCS (SDHC block addressing).
-        let r = cmd(&mut c, &sys, 58, 0);
-        assert_eq!(r[5], 0x00, "CMD58 R1");
+        assert_eq!(cmd(&mut c, &sys, 58, 0), 0x00, "CMD58 R1");
         let mut ocr = vec![];
         for _ in 0..4 {
             ocr.push(xfer(&mut c, &sys, 0xFF));
@@ -394,18 +468,17 @@ mod tests {
     #[test]
     fn cmd17_reads_exact_block() {
         let (mut c, sys) = card();
-        // Ready the card (R1 rides the CRC byte's paired read each time).
-        assert_eq!(cmd(&mut c, &sys, 0, 0)[5], 0x01, "CMD0 idle");
-        assert_eq!(cmd(&mut c, &sys, 55, 0)[5], 0x01, "CMD55");
-        assert_eq!(cmd(&mut c, &sys, 41, 0)[5], 0x01, "ACMD41 busy");
-        assert_eq!(cmd(&mut c, &sys, 55, 0)[5], 0x01, "CMD55");
-        assert_eq!(cmd(&mut c, &sys, 41, 0)[5], 0x00, "ACMD41 ready");
+        // Ready the card via the SdFat-shaped helper.
+        assert_eq!(cmd(&mut c, &sys, 0, 0), 0x01, "CMD0 idle");
+        assert_eq!(cmd(&mut c, &sys, 55, 0), 0x01, "CMD55");
+        assert_eq!(cmd(&mut c, &sys, 41, 0), 0x01, "ACMD41 busy");
+        assert_eq!(cmd(&mut c, &sys, 55, 0), 0x01, "CMD55");
+        assert_eq!(cmd(&mut c, &sys, 41, 0), 0x00, "ACMD41 ready");
         for i in 0..512 {
             c.content[2 * 512 + i] = (i ^ 0xA5) as u8;
         }
         // CMD17 block 2: R1, token, 512 exact bytes, 2 CRC.
-        let r = cmd(&mut c, &sys, 17, 2);
-        assert_eq!(r[5], 0x00, "CMD17 R1");
+        assert_eq!(cmd(&mut c, &sys, 17, 2), 0x00, "CMD17 R1");
         assert_eq!(xfer(&mut c, &sys, 0xFF), 0xFE, "data token");
         for i in 0..512 {
             assert_eq!(xfer(&mut c, &sys, 0xFF), (i ^ 0xA5) as u8, "byte {i}");
@@ -417,9 +490,9 @@ mod tests {
     #[test]
     fn cmd24_write_roundtrips_through_cmd17() {
         let (mut c, sys) = card();
-        assert_eq!(cmd(&mut c, &sys, 0, 0)[5], 0x01, "CMD0 idle");
+        assert_eq!(cmd(&mut c, &sys, 0, 0), 0x01, "CMD0 idle");
         // CMD24 block 1 with a ramp pattern.
-        assert_eq!(cmd(&mut c, &sys, 24, 1)[5], 0x00, "CMD24 R1");
+        assert_eq!(cmd(&mut c, &sys, 24, 1), 0x00, "CMD24 R1");
         xfer(&mut c, &sys, 0xFF); // Nwr spacing
         xfer(&mut c, &sys, 0xFE); // data token
         for i in 0..512 {
@@ -429,7 +502,7 @@ mod tests {
         xfer(&mut c, &sys, 0xFF);
         assert_eq!(xfer(&mut c, &sys, 0xFF), 0xE5, "data accepted");
         // Read it back.
-        assert_eq!(cmd(&mut c, &sys, 17, 1)[5], 0x00, "CMD17 R1");
+        assert_eq!(cmd(&mut c, &sys, 17, 1), 0x00, "CMD17 R1");
         assert_eq!(xfer(&mut c, &sys, 0xFF), 0xFE, "token");
         for i in 0..512 {
             assert_eq!(xfer(&mut c, &sys, 0xFF), i as u8, "byte {i}");
@@ -439,18 +512,18 @@ mod tests {
     #[test]
     fn erased_reads_ff_and_oob_errors() {
         let (mut c, sys) = card();
-        assert_eq!(cmd(&mut c, &sys, 0, 0)[5], 0x01, "CMD0 idle");
+        assert_eq!(cmd(&mut c, &sys, 0, 0), 0x01, "CMD0 idle");
         // Fresh card: erased.
-        assert_eq!(cmd(&mut c, &sys, 17, 0)[5], 0x00, "R1");
+        assert_eq!(cmd(&mut c, &sys, 17, 0), 0x00, "R1");
         assert_eq!(xfer(&mut c, &sys, 0xFF), 0xFE, "token");
         for _ in 0..512 {
             assert_eq!(xfer(&mut c, &sys, 0xFF), 0xFF, "erased");
         }
         // Out of range: address error, no token.
-        assert_eq!(cmd(&mut c, &sys, 17, 99)[5], 0x20, "address error");
+        assert_eq!(cmd(&mut c, &sys, 17, 99), 0x20, "address error");
         assert_eq!(xfer(&mut c, &sys, 0xFF), 0xFF, "no token after error");
         // Bare ACMD41 (no CMD55): illegal, stays idle.
-        assert_eq!(cmd(&mut c, &sys, 41, 0)[5], 0x04, "illegal without prefix");
+        assert_eq!(cmd(&mut c, &sys, 41, 0), 0x04, "illegal without prefix");
     }
 
     #[test]
@@ -459,19 +532,19 @@ mod tests {
         // path; illegal-command answers here made it retry into its
         // timeout (the SdFat hang). Seeded-image content is untouched.
         let (mut c, sys) = card();
-        assert_eq!(cmd(&mut c, &sys, 0, 0)[5], 0x01, "CMD0 idle");
-        assert_eq!(cmd(&mut c, &sys, 59, 0)[5], 0x01, "CMD59 accepted while idle");
-        assert_eq!(cmd(&mut c, &sys, 32, 0)[5], 0x01, "CMD32 accepted while idle");
-        assert_eq!(cmd(&mut c, &sys, 33, 1)[5], 0x01, "CMD33 accepted while idle");
-        assert_eq!(cmd(&mut c, &sys, 38, 0)[5], 0x01, "CMD38 accepted while idle");
+        assert_eq!(cmd(&mut c, &sys, 0, 0), 0x01, "CMD0 idle");
+        assert_eq!(cmd(&mut c, &sys, 59, 0), 0x01, "CMD59 accepted while idle");
+        assert_eq!(cmd(&mut c, &sys, 32, 0), 0x01, "CMD32 accepted while idle");
+        assert_eq!(cmd(&mut c, &sys, 33, 1), 0x01, "CMD33 accepted while idle");
+        assert_eq!(cmd(&mut c, &sys, 38, 0), 0x01, "CMD38 accepted while idle");
         // Ready state answers 0x00.
         cmd(&mut c, &sys, 55, 0); cmd(&mut c, &sys, 41, 0);
         cmd(&mut c, &sys, 55, 0);
-        assert_eq!(cmd(&mut c, &sys, 41, 0)[5], 0x00, "ACMD41 ready");
-        assert_eq!(cmd(&mut c, &sys, 59, 0)[5], 0x00, "CMD59 accepted when ready");
-        assert_eq!(cmd(&mut c, &sys, 32, 0)[5], 0x00, "CMD32 accepted when ready");
-        assert_eq!(cmd(&mut c, &sys, 33, 1)[5], 0x00, "CMD33 accepted when ready");
-        assert_eq!(cmd(&mut c, &sys, 38, 0)[5], 0x00, "CMD38 accepted when ready");
+        assert_eq!(cmd(&mut c, &sys, 41, 0), 0x00, "ACMD41 ready");
+        assert_eq!(cmd(&mut c, &sys, 59, 0), 0x00, "CMD59 accepted when ready");
+        assert_eq!(cmd(&mut c, &sys, 32, 0), 0x00, "CMD32 accepted when ready");
+        assert_eq!(cmd(&mut c, &sys, 33, 1), 0x00, "CMD33 accepted when ready");
+        assert_eq!(cmd(&mut c, &sys, 38, 0), 0x00, "CMD38 accepted when ready");
         // Erase window is a no-op: content untouched, still erased.
         assert_eq!(c.content.iter().all(|&x| x == 0xFF), true, "erase is a no-op");
     }
@@ -483,7 +556,7 @@ mod tests {
         img[510] = 0x55; img[511] = 0xAA;
         img[512] = 0x42;
         c.load_image(&img);
-        assert_eq!(cmd(&mut c, &sys, 17, 0)[5], 0x00, "R1");
+        assert_eq!(cmd(&mut c, &sys, 17, 0), 0x00, "R1");
         assert_eq!(xfer(&mut c, &sys, 0xFF), 0xFE, "token");
         let mut blk = vec![];
         for _ in 0..512 { blk.push(xfer(&mut c, &sys, 0xFF)); }
@@ -492,6 +565,68 @@ mod tests {
         // Longer images truncate to the card size (no panic, no growth).
         c.load_image(&vec![0x11; 99 * 512]);
         assert_eq!(c.content.len(), 4 * 512, "size unchanged after oversize load");
+    }
+
+    #[test]
+    fn acmd23_gated_on_cmd55_prefix() {
+        // writeStart sends CMD55 + CMD23 (pre-erase count) before CMD25.
+        let (mut c, sys) = card();
+        assert_eq!(cmd(&mut c, &sys, 0, 0), 0x01, "CMD0 idle");
+        assert_eq!(cmd(&mut c, &sys, 23, 1), 0x04, "bare CMD23 illegal");
+        assert_eq!(cmd(&mut c, &sys, 55, 0), 0x01, "CMD55 R1 idle");
+        assert_eq!(cmd(&mut c, &sys, 23, 1), 0x01, "ACMD23 accepted while idle");
+        // Ready state answers 0x00.
+        cmd(&mut c, &sys, 55, 0); cmd(&mut c, &sys, 41, 0);
+        cmd(&mut c, &sys, 55, 0);
+        assert_eq!(cmd(&mut c, &sys, 41, 0), 0x00, "ACMD41 ready");
+        assert_eq!(cmd(&mut c, &sys, 55, 0), 0x00, "CMD55 R1 ready");
+        assert_eq!(cmd(&mut c, &sys, 23, 2), 0x00, "ACMD23 accepted when ready");
+    }
+
+    #[test]
+    fn cmd25_multi_write_streams_until_stop() {
+        // SdFat DEDICATED_SPI routes EVERY write (even single-sector)
+        // through CMD25 + STOP_TRAN: without this, writeStart fails R1
+        // illegal while raw CMD24 tests stay green.
+        let (mut c, sys) = card();
+        assert_eq!(cmd(&mut c, &sys, 0, 0), 0x01, "CMD0 idle");
+        assert_eq!(cmd(&mut c, &sys, 25, 1), 0x00, "CMD25 R1");
+        // Packet 1 -> block 1.
+        xfer(&mut c, &sys, 0xFF);
+        xfer(&mut c, &sys, 0xFC);
+        for i in 0..512 {
+            xfer(&mut c, &sys, i as u8);
+        }
+        xfer(&mut c, &sys, 0xFF);
+        xfer(&mut c, &sys, 0xFF);
+        assert_eq!(xfer(&mut c, &sys, 0xFF), 0xE5, "packet 1 accepted");
+        // Packet 2 auto-targets block 2 (no new command).
+        for _ in 0..4 {
+            xfer(&mut c, &sys, 0xFF); // busy drain
+        }
+        xfer(&mut c, &sys, 0xFC);
+        for i in 0..512 {
+            xfer(&mut c, &sys, (i ^ 0xFF) as u8);
+        }
+        xfer(&mut c, &sys, 0xFF);
+        xfer(&mut c, &sys, 0xFF);
+        assert_eq!(xfer(&mut c, &sys, 0xFF), 0xE5, "packet 2 accepted");
+        // STOP_TRAN ends the stream (no CMD12 on the write path).
+        for _ in 0..4 {
+            xfer(&mut c, &sys, 0xFF);
+        }
+        xfer(&mut c, &sys, 0xFD);
+        // Both blocks read back exact.
+        assert_eq!(cmd(&mut c, &sys, 17, 1), 0x00, "CMD17 R1");
+        assert_eq!(xfer(&mut c, &sys, 0xFF), 0xFE, "token");
+        for i in 0..512 {
+            assert_eq!(xfer(&mut c, &sys, 0xFF), i as u8, "block1 byte {i}");
+        }
+        assert_eq!(cmd(&mut c, &sys, 17, 2), 0x00, "CMD17 R1");
+        assert_eq!(xfer(&mut c, &sys, 0xFF), 0xFE, "token");
+        for i in 0..512 {
+            assert_eq!(xfer(&mut c, &sys, 0xFF), (i ^ 0xFF) as u8, "block2 byte {i}");
+        }
     }
 
     #[test]
@@ -548,31 +683,30 @@ mod tests {
             w(&sys, 0x40003C0C, b as u32);
             r(&sys, 0x40003C0C) as u8
         };
-        // Init: CMD0, CMD55 + ACMD41 to ready.
+        // Init: CMD0, CMD55 + ACMD41 to ready — SdFat-shaped
+        // (frame + discard + poll), like the `cmd` helper above.
         w(&sys, 0x40020414, 1 << (12 + 16)); // CS low
-        let mut frame = vec![];
-        let mut r1 = 0xFF;
-        for b in [0x40u8, 0, 0, 0, 0, 0x95] {
-            frame.push(tr(b));
-        }
-        assert_eq!(&frame[..5], &[0xFF; 5], "cmd bytes idle-high");
-        assert_eq!(frame[5], 0x01, "CMD0 R1 idle");
-        for (idx, arg) in [(55u8, 0u32), (41, 0), (55, 0), (41, 0)] {
-            for (i, b) in [0x40 | idx,
-                (arg >> 24) as u8, (arg >> 16) as u8, (arg >> 8) as u8, arg as u8, 0xFF]
-                .iter().enumerate() {
-                let v = tr(*b);
-                if i == 5 {
-                    r1 = v; // R1 rides the CRC byte's paired read
+        let mut cmdr = |idx: u8, arg: u32| -> u8 {
+            for b in [0x40 | idx,
+                (arg >> 24) as u8, (arg >> 16) as u8, (arg >> 8) as u8, arg as u8, 0xFF] {
+                tr(b);
+            }
+            tr(0xFF); // discard first fill (SdFat drops one byte)
+            for _ in 0..10 {
+                let v = tr(0xFF);
+                if v != 0xFF {
+                    return v;
                 }
             }
-        }
-        assert_eq!(r1, 0x00, "ACMD41 ready");
+            0xFF
+        };
+        assert_eq!(cmdr(0, 0), 0x01, "CMD0 R1 idle");
+        assert_eq!(cmdr(55, 0), 0x01, "CMD55 R1");
+        assert_eq!(cmdr(41, 0), 0x01, "ACMD41 busy");
+        assert_eq!(cmdr(55, 0), 0x01, "CMD55 R1");
+        assert_eq!(cmdr(41, 0), 0x00, "ACMD41 ready");
         // CMD17 block 3, same CS assertion, straight through.
-        for b in [0x51u8, 0, 0, 0, 3, 0xFF] {
-            tr(b);
-        }
-        // R1 rode the CRC byte's paired read; next byte is the token.
+        assert_eq!(cmdr(17, 3), 0x00, "CMD17 R1");
         assert_eq!(tr(0xFF), 0xFE, "data token");
         for i in 0..512 {
             assert_eq!(tr(0xFF), (i ^ 0x3C) as u8, "block byte {i}");

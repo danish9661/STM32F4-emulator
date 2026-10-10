@@ -16,7 +16,7 @@
 //! RSC/SRS, ...) records a [`CpuFault`](super::CpuFault) and stops, so gaps
 //! are loud and precisely located instead of silently wrong.
 
-use super::{mem::Memory, Cpu};
+use super::{mem::{Memory, FlatMemory}, Cpu};
 use crate::system::WasmSystem;
 
 pub(crate) fn len(op: u16) -> usize {
@@ -763,7 +763,7 @@ fn fault(c: &mut Cpu, pc: u32, op1: u16, op2: u16, l: u8) -> bool {
 /// Returns true when the divide must not execute (caller returns the
 /// fault state). PC is advanced first: the fault is precise at the next
 /// instruction, matching the other synchronous raises.
-fn div0_trap(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, pc: u32) -> bool {
+fn div0_trap(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc: u32) -> bool {
     if sys.p.read(sys, 0xE000ED14, 4) & (1 << 4) == 0 {
         return false;
     }
@@ -798,7 +798,7 @@ impl Drop for UnprivAccess {
 fn branch(
     c: &mut Cpu,
     sys: &WasmSystem,
-    mem: &mut dyn Memory,
+    mem: &mut FlatMemory,
     t: u32,
     pc: u32,
     op1: u16,
@@ -984,7 +984,7 @@ fn shift_op(v: u32, typ: u32, amt: u32, ci: u32, reg: bool) -> (u32, u32) {
     }
 }
 
-pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc: u32) -> bool {
+pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, op: u16, pc: u32) -> bool {
     let o = op as u32;
     // Snapshot predication BEFORE it_ok consumes/resets the slot.
     cpu.it_pred = cpu.it_n > 0;
@@ -1763,7 +1763,7 @@ fn alu_op(
 pub fn exec32(
     cpu: &mut Cpu,
     sys: &WasmSystem,
-    mem: &mut dyn Memory,
+    mem: &mut FlatMemory,
     op1: u16,
     op2: u16,
     pc: u32,
