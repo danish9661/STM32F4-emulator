@@ -5,6 +5,8 @@ mod system;
 pub mod peripherals;
 pub mod ext_devices;
 pub mod cpu;
+mod tb_emit;
+mod tb_xlate;
 
 use system::WasmSystem;
 
@@ -132,6 +134,12 @@ pub fn tick_n(delta: u32) {
     use std::sync::atomic::Ordering;
     system::INSTRUCTION_COUNT.fetch_add(delta as u64, Ordering::Relaxed);
     sys().tick();
+}
+/// MPU enable state for drivers (translated-block submission rule: only
+/// MPU-clean stretches run translated; guarded RAM stays interpreted).
+#[wasm_bindgen]
+pub fn is_mpu_enabled() -> bool {
+    crate::system::is_mpu_enabled()
 }
 
 /// Run one peripheral-model tick WITHOUT advancing the instruction clock.
@@ -965,6 +973,72 @@ pub fn eth_pps_count() -> u32 { crate::peripherals::eth::eth_pps_count(sys()) }
 #[wasm_bindgen]
 pub fn eth_pps_level() -> bool { crate::peripherals::eth::eth_pps_level(sys()) }
 
+/// Static-translation entry (test/driver helper, binary-translation
+/// project): translate a halfword run into an executable module
+/// (v1 ABI: r0-r7 + xpsr globals, 1-page memory, run()->consumed).
+#[wasm_bindgen]
+pub fn tb_translate(ops: &[u16], segs: &[u32], base_pc: u32) -> Vec<u8> {
+    tb_xlate::translate(ops, segs, base_pc).bytes
+}
+/// Halfwords consumed by translating the same run (call alongside
+/// tb_translate; translation is deterministic and cheap for blocks).
+#[wasm_bindgen]
+pub fn tb_translate_consumed(ops: &[u16], segs: &[u32], base_pc: u32) -> usize {
+    tb_xlate::translate(ops, segs, base_pc).consumed
+}
+/// Packed region shape for the driver: bit0 = is_loop, exit_off << 1
+/// (resume pc = base + 2*exit_off; loop resume on fuel-out = base).
+#[wasm_bindgen]
+pub fn tb_translate_meta(ops: &[u16], segs: &[u32], base_pc: u32) -> u32 {
+    tb_xlate::region_meta(ops, segs, base_pc)
+}
+/// Static load slots for the driver mirror page-sync (see
+/// tb_xlate::load_slots): base | off<<4 per LDR in the region.
+#[wasm_bindgen]
+pub fn tb_translate_loads(ops: &[u16], segs: &[u32], base_pc: u32) -> Vec<u32> {
+    tb_xlate::load_slots(ops, segs, base_pc)
+}
+/// Static store slots for the driver mirror page-sync (same flat
+/// [pack, off] layout as loads).
+#[wasm_bindgen]
+pub fn tb_translate_stores(ops: &[u16], segs: &[u32], base_pc: u32) -> Vec<u32> {
+    tb_xlate::store_slots(ops, segs, base_pc)
+}
+/// Mirror scratch reserve in bytes (dirty trailer + validity bitmap
+/// live below it; segments start here). Exported so drivers and tests
+/// share the exact layout instead of hardcoding it (a stale constant
+/// silently desyncs every load — caught twice).
+#[wasm_bindgen]
+pub fn tb_scratch_bytes() -> u32 {
+    tb_xlate::SCRATCH
+}
+/// Mirror validity-bitmap base (see tb_xlate BITBASE). Exported for the
+/// same reason as tb_scratch_bytes (stale layout constants corrupt silently).
+#[wasm_bindgen]
+pub fn tb_valid_base() -> u32 {
+    tb_xlate::BITBASE
+}
+/// Mid-body entry variants (entry_pc inside the submitted window):
+/// the region is translated with a partial first pass from the entry.
+/// entry == base behaves exactly like the plain forms.
+#[wasm_bindgen]
+pub fn tb_translate_at(ops: &[u16], segs: &[u32], base_pc: u32, entry_pc: u32) -> Vec<u8> {
+    tb_xlate::translate_at(ops, segs, base_pc, entry_pc).bytes
+}
+#[wasm_bindgen]
+pub fn tb_translate_meta_at(ops: &[u16], segs: &[u32], base_pc: u32, entry_pc: u32) -> u32 {
+    let b = tb_xlate::translate_at(ops, segs, base_pc, entry_pc);
+    (b.is_loop as u32) | ((b.exit_off as u32) << 1)
+}
+#[wasm_bindgen]
+pub fn tb_translate_loads_at(ops: &[u16], segs: &[u32], base_pc: u32, entry_pc: u32) -> Vec<u32> {
+    tb_xlate::load_slots_at(ops, segs, base_pc, entry_pc)
+}
+#[wasm_bindgen]
+pub fn tb_translate_stores_at(ops: &[u16], segs: &[u32], base_pc: u32, entry_pc: u32) -> Vec<u32> {
+    tb_xlate::store_slots_at(ops, segs, base_pc, entry_pc)
+}
+
 /// Arm RX wire pacing for a delivered frame (RS waits the wire time).
 #[wasm_bindgen]
 pub fn eth_rx_wire_busy(len: u32) {
@@ -1698,10 +1772,49 @@ impl WasmCpu {
     pub fn sleeping(&self) -> bool { self.cpu.sleeping }
     pub fn wake(&mut self) { self.cpu.sleeping = false; }
     pub fn get_ipsr(&self) -> u32 { self.cpu.ipsr }
+    /// Active IT-block length (0 = no predicated instructions pending).
+    /// The TB driver only submits it_n==0 stretches (predicated flag
+    /// semantics live in the interpreter).
+    pub fn get_it_n(&self) -> u32 { self.cpu.it_n as u32 }
     pub fn get_pc(&self) -> u32 { self.cpu.regs.r[15] }
     pub fn get_sp(&self) -> u32 { self.cpu.regs.r[13] }
     pub fn get_regs(&self) -> Vec<u32> { self.cpu.regs.r.to_vec() }
     pub fn get_xpsr(&self) -> u32 { self.cpu.regs.xpsr }
+    /// Write one low register (r0-r12 only; r13-r15 via reset_cpu).
+    /// TB-driver sync-back for translated blocks (their subset provably
+    /// touches nothing else — see tb_xlate). Covers r0-r12 + lr; SP/PC
+    /// go through reset_cpu/set_pc (the translator never writes them).
+    pub fn set_reg(&mut self, i: u32, v: u32) {
+        if (i as usize) < 13 || i == 14 {
+            self.cpu.regs.r[i as usize] = v;
+        }
+    }
+    /// Bulk TB-driver sync-back: r0-r12 + lr + xpsr in ONE call (15
+    /// per-reg crossings dominate the translated-run fixed cost).
+    /// Layout: [r0..r12, lr, xpsr] (15 entries; short slices set what
+    /// fits, SP/PC untouched — the translator never writes them).
+    pub fn set_regs_bulk(&mut self, v: &[u32]) {
+        let n = v.len().min(13);
+        self.cpu.regs.r[..n].copy_from_slice(&v[..n]);
+        if v.len() > 13 {
+            self.cpu.regs.r[14] = v[13];
+        }
+        if v.len() > 14 {
+            self.cpu.regs.xpsr = v[14];
+        }
+    }
+    /// Bulk snapshot for the miss path (mirrors set_regs_bulk layout).
+    pub fn get_regs_bulk(&self) -> Vec<u32> {
+        let mut out = Vec::with_capacity(15);
+        out.extend_from_slice(&self.cpu.regs.r[..13]);
+        out.push(self.cpu.regs.r[14]);
+        out.push(self.cpu.regs.xpsr);
+        out
+    }
+    /// Write xPSR (TB-driver sync-back; translated flag writes are exact).
+    pub fn set_xpsr(&mut self, v: u32) { self.cpu.regs.xpsr = v; }
+    /// Write PC (TB-driver fallthrough advance; Thumb bit preserved).
+    pub fn set_pc(&mut self, v: u32) { self.cpu.regs.r[15] = v | 1; }
     /// Raw S0-S31 file (f32 bits; Dd aliases S(2d)/S(2d+1)). Debugger and
     /// driver visibility for the VFPv4-SP unit (nothing else reads these).
     pub fn get_sregs(&self) -> Vec<u32> { self.cpu.regs.s.to_vec() }

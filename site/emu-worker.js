@@ -123,7 +123,7 @@ function selfTick() {
 // ── boot ──
 // BOOT_CFG (all cloneable; big buffers transferred):
 // { fw, svdXml, svdFile, flash_size, ram_size, extraMem[{addr,data}],
-//   uartAddr, name, enable_irqs, irq_eth, freertos, lowpower, eth,
+//   uartAddr, name, enable_irqs, irq_eth, freertos, lowpower, tb, eth,
 //   ext_devices (minus function handlers; fsmcDevices rebuilt here),
 //   gateway (bool), audioWav, dcmiBig, camPrefeed {w,h,pixels} | null,
 //   useNetsim (bool: false in gateway mode) }
@@ -152,6 +152,7 @@ async function boot(c) {
         irq_eth: !!c.irq_eth,
         freertos: !!c.freertos,
         lowpower: !!c.lowpower,
+        tb: !!c.tb,
         eth: c.eth,
         ext_devices: ext,
         onTx: (pkt) => {

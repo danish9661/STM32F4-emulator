@@ -25,9 +25,19 @@ export class WasmCpu {
      */
     get_fpscr(): number;
     get_ipsr(): number;
+    /**
+     * Active IT-block length (0 = no predicated instructions pending).
+     * The TB driver only submits it_n==0 stretches (predicated flag
+     * semantics live in the interpreter).
+     */
+    get_it_n(): number;
     get_pc(): number;
     get_primask(): number;
     get_regs(): Uint32Array;
+    /**
+     * Bulk snapshot for the miss path (mirrors set_regs_bulk layout).
+     */
+    get_regs_bulk(): Uint32Array;
     get_sp(): number;
     /**
      * Raw S0-S31 file (f32 bits; Dd aliases S(2d)/S(2d+1)). Debugger and
@@ -62,9 +72,31 @@ export class WasmCpu {
      */
     set_fpscr(v: number): void;
     /**
+     * Write PC (TB-driver fallthrough advance; Thumb bit preserved).
+     */
+    set_pc(v: number): void;
+    /**
+     * Write one low register (r0-r12 only; r13-r15 via reset_cpu).
+     * TB-driver sync-back for translated blocks (their subset provably
+     * touches nothing else — see tb_xlate). Covers r0-r12 + lr; SP/PC
+     * go through reset_cpu/set_pc (the translator never writes them).
+     */
+    set_reg(i: number, v: number): void;
+    /**
+     * Bulk TB-driver sync-back: r0-r12 + lr + xpsr in ONE call (15
+     * per-reg crossings dominate the translated-run fixed cost).
+     * Layout: [r0..r12, lr, xpsr] (15 entries; short slices set what
+     * fits, SP/PC untouched — the translator never writes them).
+     */
+    set_regs_bulk(v: Uint32Array): void;
+    /**
      * Debugger poke for one S register (out of range is ignored).
      */
     set_sreg(i: number, v: number): void;
+    /**
+     * Write xPSR (TB-driver sync-back; translated flag writes are exact).
+     */
+    set_xpsr(v: number): void;
     /**
      * True while halted in WFI/WFE (low-power). The driver advances virtual
      * time and calls `wake()` once an interrupt is pending.
@@ -731,6 +763,12 @@ export function init_svd(svd_xml: string): void;
  */
 export function init_svd_chip(svd_xml: string, chip: string): void;
 
+/**
+ * MPU enable state for drivers (translated-block submission rule: only
+ * MPU-clean stretches run translated; guarded RAM stays interpreted).
+ */
+export function is_mpu_enabled(): boolean;
+
 export function is_watchdog_reset_requested(): boolean;
 
 /**
@@ -960,6 +998,64 @@ export function spi_take_events(peripheral: string): Uint32Array;
  * each byte event (1 = data) so the JS device can parse TFT-style traffic.
  */
 export function spi_tap(peripheral: string, cs?: string | null, dc?: string | null): void;
+
+/**
+ * Mirror scratch reserve in bytes (dirty trailer + validity bitmap
+ * live below it; segments start here). Exported so drivers and tests
+ * share the exact layout instead of hardcoding it (a stale constant
+ * silently desyncs every load — caught twice).
+ */
+export function tb_scratch_bytes(): number;
+
+/**
+ * Static-translation entry (test/driver helper, binary-translation
+ * project): translate a halfword run into an executable module
+ * (v1 ABI: r0-r7 + xpsr globals, 1-page memory, run()->consumed).
+ */
+export function tb_translate(ops: Uint16Array, segs: Uint32Array, base_pc: number): Uint8Array;
+
+/**
+ * Mid-body entry variants (entry_pc inside the submitted window):
+ * the region is translated with a partial first pass from the entry.
+ * entry == base behaves exactly like the plain forms.
+ */
+export function tb_translate_at(ops: Uint16Array, segs: Uint32Array, base_pc: number, entry_pc: number): Uint8Array;
+
+/**
+ * Halfwords consumed by translating the same run (call alongside
+ * tb_translate; translation is deterministic and cheap for blocks).
+ */
+export function tb_translate_consumed(ops: Uint16Array, segs: Uint32Array, base_pc: number): number;
+
+/**
+ * Static load slots for the driver mirror page-sync (see
+ * tb_xlate::load_slots): base | off<<4 per LDR in the region.
+ */
+export function tb_translate_loads(ops: Uint16Array, segs: Uint32Array, base_pc: number): Uint32Array;
+
+export function tb_translate_loads_at(ops: Uint16Array, segs: Uint32Array, base_pc: number, entry_pc: number): Uint32Array;
+
+/**
+ * Packed region shape for the driver: bit0 = is_loop, exit_off << 1
+ * (resume pc = base + 2*exit_off; loop resume on fuel-out = base).
+ */
+export function tb_translate_meta(ops: Uint16Array, segs: Uint32Array, base_pc: number): number;
+
+export function tb_translate_meta_at(ops: Uint16Array, segs: Uint32Array, base_pc: number, entry_pc: number): number;
+
+/**
+ * Static store slots for the driver mirror page-sync (same flat
+ * [pack, off] layout as loads).
+ */
+export function tb_translate_stores(ops: Uint16Array, segs: Uint32Array, base_pc: number): Uint32Array;
+
+export function tb_translate_stores_at(ops: Uint16Array, segs: Uint32Array, base_pc: number, entry_pc: number): Uint32Array;
+
+/**
+ * Mirror validity-bitmap base (see tb_xlate BITBASE). Exported for the
+ * same reason as tb_scratch_bytes (stale layout constants corrupt silently).
+ */
+export function tb_valid_base(): number;
 
 export function tick(): void;
 
@@ -1330,6 +1426,7 @@ export interface InitOutput {
     readonly init: () => void;
     readonly init_svd: (a: number, b: number) => void;
     readonly init_svd_chip: (a: number, b: number, c: number, d: number) => void;
+    readonly is_mpu_enabled: () => number;
     readonly is_watchdog_reset_requested: () => number;
     readonly itm_port_pending: (a: number) => number;
     readonly itm_take_port: (a: number, b: number) => void;
@@ -1371,6 +1468,17 @@ export interface InitOutput {
     readonly spi_slave_select: (a: number, b: number) => void;
     readonly spi_take_events: (a: number, b: number, c: number) => void;
     readonly spi_tap: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly tb_scratch_bytes: () => number;
+    readonly tb_translate: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly tb_translate_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly tb_translate_consumed: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly tb_translate_loads: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly tb_translate_loads_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly tb_translate_meta: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly tb_translate_meta_at: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+    readonly tb_translate_stores: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly tb_translate_stores_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly tb_valid_base: () => number;
     readonly tick: () => void;
     readonly tick_n: (a: number) => void;
     readonly tick_peripherals: () => void;
@@ -1422,9 +1530,11 @@ export interface InitOutput {
     readonly wasmcpu_flash_fill_erase: (a: number, b: number, c: number) => void;
     readonly wasmcpu_get_fpscr: (a: number) => number;
     readonly wasmcpu_get_ipsr: (a: number) => number;
+    readonly wasmcpu_get_it_n: (a: number) => number;
     readonly wasmcpu_get_pc: (a: number) => number;
     readonly wasmcpu_get_primask: (a: number) => number;
     readonly wasmcpu_get_regs: (a: number, b: number) => void;
+    readonly wasmcpu_get_regs_bulk: (a: number, b: number) => void;
     readonly wasmcpu_get_sp: (a: number) => number;
     readonly wasmcpu_get_sregs: (a: number, b: number) => void;
     readonly wasmcpu_get_xpsr: (a: number) => number;
@@ -1438,7 +1548,11 @@ export interface InitOutput {
     readonly wasmcpu_reset_cpu: (a: number, b: number, c: number) => void;
     readonly wasmcpu_set_deliver_irqs: (a: number, b: number) => void;
     readonly wasmcpu_set_fpscr: (a: number, b: number) => void;
+    readonly wasmcpu_set_pc: (a: number, b: number) => void;
+    readonly wasmcpu_set_reg: (a: number, b: number, c: number) => void;
+    readonly wasmcpu_set_regs_bulk: (a: number, b: number, c: number) => void;
     readonly wasmcpu_set_sreg: (a: number, b: number, c: number) => void;
+    readonly wasmcpu_set_xpsr: (a: number, b: number) => void;
     readonly wasmcpu_sleeping: (a: number) => number;
     readonly wasmcpu_step: (a: number, b: number) => number;
     readonly wasmcpu_take_trace: (a: number, b: number) => void;

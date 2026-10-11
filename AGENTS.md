@@ -4603,6 +4603,157 @@ full battery + a same-box A/B; (c) kill criterion: if the mechanism
 microbenchmark (emitted-WASM-with-imports vs interpreter, same
 engines) fails to beat interpretation, stop before building the
 translator. Architecture analysis + first slice below.
+MECHANISM PROVEN 2026-10-10 (`.pw-scratch/tb_uarch.mjs`, hand-emitted
+WASM, counts verified exact): LOCAL-mem loop 622 Node / 616 page,
+IMPORT-call loop 292 / 283 MIPS-equiv (interpreter: 82 / 46).
+Verdict: RAM-mirror design WINS (7-13x ceiling even before sync tax;
+proceed), import-per-access REJECTED for hot paths (tiny-callee
+number is inlining-optimistic; real model calls won't inline —
+MMIO-only). Two real bugs found building it, both mine not V8's:
+i32.lt_s is 0x48 (0x4B is gt_u — silent always-exit), and i32.store
+takes [addr, value] (addr pushed FIRST — swapped operands silently
+write m[v+1]=addr). Architecture: translated module with PRIVATE
+RAM mirror + dirty-page sync on block exit, MMIO via imports;
+translator lives in Rust (emits bytes), compile+instantiate in JS
+via WebAssembly.Module (no SharedArrayBuffer possible — separate
+linear memories regardless, same constraint as doom-worker).
+SLICE 1 DONE 2026-10-10 (`stm32-periph-wasm/src/tb_emit.rs`, wired as
+`mod tb_emit`, zero behavior change): LEB128 + section/code builders
+for the hot-path op subset, 2 native tests green (LEB vectors +
+byte-identical rebuild of the proven 87-byte LOCAL-mem module —
+golden-pinned against the lt_s/store-operand lessons). Next slices:
+Thumb-block translator (decoder → Code calls) → JS compile/link +
+block cache → RAM-mirror sync protocol → integration, each behind
+battery + A/B.
+SLICE 2 DONE 2026-10-10 (`tb_xlate.rs` + `tb_translate`/
+`tb_translate_consumed` exports): straight-line MOVS/ADDS/SUBS/CMP
+imm8 + NOP with ARM-exact flags (add/sub formulas + NZ/C-preserve/
+V-clear rules mirrored arm-for-arm; predicated forms stay with the
+driver). Proven by `test_tb_diff.mjs` 11/11 through REAL execution:
+borrow/carry/overflow corners, C-recomputation (not sticky), V-clear,
+low-28-bit preservation, stop-before-branch/wide. Bugs caught, both
+real: (1) unsigned-minimal LEB is WRONG for i32.const with 0x40 set
+in the top group (0x0FFFFFFF decoded as negative — kept V alive;
+proper sleb now); (2) V check needs the &0x80000000 mask (bare !=0
+fails whenever low bits differ). Zero existing behavior touched
+(new files + 2 exports; full suite unaffected).
+SLICE 3 DONE 2026-10-10 (JS block cache + driver,
+`.pw-scratch/test_tb_driver.mjs` 7/7): keyed compile cache (no
+recompile on repeat), multi-op borrow/carry chains + mixed-flags
+programs + stop-splitting through translate→compile→instantiate→
+seed→run→compare, all flag-exact. Remaining slices: load/store +
+branches (needs RAM-mirror sync design below) → emulator sync →
+integration.
+SLICE 4 DONE 2026-10-10 (load/store + exit protocol,
+`test_tb_mem.mjs` 7/7): LDR/STR imm + SP-rel word forms with a
+runtime mirror guard (out-of-mirror → tb_exit=1/tb_addr set/return
+ops-before-fault so the driver re-runs it interpreted); RAM
+round-trips (incl. overlap + SP), boundary edge (last word in /
+first word out), mid-block partial application. Lessons, both test
+bugs not model bugs: (1) fixtures must live INSIDE the mirror window
+(0x100+ addrs correctly missed a 256 B mirror — the translator was
+right); (2) driver advances by runtime `ret`, not static consumed
+(they differ exactly on miss). MPU-guarded RAM stays driver-side
+(documented v1 limit). Next: emulator sync (state in/out around
+translated blocks) → integration.
+SLICE 5 DONE 2026-10-10 (loop regions + unified `(fuel)->i64` ABI,
+`test_tb_loop.mjs` 4/4): backward-edge latch into the submitted run
+(mem-free body required — poll loops stay straight, still
+translated); run-to-completion + fuel-out with exact insts accounting
+(iters × cycle + prefix) and resume-at-top semantics; spin proved to
+completion (100 iters, exact flags) + fuel exhaustion (exact partial
+state). Real bug caught (not a test bug): the straight pass emitted
+the loop body AND the loop re-emitted it — first iterations executed
+twice (spin-once ran 1001 SUBS, insts 3002). Fixed by
+prefix/body split (straight [0..T], loop [T..li]). Full battery now
+29/29 differential checks green (11 ALU + 7 driver + 7 mem + 4
+loop). Next: emulator sync → integration.
+SLICE 6 DONE 2026-10-11 (poll-loop translator + mirror sync +
+driver integration, UNCOMMITTED): the v1 mem-free rule fused nothing
+in steady state (chunk-start census: top 0/125, latch 35, mid-body 54 —
+the hot loops are countdown+poll hybrids [SUBS,BEQ.W-fwd,LDR.W,LSLS,
+BPL-back], not pure spins). Translator now covers LSLS-imm (V-preserve
++ im==0 carry-preserve), LDR.W/LDR16/SP-rel mirror loads, Bcc(.N/.W)
+latches + forward exits (kind 3 + tb_addr), loads-only regions
+(stores stop), SRAM-sized mirror pages, `tb_translate_loads` slots.
+Driver: per-run 4KB page sync, kind-3 pc set, kind-1 sync+restore+retry
+(≤2). Assists: latch-entry (pc==back-edge only — resubmitting behind
+pc re-entered an exited spin with r3=0, 4G wrap, stalled boot) +
+mid-body (NOP-prefix only). Real bugs caught: iters++ placement
+over/under-counted exits by a cycle (now back-edge + completion +1);
+u32 target wrap masqueraded below-base as forward (signed math now).
+Battery 40/40 differential (11+7+7+4+11) + integration 49/49 rounds
+identical, 702 translated hits, inst-match. Rule changes: loop_closed
+DELETED (live-ins are stable — runs are atomic, no mid-run interrupts;
+the stale-flag case was the broken zeroed-mirror load, not live-ins).
+Battery 2026-10-11 (all repo-local logs, .pw-scratch/battery3/): cargo
+264/264 EXIT 0; npm steps EXIT 0 through board matrix 176/176 +
+QSPI CDP PASS; test_browser 44/44 PASS standalone (the in-chain run
+stalled 25 min on a stale-chrome :9337 cascade — killed by PID, fresh
+run clean; environmental, also seen pre-change); test_npm_demo PASS;
+test:wasm EXIT 0 (incl. doom save/load + audio).
+A/B 2026-10-11 (pill_tb_ab, 3 reps back-to-back, noisy box load ~10):
+eth-heavy off 23.8/25.5/24.6 MIPS (19.5–20.8 rounds/s) → on
+40.2/50.3/57.5 MIPS (32.8–46.9 rounds/s), 51% insts translated,
+kind3=0, missRetry=2 total; blinky neutral (43/42/31 vs 38/38/38 —
+no loops in subset, variance is box). Direction consistent 3/3, clears
+8% even at the low end. Page-side wiring (app.js opt-in) is the next
+slice, with its own battery + cdp_mips A/B — NOT in this slice.
+PAGE SLICE 2026-10-11 (`?tb=1` opt-in: app.js cfg + legacy path,
+emu-worker `tb: !!c.tb`, console.html app.js v64→65, worker v8→9;
+cdp_mips `--tb`): page A/B back-to-back — blinky 49.1/46.2 →
+46.2/45.3 (neutral, expected), eth_http 45.1/42.9 → 87.3/83.1
+(+94% best/median, tight spread, TCP connected). Battery: test_browser
+default path 44/44 EXIT 0 + ?tb=1 subset 6/6 (blinky/eth/oled/tft/can/
+usb echo, all on-page through the worker). Nothing committed.
+DOOM NOTE 2026-10-11 (user: heaviest firmware, 80 MIPS bar): doom pill
+A/B off 24.1 vs tb 23.8 (neutral) with ZERO hits / 6584 fallbacks —
+the subset cannot see DOOM's loops. Census (5k chunk-starts): 54%
+V_DrawPatch column loop [SUBS,BCS,LDRB,ADDS,ADDhi,B,LDRB.W-postidx,
+STRB.W,ADD.W,B-back] + 36% newlib memcpy [LDRB.W-postidx,
+STRB.W-preidx-wb,CMP,BNE-back]. Both need byte mirror access +
+stores with writeback + index writeback + a little 32-bit ALU —
+exactly the two things v2 lacks (loads-only, word-only). Next slice:
+dirty-page writeback (i64 page mask, mirror-is-GO within runs) +
+byte xfer + post/pre-index + ADD.W/hi-ADD. No commit.
+DOOM SLICE 2026-10-11 (UNCOMMITTED): byte ops (LDRB/STRB 16/.W/PUW),
+word stores, post/pre-index wb (incl. Rt==Rn load-wins), ADD.W-imm/reg,
+ADD(2)/CMP(2), T1 ALU/imm3/CMP-reg, B.N latch+exits, high-reg ABI
+(r8-r12,lr), segmented mirror (SRAM+flash+extra_ram, 256KB scratch),
+exact-range dirty trailer + coalesced writeback, driver resync without
+writeback on miss. Real bugs caught: load8_u opcode was load8_s (0x2C
+vs 0x2D — every LDRB sign-extended); stores used guest addr not mirror
+idx (straight STRB OOB); driver/ABI scratch mismatch 64K vs 256K
+(silent stale loads); 'r14' vs 'lr' export name (every run threw).
+Battery: cargo 265/265, 54 differentials, eth integration 49/49.
+DOOM A/B: 1263 hits, 1.4M translated, kind3=1, zero errors — but
+NEUTRAL within noise (off 30.0/26.5 vs on 25.3/26.6). Telemetry:
+translated execution runs ~500 MIPS; per-hit overhead (~32us:
+sync+writeback+regs) cancels it, and only ~8% of insts translate
+(mid-body store loops decline — re-executing store prefixes is
+unsound). Next: entry-offset translation (exact mid-body entry) +
+further overhead cuts. 80 needs ~90% share at ~5us/hit. No commit.
+ENTRY + VALIDITY 2026-10-11 (UNCOMMITTED): entry-offset translation
+(partial-first, exact — mid-body store loops now fuse), demand-paged
+mirror (validity bits, miss+restore+retry), exact-range trailer +
+coalesced writeback, segmented mirror incl. EXTRAM/WAD, bulk regs,
+meta caching, span-batched sync. Real bugs caught: cross-if stack
+value breaks V8 validation (kept pidx in a local instead); load8_u
+opcode 0x2D (not 0x2C); stores used guest addr; scratch/driver offset
+mismatches (twice — exports tb_scratch_bytes/tb_valid_base now);
+'r14' vs 'lr'; u32 target wrap; iters/completion off-by-cycle (twice);
+pack bit decoder inverted; stale test mirror offsets (twice). THE big
+one: SCRATCH (263168) wasn't 4KB-aligned, so mirror pages stopped
+matching guest pages — every validity check read next-door bits
+(silent zeros, boot failure); fixed + compile-time alignment asserts.
+Also fixed: clear-per-run caused retry storms on fuel-out resubmits
+(gen-based clearing: per-tbRun + post-native-chunk only).
+Battery: cargo 265/265, 60 differentials, eth integration 49/49, DOOM
+boots end-to-end. DOOM A/B still NEUTRAL-to-negative (off ~31 vs on
+~24-26): execution runs ~500 MIPS but per-hit overhead + retry waste
++ only ~8% share. Next: mem.rs contiguous-RAM fast path (44us/4KB
+crossings dominate), bigger pre-sync neighborhoods, outer-loop shapes.
+No commit.
 
 Target as defined by the user: browser page-side 80+ MIPS (Node already
 clears ~82; page sits ~45). Acceptance harness EXISTS:

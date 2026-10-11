@@ -744,6 +744,7 @@ const bootWorker = async (id) => {
         irq_eth: IRQ_ETH_FIRMWARES.has(image.name),
         freertos: FREERTOS_FIRMWARES.has(image.name),
         lowpower: LOWPOWER_FIRMWARES.has(image.name),
+        tb: params.has('tb'),
         eth: ETH_RX_MAP[image.name],
         ext_devices: dev,
         gateway: !!(gw.connected && gw.ws),
@@ -763,7 +764,7 @@ const bootWorker = async (id) => {
     try { for (const w of WATCH) cfg.probes.push(w.addr >>> 0); } catch {}
     try { for (const t of TRACES) cfg.probes.push(t.addr >>> 0); } catch {}
     try { for (const [, a] of PERIPH_REGS) cfg.probes.push(a >>> 0); } catch {}
-    emuWorker = new Worker('emu-worker.js?v=8', { type: 'module' });
+    emuWorker = new Worker('emu-worker.js?v=9', { type: 'module' });
     emuWorker.onmessage = onWorkerMessage;
     emu = workerAdapter;
     netsim = null; usbhost = null; featHooks = null;
@@ -893,6 +894,7 @@ const boot = async () => {
             irq_eth: IRQ_ETH_FIRMWARES.has(image.name),
             freertos: FREERTOS_FIRMWARES.has(image.name),
             lowpower: LOWPOWER_FIRMWARES.has(image.name),
+            tb: params.has('tb'),
             eth: ETH_RX_MAP[image.name],
             ext_devices: DEVICE_FIRMWARES[image.name],
             onTx: (pkt) => {

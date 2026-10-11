@@ -67,6 +67,16 @@ export class WasmCpu {
         return ret >>> 0;
     }
     /**
+     * Active IT-block length (0 = no predicated instructions pending).
+     * The TB driver only submits it_n==0 stretches (predicated flag
+     * semantics live in the interpreter).
+     * @returns {number}
+     */
+    get_it_n() {
+        const ret = wasm.wasmcpu_get_it_n(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * @returns {number}
      */
     get_pc() {
@@ -87,6 +97,23 @@ export class WasmCpu {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             wasm.wasmcpu_get_regs(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v1 = getArrayU32FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export(r0, r1 * 4, 4);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Bulk snapshot for the miss path (mirrors set_regs_bulk layout).
+     * @returns {Uint32Array}
+     */
+    get_regs_bulk() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.wasmcpu_get_regs_bulk(retptr, this.__wbg_ptr);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var v1 = getArrayU32FromWasm0(r0, r1).slice();
@@ -227,12 +254,49 @@ export class WasmCpu {
         wasm.wasmcpu_set_fpscr(this.__wbg_ptr, v);
     }
     /**
+     * Write PC (TB-driver fallthrough advance; Thumb bit preserved).
+     * @param {number} v
+     */
+    set_pc(v) {
+        wasm.wasmcpu_set_pc(this.__wbg_ptr, v);
+    }
+    /**
+     * Write one low register (r0-r12 only; r13-r15 via reset_cpu).
+     * TB-driver sync-back for translated blocks (their subset provably
+     * touches nothing else — see tb_xlate). Covers r0-r12 + lr; SP/PC
+     * go through reset_cpu/set_pc (the translator never writes them).
+     * @param {number} i
+     * @param {number} v
+     */
+    set_reg(i, v) {
+        wasm.wasmcpu_set_reg(this.__wbg_ptr, i, v);
+    }
+    /**
+     * Bulk TB-driver sync-back: r0-r12 + lr + xpsr in ONE call (15
+     * per-reg crossings dominate the translated-run fixed cost).
+     * Layout: [r0..r12, lr, xpsr] (15 entries; short slices set what
+     * fits, SP/PC untouched — the translator never writes them).
+     * @param {Uint32Array} v
+     */
+    set_regs_bulk(v) {
+        const ptr0 = passArray32ToWasm0(v, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmcpu_set_regs_bulk(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
      * Debugger poke for one S register (out of range is ignored).
      * @param {number} i
      * @param {number} v
      */
     set_sreg(i, v) {
         wasm.wasmcpu_set_sreg(this.__wbg_ptr, i, v);
+    }
+    /**
+     * Write xPSR (TB-driver sync-back; translated flag writes are exact).
+     * @param {number} v
+     */
+    set_xpsr(v) {
+        wasm.wasmcpu_set_xpsr(this.__wbg_ptr, v);
     }
     /**
      * True while halted in WFI/WFE (low-power). The driver advances virtual
@@ -1657,6 +1721,16 @@ export function init_svd_chip(svd_xml, chip) {
 }
 
 /**
+ * MPU enable state for drivers (translated-block submission rule: only
+ * MPU-clean stretches run translated; guarded RAM stays interpreted).
+ * @returns {boolean}
+ */
+export function is_mpu_enabled() {
+    const ret = wasm.is_mpu_enabled();
+    return ret !== 0;
+}
+
+/**
  * @returns {boolean}
  */
 export function is_watchdog_reset_requested() {
@@ -2114,6 +2188,235 @@ export function spi_tap(peripheral, cs, dc) {
     var ptr2 = isLikeNone(dc) ? 0 : passStringToWasm0(dc, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
     var len2 = WASM_VECTOR_LEN;
     wasm.spi_tap(ptr0, len0, ptr1, len1, ptr2, len2);
+}
+
+/**
+ * Mirror scratch reserve in bytes (dirty trailer + validity bitmap
+ * live below it; segments start here). Exported so drivers and tests
+ * share the exact layout instead of hardcoding it (a stale constant
+ * silently desyncs every load — caught twice).
+ * @returns {number}
+ */
+export function tb_scratch_bytes() {
+    const ret = wasm.tb_scratch_bytes();
+    return ret >>> 0;
+}
+
+/**
+ * Static-translation entry (test/driver helper, binary-translation
+ * project): translate a halfword run into an executable module
+ * (v1 ABI: r0-r7 + xpsr globals, 1-page memory, run()->consumed).
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @returns {Uint8Array}
+ */
+export function tb_translate(ops, segs, base_pc) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.tb_translate(retptr, ptr0, len0, ptr1, len1, base_pc);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v3 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Mid-body entry variants (entry_pc inside the submitted window):
+ * the region is translated with a partial first pass from the entry.
+ * entry == base behaves exactly like the plain forms.
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @param {number} entry_pc
+ * @returns {Uint8Array}
+ */
+export function tb_translate_at(ops, segs, base_pc, entry_pc) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.tb_translate_at(retptr, ptr0, len0, ptr1, len1, base_pc, entry_pc);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v3 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Halfwords consumed by translating the same run (call alongside
+ * tb_translate; translation is deterministic and cheap for blocks).
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @returns {number}
+ */
+export function tb_translate_consumed(ops, segs, base_pc) {
+    const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.tb_translate_consumed(ptr0, len0, ptr1, len1, base_pc);
+    return ret >>> 0;
+}
+
+/**
+ * Static load slots for the driver mirror page-sync (see
+ * tb_xlate::load_slots): base | off<<4 per LDR in the region.
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @returns {Uint32Array}
+ */
+export function tb_translate_loads(ops, segs, base_pc) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.tb_translate_loads(retptr, ptr0, len0, ptr1, len1, base_pc);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v3 = getArrayU32FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 4, 4);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @param {number} entry_pc
+ * @returns {Uint32Array}
+ */
+export function tb_translate_loads_at(ops, segs, base_pc, entry_pc) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.tb_translate_loads_at(retptr, ptr0, len0, ptr1, len1, base_pc, entry_pc);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v3 = getArrayU32FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 4, 4);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Packed region shape for the driver: bit0 = is_loop, exit_off << 1
+ * (resume pc = base + 2*exit_off; loop resume on fuel-out = base).
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @returns {number}
+ */
+export function tb_translate_meta(ops, segs, base_pc) {
+    const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.tb_translate_meta(ptr0, len0, ptr1, len1, base_pc);
+    return ret >>> 0;
+}
+
+/**
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @param {number} entry_pc
+ * @returns {number}
+ */
+export function tb_translate_meta_at(ops, segs, base_pc, entry_pc) {
+    const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.tb_translate_meta_at(ptr0, len0, ptr1, len1, base_pc, entry_pc);
+    return ret >>> 0;
+}
+
+/**
+ * Static store slots for the driver mirror page-sync (same flat
+ * [pack, off] layout as loads).
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @returns {Uint32Array}
+ */
+export function tb_translate_stores(ops, segs, base_pc) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.tb_translate_stores(retptr, ptr0, len0, ptr1, len1, base_pc);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v3 = getArrayU32FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 4, 4);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @param {number} entry_pc
+ * @returns {Uint32Array}
+ */
+export function tb_translate_stores_at(ops, segs, base_pc, entry_pc) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.tb_translate_stores_at(retptr, ptr0, len0, ptr1, len1, base_pc, entry_pc);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v3 = getArrayU32FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 4, 4);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Mirror validity-bitmap base (see tb_xlate BITBASE). Exported for the
+ * same reason as tb_scratch_bytes (stale layout constants corrupt silently).
+ * @returns {number}
+ */
+export function tb_valid_base() {
+    const ret = wasm.tb_valid_base();
+    return ret >>> 0;
 }
 
 export function tick() {
@@ -2740,6 +3043,13 @@ let heap_next = heap.length;
 
 function isLikeNone(x) {
     return x === undefined || x === null;
+}
+
+function passArray16ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 2, 2) >>> 0;
+    getUint16ArrayMemory0().set(arg, ptr / 2);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passArray32ToWasm0(arg, malloc) {
