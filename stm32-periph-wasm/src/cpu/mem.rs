@@ -74,6 +74,15 @@ pub struct FlatMemory {
     /// Last unmapped access (read or write), for diagnostics. Reads of
     /// unmapped memory return 0; writes are dropped.
     pub bad: Cell<Option<u32>>,
+    /// Count of guest-visible RAM/extra-region stores (fast + slow paths,
+    /// DMA memmove, image loads). The translated-block driver samples it
+    /// around native chunks: an unchanged value proves no native store
+    /// touched guest RAM, so the mirror stays valid and the per-chunk
+    /// tbGen invalidation can be skipped (VDP-class shapes alternate
+    /// translated runs and writeless native fragments every column).
+    /// Flash/periph/model writes never bump it (they cannot desync a RAM
+    /// mirror page). Wrapping is fine (equality comparison only).
+    pub write_seq: u64,
 }
 
 impl FlatMemory {
@@ -85,6 +94,7 @@ impl FlatMemory {
             flash_base: 0x08000000,
             ram_base: 0x20000000,
             bad: Cell::new(None),
+            write_seq: 0,
         }
     }
 
@@ -93,6 +103,10 @@ impl FlatMemory {
     }
     fn in_ram(&self, addr: u32) -> bool {
         addr >= self.ram_base && (addr - self.ram_base) < self.ram.len() as u32
+    }
+    #[inline]
+    fn note_write(&mut self) {
+        self.write_seq = self.write_seq.wrapping_add(1);
     }
     fn extra_idx(&self, addr: u32) -> Option<usize> {
         self.extra
@@ -112,12 +126,16 @@ impl FlatMemory {
         !crate::system::is_mpu_enabled() && !crate::system::unalign_trp()
     }
 
-    /// Byte offset of `[addr, addr+size)` inside flash, or None (u64 math
-    /// so a below-base address wraps huge and fails instead of panicking).
+    /// Byte offset of `[addr, addr+size)` inside flash, or None.
+    /// Below-base addresses wrap huge via wrapping_sub; the checked_add
+    /// then fails instead of panicking (debug) or wrapping into a bogus
+    /// Some (release) — a latent bug this exact shape once had, caught by
+    /// the bulk_range_parity test probing just below the base.
     #[inline]
     fn flash_range(&self, addr: u32, size: u32) -> Option<usize> {
         let off = (addr as u64).wrapping_sub(self.flash_base as u64);
-        if off + size as u64 <= self.flash.len() as u64 {
+        let end = off.checked_add(size as u64)?;
+        if end <= self.flash.len() as u64 {
             Some(off as usize)
         } else {
             None
@@ -128,7 +146,8 @@ impl FlatMemory {
     #[inline]
     fn ram_range(&self, addr: u32, size: u32) -> Option<usize> {
         let off = (addr as u64).wrapping_sub(self.ram_base as u64);
-        if off + size as u64 <= self.ram.len() as u64 {
+        let end = off.checked_add(size as u64)?;
+        if end <= self.ram.len() as u64 {
             Some(off as usize)
         } else {
             None
@@ -143,11 +162,77 @@ impl FlatMemory {
         self.extra.push(MemRegion { base, data: vec![0; size] });
     }
 
+    /// Bulk read fast path for driver crossings (mem_read): single bounds
+    /// check + slice copy when `fast_plain()` holds and the whole range
+    /// sits in one plain region (flash / SRAM / one extra region).
+    /// Returns false otherwise — the caller then takes the exact per-byte
+    /// slow path, which owns all model side effects, MPU faults, QSPI
+    /// routing, and bad-address latches. No observable difference: the
+    /// plain paths have no side effects, and anything else never reaches
+    /// here (ranges are disjoint by construction; MPU-on and UNALIGN_TRP
+    /// are gated out by fast_plain).
+    pub fn read_range(&self, addr: u32, out: &mut [u8]) -> bool {
+        if out.is_empty() {
+            return true;
+        }
+        if !self.fast_plain() {
+            return false;
+        }
+        let len = out.len();
+        if let Some(o) = self.flash_range(addr, len as u32) {
+            out.copy_from_slice(&self.flash[o..o + len]);
+            return true;
+        }
+        if let Some(o) = self.ram_range(addr, len as u32) {
+            out.copy_from_slice(&self.ram[o..o + len]);
+            return true;
+        }
+        // Extra regions: the whole range must sit in ONE region.
+        for r in self.extra.iter() {
+            let o = (addr as u64).wrapping_sub(r.base as u64);
+            if o + len as u64 <= r.data.len() as u64 {
+                out.copy_from_slice(&r.data[o as usize..o as usize + len]);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Bulk write fast path for driver crossings (mem_write): RAM and extra
+    /// regions only. Flash keeps its protection + program-error arms (slow
+    /// path: flash writes are erase/program events, never hot), and
+    /// periph/QSPI/MPU/unmapped keep the exact per-byte path. Same
+    /// no-observable-difference contract as read_range.
+    pub fn write_range(&mut self, addr: u32, data: &[u8]) -> bool {
+        if data.is_empty() {
+            return true;
+        }
+        if !self.fast_plain() {
+            return false;
+        }
+        let len = data.len();
+        if let Some(o) = self.ram_range(addr, len as u32) {
+            self.ram[o..o + len].copy_from_slice(data);
+            self.note_write();
+            return true;
+        }
+        for r in self.extra.iter_mut() {
+            let o = (addr as u64).wrapping_sub(r.base as u64);
+            if o + len as u64 <= r.data.len() as u64 {
+                r.data[o as usize..o as usize + len].copy_from_slice(data);
+                self.note_write();
+                return true;
+            }
+        }
+        false
+    }
+
     /// Apply a sector/mass erase fill (all bytes 0xFF), clamped to mapped
     /// flash. Called by the JS flash driver after `take_flash_erase`, then
     /// completed with `flash_erase_applied` — the only runtime path that
     /// sets flash bits besides programming (see `write8`).
     pub fn fill_flash_erase(&mut self, start: u32, len: u32) {
+        self.note_write();
         let end = start.saturating_add(len);
         let mut a = start;
         while a < end {
@@ -194,6 +279,9 @@ impl FlatMemory {
                 }
             }
         }
+        // Image loads rewrite guest memory wholesale (boot/setup time):
+        // one bump covers the whole call.
+        self.note_write();
     }
 
     fn read_ram_byte(&self, addr: u32) -> u8 {
@@ -209,9 +297,11 @@ impl FlatMemory {
     fn write_ram_byte(&mut self, addr: u32, v: u8) {
         if self.in_ram(addr) {
             self.ram[(addr - self.ram_base) as usize] = v;
+            self.note_write();
         } else if let Some(idx) = self.extra_idx(addr) {
             let r = &mut self.extra[idx];
             r.data[(addr - r.base) as usize] = v;
+            self.note_write();
         }
         // Flash/unmapped destinations are skipped (matches the JS driver,
         // whose mem_write there throws and is ignored before completion).
@@ -459,6 +549,7 @@ impl Memory for FlatMemory {
         if self.fast_plain() {
             if let Some(o) = self.ram_range(addr, 1) {
                 self.ram[o] = v;
+                self.note_write();
                 return;
             }
         }
@@ -492,6 +583,7 @@ impl Memory for FlatMemory {
                 let i = (addr - self.flash_base) as usize;
                 if let Some(cell) = self.flash.get_mut(i) {
                     *cell &= v;
+                    self.note_write();
                 }
             }
         } else if self.in_ram(addr) {
@@ -499,12 +591,14 @@ impl Memory for FlatMemory {
                 return;
             }
             self.ram[(addr - self.ram_base) as usize] = v;
+            self.note_write();
         } else if let Some(idx) = self.extra_idx(addr) {
             if self.mpu_deny(addr, 1, true) {
                 return;
             }
             let r = &mut self.extra[idx];
             r.data[(addr - r.base) as usize] = v;
+            self.note_write();
         } else {
             // Unmapped store: bad-address latch plus a precise BusFault
             // (read arm documents the split with peripheral holes).
@@ -518,6 +612,7 @@ impl Memory for FlatMemory {
                 let b = v.to_le_bytes();
                 self.ram[o] = b[0];
                 self.ram[o + 1] = b[1];
+                self.note_write();
                 return;
             }
         }
@@ -546,6 +641,7 @@ impl Memory for FlatMemory {
                 self.ram[o + 1] = b[1];
                 self.ram[o + 2] = b[2];
                 self.ram[o + 3] = b[3];
+                self.note_write();
                 return;
             }
         }
@@ -567,5 +663,92 @@ impl Memory for FlatMemory {
         self.write8(addr + 1, ((v >> 8) & 0xFF) as u8);
         self.write8(addr + 2, ((v >> 16) & 0xFF) as u8);
         self.write8(addr + 3, ((v >> 24) & 0xFF) as u8);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bulk range fast path must be bit-identical to the per-byte path
+    /// (content assertions only — never the taken/not-taken bool, so a
+    /// concurrent MPU firmware test flipping `fast_plain` can't flake it).
+    #[test]
+    fn bulk_range_parity() {
+        let mut m = FlatMemory::new(1024, 0x20000);
+        m.map_extra(0xC0000000, 0x10000);
+        // Pure range helpers are globals-free and deterministic.
+        assert_eq!(m.flash_range(0x08000000, 1024), Some(0));
+        assert_eq!(m.flash_range(0x080003F0, 64), None); // straddles end
+        assert_eq!(m.flash_range(0x07FFFFFF, 4), None); // below base wraps
+        assert_eq!(m.ram_range(0x20000000, 0x20000), Some(0));
+        assert_eq!(m.ram_range(0x2001FFF0, 32), None); // straddles end
+        for i in 0..1024 {
+            m.flash[i] = (i & 0xFF) as u8;
+        }
+        for i in 0..0x20000 {
+            m.ram[i] = ((i * 7 + 3) & 0xFF) as u8;
+        }
+        for i in 0..0x10000 {
+            m.extra[0].data[i] = ((i * 13 + 5) & 0xFF) as u8;
+        }
+        // Reads: bulk vs per-byte across regions and sizes.
+        for (base, len) in [
+            (0x08000000u32, 1usize),
+            (0x08000000, 1024),
+            (0x080003F0, 64),
+            (0x20000000, 4096),
+            (0x2001F000, 8192),
+            (0xC0000000, 16384),
+            (0xC000FFF0, 32),
+        ] {
+            let mut bulk = vec![0u8; len];
+            let took_fast = m.read_range(base, &mut bulk);
+            let slow: Vec<u8> = (0..len).map(|i| m.read8(base.wrapping_add(i as u32))).collect();
+            if took_fast {
+                assert_eq!(bulk, slow, "read parity @{:08x}+{}", base, len);
+            }
+            // Cross-region (RAM end + past end) must decline to slow path.
+            let _ = took_fast;
+        }
+        // Cross-region span declines (straddles RAM end).
+        let mut cross = vec![0u8; 32];
+        assert!(!m.read_range(0x2001FFF0, &mut cross));
+        // Writes: RAM + extra round-trip through the bulk path or slow
+        // path identically; flash direct-apply stays refused.
+        let waddr = 0x20005000;
+        let wdata: Vec<u8> = (0..256).map(|i| (i ^ 0xA5) as u8).collect();
+        if !m.write_range(waddr, &wdata) {
+            for (i, &b) in wdata.iter().enumerate() {
+                m.write8(waddr.wrapping_add(i as u32), b);
+            }
+        }
+        let back: Vec<u8> = (0..256).map(|i| m.read8(waddr.wrapping_add(i as u32))).collect();
+        assert_eq!(back, wdata, "ram write round-trip");
+        let xaddr = 0xC0002000;
+        if !m.write_range(xaddr, &wdata) {
+            for (i, &b) in wdata.iter().enumerate() {
+                m.write8(xaddr.wrapping_add(i as u32), b);
+            }
+        }
+        let xback: Vec<u8> = (0..256).map(|i| m.read8(xaddr.wrapping_add(i as u32))).collect();
+        assert_eq!(xback, wdata, "extra write round-trip");
+        // Flash bulk write must NOT apply directly (protection arms own it).
+        assert!(!m.write_range(0x08000100, &wdata));
+        assert_eq!(m.flash[0x100], 0x00);
+        // write_seq: reads never bump; RAM/extra stores bump exactly once
+        // per call (batching granularity is calls, not bytes — the driver
+        // only needs changed-vs-unchanged).
+        let s0 = m.write_seq;
+        let _ = m.read8(waddr);
+        let mut tmp = [0u8; 4];
+        assert!(m.read_range(waddr, &mut tmp));
+        assert_eq!(m.write_seq, s0, "reads must not bump");
+        m.write8(waddr, 0x11);
+        assert_eq!(m.write_seq, s0 + 1);
+        assert!(m.write_range(waddr, &[1, 2, 3, 4]));
+        assert_eq!(m.write_seq, s0 + 2);
+        assert!(m.write_range(xaddr, &[9, 9]));
+        assert_eq!(m.write_seq, s0 + 3);
     }
 }

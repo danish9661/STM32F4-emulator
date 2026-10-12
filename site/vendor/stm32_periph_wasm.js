@@ -201,6 +201,36 @@ export class WasmCpu {
         wasm.wasmcpu_mem_write(this.__wbg_ptr, addr, ptr0, len0);
     }
     /**
+     * Batched scatter-write: flat [addr, len] pairs applied in order from
+     * one concatenated blob. IDENTICAL semantics to N mem_write calls
+     * (fast RAM path per range, per-byte slow path otherwise, same order)
+     * with one wasm-bindgen crossing instead of N. The translated-
+     * block writeback drains hundreds of tiny dirty ranges per run
+     * (a strided framebuffer column = 200 x 1-4B ranges); unbatched that
+     * is ~200 crossings per hit and dominates hit cost (caught by the
+     * DOOM A/B: 365K ranges, ~250ms overhead). Malformed tails
+     * (odd pairs, short blob) are ignored, never partially misapplied:
+     * a pair is applied only when its full slice is present.
+     * @param {Uint32Array} pairs
+     * @param {Uint8Array} data
+     */
+    mem_write_multi(pairs, data) {
+        const ptr0 = passArray32ToWasm0(pairs, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(data, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.wasmcpu_mem_write_multi(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+    }
+    /**
+     * Store sequence counter (see FlatMemory::write_seq): sampled around
+     * native chunks so writeless fragments skip mirror invalidation.
+     * @returns {bigint}
+     */
+    mem_write_seq() {
+        const ret = wasm.wasmcpu_mem_write_seq(this.__wbg_ptr);
+        return BigInt.asUintN(64, ret);
+    }
+    /**
      * @param {number} sp
      * @param {number} pc
      * @param {number} flash_size

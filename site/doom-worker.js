@@ -13,8 +13,8 @@
 // Bump the ?v= on the Worker() URL in doom.js whenever this file changes:
 // worker scripts are cached exactly as hard as module scripts, and a stale
 // copy looks precisely like the bug you thought you just fixed.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=49';
-import { createEmulator } from './emulator.js?v=3';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=50';
+import { createEmulator } from './emulator.js?v=4';
 
 // ── pacing (unchanged from the pre-worker main-thread loop) ──
 // The guest's DG_SleepMs(15) is a no-op, and the guest advances its own frame
@@ -454,13 +454,14 @@ async function boot(msg) {
             firmware: msg.firmware,
             bindings,
             svdXml: msg.svdXml,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=49', // VENDOR_V: bump with app.js
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=50', // VENDOR_V: bump with app.js
             extra_ram: [
                 { addr: 0xC0000000, size: 16 * 1024 * 1024 },   // .data/.bss + zone + heap
                 { addr: 0xB8000000, size: 8 * 1024 * 1024 },    // WAD image
             ],
             extra_mem: [{ addr: 0xB8000000, data: new Uint8Array(msg.wad) }],
             ext_devices: { speaker: true },   // enable the I2S capture drain
+            tb: !!msg.tb,
         });
         uc = emu.uc;
         lowDetail = !!msg.lowDetail;

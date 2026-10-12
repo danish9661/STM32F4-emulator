@@ -233,6 +233,8 @@ export const wasmcpu_load_firmware: (a: number, b: number, c: number, d: number)
 export const wasmcpu_mem_fault: (a: number) => number;
 export const wasmcpu_mem_read: (a: number, b: number, c: number, d: number) => void;
 export const wasmcpu_mem_write: (a: number, b: number, c: number, d: number) => void;
+export const wasmcpu_mem_write_multi: (a: number, b: number, c: number, d: number, e: number) => void;
+export const wasmcpu_mem_write_seq: (a: number) => bigint;
 export const wasmcpu_new: (a: number, b: number, c: number, d: number) => number;
 export const wasmcpu_read32: (a: number, b: number) => number;
 export const wasmcpu_read8: (a: number, b: number) => number;

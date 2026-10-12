@@ -78,7 +78,7 @@ window.__doomLog = () => dbgLog.slice();
 window.__pace = () => window.__lastPace || null;
 // Build stamp: type __doomVer in the console — if it doesn't print the
 // current number, the tab runs a cached copy (Ctrl+Shift+R).
-window.__doomVer = 89;
+window.__doomVer = 90;
 // Keys pressed before the worker boots would be eaten (nothing listens
 // yet) — the old "wait before touching anything" ritual. Instead they queue
 // here and flush on 'booted', so press ahead: the game catches up. The
@@ -614,7 +614,7 @@ async function boot(keepDetail) {
 
         // Bump ?v= on every doom-worker.js edit — worker scripts cache as hard
         // as module scripts, and a stale copy looks exactly like a bug.
-        worker = new Worker('doom-worker.js?v=57', { type: 'module' });
+        worker = new Worker('doom-worker.js?v=58', { type: 'module' });
         worker.onmessage = onWorkerMessage;
         worker.onerror = (e) => {
             setStatus('worker failed: ' + (e.message || 'load error'), 'error');
@@ -624,8 +624,12 @@ async function boot(keepDetail) {
         // Auto (or a keepDetail reboot from High) boots high and lets the
         // worker's hysteresis drop to low only if gameplay sags.
         const bootLow = detailMode === 'low';
+        // ?tb=1 opts the worker into translated-block execution (same
+        // opt-in as the console page): page-side measurement only, the
+        // default path is untouched.
+        const tbOn = new URLSearchParams(location.search).has('tb');
         send({ t: 'boot', svdXml, wad, firmware, lowDetail: bootLow,
-               detailMode: detailMode === 'auto' ? 'auto' : 'manual', saveMap }, [wad]);
+               detailMode: detailMode === 'auto' ? 'auto' : 'manual', saveMap, tb: tbOn }, [wad]);
         send({ t: 'hidden', hidden: document.hidden });
         startTicking();
     } catch (e) {

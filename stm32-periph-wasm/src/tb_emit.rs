@@ -58,6 +58,7 @@ pub fn section(id: u8, body: &[u8], out: &mut Vec<u8>) {
 }
 
 pub const I32: u8 = 0x7F;
+pub const I64: u8 = 0x7E;
 
 /// Function body builder: locals + raw instruction stream.
 pub struct Code {
@@ -115,6 +116,7 @@ impl Code {
     pub fn i64_gt_u(&mut self) -> &mut Self { self.op(0x56) }
     pub fn i64_or(&mut self) -> &mut Self { self.op(0x84) }
     pub fn i64_shl(&mut self) -> &mut Self { self.op(0x86) }
+    pub fn i64_shr_u(&mut self) -> &mut Self { self.op(0x87) }
     pub fn i64_mul(&mut self) -> &mut Self { self.op(0x7E) }
     pub fn i64_const(&mut self, v: u64) -> &mut Self {
         self.code.push(0x42);
@@ -153,6 +155,10 @@ impl Code {
     pub fn nop(&mut self) -> &mut Self { self.op(0x01) }
     pub fn if_void(&mut self) -> &mut Self {
         self.code.extend_from_slice(&[0x04, 0x40]);
+        self
+    }
+    pub fn else_(&mut self) -> &mut Self {
+        self.code.push(0x05);
         self
     }
     pub fn return_(&mut self) -> &mut Self { self.op(0x0F) }

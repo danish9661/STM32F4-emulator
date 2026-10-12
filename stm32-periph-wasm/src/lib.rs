@@ -1753,10 +1753,54 @@ impl WasmCpu {
     pub fn read32(&self, addr: u32) -> u32 { self.mem.read32(addr) }
     pub fn write32(&mut self, addr: u32, v: u32) { self.mem.write32(addr, v) }
     pub fn mem_read(&self, addr: u32, len: u32) -> Vec<u8> {
-        (0..len).map(|i| self.mem.read8(addr.wrapping_add(i))).collect()
+        let mut out = vec![0; len as usize];
+        if !self.mem.read_range(addr, &mut out) {
+            return (0..len).map(|i| self.mem.read8(addr.wrapping_add(i))).collect();
+        }
+        out
+    }
+    /// Store sequence counter (see FlatMemory::write_seq): sampled around
+    /// native chunks so writeless fragments skip mirror invalidation.
+    pub fn mem_write_seq(&self) -> u64 {
+        self.mem.write_seq
     }
     pub fn mem_write(&mut self, addr: u32, data: &[u8]) {
+        if self.mem.write_range(addr, data) {
+            return;
+        }
         for (i, &b) in data.iter().enumerate() { self.mem.write8(addr.wrapping_add(i as u32), b); }
+    }
+    /// Batched scatter-write: flat [addr, len] pairs applied in order from
+    /// one concatenated blob. IDENTICAL semantics to N mem_write calls
+    /// (fast RAM path per range, per-byte slow path otherwise, same order)
+    /// with one wasm-bindgen crossing instead of N. The translated-
+    /// block writeback drains hundreds of tiny dirty ranges per run
+    /// (a strided framebuffer column = 200 x 1-4B ranges); unbatched that
+    /// is ~200 crossings per hit and dominates hit cost (caught by the
+    /// DOOM A/B: 365K ranges, ~250ms overhead). Malformed tails
+    /// (odd pairs, short blob) are ignored, never partially misapplied:
+    /// a pair is applied only when its full slice is present.
+    pub fn mem_write_multi(&mut self, pairs: &[u32], data: &[u8]) {
+        let mut off = 0usize;
+        let mut i = 0usize;
+        while i + 1 < pairs.len() {
+            let (addr, len) = (pairs[i], pairs[i + 1] as usize);
+            let end = match off.checked_add(len) {
+                Some(e) => e,
+                None => break,
+            };
+            if end > data.len() {
+                break;
+            }
+            let buf = &data[off..end];
+            if !self.mem.write_range(addr, buf) {
+                for (j, &b) in buf.iter().enumerate() {
+                    self.mem.write8(addr.wrapping_add(j as u32), b);
+                }
+            }
+            off = end;
+            i += 2;
+        }
     }
     /// Fill a flash range with 0xFF (erase applied by the JS flash driver
     /// after `flash_take_erase`; clamped to mapped flash, then completed

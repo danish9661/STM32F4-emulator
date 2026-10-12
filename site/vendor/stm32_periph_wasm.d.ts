@@ -55,6 +55,24 @@ export class WasmCpu {
     mem_fault(): number;
     mem_read(addr: number, len: number): Uint8Array;
     mem_write(addr: number, data: Uint8Array): void;
+    /**
+     * Batched scatter-write: flat [addr, len] pairs applied in order from
+     * one concatenated blob. IDENTICAL semantics to N mem_write calls
+     * (fast RAM path per range, per-byte slow path otherwise, same order)
+     * with one wasm-bindgen crossing instead of N. The translated-
+     * block writeback drains hundreds of tiny dirty ranges per run
+     * (a strided framebuffer column = 200 x 1-4B ranges); unbatched that
+     * is ~200 crossings per hit and dominates hit cost (caught by the
+     * DOOM A/B: 365K ranges, ~250ms overhead). Malformed tails
+     * (odd pairs, short blob) are ignored, never partially misapplied:
+     * a pair is applied only when its full slice is present.
+     */
+    mem_write_multi(pairs: Uint32Array, data: Uint8Array): void;
+    /**
+     * Store sequence counter (see FlatMemory::write_seq): sampled around
+     * native chunks so writeless fragments skip mirror invalidation.
+     */
+    mem_write_seq(): bigint;
     constructor(sp: number, pc: number, flash_size: number, ram_size: number);
     read32(addr: number): number;
     read8(addr: number): number;
@@ -1542,6 +1560,8 @@ export interface InitOutput {
     readonly wasmcpu_mem_fault: (a: number) => number;
     readonly wasmcpu_mem_read: (a: number, b: number, c: number, d: number) => void;
     readonly wasmcpu_mem_write: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmcpu_mem_write_multi: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly wasmcpu_mem_write_seq: (a: number) => bigint;
     readonly wasmcpu_new: (a: number, b: number, c: number, d: number) => number;
     readonly wasmcpu_read32: (a: number, b: number) => number;
     readonly wasmcpu_read8: (a: number, b: number) => number;

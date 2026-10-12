@@ -4716,6 +4716,33 @@ stores with writeback + index writeback + a little 32-bit ALU —
 exactly the two things v2 lacks (loads-only, word-only). Next slice:
 dirty-page writeback (i64 page mask, mirror-is-GO within runs) +
 byte xfer + post/pre-index + ADD.W/hi-ADD. No commit.
+
+NEXT PHASE (done 2026-10-11, UNCOMMITTED): per-hit overhead + share work.
+1. mem.rs fast path DONE (read_range/write_range + mem_write_multi;
+   crossings 44->4us; bulk parity + multi parity pinned).
+2. Pre-sync neighborhoods REMOVED (isolated 3x3 A/B: identical retries +
+   MIPS; cold-submit volume tripled for nothing). Exact slot spans +
+   demand-miss paging + validity gating instead (doom missRetry 47->22,
+   pagesIn 87->23).
+3. Outer-loop shapes DONE: internal-skip translator (scan-past-below-base
+   BUn, conditional skip-blocks, skipAdj exact counting, 19th global) fuses
+   the VDP column loop (mechanism proven: 17-check TB-SKIP differential +
+   native tests); run-length gate (TB_MIN_RUN=20000, 2 free runs, 128th
+   re-probe, permanent decline at 256) declines sub-profitable shapes.
+   Census data drove both; straight-block fusion skipped (per-iteration
+   sync floor makes single-iteration blocks unprofitable by construction).
+4. Page DOOM DONE (?tb=1 doom.js->worker->createEmulator passthrough).
+State: eth_heavy +70-80% Node, blinky neutral, DOOM Node tb -4..-8%
+(transient-heavy pill + noisy box; a rep hit parity 30.82). write_seq +
+syncGen + validity-gated sync + batched writeback + TB_PROFILE infra in.
+PAGE 2026-10-11 (cdp_mips best-of-5, back-to-back): blinky 40.78->42.44,
+eth_http 30.18->89.13 median (+195%, best 91.07) with ?tb=1 — the 80 MIPS
+page bar is MET for the heavy class. Doom page ?tb=1 smoke PASS both modes
+(I_InitGraphics + 35t/s + zero pageerrors; title-phase snapshots, not A/B).
+?v=: vendor 50, emulator v4, doom 91/worker 58/__doomVer 90, app 66/worker 10.
+REMAINING: quiet-box A/B for final numbers; nested-loop fusion iff a
+census shows long nested runs; commit only on explicit user order.
+
 DOOM SLICE 2026-10-11 (UNCOMMITTED): byte ops (LDRB/STRB 16/.W/PUW),
 word stores, post/pre-index wb (incl. Rt==Rn load-wins), ADD.W-imm/reg,
 ADD(2)/CMP(2), T1 ALU/imm3/CMP-reg, B.N latch+exits, high-reg ABI

@@ -1443,22 +1443,71 @@ export async function createEmulator(opts) {
 
 
         let tbPagesIn = 0, tbPagesOut = 0;
-        const TB_LOOKAHEAD = 8;    // halfwords read per translate attempt
+        // 32-halfword window: call/nested shapes span further than one
+        // loop (VDP L1+MID discovery needs ~30). mem_read is bulk-fast so
+        // the wider read is ~free; decline-cache bounds repeat cost.
+        const TB_LOOKAHEAD = 32;   // halfwords read per translate attempt
+        // Minimum average run length (insts) for a cached shape to keep
+        // translating. A translated run pays a fixed floor (~40-60us:
+        // sync + reg bulks + writeback) regardless of length; shapes
+        // averaging below this (VDP column: ~1200/run with a kind-3 exit
+        // per column) lose to interpretation. Declining them is always
+        // sound; a periodic re-probe (every 32nd submit) catches phase
+        // changes. Self-tuning per shape — no shape knowledge needed.
+        const TB_MIN_RUN = 20000;
+        const tbShort = (e) => {
+            if (!e || !e.module) return false; // declined handled by callers
+            // Two free runs judge a shape (run lengths are consistent
+            // per shape in practice: countdowns, memcpys, columns);
+            // the 128th-submit re-probe + 256-decline backstop atypical
+            // warmups instead of a third and fourth free run.
+            if ((e.run | 0) <= 1) return false;
+            if ((e.runInst / e.run) >= TB_MIN_RUN) return false;
+            e.probe = ((e.probe | 0) + 1) | 0;
+            // Two failed re-probe cycles (256 gated submits) with no
+            // long run: decline permanently for this instance. Phase
+            // changes bring new shapes (new entries) far more often
+            // than they rehabilitate old ones; re-probing forever costs
+            // ~3% per shape (compile + free runs).
+            if (e.probe > 256) { e.declined = true; return true; }
+            return (e.probe % 128) !== 0;
+        };
         // Mirror window = chip SRAM (module memory sized by the
         // translator from the sram_bytes passed per translate).
+        // Mirror-validity gatekeeper: tbGen invalidates (lazy clear on
+        // next use) only when guest RAM actually changed since the last
+        // check (BigInt-exact store sequence; missing export = legacy
+        // always-bump). Called at tbRun start (inter-step servicing) and
+        // every tbExec entry (native chunks, model ticks, DMA) — the ONLY
+        // places RAM can change under a warm mirror.
+        let tbSeq = null;
+        const syncGen = () => {
+            let q = null;
+            try { q = (typeof cpu.mem_write_seq === 'function') ? cpu.mem_write_seq() : null; } catch {}
+            if (q === null || tbSeq === null || q !== tbSeq) { tbGen++; tbSeq = q; }
+        };
+        // Hit-cost profiling (env TB_PROFILE=1, Node scratch only):
+        // accumulates ms per translated-run phase. Zero-cost when off
+        // (one boolean per hit).
+        const TB_PROF = typeof process !== 'undefined' && process.env && process.env.TB_PROFILE === '1';
+        const tbProf = TB_PROF ? { sync: 0, regsIn: 0, run: 0, wb: 0, regsOut: 0, hits: 0 } : null;
         const tbStats = () => ({ hits: tbHits, fallbacks: tbFallbacks, entries: tbCache.size,
             translated: tbTranslated, kind3: tbKind3, missRetry: tbMissRetry, firstErr: tbFirstErr,
 
 
 
-            pagesIn: tbPagesIn, pagesOut: tbPagesOut });
-        // Mirror segment table (must match tb_xlate layout EXACTLY:
+            pagesIn: tbPagesIn, pagesOut: tbPagesOut,
+            prof: tbProf ? { ...tbProf } : null });
+        // Mirror segment table (per-emulator constants — hoisted out of
+        // the per-submit path; must match tb_xlate layout EXACTLY:
         // SCRATCH=262144 reserve at mirror 0 (dirty trailer at [8..)),
         // then each segment at a 64KB-aligned offset. A stale offset
         // here silently desyncs every load (caught live: flag reads).
         // Segments: SRAM + flash (read-mostly; model drops stray writes)
         // + extra_ram (EXTRAM/WAD for doom-class firmware).
+        let tbSegsCached = null;
         const tbSegs = () => {
+            if (tbSegsCached) return tbSegsCached;
             const list = [
                 { base: 0x20000000, size: ram_size >>> 0 },
                 { base: 0x08000000, size: flash_size >>> 0 },
@@ -1477,10 +1526,9 @@ export async function createEmulator(opts) {
                 g.off = mo;
                 mo += Math.ceil(g.size / 65536) * 65536;
             }
-            return { flat, list };
+            tbSegsCached = { flat, list };
+            return tbSegsCached;
         };
-        // TEMP divergence trace: last N translated runs (pc, fuel, iters,
-        // kind, r3 before/after). Remove after diagnosis.
         // (No per-submit tracing: tbTryLoop runs hot; stats stay counters.)
         // Try one translated loop at pc. Returns insts executed, else 0
         // (caller falls back to a native chunk). Never throws.
@@ -1539,48 +1587,48 @@ export async function createEmulator(opts) {
         const tbFindTop = (pc) => {
             let raw;
             try {
-                raw = wuc.mem_read(BigInt((pc - 14) >>> 0), 16);
+                raw = wuc.mem_read(BigInt((pc - 30) >>> 0), 32);
             } catch { return 0; }
-            const b = new Uint8Array(raw.buffer, raw.byteOffset, 16);
+            const b = new Uint8Array(raw.buffer, raw.byteOffset, 32);
             const w = new Uint16Array(b.slice().buffer);
-            const base = (pc - 14) >>> 0;
+            const base = (pc - 30) >>> 0;
             // Halfword AT pc must be a back-edge latch (Bcc, Bcc.W, or
             // B.N starting at pc).
-            const lc = tbClass(w, 7);
+            const lc = tbClass(w, 15);
             if (lc.k !== 'b16' && lc.k !== 'bw' && lc.k !== 'bun') return 0;
             let target;
             if (lc.k === 'b16') {
-                const op = w[7];
+                const op = w[15];
                 let imm = ((op & 0xFF) << 1);
                 if (imm & 0x100) imm -= 0x200;
                 target = (pc + 4 + imm) >>> 0;
             } else if (lc.k === 'bun') {
-                const op = w[7];
+                const op = w[15];
                 let imm = (op & 0x7FF) << 1;
                 const off = (imm & 0x800) ? (imm | 0xFFFFF000) : imm;
                 target = (pc + 4 + off) >>> 0;
             } else {
-                const o1 = w[7], o2 = w[8];
+                const o1 = w[15], o2 = w[16];
                 const sg = (v) => (v & 0x100000) ? (v | 0xFFE00000) : v;
                 const off = sg((((o1 >> 10) & 1) << 20) | (((o2 >> 13) & 1) << 19)
                     | (((o2 >> 11) & 1) << 18) | ((o1 & 0x3F) << 12) | ((o2 & 0x7FF) << 1));
                 target = (pc + 4 + off) >>> 0;
             }
             if (target >= pc) return 0;
-            if ((pc - target) > 14) return 0; // body must fit the window
+            if ((pc - target) > 30) return 0; // body must fit the window
             // Body [target, pc): emittable items only (pair-stepped).
             const t = (target - base) / 2;
             let k = t;
-            while (k < 7) {
+            while (k < 15) {
                 const c = tbClass(w, k);
                 if (!tbBodyOk(c)) return 0;
                 k += c.n;
             }
-            if (k !== 7) return 0; // straddled pair: unsafe
+            if (k !== 15) return 0; // straddled pair: unsafe
             return target;
         };
         // Mid-body discovery: pc strictly inside a loop body (top behind,
-        // latch ahead) in a combined [pc-14, pc+16) window. Returns the
+        // latch ahead) in a combined [pc-30, pc+32) window. Returns the
         // loop TOP, else 0. No prefix restriction: entry-offset execution
         // starts AT pc and never re-executes the prefix (exact even with
         // stores). The translator re-validates everything (item
@@ -1589,16 +1637,16 @@ export async function createEmulator(opts) {
         const tbMidLatch = (pc) => {
             let raw;
             try {
-                raw = wuc.mem_read(BigInt((pc - 14) >>> 0), 30);
+                raw = wuc.mem_read(BigInt((pc - 30) >>> 0), 62);
             } catch { return 0; }
-            const b = new Uint8Array(raw.buffer, raw.byteOffset, 30);
+            const b = new Uint8Array(raw.buffer, raw.byteOffset, 62);
             const w = new Uint16Array(b.slice().buffer);
-            const base = (pc - 14) >>> 0;
-            for (let i = 8; i < 15; i++) { // halfwords strictly after pc
-                // (i==7 is the latch-entry case, handled by tbFindTop)
+            const base = (pc - 30) >>> 0;
+            for (let i = 16; i < 31; i++) { // halfwords strictly after pc
+                // (i==15 is the latch-entry case, handled by tbFindTop)
                 const lc = tbClass(w, i);
                 if (lc.k !== 'b16' && lc.k !== 'bw' && lc.k !== 'bun') continue;
-                if (i + lc.n > 15) continue; // pair overhangs the window
+                if (i + lc.n > 31) continue; // pair overhangs the window
                 const opc = base + i * 2;
                 let target;
                 if (lc.k === 'b16') {
@@ -1620,7 +1668,7 @@ export async function createEmulator(opts) {
                 }
                 if (target >= opc) continue; // must loop back
                 if (target > pc || target < base) continue; // top behind/at pc
-                if ((opc - target) > 14) continue;
+                if ((opc - target) > 30) continue;
                 const t = (target - base) / 2;
                 // Body [t, latch-end): emittable items only, pair-stepped.
                 // (No prefix content rule: entry-offset starts at pc, so
@@ -1654,6 +1702,8 @@ export async function createEmulator(opts) {
             let e = tbCache.get(pc >>> 0);
             let meta = 0;
             if (!noMetaCache && e && e.top === undefined && e.bytes.length === TB_LOOKAHEAD * 2 && bytesEqual(e.bytes, bytes)) {
+                if (e.declined) return 0;
+                if (tbShort(e)) return 0;
                 meta = e.meta;
             } else {
                 try {
@@ -1677,12 +1727,18 @@ export async function createEmulator(opts) {
                         const top2 = tbMidLatch(pc >>> 0);
                         if (top2) return tbTryEntry(top2, pc >>> 0, budget);
                     }
+                    // Cache the decline (shape-declines are deterministic
+                    // per code bytes; transient gates return earlier and
+                    // are never cached). Repeat declines skip assists.
+                    tbCache.set(pc >>> 0, { bytes: bytes.slice(), declined: true });
                     return 0; // not a loop region: interpret
                 }
                 let modBytes, mod;
                 try {
                     modBytes = bindings.tb_translate(ops, segs.flat, pc >>> 0);
+                    let tC0 = TB_PROF ? performance.now() : 0;
                     mod = new WebAssembly.Module(modBytes);
+                    if (TB_PROF) { tbProf.compiles = ((tbProf.compiles | 0) + 1) | 0; tbProf.compileMs = (tbProf.compileMs | 0) + (performance.now() - tC0); }
                 } catch { return 0; }
                 let inst;
                 try {
@@ -1720,6 +1776,8 @@ export async function createEmulator(opts) {
             let e = tbCache.get(key);
             let meta = 0;
             if (e && e.top === (top >>> 0) && e.bytes.length === W * 2 && bytesEqual(e.bytes, bytes)) {
+                if (e.declined) return 0;
+                if (tbShort(e)) return 0;
                 meta = e.meta;
             } else {
                 try {
@@ -1728,11 +1786,16 @@ export async function createEmulator(opts) {
                     if (typeof bindings.tb_translate_meta_at !== 'function') return 0;
                     meta = bindings.tb_translate_meta_at(ops, segs.flat, top >>> 0, pc >>> 0);
                 } catch { return 0; }
-                if (!(meta & 1)) return 0;
+                if (!(meta & 1)) {
+                    tbCache.set(key, { top: top >>> 0, bytes: bytes.slice(), declined: true });
+                    return 0;
+                }
                 let modBytes, mod;
                 try {
                     modBytes = bindings.tb_translate_at(ops, segs.flat, top >>> 0, pc >>> 0);
+                    let tC0 = TB_PROF ? performance.now() : 0;
                     mod = new WebAssembly.Module(modBytes);
+                    if (TB_PROF) { tbProf.compiles = ((tbProf.compiles | 0) + 1) | 0; tbProf.compileMs = (tbProf.compileMs | 0) + (performance.now() - tC0); }
                 } catch { return 0; }
                 let inst;
                 try {
@@ -1762,6 +1825,17 @@ export async function createEmulator(opts) {
             // NEVER writes back (mirror stores are discarded by
             // re-syncing) — otherwise a retried/give-up run would apply
             // stores twice.
+            // Guest address + clamp length for a mirror offset (inverse
+            // of mirrorOff; null when outside every segment).
+            const moToGuest = (mo) => {
+                for (const g of segs.list) {
+                    if (g.off === undefined) continue;
+                    if (mo >= g.off && mo < g.off + g.size) {
+                        return [(g.base + (mo - g.off)) >>> 0, g.off + g.size - mo];
+                    }
+                }
+                return null;
+            };
             const mirrorOff = (addr) => {
                 for (const g of segs.list) {
                     if (addr >= g.base && addr < g.base + g.size) return g.off + (addr - g.base);
@@ -1808,11 +1882,19 @@ export async function createEmulator(opts) {
                 }
                 return out;
             };
+            // Pre-sync is EXACT slot ranges (no neighborhood expansion):
+            // an earlier [-4KB,+32KB) hood window showed zero benefit in
+            // isolation (identical retry counts and MIPS on eth_heavy,
+            // 3x3 back-to-back) while tripling cold-submit sync volume,
+            // so it was removed. Striding loops page in via demand misses
+            // (fault-page sync + re-run, exec is ~500 MIPS so re-runs are
+            // cheap); warm pages are skipped by validity gating anyway.
             // Merge slot ranges into spans (gap <= 4KB merges stack-local
             // clusters into one mem_read; span cap 64KB). Mirror bytes
             // from gaps are never written back (only trailer ranges are),
             // so merging is always safe.
-            const slotSpans = (pairs, regs, sp) => {
+            const slotSpans = (pairs, regs, sp, budget) => {
+                const _ = budget;
                 const rs = slotAddrs(pairs, regs, sp).sort((a, b) => a[0] - b[0]);
                 const out = [];
                 let cur = null;
@@ -1858,27 +1940,58 @@ export async function createEmulator(opts) {
                 }
                 if (!sorted) rs = rs.slice().sort((a, b) => a[0] - b[0]);
                 tbPagesOut += rs.length;
+                // Gap-0 coalesced spans (order preserved).
+                const spans = [];
                 let cur = null;
-                const flush = () => {
-                    if (!cur) return;
-                    try {
-                        const mo = mirrorOff(cur[0]);
-                        if (mo >= 0) {
-                            const bytes = new Uint8Array(ex.mem.buffer).slice(mo, mo + cur[1]);
- 
-                            wuc.mem_write(BigInt(cur[0] >>> 0), bytes);
-                        }
-                    } catch {}
-                    cur = null;
-                };
                 for (const [a, n] of rs) {
                     if (!cur) { cur = [a, n]; continue; }
                     const end = cur[0] + cur[1];
                     if (a <= end && a + n - cur[0] <= 262144) {
                         cur[1] = Math.max(end, a + n) - cur[0];
-                    } else { flush(); cur = [a, n]; }
+                    } else { spans.push(cur); cur = [a, n]; }
                 }
-                flush();
+                if (cur) spans.push(cur);
+                // One batched scatter-write per run instead of one
+                // crossing per span: strided stores (framebuffer column
+                // = ~200 x 1-4B spans) paid a full bindgen crossing each
+                // and dominated hit cost (DOOM A/B). mem_write_multi
+                // (WasmCpu method, like mem_write) has identical
+                // semantics (ordered, same bytes); falls back to
+                // per-span writes when absent (older vendor).
+                if (spans.length > 0 && typeof cpu.mem_write_multi === 'function') {
+                    try {
+                        const mem = new Uint8Array(ex.mem.buffer);
+                        let total = 0;
+                        const items = [];
+                        for (const [a, n] of spans) {
+                            const mo = mirrorOff(a);
+                            if (mo < 0 || n <= 0) continue;
+                            items.push([a >>> 0, mo, n]);
+                            total += n;
+                        }
+                        if (items.length > 0) {
+                            const pairs = new Uint32Array(items.length * 2);
+                            const blob = new Uint8Array(total);
+                            let bo = 0, pi = 0;
+                            for (const [a, mo, n] of items) {
+                                pairs[pi++] = a; pairs[pi++] = n;
+                                blob.set(mem.subarray(mo, mo + n), bo);
+                                bo += n;
+                            }
+                            cpu.mem_write_multi(pairs, blob);
+                        }
+                    } catch {}
+                } else {
+                    for (const [a, n] of spans) {
+                        try {
+                            const mo = mirrorOff(a);
+                            if (mo >= 0) {
+                                const bytes = new Uint8Array(ex.mem.buffer).slice(mo, mo + n);
+                                wuc.mem_write(BigInt(a >>> 0), bytes);
+                            }
+                        } catch {}
+                    }
+                }
             };
             const clearValid = () => {
                 try {
@@ -1932,21 +2045,62 @@ export async function createEmulator(opts) {
                 for (let i = 0; i < 8; i++) regs[i] = src['r' + i].value;
                 for (const [r, nm] of HI) regs[r] = src[nm].value;
             };
+            syncGen(); // single gatekeeper: RAM changed => tbGen++ (lazy clear)
             try {
+                let t0 = TB_PROF ? performance.now() : 0;
                 let regs = cpu.get_regs();
                 let sp = cpu.get_sp();
-                const addrs = slotSpans(e.loads, regs, sp).concat(slotSpans(e.stores, regs, sp));
-                for (const [a, n] of addrs) { if (syncRange(a, n)) tbPagesIn++; }
+                const addrs = slotSpans(e.loads, regs, sp, budget).concat(slotSpans(e.stores, regs, sp, budget));
+                // Validity-gated sync: skip 4KB pages whose bit is set
+                // (synced since the last real RAM change — mirror holds
+                // the latest bytes, including prior translated stores).
+                // Without this the pre-run loop re-reads ~100KB of hood
+                // windows per hit (~50us) even when nothing changed.
+                const syncNeeded = (mo, len) => {
+                    let mem;
+                    try { mem = new Uint8Array(ex.mem.buffer); } catch { return null; }
+                    const first = mo >>> 12, last = (mo + len - 1) >>> 12;
+                    const out = [];
+                    let cs = -1, ce = -1;
+                    for (let pg = first; pg <= last; pg++) {
+                        let has = false;
+                        try { has = ((mem[BITBASE + (pg >>> 3)] >>> (pg & 7)) & 1) !== 0; } catch {}
+                        if (!has) {
+                            const ps = Math.max(mo, pg * 4096), pe = Math.min(mo + len, (pg + 1) * 4096);
+                            if (cs < 0) { cs = ps; ce = pe; }
+                            else if (ps <= ce) { ce = Math.max(ce, pe); }
+                            else { out.push([cs, ce - cs]); cs = ps; ce = pe; }
+                        }
+                    }
+                    if (cs >= 0) out.push([cs, ce - cs]);
+                    return out;
+                };
+                for (const [a, n] of addrs) {
+                    const mo = mirrorOff(a);
+                    if (mo < 0) { if (syncRange(a, n)) tbPagesIn++; continue; }
+                    const gaps = syncNeeded(mo, n);
+                    if (gaps === null) { if (syncRange(a, n)) tbPagesIn++; continue; }
+                    for (const [smo, slen] of gaps) {
+                        const g = moToGuest(smo);
+                        if (!g) continue;
+                        if (syncRange(g[0], Math.min(slen, g[1]))) tbPagesIn++;
+                    }
+                }
+                if (TB_PROF) tbProf.sync += performance.now() - t0;
                 // Entry snapshot for miss-retry restore (mirror stores are
                 // discarded by re-sync, so restoring regs un-runs it).
                 const snapR = regs.slice();
                 const snapX = cpu.get_xpsr();
+                t0 = TB_PROF ? performance.now() : 0;
                 syncRegsTo(ex, regs, snapX, sp);
                 try { ex.dirtyCount.value = 0; } catch {}
                 ensureValid();
+                if (TB_PROF) tbProf.regsIn += performance.now() - t0;
                 let retries = 0;
                 for (;;) {
+                    t0 = TB_PROF ? performance.now() : 0;
                     const ret = ex.run(budget | 0);
+                    if (TB_PROF) tbProf.run += performance.now() - t0;
                     const insts = Number(ret & 0xFFFFFFFFn);
                     const kind = Number(ret >> 32n);
                     if (kind === 1 && retries < 16) {
@@ -1965,7 +2119,17 @@ export async function createEmulator(opts) {
                             cpuBulk(snapR, snapX);
                             return 0; // outside every segment: interpret
                         }
-                        for (const [a, n] of addrs) { if (syncRange(a, n)) tbPagesIn++; }
+                        for (const [a, n] of addrs) {
+                            const mo = mirrorOff(a);
+                            if (mo < 0) { if (syncRange(a, n)) tbPagesIn++; continue; }
+                            const gaps = syncNeeded(mo, n);
+                            if (gaps === null) { if (syncRange(a, n)) tbPagesIn++; continue; }
+                            for (const [smo, slen] of gaps) {
+                                const g = moToGuest(smo);
+                                if (!g) continue;
+                                if (syncRange(g[0], Math.min(slen, g[1]))) tbPagesIn++;
+                            }
+                        }
                         regs = snapR.slice();
                         continue;
                     }
@@ -1973,12 +2137,17 @@ export async function createEmulator(opts) {
                         cpuBulk(snapR, snapX);
                         return 0;
                     }
+                    t0 = TB_PROF ? performance.now() : 0;
                     writeback();
+                    if (TB_PROF) { tbProf.wb += performance.now() - t0; t0 = performance.now(); }
                     readRegsBack(ex, regs);
                     cpuBulk(regs, ex.xpsr.value);
                     try { tick_n(insts); } catch {}
+                    if (TB_PROF) { tbProf.regsOut += performance.now() - t0; tbProf.hits++; }
                     tbHits++;
                     tbTranslated += insts;
+                    e.run = ((e.run | 0) + 1) | 0;
+                    e.runInst = ((e.runInst | 0) + insts) | 0;
                     if (kind === 3) tbKind3++;
                     if (kind === 0) {
                         // completed: advance past the region.
@@ -1988,7 +2157,13 @@ export async function createEmulator(opts) {
                         // forward-branch exit: resume at the branch target.
                         cpu.set_pc(ex.tb_addr.value >>> 0);
                     }
-                    // kind 2 (fuel out): resume at loop top next round.
+                    // kind 2 (fuel out): resume at the emitted tb_addr
+                    // (flat: the entry pc, identical to the old leave-pc
+                    // behavior; nested: the fuelled-out inner top, which
+                    // resubmits as a standalone shape).
+                    if (kind === 2) {
+                        try { cpu.set_pc(ex.tb_addr.value >>> 0); } catch {}
+                    }
                     return insts;
                 }
             } catch (e) { try { if (!tbFirstErr) tbFirstErr = String((e && e.message) || e).slice(0, 200); } catch {} return 0; }
@@ -2001,20 +2176,36 @@ export async function createEmulator(opts) {
         // Budget runner mixing translated loops + native chunks. Returns
         // total instructions executed (feeds instCount + servicing exactly
         // like cpu.step's count does).
+        // Adaptive backoff: tbTryLoop on never-translating firmware
+        // (blinky: 5000 declines, 0 hits) costs a mem_read + compare per
+        // chunk for nothing. After 200 consecutive declines, probe only
+        // every 32nd chunk — overhead drops ~97% while translatable
+        // firmware (hits reset the count long before 200) never backs
+        // off. Skipping is always sound: decline === interpret anyway.
+        let tbDeclines = 0;
         const tbRun = (n) => {
             let done = 0;
-            tbGen++; // inter-step servicing may have written guest RAM
+            syncGen(); // inter-step servicing may have written guest RAM
             while (done < n) {
                 if (cpu.fault_pc() !== 0xFFFFFFFF) break;
                 const pc = cpu.get_pc() & 0xFFFFFFFE;
-                const step = tbTryLoop(pc, n - done);
-                if (step > 0) { done += step; continue; }
+                let step = 0;
+                if (tbDeclines < 200 || (tbDeclines % 32) === 0) {
+                    step = tbTryLoop(pc, n - done);
+                }
+                if (step > 0) { done += step; tbDeclines = 0; continue; }
+                tbDeclines++;
                 tbFallbacks++;
-                const chunk = Math.min(n - done, 4096);
+                // While backed off (no translation happening), step native
+                // at the same 64K granularity as the tb-off path instead
+                // of 4K probe chunks — the chunking itself was measurable.
+                const chunk = Math.min(n - done, tbDeclines >= 200 ? 65536 : 4096);
                 const c = cpu.step(chunk);
                 done += c;
                 if (c < chunk) break; // fault/sleep: outer logic resumes
-                tbGen++; // native chunk may have written guest RAM
+                // No tbGen++ here: tbExec-entry syncGen() invalidates on
+                // real RAM change (write_seq-gated), so writeless native
+                // fragments keep a warm mirror across submits.
             }
             return done;
         };
