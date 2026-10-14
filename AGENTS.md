@@ -4952,3 +4952,38 @@ Preconditions before starting: quiet box, green `npm test` baseline,
 fresh `cdp_mips` baseline trio on the same day. Expected total IF every
 step pays (unlikely): page 45 → ~60-70. 80+ is NOT promised — if steps
 1-3 stall below target, stop and say so rather than fusing blindly.
+
+## 43. Interpreter fusion #3 (memcpy) + the wrong-origin find (2026-10-14)
+
+FUSION #1 (countdown-spin) and #2 (flag-poll) from §42 NEVER FIRED — both
+carried the same wrong branch-origin formula, and nothing caught it because
+correctness holds via the unfused fallback and the speed A/B compared
+identical code paths. The fire-counter tests below are the regression pins.
+
+- **The bug**: a 16-bit B.cond at address A targets A+4+imm (the
+  interpreter's own 0xD000 arm is ground truth). All three fused forms
+  computed the target from the LOOP TOP instead of the branch address:
+  spin used P+4 (branch at P+2, true origin P+6 — selected imm=-6, real
+  loops carry -8, shape never matched); poll used P+4 (branch at P+4,
+  origin P+8); memcpy used P+4 (branch at P+10, origin P+14, real imm=-14).
+  The taken-branch write used the same wrong origin (would have jumped
+  mid-instruction — lucky it never fired). Fixed all three (check + taken).
+- **FUSION #3 (new)**: newlib memcpy inner loop [LDRB.W-postidx, STRB.W-
+  preidxWB, CMP-reg, BNE-back] (doom.elf memcpy+0xe @0x0801c5ce, 35% of
+  gameplay chunk-starts). Generic over regs/PUW/sign; bails on reg-offset,
+  unpriv variants, any r13/r15, and Rt==Rn on the load (the interpreter's
+  F8 arm writes back TWICE, so unfused `ldrb.w r1,[r1],#1` leaves base+off
+  — observed live r1=src+2 — while silicon order leaves the byte; the
+  corner is UNPREDICTABLE and never compiler-emitted, stays interpreted).
+  Caller guard in mod.rs (mask + nibble + IT/trace, zero fetches on miss).
+- **Firing proof (anti-vacuous rule)**: cfg(test) counters FUSED_SPIN/
+  POLL/MEMCPY_FIRES + native tests asserting exact end state AND exact
+  dispatch counts AND fires>0 (n counts run(1) dispatches: memcpy 5 =
+  5x1 fused, spin 5 = 3 fused + 2 NOP, poll 2+1 across taken/exit cases).
+- **Measured (back-to-back, same box)**: DOOM Node attract 30.6→34.9
+  (+14%), gameplay 30.2→34.0 (+13%), eth node off-path up slightly;
+  page eth_http+tb 90.7→95.2 median (best 95.8). tb-driver still neutral
+  on DOOM (0.14% fusable share — structural, see §42 DOOM NOTE).
+- Debug scaffolding stripped before commit (TB_PROF/TB_BIGRUNS/TB_MINRUN
+  env → const TB_MIN_RUN=5000). `?v=`: vendor 51, emulator 4/5/5,
+  app 67, worker 11, doom 92/worker 59/__doomVer 91.

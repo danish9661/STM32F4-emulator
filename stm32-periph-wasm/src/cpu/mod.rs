@@ -1036,7 +1036,7 @@ impl Cpu {
                     continue;
                 }
             }
-            // Fused hot loops (see thumb::fused_spin/fused_poll): multiple
+            // Fused hot loops (see thumb::fused_spin/fused_poll/fused_memcpy): multiple
             // members in one dispatch on measured shapes. Bail to the
             // normal path on any mismatch (zero behavioral delta when
             // bailing). Fused members skip bank sync (r13 untouched —
@@ -1045,7 +1045,7 @@ impl Cpu {
             // Guard order: opcode mask first (cheapest, filters ~everything;
             // the atomic + call below run only on SUBS-imm8 / LDR-imm).
             // Fused members return their instruction count (spin 2, poll
-            // 3), else 0. done/cycles scale by it — the chunk publisher
+            // 3, memcpy 4), else 0. done/cycles scale by it — the chunk publisher
             // and model clock stay exact.
             let fused_n = if (op & 0xF800) == 0x3800
                 && self.it_n == 0
@@ -1059,6 +1059,14 @@ impl Cpu {
                 && !TRACE_ON.load(Ordering::Relaxed)
             {
                 thumb::fused_poll(self, sys, mem, pc, op)
+            } else if (op & 0xF800) == 0xF800
+                && op < 0xFA00
+                && (op >> 4) & 0xF == 1
+                && self.it_n == 0
+                && !self.it_pred
+                && !TRACE_ON.load(Ordering::Relaxed)
+            {
+                thumb::fused_memcpy(self, sys, mem, pc, op)
             } else {
                 0
             };

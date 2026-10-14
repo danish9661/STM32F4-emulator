@@ -3286,3 +3286,191 @@ fn tst16_preserves_rn_and_sets_z() {
     assert_eq!(cpu.regs.r[0], 1, "tst Z=0 must fall through to bad marker");
     assert_eq!(cpu.regs.r[2], 0xFF00, "tst must not write Rn");
 }
+
+/// Ground truth for the nested-call differential shape: single-step the
+/// REAL interpreter until the outer exit (hw24) and assert exact counts.
+/// Settles whether the fused count should be 11 or 12.
+#[test]
+fn call_shape_native_truth() {
+    let _g = lock_boot();
+    let ops: [u16; 24] = [
+        0x3A01, 0xD015, 0xD205, 0x2007, 0xE7FA, 0xBF00, 0xBF00, 0xBF00, 0xBF00, 0x680C,
+        0x3D01, 0xD202, 0x784E, 0x701E, 0xE7FA, 0xBF00, 0x7888, 0xD1F6, 0xBF00, 0xE7EB,
+        0xBF00, 0xBF00, 0xBF00, 0xBF00,
+    ];
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../firmware/blinky/blinky.bin"));
+    for (i, w) in ops.iter().enumerate() {
+        mem.write16(0x20002000 + (i as u32) * 2, *w);
+    }
+    // Seed RAM backing the loads.
+    mem.write8(0x20000000, 0x11);
+    mem.write8(0x20000001, 0x22);
+    mem.write8(0x20000002, 0x55);
+    mem.write8(0x20000003, 0x44);
+    cpu.regs.r[1] = 0x20000000;
+    cpu.regs.r[2] = 2;
+    cpu.regs.r[3] = 0x20000100;
+    cpu.regs.r[5] = 1;
+    cpu.regs.r[15] = 0x20002001;
+    let sys = crate::sys();
+    let mut n = 0u32;
+    let mut trace = Vec::new();
+    loop {
+        let pc = cpu.regs.r[15] & !1;
+        if pc == 0x20002000 + 48 {
+            break;
+        }
+        assert!(n < 500, "runaway: pc={:#x} r2={} r5={}", pc, cpu.regs.r[2], cpu.regs.r[5]);
+        trace.push(pc);
+        cpu.run(sys, &mut mem, 1);
+        n += 1;
+    }
+    eprintln!("TRACE {}", trace.iter().map(|a| format!("{:x}", (a - 0x20002000) / 2)).collect::<Vec<_>>().join(" "));
+    eprintln!(
+        "NATIVE-TRUTH n={} r2={} r5={} r4={:#x} r6={} r0={} dst={:#x}",
+        n,
+        cpu.regs.r[2],
+        cpu.regs.r[5],
+        cpu.regs.r[4],
+        cpu.regs.r[6],
+        cpu.regs.r[0],
+        mem.read8(0x20000100),
+    );
+    // 13 = L1[SUBS,BEQ,BCS] + MID[setup,SUBS,BCS,NOP,LDRB,BNE,NOP,B-ret]
+    // + L1[SUBS,BEQ]. (The BCS lands mid-dup on hw15-NOP — hand-counts
+    // saying 11 miss it and the return-branch B@19.)
+    assert_eq!(n, 13, "native executed count");
+}
+
+/// Fused memcpy loop: the exact newlib shape from doom.elf memcpy+0xe
+/// (F811 4B01 / F803 4F01 / 4291 / D1F9) copies 5 bytes with the fused
+/// arm live. Asserts exact end state + exact count (4/iter) + that the
+/// fused arm actually fired (cfg-test counter — a bail-out would pass
+/// the state asserts vacuously).
+#[test]
+fn fused_memcpy_copies() {
+    use crate::cpu::thumb::FUSED_MEMCPY_FIRES;
+    use std::sync::atomic::Ordering;
+    let _g = lock_boot();
+    FUSED_MEMCPY_FIRES.swap(0, Ordering::Relaxed);
+    let ops: [u16; 6] = [0xF811, 0x4B01, 0xF803, 0x4F01, 0x4291, 0xD1F9];
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../firmware/blinky/blinky.bin"));
+    for (i, w) in ops.iter().enumerate() {
+        mem.write16(0x20002000 + (i as u32) * 2, *w);
+    }
+    let src = [0x48u8, 0x45, 0x4C, 0x4C, 0x4F]; // HELLO
+    for (i, b) in src.iter().enumerate() {
+        mem.write8(0x20000100 + i as u32, *b);
+    }
+    cpu.regs.r[1] = 0x20000100;
+    cpu.regs.r[2] = 0x20000105;
+    // r3 = dst-1: the real prologue (memcpy+0x4: add.w r3,r0,#-1) biases the
+    // dest because the loop stores pre-indexed [r3,#1]!.
+    cpu.regs.r[3] = 0x2000010F;
+    cpu.regs.r[15] = 0x20002001;
+    let sys = crate::sys();
+    let mut n = 0u32;
+    loop {
+        let pc = cpu.regs.r[15] & !1;
+        if pc == 0x20002000 + 12 {
+            break;
+        }
+        assert!(n < 500, "runaway: pc={:#x}", pc);
+        cpu.run(sys, &mut mem, 1);
+        n += 1;
+    }
+    // n counts DISPATCHES (one run(1) call each): 5 fused iters x 1 = 5.
+    // (Unfused would be 20 dispatches — n==5 is itself the fusion proof;
+    // the fires counter below pins it directly.)
+    assert_eq!(n, 5, "fused dispatch count");
+    for (i, b) in src.iter().enumerate() {
+        assert_eq!(mem.read8(0x20000110 + i as u32), *b, "dst byte {}", i);
+    }
+    assert_eq!(cpu.regs.r[1], 0x20000105, "src pointer advanced");
+    assert_eq!(cpu.regs.r[3], 0x20000114, "dst pointer advanced");
+    assert_eq!(cpu.regs.r[4], 0x4F, "last byte in r4");
+    assert_ne!(cpu.regs.xpsr & 0x40000000, 0, "Z set at exit (BNE not taken)");
+    assert!(
+        FUSED_MEMCPY_FIRES.load(Ordering::Relaxed) > 0,
+        "fused arm must fire (else this test is vacuous)"
+    );
+}
+
+/// Fused countdown-spin: [NOP][SUBS r2,#1][BNE->NOP] runs 3 iterations
+/// with the fused arm live. 8 instructions total (3 fused x2 + 2 NOP),
+/// fires>0 (the wrong-origin first cut NEVER fired — this assert is the
+/// regression pin), exact count + flags.
+#[test]
+fn fused_spin_fires() {
+    use crate::cpu::thumb::FUSED_SPIN_FIRES;
+    use std::sync::atomic::Ordering;
+    let _g = lock_boot();
+    FUSED_SPIN_FIRES.swap(0, Ordering::Relaxed);
+    // NOP@P-2 / SUBS r2,#1@P / BNE->P-2@P+2 (imm=-8: origin P+6).
+    let ops: [u16; 3] = [0xBF00, 0x3A01, 0xD1FC];
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../firmware/blinky/blinky.bin"));
+    for (i, w) in ops.iter().enumerate() {
+        mem.write16(0x20002000 + (i as u32) * 2, *w);
+    }
+    cpu.regs.r[2] = 3;
+    cpu.regs.r[15] = 0x20002003; // SUBS@P
+    let sys = crate::sys();
+    let mut n = 0u32;
+    loop {
+        let pc = cpu.regs.r[15] & !1;
+        if pc == 0x20002000 + 6 {
+            break;
+        }
+        assert!(n < 500, "runaway: pc={:#x}", pc);
+        cpu.run(sys, &mut mem, 1);
+        n += 1;
+    }
+    // n counts DISPATCHES: 3 fused + 2 NOP = 5. (Unfused would be 8 —
+    // n==5 is itself the fusion proof; fires==3 pins it directly.)
+    assert_eq!(n, 5, "fused spin dispatch count");
+    assert_eq!(cpu.regs.r[2], 0, "countdown exhausted");
+    assert_ne!(cpu.regs.xpsr & 0x40000000, 0, "Z set at exit");
+    assert!(
+        FUSED_SPIN_FIRES.load(Ordering::Relaxed) == 3,
+        "all 3 iters must fuse (else the origin regressed)"
+    );
+}
+
+/// Fused flag-poll: [LDR r3,[r2,#0]][LSLS r4,r3,#24][BPL->top] spins taken
+/// (N=0) then exits on a bit7-set byte (N=1). Both directions, fires>0.
+#[test]
+fn fused_poll_fires() {
+    use crate::cpu::thumb::FUSED_POLL_FIRES;
+    use std::sync::atomic::Ordering;
+    let _g = lock_boot();
+    FUSED_POLL_FIRES.swap(0, Ordering::Relaxed);
+    // LDR r3,[r2,#0]=0x6813 / LSLS r4,r3,#24=0x061C / BPL->P=0xD5FC.
+    let ops: [u16; 3] = [0x6813, 0x061C, 0xD5FC];
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../firmware/blinky/blinky.bin"));
+    for (i, w) in ops.iter().enumerate() {
+        mem.write16(0x20002000 + (i as u32) * 2, *w);
+    }
+    // Taken case: byte bit7 clear -> N=0 -> BPL loops.
+    mem.write32(0x20000100, 0x00000000);
+    cpu.regs.r[2] = 0x20000100;
+    cpu.regs.r[15] = 0x20002001;
+    let sys = crate::sys();
+    cpu.run(sys, &mut mem, 6); // 2 fused iters (3 each)
+    assert_eq!(cpu.regs.r[15] & !1, 0x20002000, "still polling");
+    assert_eq!(cpu.regs.r[4], 0, "shifted value");
+    assert!(
+        FUSED_POLL_FIRES.load(Ordering::Relaxed) == 2,
+        "both iters must fuse"
+    );
+    // Exit case: byte bit7 set -> N=1 -> BPL falls through.
+    FUSED_POLL_FIRES.swap(0, Ordering::Relaxed);
+    mem.write32(0x20000100, 0x00000080);
+    cpu.regs.r[15] = 0x20002001;
+    cpu.run(sys, &mut mem, 3); // 1 fused iter
+    assert_eq!(cpu.regs.r[15] & !1, 0x20002006, "poll exit falls to P+6");
+    assert_eq!(cpu.regs.r[4], 0x80000000, "shifted bit31");
+    assert!(
+        FUSED_POLL_FIRES.load(Ordering::Relaxed) == 1,
+        "exit iter must fuse"
+    );
+}

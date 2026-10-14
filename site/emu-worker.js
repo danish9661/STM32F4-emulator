@@ -50,7 +50,7 @@
 //     measureResult {id,mips,runs} reply to measure
 //     fault {info} ....... guest fault (faultInfo, for the fault panel)
 import * as bindings from './vendor/stm32_periph_wasm.js?v=50';
-import { createEmulator } from './emulator.js?v=4';
+import { createEmulator } from './emulator.js?v=5';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
 

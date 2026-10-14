@@ -1013,6 +1013,10 @@ fn shift_op(v: u32, typ: u32, amt: u32, ci: u32, reg: bool) -> (u32, u32) {
 /// which is exactly what branch() does for an odd non-EXC_RETURN target
 /// (proven: target = P-2|1, mapped by the fetch-range check above).
 /// Returns true when fused (pc advanced; caller adds done/cycles).
+#[cfg(test)]
+pub(crate) static FUSED_SPIN_FIRES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
 pub(crate) fn fused_spin(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc: u32, op: u16) -> u32 {
     if op & 0xF800 != 0x3800 {
         return 0;
@@ -1031,7 +1035,12 @@ pub(crate) fn fused_spin(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc
     // exits to an LDR, not a NOP; requiring NOP here fused nothing —
     // caught by objdump, not by review).
     let cc = (o2 >> 8) & 0xF;
-    let target = pc.wrapping_add(4).wrapping_add(sx(((o2 & 0xFF) << 1) as u32, 9));
+    // Branch origin is the B.cond's own address (P+2) + 4 = P+6 — NOT P+4.
+    // (The first cut used P+4, which selects imm=-6; real loops carry
+    // imm=-8, so the shape NEVER matched and the fuse never fired —
+    // caught by the memcpy fire-counter test, not by review or A/B.
+    // The identical wrong-origin bug in fused_poll below is fixed too.)
+    let target = pc.wrapping_add(6).wrapping_add(sx(((o2 & 0xFF) << 1) as u32, 9));
     if target != pc.wrapping_sub(2) {
         return 0;
     }
@@ -1059,6 +1068,8 @@ pub(crate) fn fused_spin(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc
         // executes normally — the fused step accounts SUBS+BNE only.
         adv(c, pc, 4);
     }
+    #[cfg(test)]
+    FUSED_SPIN_FIRES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     2
 }
 
@@ -1066,6 +1077,10 @@ pub(crate) fn fused_spin(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc
 /// [B.cond -> P @P+4] — measured ~13% of eth DHCP dynamic
 /// (objdump-verified flag poll: LDR r3,[r2,#0] / LSLS r4,r3,#24 /
 /// BPL->top). Executes all three members with one dispatch instead of
+#[cfg(test)]
+pub(crate) static FUSED_POLL_FIRES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
 /// three. Same exactness case as fused_spin (shape/mapped/MPU/trace/IT
 /// bails; r13 untouched so bank-sync skip is exact; 2 delivery points
 /// skipped, documented jitter) with one addition: the LDR goes through
@@ -1094,7 +1109,10 @@ pub(crate) fn fused_poll(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc
         return 0;
     }
     let cc = (o3 >> 8) & 0xF;
-    let target = pc.wrapping_add(4).wrapping_add(sx(((o3 & 0xFF) << 1) as u32, 9));
+    // Branch origin is the B.cond's own address (P+4) + 4 = P+8 — NOT P+4
+    // (same wrong-origin bug as fused_spin's first cut: P+4 selects imm=-4
+    // while real loops carry imm=-8, so the fuse never fired).
+    let target = pc.wrapping_add(8).wrapping_add(sx(((o3 & 0xFF) << 1) as u32, 9));
     if target != pc {
         return 0;
     }
@@ -1126,7 +1144,161 @@ pub(crate) fn fused_poll(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc
     } else {
         adv(c, pc, 6);
     }
+    #[cfg(test)]
+    FUSED_POLL_FIRES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     3
+}
+
+#[cfg(test)]
+pub(crate) static FUSED_MEMCPY_FIRES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Fused byte-copy loop: [LDRB.W Rt,[Rn],#imm @P] [STRB.W Rt2,[Rn2],#imm @P+4]
+/// [CMP-reg @P+8] [B.cond -> P @P+10] — newlib memcpy's inner loop
+/// (objdump-verified doom.elf memcpy+0xe @0x0801c5ce: F811 4B01 / F803 4F01
+/// / 4291 / D1F9; the memcpy shape is 35% of gameplay chunk-starts). Executes
+/// all four members in one dispatch instead of four; done+=4. Same exactness
+/// case as fused_spin/poll (shape/mapped/MPU/trace/IT bails; any r13/r15
+/// involved bails so the bank-sync skip and direct reads stay exact;
+/// delivery runs once per fused step, documented jitter) with these
+/// arm-for-arm notes from the F8 T3-PUW arm:
+/// - Both transfers go through mem.read8/write8, so the MPU data path, MMIO
+///   side effects and deferred faults behave exactly as the unfused arms
+///   (a faulting access pends and raises at the next loop-top, same as
+///   normal — one delivery point later at most).
+/// - Writeback BEFORE the load's register write (silicon order — the F8 arm
+///   writes back first so Rt==Rn loads win; same ordering here, so
+///   `ldrb.w r1,[r1],#1` leaves the byte in r1, not base+off).
+/// - Any PUW combination fuses (post/pre, +/-imm, W or not — sequential
+///   execution is exact for any of them); register-offset ((o2&0xC00)==0)
+///   and unpriv T-variants ((o2&0xF00)==0xE00) bail (different paths).
+/// - CMP is the sop-10 T1 form with sub_flags(a,b,1) unconditionally (it is
+///   one of the three flag-setting IT exceptions — same as the arm).
+/// Returns 4 when fused, else 0.
+pub(crate) fn fused_memcpy(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc: u32, op: u16) -> u32 {
+    // Guard: F8 LDRB (c nibble == 1). Filters everything else with zero
+    // fetches (F9 signed forms have c==1 too but op>=0xFA00 excludes them).
+    if op & 0xF800 != 0xF800 || op >= 0xFA00 || (op >> 4) & 0xF != 1 {
+        return 0;
+    }
+    let p2 = pc.wrapping_add(2);
+    let p4 = pc.wrapping_add(4);
+    let p6 = pc.wrapping_add(6);
+    let p8 = pc.wrapping_add(8);
+    let p10 = pc.wrapping_add(10);
+
+    if !(mem.is_mapped(pc)
+        && mem.is_mapped(p2)
+        && mem.is_mapped(p4)
+        && mem.is_mapped(p6)
+        && mem.is_mapped(p8)
+        && mem.is_mapped(p10))
+    {
+        return 0;
+    }
+    // LDRB.W T3-PUW (any P/U/W; reg-offset and unpriv bail).
+    let o2a = mem.fetch16(p2);
+    if (o2a & 0xC00) == 0 || (o2a & 0xF00) == 0xE00 {
+        return 0;
+    }
+    // STRB.W T3-PUW (c nibble == 0).
+    let o1b = mem.fetch16(p4);
+    if o1b & 0xF800 != 0xF800 || o1b >= 0xFA00 || (o1b >> 4) & 0xF != 0 {
+        return 0;
+    }
+    let o2b = mem.fetch16(p6);
+    if (o2b & 0xC00) == 0 || (o2b & 0xF00) == 0xE00 {
+        return 0;
+    }
+
+    // CMP-reg T1 (sop == 10).
+    let o4 = mem.fetch16(p8);
+    if o4 & 0xFFC0 != 0x4280 {
+        return 0;
+    }
+    // B.cond targeting exactly P.
+    let o5 = mem.fetch16(p10);
+    if o5 & 0xF000 != 0xD000 {
+        return 0;
+    }
+
+    let cc = (o5 >> 8) & 0xF;
+    // Branch origin is the B.cond's own address (P+10) + 4 = P+14 — NOT P+4
+    // (the P+4 cut selects imm=-6; the real loop carries imm=-14, so the
+    // shape never matched — same wrong-origin bug as spin/poll's first cut).
+    let target = pc.wrapping_add(14).wrapping_add(sx(((o5 & 0xFF) << 1) as u32, 9));
+    if target != pc {
+        return 0;
+    }
+    // Register file: r13 would break the bank-sync skip, r15 needs
+    // rr()/branch() semantics — bail on either, anywhere in the shape.
+    // (r14 is a plain data register here; direct access is exact.)
+    let rta = ((o2a >> 12) & 0xF) as usize;
+    let rna = (op & 0xF) as usize;
+    let rtb = ((o2b >> 12) & 0xF) as usize;
+    let rnb = (o1b & 0xF) as usize;
+    let rn2 = (o4 & 7) as usize;
+    let rm2 = ((o4 >> 3) & 7) as usize;
+    for r in [rta, rna, rtb, rnb, rn2, rm2] {
+        if r == 13 || r == 15 {
+            return 0;
+        }
+    }
+    // Rt==Rn on the load bails: the interpreter's F8 arm writes back TWICE
+    // (before AND after the Rt write), so an unfused `ldrb.w r1,[r1],#1`
+    // leaves base+off while silicon order would leave the loaded byte
+    // (observed live: r1=src+2 after one step, not src+1). The corner is
+    // UNPREDICTABLE on silicon and never compiler-emitted — it stays
+    // interpreted (exact by definition) rather than fused.
+    if rta == rna {
+        return 0;
+    }
+    if crate::system::is_mpu_enabled() {
+        if sys.p.mpu_check(p2, 10, false, true).is_some() {
+            return 0;
+        }
+    }
+    // LDRB.W (silicon order: read, writeback base, then Rt — so Rt==Rn
+    // leaves the loaded byte, matching the F8 arm).
+    let pa = (o2a >> 10) & 1;
+    let ua = (o2a >> 9) & 1;
+    let wa = (o2a >> 8) & 1;
+    let imm8a = (o2a & 0xFF) as u32;
+    let offa = if ua == 1 { imm8a } else { imm8a.wrapping_neg() };
+    let ba = c.regs.r[rna];
+    let addra = if pa == 1 { ba.wrapping_add(offa) } else { ba };
+    let v = mem.read8(addra) as u32;
+    if wa == 1 || pa == 0 {
+        c.regs.r[rna] = ba.wrapping_add(offa);
+    }
+    c.regs.r[rta] = v;
+    // STRB.W (value read before writeback, matching the F8 arm — matters
+    // when Rtb==Rnb).
+    let pb = (o2b >> 10) & 1;
+    let ub = (o2b >> 9) & 1;
+    let wb = (o2b >> 8) & 1;
+    let imm8b = (o2b & 0xFF) as u32;
+    let offb = if ub == 1 { imm8b } else { imm8b.wrapping_neg() };
+    let bb = c.regs.r[rnb];
+    let addrb = if pb == 1 { bb.wrapping_add(offb) } else { bb };
+    mem.write8(addrb, (c.regs.r[rtb] & 0xFF) as u8);
+    if wb == 1 || pb == 0 {
+        c.regs.r[rnb] = bb.wrapping_add(offb);
+    }
+    // CMP-reg (sop 10: sub_flags unconditionally — IT exception, same as
+    // the 0x4000 arm).
+    let a = c.regs.r[rn2];
+    let b = c.regs.r[rm2];
+    sub_flags(c, a, b, 1);
+    // B.cond (arm-for-arm with the 0xD000 exec16 arm).
+    if cond_ok(c, cc as u32) {
+        c.regs.r[15] = target | 1;
+    } else {
+        adv(c, pc, 12);
+    }
+    #[cfg(test)]
+    FUSED_MEMCPY_FIRES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    4
 }
 
 pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, op: u16, pc: u32) -> bool {
