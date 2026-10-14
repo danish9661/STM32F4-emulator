@@ -3474,3 +3474,72 @@ fn fused_poll_fires() {
         "exit iter must fuse"
     );
 }
+
+/// Shared-memory translation, slice 1: region buffers never move at
+/// runtime. Growth happens only in load()/map_extra() (setup time);
+/// runtime writes never grow (unmapped writes BusFault instead). So a
+/// stable layout_version + stable buffer pointers across a run PROVES
+/// baked region addresses stay valid — the load-bearing assumption for
+/// deleting the mirror. If this test ever fails, translations must pin
+/// (reserve upfront) instead of merely version-guarding.
+#[test]
+fn layout_version_bumps_on_grow_only() {
+    let _g = lock_boot();
+    let (cpu, mut mem) = boot(include_bytes!("../../../firmware/blinky/blinky.bin"));
+    let _ = cpu;
+    let v0 = mem.layout_version;
+    let flash_p0 = mem.flash.as_ptr() as usize;
+    let ram_p0 = mem.ram.as_ptr() as usize;
+    // Plain stores (all paths: RAM fast, RAM slow, periph-drop,
+    // flash-program-attempt) must NOT bump the layout version.
+    mem.write8(0x20000000, 0x11);
+    mem.write16(0x20000002, 0x2233);
+    mem.write32(0x20000004, 0x44556677);
+    mem.write8(0x50000000, 0xFF); // periph: model call, no buffer
+    assert_eq!(mem.layout_version, v0, "plain stores keep layout");
+    assert_eq!(mem.flash.as_ptr() as usize, flash_p0, "flash stable");
+    assert_eq!(mem.ram.as_ptr() as usize, ram_p0, "ram stable");
+    // Growth bumps: new region, forward push, backward insert.
+    mem.map_extra(0xC0000000, 4096);
+    assert!(mem.layout_version > v0, "map_extra bumps");
+    let v1 = mem.layout_version;
+    mem.load(&[0xAA], 0xC0001000); // forward push past the end
+    assert!(mem.layout_version > v1, "forward growth bumps");
+    let v2 = mem.layout_version;
+    mem.load(&[0xBB], 0xBFFFFFFF); // backward insert
+    assert!(mem.layout_version > v2, "backward growth bumps");
+    // Untouched regions stay put across others' growth.
+    assert_eq!(mem.flash.as_ptr() as usize, flash_p0, "flash stable across grows");
+    assert_eq!(mem.ram.as_ptr() as usize, ram_p0, "ram stable across grows");
+}
+
+/// The heavyweight stability proof: DOOM boots (megabyte WAD/EXTRAM
+/// mapping = many version bumps) then runs 5M instructions with ZERO
+/// layout change and ZERO buffer moves. If this holds, runtime-baked
+/// addresses are sound for the heaviest firmware shipped.
+#[test]
+fn layout_stable_across_doom_run() {
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot_doom();
+    let sys = crate::sys();
+    // Settle past boot mapping (any late growth happens here, if at all).
+    cpu.run(sys, &mut mem, 1_000_000);
+    let v = mem.layout_version;
+    let flash_p = mem.flash.as_ptr() as usize;
+    let ram_p = mem.ram.as_ptr() as usize;
+    let extras: Vec<(u32, usize, usize)> = mem
+        .extra
+        .iter()
+        .map(|r| (r.base, r.data.as_ptr() as usize, r.data.len()))
+        .collect();
+    cpu.run(sys, &mut mem, 5_000_000);
+    assert_eq!(mem.layout_version, v, "no growth during doom run");
+    assert_eq!(mem.flash.as_ptr() as usize, flash_p, "flash pinned");
+    assert_eq!(mem.ram.as_ptr() as usize, ram_p, "ram pinned");
+    assert_eq!(mem.extra.len(), extras.len(), "no new regions");
+    for (r, (base, ptr, len)) in mem.extra.iter().zip(extras.iter()) {
+        assert_eq!(r.base, *base, "extra base stable");
+        assert_eq!(r.data.as_ptr() as usize, *ptr, "extra buffer pinned");
+        assert_eq!(r.data.len(), *len, "extra len stable");
+    }
+}

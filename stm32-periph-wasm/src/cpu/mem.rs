@@ -83,6 +83,14 @@ pub struct FlatMemory {
     /// Flash/periph/model writes never bump it (they cannot desync a RAM
     /// mirror page). Wrapping is fine (equality comparison only).
     pub write_seq: u64,
+    /// Layout version: bumped whenever a region buffer can move (new extra
+    /// region, backward/forward growth inside load(), map_extra()). Plain
+    /// stores never move buffers (runtime writes never grow — unmapped
+    /// writes BusFault instead), so a stable version across a run PROVES
+    /// baked region addresses stay valid. Shared-memory translation (the
+    /// mirror's replacement) keys its cache on this: any bump drops all
+    /// translations. Setup-time only in practice (load/map_extra).
+    pub layout_version: u64,
 }
 
 impl FlatMemory {
@@ -95,6 +103,7 @@ impl FlatMemory {
             ram_base: 0x20000000,
             bad: Cell::new(None),
             write_seq: 0,
+            layout_version: 0,
         }
     }
 
@@ -160,6 +169,10 @@ impl FlatMemory {
     /// every extra_ram region at map time.
     pub fn map_extra(&mut self, base: u32, size: usize) {
         self.extra.push(MemRegion { base, data: vec![0; size] });
+        // New region: the region table changed (data buffers of existing
+        // regions don't move on an outer-Vec push, but translators key on
+        // the table too — bump unconditionally, setup-time only).
+        self.layout_version = self.layout_version.wrapping_add(1);
     }
 
     /// Bulk read fast path for driver crossings (mem_read): single bounds
@@ -265,17 +278,22 @@ impl FlatMemory {
                     if a.wrapping_add(1) == r.base {
                         r.base = a;
                         r.data.insert(0, b);
+                        // Buffer moved (insert reallocates): bump layout.
+                        self.layout_version = self.layout_version.wrapping_add(1);
                         done = true;
                         break;
                     }
                     if a == r.base.wrapping_add(r.data.len() as u32) {
                         r.data.push(b);
+                        // Buffer may have moved (push reallocates): bump.
+                        self.layout_version = self.layout_version.wrapping_add(1);
                         done = true;
                         break;
                     }
                 }
                 if !done {
                     self.extra.push(MemRegion { base: a, data: vec![b] });
+                    self.layout_version = self.layout_version.wrapping_add(1);
                 }
             }
         }
