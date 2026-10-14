@@ -600,7 +600,9 @@ enum Item {
     CmpHi { rda: u32, rsb: u32 },        // 0x4400 h=1 (flags, no wb)
     AddWImm { rd: u32, rn: u32, imm: u32 }, // ADD.W-imm s=0 (no flags)
     AddWReg { rd: u32, rn: u32, rm: u32, amt: u32 }, // ADD.W-reg LSL s=0
-    Mem { base: u32, off: i32, rt: u32, size: u32, is_store: bool, wb: u32 },
+    Mem { base: u32, off: i32, rt: u32, size: u32, is_store: bool, wb: u32,
+          idx: Option<u32>, sh: u32 }, // register offset: addr = base+(idx<<sh)
+                                       // (None = plain imm `off`; SP=13 allowed as idx)
 }
 
 /// Slot pack for one memory item: base(5b: 0-14 reg, 15 = SP) |
@@ -729,12 +731,20 @@ fn emit_item(c: &mut Code, item: &Item, exec: &ExecCount, segs: &[(u32, u32, u32
             }
             emit_add_plain(c, reg_g(rd));
         }
-        Item::Mem { base, off, rt, size, is_store, wb } => {
+        Item::Mem { base, off, rt, size, is_store, wb, idx, sh } => {
             let bg = reg_g(base);
             let rtg = reg_g(rt);
             // l2 = base value; l3 = access address.
             c.global_get(bg).local_tee(2);
-            if wb == 1 {
+            if let Some(ir) = idx {
+                // Register offset (always ADD in Thumb-2 — GAS rejects
+                // negative indexing): addr = base + (idx << sh).
+                c.global_get(reg_g(ir));
+                if sh != 0 {
+                    c.i32_const(sh as i32).i32_shl();
+                }
+                c.i32_add().local_set(3);
+            } else if wb == 1 {
                 // Post-index: access at base, then base += off.
                 c.local_set(3);
             } else {
@@ -819,6 +829,8 @@ fn classify(ops: &[u16], i: usize) -> Class {
                 size: 4,
                 is_store: false,
                 wb: 0,
+                idx: None,
+                sh: 0,
             },
             1,
         );
@@ -833,6 +845,8 @@ fn classify(ops: &[u16], i: usize) -> Class {
                 size: 4,
                 is_store: false,
                 wb: 0,
+                idx: None,
+                sh: 0,
             },
             1,
         );
@@ -843,7 +857,7 @@ fn classify(ops: &[u16], i: usize) -> Class {
         let off = ((op >> 6) & 0x1F) as i32;
         let is_store = cls == 0x7000;
         return Class::Emit(
-            Item::Mem { base: rn, off, rt, size: 1, is_store, wb: 0 },
+            Item::Mem { base: rn, off, rt, size: 1, is_store, wb: 0, idx: None, sh: 0 },
             1,
         );
     }
@@ -855,7 +869,7 @@ fn classify(ops: &[u16], i: usize) -> Class {
             (13, ((op >> 8) & 7) as u32, ((op & 0xFF) as i32) * 4)
         };
         return Class::Emit(
-            Item::Mem { base: rn, off, rt, size: 4, is_store: true, wb: 0 },
+            Item::Mem { base: rn, off, rt, size: 4, is_store: true, wb: 0, idx: None, sh: 0 },
             1,
         );
     }
@@ -938,7 +952,29 @@ fn classify(ops: &[u16], i: usize) -> Class {
                 _ => (4, false),
             };
             return Class::Emit(
-                Item::Mem { base: rn, off: (o2 & 0xFFF) as i32, rt, size, is_store, wb: 0 },
+                Item::Mem { base: rn, off: (o2 & 0xFFF) as i32, rt, size, is_store, wb: 0, idx: None, sh: 0 },
+                2,
+            );
+        }
+        // Register offset (GAS-verified layouts, docs/encodings/regidx.s):
+        // c 0 STRB / 1 LDRB / 4 STR.W / 5 LDR.W with o2[11:10]==00 (never
+        // T3-PUW-imm8, whose offset bits live there). Addr = Rn+(Rm<<imm2),
+        // always ADD (GAS rejects negative indexing). Halfword/signed
+        // (c 2,3,6,7) stay interpreted.
+        if (c == 0 || c == 1 || c == 4 || c == 5) && (o2 & 0xC00) == 0 {
+            let (size, is_store) = match c {
+                0 => (1, true),
+                1 => (1, false),
+                4 => (4, true),
+                _ => (4, false),
+            };
+            let rm = (o2 & 0xF) as u32;
+            let sh = ((o2 >> 4) & 3) as u32;
+            if rm == 15 {
+                return Class::Stop(2); // PC-index: not in the ABI
+            }
+            return Class::Emit(
+                Item::Mem { base: rn, off: 0, rt, size, is_store, wb: 0, idx: Some(rm), sh },
                 2,
             );
         }
@@ -970,7 +1006,7 @@ fn classify(ops: &[u16], i: usize) -> Class {
                 0 // pre-index, no writeback
             };
             return Class::Emit(
-                Item::Mem { base: rn, off, rt, size, is_store, wb },
+                Item::Mem { base: rn, off, rt, size, is_store, wb, idx: None, sh: 0 },
                 2,
             );
         }
@@ -1078,6 +1114,28 @@ fn sx21(v: u32) -> i32 {
 /// missing). Unlike branch_target_un, below-base targets are returned,
 /// not rejected — the scanner records them as true loop exits (outer-
 /// loop tops) and keeps looking for a later latch within the window.
+/// Raw conditional-branch target as i64 (None only if the op is
+/// missing). Below-base targets are returned: the tree-discovery scan
+/// records them as true exits (VDP's BGE to the epilogue) instead of
+/// barrier-ing (which blinded L1 discovery).
+fn branch_target_wide(ops: &[u16], hw: usize, wide: bool, base_pc: u32) -> Option<i64> {
+    let origin = base_pc as i64 + (hw as i64) * 2 + 4;
+    let off: i64 = if wide {
+        let o1 = *ops.get(hw)?;
+        let o2 = *ops.get(hw + 1)?;
+        let s = (o1 >> 10) & 1;
+        let j1 = (o2 >> 13) & 1;
+        let j2 = (o2 >> 11) & 1;
+        sx21(
+            ((s as u32) << 20) | (((j1) as u32) << 19) | (((j2) as u32) << 18)
+                | (((o1 & 0x3F) as u32) << 12) | (((o2 & 0x7FF) as u32) << 1),
+        ) as i64
+    } else {
+        let op = *ops.get(hw)?;
+        sx9((((op & 0xFF) << 1)) as u32) as i64
+    };
+    Some(origin + off)
+}
 fn branch_target_un_wide(ops: &[u16], hw: usize, base_pc: u32) -> Option<i64> {
     let op = *ops.get(hw)?;
     let imm = ((op & 0x7FF) << 1) as u32;
@@ -1179,14 +1237,20 @@ fn layout_scan(ops: &[u16], base_pc: u32) -> Layout {
                 hw += size;
             }
             Class::BCond { cc, wide, size } => {
-                let target = match branch_target(ops, hw, wide, base_pc) {
+                // Below-base targets (VDP's BGE to the epilogue) are true
+                // exits like any forward edge — record and continue, never
+                // barrier (barrier-ing here blinded L1 discovery; caught by
+                // the real-VDP probe, not review). Only the tree-discovery
+                // scan does this; the flat legacy scan keeps its break.
+                // Out-of-u32-range targets stay barriers (calls/faults).
+                let tw = match branch_target_wide(ops, hw, wide, base_pc) {
                     Some(t) => t,
                     None => break,
                 };
-                if target < base_pc {
+                if tw < 0 || tw > 0xFFFF_FFFE {
                     break;
                 }
-                edges.push(TEdge { hw, size, cc: Some(cc), target });
+                edges.push(TEdge { hw, size, cc: Some(cc), target: tw as u32 });
                 hw += size;
             }
             Class::BUn { size } => {
@@ -1258,6 +1322,8 @@ fn all_latches(lay: &Layout, base_pc: u32) -> Vec<(usize, Option<u32>, usize, us
 // - at most 1 call edge (top loop only) -> at most 2 funcs total.
 struct RegionTree {
     top: TLoop,
+    entry: usize, // submit hw (== top.top for top-entry; inside top body
+                  // for mid-entry — never inside nest/callee spans, v1)
     // (callees live inside top.calls; kept here for shape clarity)
 }
 #[allow(dead_code)]
@@ -1266,9 +1332,12 @@ fn build_tree(
     base_pc: u32,
     entry_pc: u32,
 ) -> Option<RegionTree> {
-    if entry_pc != base_pc {
-        return None; // top-entry only (mid-entry stays flat legacy)
-    }
+    // Entry hw (submit pc, entry-relative).
+    let entry_hw = if entry_pc < base_pc || (entry_pc - base_pc) % 2 != 0 {
+        return None;
+    } else {
+        ((entry_pc - base_pc) / 2) as usize
+    };
     let lay = layout_scan(ops, base_pc);
     let latches = all_latches(&lay, base_pc);
     // Top latch: target == base (submit pc is the loop top).
@@ -1605,7 +1674,31 @@ fn build_tree(
             calls: Vec::new(),
         });
     }
-    Some(RegionTree { top })
+    // Mid-entry validation (v1): entry must be an item start strictly
+    // inside the top body (top itself = top-entry, always fine), never
+    // inside a nest span (those belong to the nested construct) nor a
+    // callee span (cross-func partials are out of scope — flat legacy
+    // owns them). Prefix stores can't double-apply: execution starts AT
+    // entry, never before it.
+    if entry_hw != t0 {
+        let is_start = true_starts(&lay.items, &lay.edges).contains(&entry_hw);
+        if !is_start || entry_hw <= t0 || entry_hw >= li0 + ls0 {
+            return None;
+        }
+        for n in top.nests.iter() {
+            if entry_hw > n.top && entry_hw < n.li + n.lsize {
+                return None;
+            }
+        }
+        for c in top.calls.iter() {
+            let cn = &c.callee;
+            // Callee span: [top..dup_end] (prefix + nest + dup).
+            if entry_hw >= cn.top && entry_hw < cn.dup_end {
+                return None;
+            }
+        }
+    }
+    Some(RegionTree { top, entry: entry_hw })
 }
 
 pub fn translate(ops: &[u16], segs_in: &[u32], base_pc: u32) -> Block {
@@ -1692,6 +1785,9 @@ fn emit_tree(
     // cycle (own items + edge evals; nested spans excluded — they check
     // shared fuel themselves). Reachability enforced inline.
     #[allow(clippy::too_many_arguments)]
+    // walk_from: first hw to emit (== top for full loops; entry hw for
+    // mid-entry partials — same span bounds, reachability seeded there).
+    #[allow(clippy::too_many_arguments)]
     fn plan_span(
         lay: &Layout,
         base_pc: u32,
@@ -1702,6 +1798,7 @@ fn emit_tree(
         nests: &[(usize, usize, usize)], // (top, li, lsize) inline nests
         calls: &[(usize, usize, u32)],     // (edge_hw, func_idx, callee_top)
         brks: &[(usize, usize)],         // (edge_hw, dup_src_hw)
+        walk_from: usize,
     ) -> Option<(Vec<BodyOp>, u32)> {
         let item_at = |h: usize| lay.items.iter().find(|it| it.hw == h);
         let edge_at = |h: usize| lay.edges.iter().find(|e| e.hw == h);
@@ -1725,11 +1822,11 @@ fn emit_tree(
         let is_start = |h: usize| starts.contains(&h);
         let mut ops: Vec<BodyOp> = Vec::new();
         let mut cyc: u32 = 0;
-        let mut pos = top;
+        let mut pos = walk_from;
         // Reachability set (positions reached by fallthrough/branches).
         use std::collections::HashSet;
         let mut reach: HashSet<usize> = HashSet::new();
-        reach.insert(top);
+        reach.insert(walk_from);
         let span_end = li + latch_size;
         while pos < span_end {
             // Inline nest construct covers [ntop..nli+nlsize].
@@ -2113,6 +2210,7 @@ fn emit_tree(
                 &[],
                 &[],
                 brks,
+                nest.top,
             ) {
                 Some(x) => x,
                 None => {
@@ -2185,9 +2283,13 @@ fn emit_tree(
         // Trailing straight items (return path).
         while h < cal.dup_end {
             // Terminal return-branch: verified (BUn to caller top), never
-            // emitted — the caller returns kind-0 instead.
+            // emitted as control flow — the caller returns kind-0
+            // instead. But it IS a natively-executed instruction, so it
+            // still ticks (else fused undercounts native by 1 per call —
+            // caught by the native-truth test, not review).
             if let Some((rsz, rcc, rtgt)) = self.edge_at(h) {
                 if rcc.is_none() && rtgt == caller_top_pc {
+                    emit_tick(c);
                     h += rsz;
                     continue;
                 }
@@ -2322,7 +2424,27 @@ fn emit_tree(
         &top_nests.iter().map(|&(t, l, s)| (t, l, s)).collect::<Vec<_>>(),
         &top_calls,
         &[],
+        tree.top.top,
     )?;
+    // Mid-entry partial (entry inside the top body): straight walk from
+    // entry to the top latch, then fallthrough into the full loop below.
+    // No fuel check (bounded overshoot, same class as native chunking).
+    // Nested constructs/calls inside the partial execute fully (sound:
+    // native flow passes through them identically).
+    // (top plan first; partial only on mid-entry)
+    let part_ops: Vec<BodyOp> = if tree.entry != tree.top.top {
+        let (po, _) = plan_span(
+            lay, base_pc, tree.top.top, tree.top.li, tree.top.lsize, tree.top.cc,
+            &top_nests.iter().map(|&(t, l, s)| (t, l, s)).collect::<Vec<_>>(),
+            &top_calls,
+            &[],
+            tree.entry,
+        )?;
+        po
+    } else {
+        Vec::new()
+    };
+    // (top plan success/failure traced by caller prints below)
     // Run func.
     let mut crun = Code::new();
     {
@@ -2335,10 +2457,29 @@ fn emit_tree(
         crun.global_set(FUEL_GLOBAL);
         crun.i32_const(0).global_set(ADJ_GLOBAL);
         crun.i32_const(0).local_set(LTOT_LOCAL);
+        // Mid-entry partial (empty for top-entry): straight walk from
+        // entry to the top latch, then fallthrough into the full loop.
+        // Latch-taken falls through (no br); Bcc-nt returns kind-0.
+        // No fuel check (bounded overshoot, native-chunk class).
         crun.block_void();
         st_r.stack.push(NFrame::Fuel);
         crun.block_void();
         st_r.stack.push(NFrame::End);
+        if !part_ops.is_empty() {
+            st_r.walk(&mut crun, &part_ops, &tree.top.nests, &top_calls.iter().map(|&(h, f, _)| (h, f)).collect::<Vec<_>>())?;
+            // Partial latch: taken falls through into the full loop below;
+            // Bcc-nt completes without looping (return kind-0).
+            emit_tick(&mut crun);
+            if let Some(k) = tree.top.cc {
+                emit_cond(&mut crun, k);
+                crun.if_void();
+                st_r.stack.push(NFrame::If);
+                crun.else_();
+                st_r.retn(&mut crun, 0);
+                crun.end();
+                st_r.stack.pop();
+            }
+        }
         crun.loop_void();
         st_r.stack.push(NFrame::Loop);
         st_r.fuel(&mut crun, top_cyc, base_pc)?;
@@ -2410,17 +2551,15 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
     };
     debug_assert!(mirror_bytes <= MAX_MIRROR_BYTES);
     debug_assert!(BITBASE + BITBYTES <= SCRATCH);
-    // Nested/call region tree (additive): top-entry submits first attempt
-    // the tree path (nested loops, cross-span calls, tail-dup). Any
-    // decline (None) falls through to the flat legacy scan below, which
-    // is untouched — tree emission can only ADD fused shapes, never
-    // change flat behavior.
-    if entry_pc == base_pc {
-        if let Some(tree) = build_tree(ops, base_pc, entry_pc) {
-            let lay = layout_scan(ops, base_pc);
-            if let Some(block) = emit_tree(&tree, &lay, base_pc, &segs, mirror_bytes) {
-                return block;
-            }
+    // Nested/call region tree (additive): attempt the tree path whenever
+    // build_tree forms (it validates entry itself: top-entry or validated
+    // mid-entry). Any decline (None) falls through to the flat legacy scan
+    // below, which is untouched — tree emission can only ADD fused shapes,
+    // never change flat behavior.
+    if let Some(tree) = build_tree(ops, base_pc, entry_pc) {
+        let lay = layout_scan(ops, base_pc);
+        if let Some(block) = emit_tree(&tree, &lay, base_pc, &segs, mirror_bytes) {
+            return block;
         }
     }
     // v2 scan (2026-10-11): 32-bit-aware, loads-only, multi-exit.
@@ -3266,8 +3405,10 @@ mod tests {
         assert_eq!((c0.callee.top, c0.callee.prefix_end), (9, 10));
         assert_eq!((c0.callee.nest.top, c0.callee.nest.li), (10, 13));
         assert_eq!((c0.callee.dup_src, c0.callee.dup_end), (15, 19));
-        // Mid-entry declines the tree (flat legacy owns mid-entry).
-        assert!(build_tree(&ops, 0x1000, 0x1002).is_none());
+        // Mid-entry into the top body now forms (partial + full loop);
+        // branch positions still decline (checked in midentry test).
+        let me_ = build_tree(&ops, 0x1000, 0x1002).expect("mid-entry forms");
+        assert_eq!(me_.entry, 1);
         // Straight code: no top latch -> None.
         assert!(build_tree(&[0x3B01u16, 0xD105], 0x1000, 0x1000).is_none());
     }
@@ -3311,18 +3452,66 @@ mod tests {
     }
 
     #[test]
-    fn tmp_mem_tree() {
-        let opc = [
-            0x3A01u16, 0xD015, 0xD205, 0x2007, 0xE7FA, 0xBF00, 0xBF00, 0xBF00, 0xBF00, 0x680C,
-            0x3D01u16, 0xD202, 0x784E, 0x701E, 0xE7FA, 0xBF00, 0x7888, 0xD1F6, 0xBF00, 0xE7EC,
-            0xBF00, 0xBF00, 0xBF00, 0xBF00,
-        ];
-        let lay = layout_scan(&opc, 0x1000);
-        eprintln!("items={:?}", lay.items.iter().map(|it| it.hw).collect::<Vec<_>>());
-        eprintln!("edges={:?}", lay.edges.iter().map(|e| (e.hw, e.target)).collect::<Vec<_>>());
-        let t = build_tree(&opc, 0x1000, 0x1000);
-        eprintln!("tree calls={}", t.as_ref().map(|x| x.top.calls.len()).unwrap_or(99));
-        assert!(t.is_some());
+    fn reg_offset_shapes() {
+        // GAS vectors (docs/encodings/regidx.s): the second halfword
+        // decides everything (imm2 = (o2>>4)&3, Rm = o2&0xF).
+        let segs = &[0x2000_0000u32, 65536];
+        // LDR.W r0,[r4,r3,lsl#2]: consumes both halfwords, loop-forming.
+        let b = translate(&[0x3B01u16, 0xF854, 0x0023, 0xD1FB], segs, 0x1000);
+        assert!(b.is_loop);
+        // All four widths × shift amounts classify (no Stop).
+        for ops in [
+            vec![0xF854u16, 0x0023], // LDR.W lsl#2
+            vec![0xF854u16, 0x1003], // LDR.W plain (imm2=0)
+            vec![0xF855u16, 0x2036], // LDR.W lsl#3
+            vec![0xF844u16, 0x0023], // STR.W lsl#2
+            vec![0xF814u16, 0x1013], // LDRB.W lsl#1
+            vec![0xF804u16, 0x2003], // STRB.W plain
+        ] {
+            let bb = translate(&ops, segs, 0x1000);
+            assert_eq!(bb.consumed, 2, "reg-offset consumes {:04x}", ops[0]);
+        }
+        // PC index declines.
+        let pc = translate(&[0xF854u16, 0x002F], segs, 0x1000);
+        assert_eq!(pc.consumed, 0);
+    }
+
+    #[test]
+    fn below_base_exit_scans_past() {
+        // BNE to below base is a true exit, not a barrier: the scan must
+        // continue to the later latch (VDP's BGE-to-epilogue shape).
+        // [SUBS, BNE->0x0FF0 (below 0x1000), MOVS, B->0x1000].
+        // BNE@1: origin 0x1006, off 0xFF0-0x1006=-22 -> 0xD1F5.
+        // B@3: origin 0x100A, off -10 -> 0xE7FB.
+        let ops = [0x3A01u16, 0xD1F5, 0x2007, 0xE7FB];
+        let lay = layout_scan(&ops, 0x1000);
+        assert_eq!(lay.end_hw, 4, "scan continues past below-base exit");
+        let b = translate(&ops, &[0x2000_0000u32, 65536], 0x1000);
+        assert!(b.is_loop);
+    }
+
+    #[test]
+    fn region_tree_midentry() {
+        // Synthetic nest shape, entry inside the top body (hw2 MOVS):
+        // partial [MOVS..latch] + full loop. Entry must be an item start
+        // in the top body (branch positions and nest/callee spans decline).
+        // B@6->hw0 is 0xE7F8 (origin base+16, off -16).
+        let ops = [0x3A01u16, 0xD005, 0x2000, 0x3001, 0x2805, 0xDBFC, 0xE7F8];
+        let t = build_tree(&ops, 0x1000, 0x1004).expect("mid-entry tree must form");
+        assert_eq!(t.entry, 2);
+        assert_eq!((t.top.top, t.top.li), (0, 6));
+        // Entry on a branch position declines.
+        assert!(build_tree(&ops, 0x1000, 0x1002).is_none());
+        // Entry inside the nested span declines (flat legacy owns it).
+        assert!(build_tree(&ops, 0x1000, 0x1008).is_none());
+        // Entry past the latch declines.
+        assert!(build_tree(&ops, 0x1000, 0x100E).is_none());
+        // Mid-entry emission takes the tree path (not flat fallback).
+        let b = translate_at(&ops, &[0x2000_0000u32, 65536], 0x1000, 0x1004);
+        assert!(b.is_loop, "mid-entry must emit loop");
+        // Top-entry on the same shape must also emit (isolates entry).
+        let b0 = translate(&ops, &[0x2000_0000u32, 65536], 0x1000);
+        assert!(b0.is_loop, "top-entry must emit loop");
     }
 
     #[test]
