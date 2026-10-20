@@ -156,6 +156,15 @@ export class WasmCpu {
         return ret >>> 0;
     }
     /**
+     * Buffer-stability key for translated-block caches (bumped only when
+     * a region buffer can move, i.e. load()/map_extra() growth).
+     * @returns {number}
+     */
+    layout_version() {
+        const ret = wasm.wasmcpu_layout_version(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * Load firmware bytes (writes through flash protection).
      * @param {Uint8Array} data
      * @param {number} base
@@ -243,6 +252,17 @@ export class WasmCpu {
         return this;
     }
     /**
+     * Non-consuming: the core would take an exception at the next
+     * instruction boundary (enabled + unmasked + preempting). Translated
+     * blocks never touch the NVIC, so the TB driver checks this between
+     * runs and lets the interpreter deliver. See Cpu::pending_ready.
+     * @returns {boolean}
+     */
+    pending_exception_ready() {
+        const ret = wasm.wasmcpu_pending_exception_ready(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * @param {number} addr
      * @returns {number}
      */
@@ -257,6 +277,25 @@ export class WasmCpu {
     read8(addr) {
         const ret = wasm.wasmcpu_read8(this.__wbg_ptr, addr);
         return ret;
+    }
+    /**
+     * Region table for shared-memory translation: flat [guest_base,
+     * buffer_ptr_offset, len] triples (flash first). See
+     * FlatMemory::region_offsets.
+     * @returns {Uint32Array}
+     */
+    region_offsets() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.wasmcpu_region_offsets(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v1 = getArrayU32FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export(r0, r1 * 4, 4);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * @param {number} sp
@@ -2288,6 +2327,31 @@ export function tb_translate_at(ops, segs, base_pc, entry_pc) {
 }
 
 /**
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @param {number} entry_pc
+ * @returns {Uint8Array}
+ */
+export function tb_translate_at_direct(ops, segs, base_pc, entry_pc) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.tb_translate_at_direct(retptr, ptr0, len0, ptr1, len1, base_pc, entry_pc);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v3 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * Halfwords consumed by translating the same run (call alongside
  * tb_translate; translation is deterministic and cheap for blocks).
  * @param {Uint16Array} ops
@@ -2302,6 +2366,30 @@ export function tb_translate_consumed(ops, segs, base_pc) {
     const len1 = WASM_VECTOR_LEN;
     const ret = wasm.tb_translate_consumed(ptr0, len0, ptr1, len1, base_pc);
     return ret >>> 0;
+}
+
+/**
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @returns {Uint8Array}
+ */
+export function tb_translate_direct(ops, segs, base_pc) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.tb_translate_direct(retptr, ptr0, len0, ptr1, len1, base_pc);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v3 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export(r0, r1 * 1, 1);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
 }
 
 /**
@@ -2385,6 +2473,37 @@ export function tb_translate_meta_at(ops, segs, base_pc, entry_pc) {
     const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
     const len1 = WASM_VECTOR_LEN;
     const ret = wasm.tb_translate_meta_at(ptr0, len0, ptr1, len1, base_pc, entry_pc);
+    return ret >>> 0;
+}
+
+/**
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @param {number} entry_pc
+ * @returns {number}
+ */
+export function tb_translate_meta_at_direct(ops, segs, base_pc, entry_pc) {
+    const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.tb_translate_meta_at_direct(ptr0, len0, ptr1, len1, base_pc, entry_pc);
+    return ret >>> 0;
+}
+
+/**
+ * @param {Uint16Array} ops
+ * @param {Uint32Array} segs
+ * @param {number} base_pc
+ * @returns {number}
+ */
+export function tb_translate_meta_direct(ops, segs, base_pc) {
+    const ptr0 = passArray16ToWasm0(ops, wasm.__wbindgen_export2);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray32ToWasm0(segs, wasm.__wbindgen_export2);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.tb_translate_meta_direct(ptr0, len0, ptr1, len1, base_pc);
     return ret >>> 0;
 }
 

@@ -18,6 +18,8 @@ const emu = await createEmulator({
     bindings,
     svdXml,
     wasmInit: wasmBytes,
+    // Opt-in TB differential: `TB=1 node site/test_flow_wasm.mjs`.
+    tb: process.env.TB === '1',
     onTx: (frame) => {
         console.log(`[TX] ${frame.length}B`);
         for (const reply of netsim.onTx(frame)) emu.injectFrame(reply);

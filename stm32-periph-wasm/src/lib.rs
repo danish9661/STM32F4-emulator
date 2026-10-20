@@ -1039,6 +1039,29 @@ pub fn tb_translate_stores_at(ops: &[u16], segs: &[u32], base_pc: u32, entry_pc:
     tb_xlate::store_slots_at(ops, segs, base_pc, entry_pc)
 }
 
+// ---- Shared-memory (direct) translation -------------------------------
+// Same shapes, emitted against the host linear memory imported as
+// env.memory: `segs` is a flat [base, size, mem_off] triple table from
+// WasmCpu::region_offsets (flash offset has bit31 set = store-read-only).
+// The driver instantiates these modules with `{ env: { memory } }`.
+#[wasm_bindgen]
+pub fn tb_translate_direct(ops: &[u16], segs: &[u32], base_pc: u32) -> Vec<u8> {
+    tb_xlate::translate_direct(ops, segs, base_pc).bytes
+}
+#[wasm_bindgen]
+pub fn tb_translate_meta_direct(ops: &[u16], segs: &[u32], base_pc: u32) -> u32 {
+    tb_xlate::region_meta_direct(ops, segs, base_pc)
+}
+#[wasm_bindgen]
+pub fn tb_translate_at_direct(ops: &[u16], segs: &[u32], base_pc: u32, entry_pc: u32) -> Vec<u8> {
+    tb_xlate::translate_at_direct(ops, segs, base_pc, entry_pc).bytes
+}
+#[wasm_bindgen]
+pub fn tb_translate_meta_at_direct(ops: &[u16], segs: &[u32], base_pc: u32, entry_pc: u32) -> u32 {
+    let b = tb_xlate::translate_at_direct(ops, segs, base_pc, entry_pc);
+    (b.is_loop as u32) | ((b.exit_off as u32) << 1)
+}
+
 /// Arm RX wire pacing for a delivered frame (RS waits the wire time).
 #[wasm_bindgen]
 pub fn eth_rx_wire_busy(len: u32) {
@@ -1752,6 +1775,13 @@ impl WasmCpu {
     pub fn write8(&mut self, addr: u32, v: u8) { self.mem.write8(addr, v) }
     pub fn read32(&self, addr: u32) -> u32 { self.mem.read32(addr) }
     pub fn write32(&mut self, addr: u32, v: u32) { self.mem.write32(addr, v) }
+    /// Region table for shared-memory translation: flat [guest_base,
+    /// buffer_ptr_offset, len] triples (flash first). See
+    /// FlatMemory::region_offsets.
+    pub fn region_offsets(&self) -> Vec<u32> { self.mem.region_offsets() }
+    /// Buffer-stability key for translated-block caches (bumped only when
+    /// a region buffer can move, i.e. load()/map_extra() growth).
+    pub fn layout_version(&self) -> u32 { self.mem.layout_version as u32 }
     pub fn mem_read(&self, addr: u32, len: u32) -> Vec<u8> {
         let mut out = vec![0; len as usize];
         if !self.mem.read_range(addr, &mut out) {
@@ -1886,6 +1916,11 @@ impl WasmCpu {
     /// Last unmapped-memory access address, or 0xFFFF_FFFF when none.
     pub fn mem_fault(&self) -> u32 { self.mem.bad.get().unwrap_or(0xFFFF_FFFF) }
     pub fn step(&mut self, budget: u32) -> u32 { self.cpu.run(sys(), &mut self.mem, budget) }
+    /// Non-consuming: the core would take an exception at the next
+    /// instruction boundary (enabled + unmasked + preempting). Translated
+    /// blocks never touch the NVIC, so the TB driver checks this between
+    /// runs and lets the interpreter deliver. See Cpu::pending_ready.
+    pub fn pending_exception_ready(&self) -> bool { self.cpu.pending_ready(sys()) }
     /// PC-trace control for differential debugging (see cpu::trace_*).
     pub fn trace_start(&mut self) { cpu::trace_start(); }
     pub fn trace_stop(&mut self) { cpu::trace_stop(); }

@@ -24,6 +24,34 @@ const XPSR_N: u32 = 0x8000_0000;
 const XPSR_C: u32 = 0x2000_0000;
 const XPSR_V: u32 = 0x1000_0000;
 
+/// Condition-code sentinel for the register-test branches (CBZ/CBNZ):
+/// bit7 marks "test a register, not xPSR". Flag conditions are 0..=13,
+/// so the encodings never collide and every opaque `cc` pass-through
+/// (latch equality, skip keys, edge plumbing) keeps working unchanged.
+const CC_RTEST: u32 = 0x80;
+
+/// Packed register-test condition: bit0 = branch when NONZERO (CBNZ),
+/// bits 4:1 = Rn (CBZ/CBNZ encode Rn 0-7 only, so the global is valid).
+fn rtest_cc(rn: u32, nonzero: bool) -> u32 {
+    CC_RTEST | (rn << 1) | (nonzero as u32)
+}
+
+/// CBZ/CBNZ (16-bit): 1011 z 0 i imm5 Rn, gate bits [15:12]=1011,
+/// [10:9]=01 -> mask 0xF500 == 0xB100 (bit11 = z, bit8 = i free).
+fn is_cbz(op: u16) -> bool {
+    (op & 0xF500) == 0xB100
+}
+
+/// CBZ/CBNZ offset: imm5*2 + bit9*64 — unsigned and forward-only, so
+/// there is NO sign bit (sign-extending a +100 offset turns it into -28
+/// and the target lands below the region). Mirrors thumb.rs line ~1836
+/// exactly; note `i` is bit 9, NOT bit 8 (the low bit of the second
+/// nibble is a fixed encoding bit — 0xBB93 has both set, so only a
+/// bit8-set/bit9-clear fixture pins the difference).
+fn cbz_off(op: u16) -> i64 {
+    ((op >> 3) & 0x1F) as i64 * 2 + (((op >> 9) & 1) as i64) * 64
+}
+
 /// Guest register number -> translator global index (r0-r7 direct,
 /// r8-r12 -> 12-16, SP(13) -> 11, LR(14) -> 17). PC(15) has no global:
 /// classify() rejects it everywhere a value is needed.
@@ -53,6 +81,19 @@ fn expand_imm_val(imm12: u32) -> u32 {
         let unrot = 0x80 | (imm12 & 0x7F);
         let rot = (imm12 >> 7) & 0x1F;
         unrot.rotate_right(rot)
+    }
+}
+
+/// ThumbExpandImm carry-out: None = keep the incoming C, Some(bit) = a
+/// static carry bit. Mirror of thumb.rs expand_imm's second return (the
+/// value half is expand_imm_val above; both from the same encoding).
+fn expand_imm_carry(imm12: u32) -> Option<u32> {
+    if imm12 & 0xC00 == 0 {
+        None
+    } else {
+        let unrot = 0x80 | (imm12 & 0x7F);
+        let rot = (imm12 >> 7) & 0x1F;
+        if rot == 0 { None } else { Some((unrot >> ((rot - 1) & 31)) & 1) }
     }
 }
 
@@ -189,7 +230,20 @@ struct Exit {
     cc: Option<u32>, // None = unconditional (B.N)
     target: u32,
     size: usize, // halfwords (1 or 2)
+    /// HOLE (direct mode only): an item the translator cannot emit. The
+    /// run returns kind 3 with pc = the item's OWN address and the
+    /// interpreter executes it, so it costs 0 executed instructions
+    /// (`partial`, never `partial + 1`) and can never be a skip target.
+    /// The scan continues past a hole, which is what lets an outer latch
+    /// enclose a body whose cold arm is unsupported (see MAX_HOLES).
+    resume: bool,
 }
+
+/// Upper bound on holes per region. The RX wait loop's cold frame
+/// handler contributes 11 (pc-relative loads, a `pop {pc}`, shifted-reg
+/// adds); the cap only exists so a data blob that decodes as garbage
+/// cannot make the scan walk arbitrarily far.
+const MAX_HOLES: usize = 24;
 
 /// Internal-skip edge: conditional forward branch inside a latched body.
 /// (edge hw, cond, target hw, static skipped count K.)
@@ -213,6 +267,35 @@ const FUEL_GLOBAL: u32 = 20;
 /// owned by other code — emit_valid_check uses l1, seg guards l3/l4).
 const SKIP_LOCAL: u32 = 7;
 
+/// Emit one kind-3 return arm for a forward exit / hole: return 3 with the
+/// branch target in `tb_addr` and the exact executed count so far.
+/// `partial` counts executed items + evaluated branches in this iteration;
+/// a HOLE (`resume`) returns at the item's OWN address before executing
+/// it, so it charges 0 and no later formula may count it.
+fn emit_exit_arm(c: &mut Code, e: &Exit, partial: u32, n_count: u32, cycle: u32) {
+    let exec_cost = if e.resume { partial } else { partial + 1 };
+    let emit_kind3 = |c: &mut Code| {
+        c.i32_const(e.target as i32).global_set(10);
+        emit_exec_count(
+            c,
+            &ExecCount::Dynamic { n: n_count, cycle, partial: exec_cost },
+        );
+        c.i64_const(3u64 << 32).i64_or();
+        c.return_();
+    };
+    match e.cc {
+        Some(cc) => {
+            emit_cond(c, cc);
+            c.if_void();
+            emit_kind3(c);
+            c.end();
+        }
+        None => {
+            emit_kind3(c);
+        }
+    }
+}
+
 /// Emit one body walk over `items` starting at halfword `start_hw`,
 /// matching forward exits by position. `n_count` is the Dynamic-count n
 /// (0 for a partial first pass, prefix-or-P for full iterations).
@@ -227,6 +310,7 @@ fn emit_body_walk(
     cycle: u32,
     segs: &[(u32, u32, u32)],
     slots: &mut Vec<u32>,
+    base_pc: u32,
 ) -> usize {
     let mut bhw = start_hw;
     let mut partial: u32 = 0;
@@ -235,9 +319,30 @@ fn emit_body_walk(
     while ei < exits.len() && exits[ei].hw < bhw {
         ei += 1;
     }
-    // Open skip-blocks targeting inside the walk only for edges at/after
-    // the walk start (an edge behind the start already resolved natively).
+    // Skip-blocks: one per distinct internal-skip target inside the walk,
+    // opened OUTERMOST-FIRST (largest target) so they close in LIFO order
+    // as the walk reaches each target. Opening them all up front is what
+    // lets one branch CHAIN target several forward labels (the eth_http
+    // RX dispatch: rx-flag -> hw 18, tx-flag -> hw 47, re-arm -> hw 61):
+    // opening lazily at each edge nests 61 inside 47 inside 18, whose
+    // ends can never be reached in LIFO order and leave the module
+    // unterminated ("expected 0 elements ..." / "unterminated control
+    // structure"). Edges behind the walk start already resolved
+    // natively, so only edges at/after it contribute blocks.
     let mut open: Vec<usize> = Vec::new(); // skip target hws (LIFO)
+    {
+        let mut targets: Vec<usize> = skips
+            .iter()
+            .filter(|sk| sk.hw >= start_hw)
+            .map(|sk| sk.target_hw)
+            .collect();
+        targets.sort_unstable();
+        targets.dedup();
+        for &th in targets.iter().rev() {
+            c.block_void();
+            open.push(th);
+        }
+    }
     // Close skip-blocks targeting bhw (LIFO: same target closes in
     // reverse open order — properly nested WASM). Must run not only at
     // item starts but after EVERY bhw advance: an exit arm can advance
@@ -253,58 +358,94 @@ fn emit_body_walk(
             }
         };
     }
-    for (it, size) in items.iter() {
-        close_skips!();
-        // Internal-skip edge here (also present in exits[] for cycle
-        // counting, but emitted as a skip-block, NOT a kind-3 return):
-        // block{$skip}; cond (kept in l7); adj += K*cond; taken -> break
-        // out (skip the spanned items); else fall into them.
-        if let Some(sk) = skips.iter().find(|sk| sk.hw == bhw) {
-            c.block_void();
-            emit_cond(c, sk.cc);
-            c.local_tee(SKIP_LOCAL);
-            c.global_get(ADJ_GLOBAL).i32_const(sk.k as i32).local_get(SKIP_LOCAL).i32_mul().i32_add().global_set(ADJ_GLOBAL);
-            c.local_get(SKIP_LOCAL).br_if(0);
-            open.push(sk.target_hw);
-            // Bookkeeping matches the exit arm below (the edge evaluates
-            // every iteration it reaches): consume the exits[] entry so
-            // the kind-3 arm below does not also fire for this hw.
-            if ei < exits.len() && exits[ei].hw == bhw {
-                partial += 1;
+    // Drain one branch/hole that starts exactly at `bhw`. Returns whether
+    // anything was consumed (so calls can loop until the cursor is idle).
+    //
+    // Two independent reasons this must run to exhaustion before EVERY
+    // item, not once per item iteration:
+    //  * Holes arrive in RUNS (consecutive unemittable items — the rx
+    //    frame handler has hw 20,21,22,...). Draining only the first one
+    //    left `bhw` behind by the sizes of the rest, so every later item
+    //    was emitted at the WRONG address and the walk stopped short of
+    //    the skip targets: the eth_http RX-wait loop's module failed
+    //    validation ("unterminated control structure @+430") because the
+    //    blocks for targets 47/61 never closed.
+    //  * An exit arm advances `bhw` onto the next hole or onto a skip
+    //    target, which needs the same treatment (the old code only had a
+    //    close_skips! there).
+    macro_rules! drain_one {
+        () => {{
+            let mut advanced = false;
+            // Internal-skip edge here (also present in exits[] for cycle
+            // counting, but emitted as a skip-block, NOT a kind-3 return):
+            // block{$skip}; cond (kept in l7); adj += K*cond; taken -> break
+            // out (skip the spanned items); else fall into them.
+            if let Some(sk) = skips.iter().find(|sk| sk.hw == bhw) {
+                // Depth of this edge's target block among the open skips
+                // (0 = innermost). The block was opened by the preamble,
+                // so the branch itself opens nothing.
+                let depth = open
+                    .iter()
+                    .rposition(|&th| th == sk.target_hw)
+                    .map(|i| (open.len() - 1 - i) as u32);
+                if let Some(depth) = depth {
+                    emit_cond(c, sk.cc);
+                    // local_set, NOT local_tee: the flag lives in the local
+                    // and is re-read for the accounting and the branch. A tee
+                    // leaves the condition on the wasm stack, and the br_if
+                    // below consumes a freshly pushed copy — one leaked value
+                    // per skip block, which fails module validation.
+                    c.local_set(SKIP_LOCAL);
+                    c.global_get(ADJ_GLOBAL).i32_const(sk.k as i32).local_get(SKIP_LOCAL).i32_mul().i32_add().global_set(ADJ_GLOBAL);
+                    c.local_get(SKIP_LOCAL).br_if(depth);
+                    // Bookkeeping matches the kind-3 arm below (the edge
+                    // evaluates every iteration it reaches): consume the
+                    // exits[] entry so the kind-3 arm does not also fire
+                    // for this hw. Skips are DERIVED from exits, so the
+                    // entry is always here; the assert catches a future
+                    // path that forgets to keep them in sync.
+                    let esize = match exits.get(ei) {
+                        Some(e) if e.hw == bhw => e.size,
+                        _ => 1,
+                    };
+                    debug_assert!(
+                        exits.get(ei).map(|e| e.hw) == Some(bhw),
+                        "skip edge at hw {} has no exits entry (ei={})",
+                        bhw,
+                        ei
+                    );
+                    if ei < exits.len() && exits[ei].hw == bhw {
+                        ei += 1;
+                    }
+                    partial += 1;
+                    bhw += esize;
+                    advanced = true;
+                }
+            }
+            // Hole / true exit at `bhw` (kind-3 arm).
+            if !advanced && ei < exits.len() && exits[ei].hw == bhw {
+                let e = &exits[ei];
+                emit_exit_arm(c, e, partial, n_count, cycle);
+                if !e.resume {
+                    partial += 1;
+                }
+                bhw += e.size;
                 ei += 1;
-                bhw += exits[ei - 1].size;
-                close_skips!();
+                advanced = true;
+            }
+            advanced
+        }};
+    }
+    for (it, size) in items.iter() {
+        // Drain every branch/hole that starts at the current halfword, so
+        // the item below is emitted at its own address.
+        loop {
+            close_skips!();
+            if !drain_one!() {
+                break;
             }
         }
-        if ei < exits.len() && exits[ei].hw == bhw {
-            let e = &exits[ei];
-            let esize = e.size;
-            // kind-3 forward exit: conditional (Bcc) or direct (B.N).
-            let emit_kind3 = |c: &mut Code| {
-                c.i32_const(e.target as i32).global_set(10);
-                emit_exec_count(
-                    c,
-                    &ExecCount::Dynamic { n: n_count, cycle, partial: partial + 1 },
-                );
-                c.i64_const(3u64 << 32).i64_or();
-                c.return_();
-            };
-            match e.cc {
-                Some(cc) => {
-                    emit_cond(c, cc);
-                    c.if_void();
-                    emit_kind3(c);
-                    c.end();
-                }
-                None => {
-                    emit_kind3(c);
-                }
-            }
-            partial += 1;
-            ei += 1;
-            bhw += esize;
-            close_skips!(); // exit width can land bhw on a skip target
-        }
+        // bhw now sits exactly on this item's start.
         if let Item::Mem { base, off, size: msize, is_store, wb, .. } = *it {
             let _ = wb;
             let pack = (if base == 13 { 15 } else { base })
@@ -318,10 +459,28 @@ fn emit_body_walk(
             it,
             &ExecCount::Dynamic { n: n_count, cycle, partial },
             segs,
+            base_pc + (bhw as u32) * 2,
         );
         partial += 1;
         bhw += size;
     }
+    // Trailing exits/holes after the last item (cold arms that end the
+    // body, e.g. the frame handler holes before the latch). Same drain
+    // rule: without it the walk ends behind the latch and the remaining
+    // skip blocks stay open.
+    loop {
+        close_skips!();
+        if !drain_one!() {
+            break;
+        }
+    }
+    debug_assert!(
+        open.is_empty(),
+        "unclosed skip blocks at end of walk: start={} bhw={} open={:?}",
+        start_hw,
+        bhw,
+        open
+    );
     bhw
 }
 
@@ -353,6 +512,17 @@ fn sx9(v: u32) -> i32 {
 /// caller passing cc<14 only... here cc is validated <14 already).
 /// Stack out: [taken?1:0].
 fn emit_cond(c: &mut Code, cc: u32) {
+    if cc & CC_RTEST != 0 {
+        // CBZ/CBNZ: pure register test, xPSR untouched (silicon: these
+        // branches never read or write the flags).
+        let rn = (cc >> 1) & 0xF;
+        let nonzero = cc & 1 != 0;
+        c.global_get(rn).i32_eqz();
+        if nonzero {
+            c.i32_eqz();
+        }
+        return;
+    }
     // one-bit reader: ((xpsr >> b) & 1)
     let bit = |c: &mut Code, b: u32| {
         c.global_get(8).i32_const(b as i32).i32_shr_u().i32_const(1).i32_and();
@@ -420,7 +590,8 @@ fn emit_cond(c: &mut Code, cc: u32) {
             bit(c, 30);
             bit(c, 31);
             bit(c, 28);
-            c.i32_eq();
+            c.i32_ne(); // N!=V (was i32_eq: LE behaved as GE — silent
+                        // one-iteration exits; caught by eth_feat delays)
             c.i32_or();
         } // LE (13): Z || N!=V
     }
@@ -455,6 +626,29 @@ const _: () = {
     assert!(BITBASE + BITBYTES <= SCRATCH);
 };
 const MAX_MIRROR_BYTES: u32 = 32 * 1024 * 1024;
+
+/// Shared-memory (direct) emission marker, appended by the internal
+/// translate path to the parsed segment table. The emission helpers read
+/// it from the table's tail instead of threading another parameter
+/// through every function; real guest bases are never u32::MAX, and the
+/// guard's wrapping subtract + size bound can never match it.
+///
+/// In direct mode each segment offset is the region buffer's byte offset
+/// INSIDE the host linear memory (the offset of `Vec::as_ptr()` in
+/// wasm32), so a translated load/store addresses the live guest bytes:
+/// no mirror, no pre-sync, no dirty trailer, no validity bitmap. The
+/// host memory is imported as index 0 (`env.memory`). Bit 31 of a
+/// segment's offset marks it READ-ONLY (flash): stores skip it and
+/// miss-exit to the interpreter, so flash protection and programming
+/// side effects keep the model's semantics (a direct store would have
+/// bypassed both).
+const DIRECT_MARK: (u32, u32, u32) = (u32::MAX, 0, 0);
+const MO_RO: u32 = 0x8000_0000;
+
+/// True when `segs` is a direct-mode table (marker in the tail).
+fn is_direct(segs: &[(u32, u32, u32)]) -> bool {
+    matches!(segs.last(), Some(s) if *s == DIRECT_MARK)
+}
 
 /// Mirror-miss guard over a segment table: l3 holds the guest byte
 /// address. Each segment (guest_base, size, mirror_off) is tried in
@@ -509,16 +703,32 @@ fn emit_exec_count(c: &mut Code, exec: &ExecCount) {
     }
 }
 
-fn emit_seg_guard(c: &mut Code, segs: &[(u32, u32, u32)], len: u32, exec: &ExecCount) {
+fn emit_seg_guard(
+    c: &mut Code,
+    segs: &[(u32, u32, u32)],
+    len: u32,
+    exec: &ExecCount,
+    is_store: bool,
+    pc: u32,
+) {
     c.block_void(); // $miss
     c.block_void(); // $ok
     for (base, size, mo) in segs.iter() {
+        if *base == u32::MAX {
+            continue; // direct-mode marker, not a segment
+        }
+        // Direct mode marks read-only segments (flash) in bit31: a store
+        // there must reach the model, so it miss-exits instead.
+        if is_store && (*mo & MO_RO) != 0 {
+            continue;
+        }
+        let mo = *mo & !MO_RO;
         let bound = size.saturating_sub(len);
         // idx = addr - base (wraps huge when addr < base: fails the check).
         c.local_get(3).i32_const(*base as i32).i32_sub().local_tee(4);
         c.i32_const(bound as i32).i32_lt_u();
         c.if_void();
-        c.local_get(4).i32_const(*mo as i32).i32_add().local_set(4);
+        c.local_get(4).i32_const(mo as i32).i32_add().local_set(4);
         c.br(2); // past $miss: success
         c.end();
     }
@@ -526,6 +736,11 @@ fn emit_seg_guard(c: &mut Code, segs: &[(u32, u32, u32)], len: u32, exec: &ExecC
     c.end(); // $ok
     c.i32_const(1).global_set(9);
     c.local_get(3).global_set(10);
+    // Resume pc of the faulting ITEM (global 21). Mirror mode retries
+    // from the entry snapshot; direct mode has already committed the
+    // preceding stores to live memory, so it resumes the interpreter
+    // here instead (never re-executes an applied store).
+    c.i32_const(pc as i32).global_set(21);
     emit_exec_count(c, exec);
     c.i64_const(1u64 << 32).i64_or();
     c.return_();
@@ -600,6 +815,8 @@ enum Item {
     CmpHi { rda: u32, rsb: u32 },        // 0x4400 h=1 (flags, no wb)
     AddWImm { rd: u32, rn: u32, imm: u32 }, // ADD.W-imm s=0 (no flags)
     AddWReg { rd: u32, rn: u32, rm: u32, amt: u32 }, // ADD.W-reg LSL s=0
+    TstW { rn: u32, imm: u32, carry: Option<u32> }, // TST.W imm12 (S=1,Rd=15)
+    Ubfx { rd: u32, rn: u32, lsb: u32, width: u32 }, // UBFX Rd,Rn,#lsb,#w
     Mem { base: u32, off: i32, rt: u32, size: u32, is_store: bool, wb: u32,
           idx: Option<u32>, sh: u32 }, // register offset: addr = base+(idx<<sh)
                                        // (None = plain imm `off`; SP=13 allowed as idx)
@@ -643,7 +860,7 @@ fn emit_lsls(c: &mut Code, rd: usize, rs: usize, im: u32) {
 
 /// Emit one Item (never a branch). `exec` drives the miss-exit count;
 /// `segs` is the mirror segment table (guest_base, size, mirror_off).
-fn emit_item(c: &mut Code, item: &Item, exec: &ExecCount, segs: &[(u32, u32, u32)]) {
+fn emit_item(c: &mut Code, item: &Item, exec: &ExecCount, segs: &[(u32, u32, u32)], pc: u32) {
     match *item {
         Item::Alu16(op) => {
             match op & 0xF800 {
@@ -731,6 +948,38 @@ fn emit_item(c: &mut Code, item: &Item, exec: &ExecCount, segs: &[(u32, u32, u32
             }
             emit_add_plain(c, reg_g(rd));
         }
+        Item::TstW { rn, imm, carry } => {
+            // N/Z from (Rn & imm); C from the expansion (kept when the
+            // expansion is a plain imm8 — carry == None); V preserved.
+            c.global_get(reg_g(rn)).i32_const(imm as i32).i32_and().local_set(2);
+            c.local_get(2).i32_eqz().i32_const(30).i32_shl(); // [z]
+            c.local_get(2).i32_const(31).i32_shr_u().i32_const(31).i32_shl(); // [z,n]
+            c.i32_or(); // [zn]
+            match carry {
+                Some(b) => {
+                    c.i32_const(((b & 1) << 29) as i32); // [zn, cbit]
+                }
+                None => {
+                    c.global_get(8).i32_const(XPSR_C as i32).i32_and(); // [zn, oldC]
+                }
+            }
+            c.i32_or(); // [znc]
+            c.global_get(8).i32_const(0x1FFF_FFFFu32 as i32).i32_and();
+            c.i32_or();
+            c.global_set(8);
+        }
+        Item::Ubfx { rd, rn, lsb, width } => {
+            // v = Rn >> lsb, masked to `width` bits (width 32 = no mask).
+            // Mirror of thumb.rs: wrapping_shr, mask only when w < 32.
+            c.global_get(reg_g(rn));
+            if lsb != 0 {
+                c.i32_const(lsb as i32).i32_shr_u();
+            }
+            if width < 32 {
+                c.i32_const(((1u64 << width) - 1) as u32 as i32).i32_and();
+            }
+            c.global_set(reg_g(rd));
+        }
         Item::Mem { base, off, rt, size, is_store, wb, idx, sh } => {
             let bg = reg_g(base);
             let rtg = reg_g(rt);
@@ -751,10 +1000,14 @@ fn emit_item(c: &mut Code, item: &Item, exec: &ExecCount, segs: &[(u32, u32, u32
                 // Imm / pre-index: access at base + off.
                 c.i32_const(off).i32_add().local_set(3);
             }
-            emit_seg_guard(c, segs, size, exec);
-            // Demand-paging: the page must be synced (see BITBASE).
+            emit_seg_guard(c, segs, size, exec, is_store, pc);
+            // Demand-paging (mirror mode only): the page must be synced
+            // (see BITBASE). Direct mode addresses live guest bytes, so
+            // there is neither a page table nor a dirty trailer to keep.
             // Uses l1 as temp — value spills happen after this.
-            emit_valid_check(c, exec);
+            if !is_direct(segs) {
+                emit_valid_check(c, exec);
+            }
             if is_store {
                 // Value into l1 BEFORE the dirty record (which uses l2).
                 // NOTE: the store address is l4 (mirror index), NOT l3
@@ -771,7 +1024,9 @@ fn emit_item(c: &mut Code, item: &Item, exec: &ExecCount, segs: &[(u32, u32, u32
                 if wb != 0 {
                     c.local_get(2).i32_const(off).i32_add().global_set(bg);
                 }
-                emit_dirty_record(c, exec, size);
+                if !is_direct(segs) {
+                    emit_dirty_record(c, exec, size);
+                }
             } else {
                 // Silicon order (writeback BEFORE the Rt write, so a
                 // Rt==Rn pre/post-indexed load reads the loaded value,
@@ -916,6 +1171,18 @@ fn classify(ops: &[u16], i: usize) -> Class {
             return Class::Emit(Item::CmpHi { rda: rd, rsb: rs }, 1);
         }
         return Class::Stop(1);
+    }
+    if is_cbz(op) {
+        // CBZ/CBNZ: pure register test (xPSR untouched). The packed
+        // sentinel `cc` carries Rn and the polarity, so latch/skip
+        // plumbing passes it through unchanged.
+        let rn = (op & 7) as u32;
+        let nonzero = (op >> 11) & 1 != 0;
+        return Class::BCond {
+            cc: rtest_cc(rn, nonzero),
+            wide: false,
+            size: 1,
+        };
     }
     if (op & 0xF000) == 0xD000 {
         let cc = ((op >> 8) & 0xF) as u32;
@@ -1063,6 +1330,48 @@ fn classify(ops: &[u16], i: usize) -> Class {
         if let Some(&o2) = ops.get(i + 1) {
             if (o2 & 0x8000) == 0 {
                 let b8 = (op >> 8) & 1;
+                // TST.W imm12 (op=AND, S=1, Rd=15): flags only, no
+                // writeback. Mirror of the interpreter's rd_is_test
+                // path: N/Z from (Rn & imm), C from ThumbExpandImm
+                // (kept when the expansion is a plain imm8), V kept.
+                if (op & 0xFF10) == 0xF010 && (o2 & 0x0F00) == 0x0F00 {
+                    let rn = (op & 0xF) as u32;
+                    if rn == 15 {
+                        return Class::Stop(2);
+                    }
+                    let imm12 = ((((op >> 10) & 1) << 11)
+                        | (((o2 >> 12) & 7) << 8)
+                        | (o2 & 0xFF)) as u32;
+                    return Class::Emit(
+                        Item::TstW {
+                            rn,
+                            imm: expand_imm_val(imm12),
+                            carry: expand_imm_carry(imm12),
+                        },
+                        2,
+                    );
+                }
+                // UBFX Rd, Rn, #lsb, #width (F3Cx): extract, no flags.
+                // Gate/lsb/width mirror thumb.rs line ~2240 exactly
+                // (width is o2[4:0]+1, so 1..=32).
+                if (op & 0xFFF0) == 0xF3C0 {
+                    let rn = (op & 0xF) as u32;
+                    let rd = ((o2 >> 8) & 0xF) as u32;
+                    let lsb = (((o2 >> 12) & 7) << 2) | ((o2 >> 6) & 3);
+                    let width = (o2 & 0x1F) + 1;
+                    if rn == 15 || rd >= 13 {
+                        return Class::Stop(2);
+                    }
+                    return Class::Emit(
+                        Item::Ubfx {
+                            rd,
+                            rn,
+                            lsb: lsb as u32,
+                            width: width as u32,
+                        },
+                        2,
+                    );
+                }
                 let is_add = b8 == 1 && (op >> 5) & 7 == 0;
                 let sbit = (op & 0x10) != 0;
                 if !is_add || sbit {
@@ -1132,7 +1441,9 @@ fn branch_target_wide(ops: &[u16], hw: usize, wide: bool, base_pc: u32) -> Optio
         ) as i64
     } else {
         let op = *ops.get(hw)?;
-        sx9((((op & 0xFF) << 1)) as u32) as i64
+        // CBZ/CBNZ share the 16-bit shape but not the B.cond immediate
+        // layout (i:imm5:'0', sign from bit 6).
+        if is_cbz(op) { cbz_off(op) } else { sx9((((op & 0xFF) << 1)) as u32) as i64 }
     };
     Some(origin + off)
 }
@@ -1167,7 +1478,7 @@ fn branch_target(ops: &[u16], hw: usize, wide: bool, base_pc: u32) -> Option<u32
         ) as i64
     } else {
         let op = *ops.get(hw)?;
-        sx9((((op & 0xFF) << 1)) as u32) as i64
+        if is_cbz(op) { cbz_off(op) } else { sx9((((op & 0xFF) << 1)) as u32) as i64 }
     };
     let t = origin + off;
     if t < base_pc as i64 || t > 0xFFFF_FFFEu64 as i64 {
@@ -1702,7 +2013,20 @@ fn build_tree(
 }
 
 pub fn translate(ops: &[u16], segs_in: &[u32], base_pc: u32) -> Block {
-    translate_at(ops, segs_in, base_pc, base_pc)
+    translate_at_impl(ops, segs_in, base_pc, base_pc, false)
+}
+
+/// Direct (shared-memory) translation. `segs_in` is a flat table of
+/// [guest_base, size, mem_off] triples where mem_off is the byte offset
+/// of the region's buffer inside the HOST linear memory (bit31 = the
+/// region is read-only for stores, i.e. flash). The emitted module
+/// imports env.memory and loads/stores live guest bytes: no mirror, no
+/// pre-sync, no validity bitmap, no dirty trailer. A store to a
+/// read-only or unmapped address miss-exits (kind 1) with `tb_pc` set to
+/// the faulting item, and the driver resumes interpretation there — all
+/// preceding stores are already committed, so nothing is re-executed.
+pub fn translate_direct(ops: &[u16], segs_in: &[u32], base_pc: u32) -> Block {
+    translate_at_impl(ops, segs_in, base_pc, base_pc, true)
 }
 
 /// Translate with an explicit entry point for mid-body submission
@@ -1768,6 +2092,7 @@ fn emit_tree(
         it: &Item,
         segs: &[(u32, u32, u32)],
         slots: &mut Vec<u32>,
+        pc: u32,
     ) {
         if let Item::Mem { base, off, size: msize, is_store, wb, .. } = *it {
             let pack = (if base == 13 { 15 } else { base }) | ((msize == 4) as u32) << 5
@@ -1775,7 +2100,7 @@ fn emit_tree(
             slots.push(pack);
             slots.push(if wb == 1 { 0 } else { off as u32 });
         }
-        emit_item(c, it, &ExecCount::Nested, segs);
+        emit_item(c, it, &ExecCount::Nested, segs, pc);
         emit_tick(c);
     }
     // ---- Body plan for one loop span: linear op sequence. ----
@@ -2012,7 +2337,8 @@ fn emit_tree(
         fn counted(&mut self, c: &mut Code, hw: usize) -> Option<()> {
             let (_, it) = self.item_at(hw)?;
             let segs = self.segs;
-            emit_counted(c, &it, segs, &mut self.slots);
+            let pc = self.base_pc + (hw as u32) * 2;
+            emit_counted(c, &it, segs, &mut self.slots, pc);
             Some(())
         }
         // Shared-fuel check: fuel < cycle -> tb_addr=level_top, br Fuel.
@@ -2261,7 +2587,8 @@ fn emit_tree(
             }
             if let Some((sz, it)) = self.item_at(h) {
                 let segs = self.segs;
-                emit_counted(c, &it, segs, &mut self.slots);
+                let pc = self.base_pc + (h as u32) * 2;
+                emit_counted(c, &it, segs, &mut self.slots, pc);
                 cyc += 1;
                 h += sz;
                 continue;
@@ -2297,7 +2624,8 @@ fn emit_tree(
             }
             let (sz, it) = self.item_at(h)?;
             let segs = self.segs;
-            emit_counted(c, &it, segs, &mut self.slots);
+            let pc = self.base_pc + (h as u32) * 2;
+            emit_counted(c, &it, segs, &mut self.slots, pc);
             cyc += 1;
             h += sz;
         }
@@ -2361,7 +2689,8 @@ fn emit_tree(
         while h < cal.prefix_end {
             let (sz, it) = st.item_at(h)?;
             let segs = st.segs;
-            emit_counted(c, &it, segs, &mut st.slots);
+            let pc = base_pc + (h as u32) * 2;
+            emit_counted(c, &it, segs, &mut st.slots, pc);
             h += sz;
         }
         if h != cal.prefix_end {
@@ -2394,16 +2723,25 @@ fn emit_tree(
     for _ in tree.top.calls.iter() {
         m.func(1);
     }
-    let pages = ((mirror_bytes + 65535) / 65536).max(1);
-    m.memory(pages);
-    for _ in 0..21 {
+    if is_direct(segs) {
+        // Shared-memory translation: translated code addresses the HOST
+        // module's linear memory directly (env.memory), so there is no
+        // private mirror to allocate or export.
+        m.import_memory("env", "memory", 1);
+    } else {
+        let pages = ((mirror_bytes + 65535) / 65536).max(1);
+        m.memory(pages);
+    }
+    for _ in 0..22 {
         m.global_mut_i32(0);
     }
     m.export_func("run", 0);
-    m.export_mem("mem", 0);
+    if !is_direct(segs) {
+        m.export_mem("mem", 0);
+    }
     for (i, name) in [
         "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "xpsr", "tb_exit", "tb_addr", "sp",
-        "r8", "r9", "r10", "r11", "r12", "lr", "dirtyCount", "skipAdj", "tbFuel",
+        "r8", "r9", "r10", "r11", "r12", "lr", "dirtyCount", "skipAdj", "tbFuel", "tb_pc",
     ]
         .iter()
         .enumerate()
@@ -2516,14 +2854,205 @@ fn emit_tree(
 } // end emit_tree
 
 pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -> Block {
+    translate_at_impl(ops, segs_in, base_pc, entry_pc, false)
+}
+
+/// Mid-body entry, direct (shared-memory) mode. See `translate_direct`.
+pub fn translate_at_direct(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -> Block {
+    translate_at_impl(ops, segs_in, base_pc, entry_pc, true)
+}
+
+/// TRUE halfword starts of emitted items. The linear scan advances through
+/// branches too, but `items` holds items only — so reconstruct by skipping
+/// the branch widths (exits in scan order + the latch itself). A naive
+/// items-only accumulation misplaces every item past the first branch
+/// (caught by the skip differential, not review: skips silently never
+/// formed).
+fn item_starts_of(
+    items: &[(Item, usize)],
+    exits: &[Exit],
+    li: usize,
+    lsize: usize,
+) -> Vec<usize> {
+    let mut starts: Vec<usize> = Vec::with_capacity(items.len());
+    let mut hc = 0usize;
+    let mut e2 = 0usize;
+    let mut latched = false;
+    for (_, size) in items.iter() {
+        loop {
+            if e2 < exits.len() && exits[e2].hw == hc {
+                hc += exits[e2].size;
+                e2 += 1;
+                continue;
+            }
+            if !latched && hc == li {
+                hc += lsize;
+                latched = true;
+                continue;
+            }
+            break;
+        }
+        starts.push(hc);
+        hc += size;
+    }
+    starts
+}
+
+/// Validate a latched body and return its internal-skip edges.
+///
+/// `items`/`exits` are the linear-scan results for the region starting at
+/// `base_pc`; `lat` is the candidate latch (li_hw, cc, t_hw, size) and the
+/// body is [t, li). Every body item must be reachable from `t` through the
+/// merged item/branch layout, and a CONDITIONAL forward edge landing
+/// strictly inside the body on an ITEM BOUNDARY is an internal skip: the
+/// run continues at the target and the skipped static count is cancelled
+/// dynamically via the skip-adjust global, so every count formula stays
+/// exact (kind-3/kind-1/fuel/completion all subtract it).
+///
+/// Two shapes that used to decline are legal here:
+///  - a BACKWARD edge inside the body (a nested loop): it is a true exit
+///    whose target is another loop top the driver translates on its own;
+///  - a HOLE (resume exit onto an unemittable item): statically a
+///    pass-through, so later items stay reachable and the layout lines up,
+///    even though the emitted code after it is dead.
+///
+/// None = this candidate cannot be emitted. The caller may then retry the
+/// legacy nested candidate or decline the region (straight regions never
+/// execute, so declining is always sound).
+fn classify_body(
+    items: &[(Item, usize)],
+    exits: &[Exit],
+    lat: (usize, Option<u32>, usize, usize),
+    base_pc: u32,
+) -> Option<Vec<Skip>> {
+    let (li, _cc, t, lsize) = lat;
+    let mut skips: Vec<Skip> = Vec::new();
+    let item_starts = item_starts_of(items, exits, li, lsize);
+    let is_body_start = |h: usize| -> bool { item_starts.contains(&h) };
+    let mut bad = false;
+    // Prefix straddle (an item crossing t) is rejected by the latch arm
+    // below; mirror that here so skips never form on it.
+    for (i, &st) in item_starts.iter().enumerate() {
+        if st < t && st + items[i].1 > t {
+            bad = true;
+        }
+    }
+    // Classify body exits. A conditional forward edge strictly inside the
+    // body that lands on an item boundary is an internal skip. Everything
+    // else in the body is a true exit (legacy kind-3 return, which
+    // subtracts skipAdj — no decline needed), including backward edges
+    // (nested loop shapes: the driver continues at their target) and
+    // unconditional/off-boundary forward edges.
+    for e in exits.iter() {
+        if e.hw < t || e.hw >= li || e.resume {
+            continue;
+        }
+        let lo = base_pc as u64 + (t as u64) * 2;
+        let hi = base_pc as u64 + (li as u64) * 2;
+        let tgt = e.target as u64;
+        if tgt >= lo && tgt < hi {
+            let thw = ((e.target - base_pc) / 2) as usize;
+            if thw > e.hw && e.cc.is_some() && is_body_start(thw) {
+                skips.push(Skip { hw: e.hw, cc: e.cc.unwrap(), target_hw: thw, k: 0 });
+            }
+            // Else: true exit (backward, unconditional, or off-boundary).
+        }
+        // Else: true exit (below-base outer top, past-li, ...).
+    }
+    // Reachability over the merged body layout (items + branches in hw
+    // order): every ITEM must be reachable from the top. Branches apply
+    // effects only when reached: internal edges add target + fallthrough,
+    // conditional true exits and holes keep fallthrough, unconditional
+    // true exits cut it. Unreached items decline.
+    if !bad {
+        use std::collections::HashSet;
+        let mut reach: HashSet<usize> = HashSet::new();
+        reach.insert(t);
+        let mut pos = t;
+        loop {
+            if pos == li {
+                break;
+            }
+            if pos > li {
+                bad = true; // overshoot: layout gap
+                break;
+            }
+            if let Some(idx) = item_starts.iter().position(|&x| x == pos) {
+                if !reach.contains(&pos) {
+                    bad = true;
+                    break;
+                }
+                reach.insert(pos + items[idx].1);
+                pos += items[idx].1;
+                continue;
+            }
+            if let Some(e) = exits.iter().find(|e| e.hw == pos) {
+                if reach.contains(&pos) {
+                    if let Some(sk) = skips.iter().find(|sk| sk.hw == pos) {
+                        reach.insert(sk.target_hw);
+                        reach.insert(pos + e.size);
+                    } else if e.cc.is_some() || e.resume {
+                        reach.insert(pos + e.size);
+                    }
+                    // Unconditional true exit: fallthrough dead.
+                }
+                pos += e.size;
+                continue;
+            }
+            bad = true; // gap: neither item nor branch (straddle fallout)
+            break;
+        }
+    }
+    if bad {
+        return None;
+    }
+    // K per skip: items + true exits spanned (nested edges count at every
+    // enclosing level, matching cycle's linear count). Holes cost 0, so
+    // they never contribute.
+    for sk in skips.iter_mut() {
+        let mut k = 0u32;
+        for &st in item_starts.iter() {
+            if st > sk.hw && st < sk.target_hw && st >= t {
+                k += 1;
+            }
+        }
+        for e in exits.iter() {
+            if e.hw > sk.hw && e.hw < sk.target_hw && !e.resume {
+                k += 1;
+            }
+        }
+        sk.k = k;
+    }
+    Some(skips)
+}
+
+fn translate_at_impl(
+    ops: &[u16],
+    segs_in: &[u32],
+    base_pc: u32,
+    entry_pc: u32,
+    direct: bool,
+) -> Block {
     // Segment table: flat [guest_base, size] pairs (SRAM + flash +
     // extra_ram, driver order). Mirror layout: scratch (dirty trailer
     // at [8..), validity bitmap at [BITBASE..)) then each segment at a
     // 64KB-aligned offset. Total bytes are capped at MAX_MIRROR_BYTES
     // (extra segments degrade to miss-and-interpret, soundly); this
     // keeps validity indices in-bounds. Returns (table, total bytes).
+    // Direct mode instead parses [base, size, mem_off] triples and never
+    // allocates a mirror (the marker triple flags the emission helpers).
     let mut segs: Vec<(u32, u32, u32)> = Vec::new();
-    {
+    if direct {
+        let mut si = 0usize;
+        while si + 2 < segs_in.len() {
+            let (base, size, mo) = (segs_in[si], segs_in[si + 1], segs_in[si + 2]);
+            if size >= 4 {
+                segs.push((base, size, mo));
+            }
+            si += 3;
+        }
+        segs.push(DIRECT_MARK);
+    } else {
         let mut mo = SCRATCH;
         let mut si = 0usize;
         while si + 1 < segs_in.len() {
@@ -2549,6 +3078,7 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
         }
         end
     };
+    let mirror_bytes = if direct { 0 } else { mirror_bytes };
     debug_assert!(mirror_bytes <= MAX_MIRROR_BYTES);
     debug_assert!(BITBASE + BITBYTES <= SCRATCH);
     // Nested/call region tree (additive): attempt the tree path whenever
@@ -2580,6 +3110,12 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
     let mut emitted: Vec<(Item, usize)> = Vec::new(); // (item, hw size), in order
     let mut exits: Vec<Exit> = Vec::new();
     let mut latch: Option<(usize, Option<u32>, usize, usize)> = None;
+    // A backward edge that does NOT close on the region top (a nested or
+    // mid-body loop) with the scan state at that point: (latch, items,
+    // exits). Restored verbatim when no top latch forms further on, which
+    // reproduces the old "first backward edge is the latch" behaviour.
+    let mut fallback: Option<((usize, Option<u32>, usize, usize), usize, usize)> = None;
+    let mut holes = 0usize;
     let mut hw = 0usize;
     let mut scan_hw = 0usize; // halfwords consumed (== hw while unbroken)
     while hw < ops.len() {
@@ -2599,14 +3135,29 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
                 }
                 let t = ((target - base_pc) / 2) as usize;
                 if t < hw && scan_hw == hw {
-                    latch = Some((hw, Some(cc), t, size));
+                    if t == 0 {
+                        // Back edge onto the region top: THE latch. The
+                        // first one wins — it closes the enclosing loop,
+                        // so nothing past it belongs to this region.
+                        latch = Some((hw, Some(cc), t, size));
+                        hw += size;
+                        break;
+                    }
+                    // Nested / mid-body backward edge. It is a TRUE EXIT:
+                    // the run returns kind 3 at the branch target, which
+                    // is its own loop top and translates there. The first
+                    // such edge also remembers the legacy latch shape.
+                    if fallback.is_none() {
+                        fallback = Some(((hw, Some(cc), t, size), emitted.len(), exits.len()));
+                    }
+                    exits.push(Exit { hw, cc: Some(cc), target, size, resume: false });
                     hw += size;
-                    break;
+                    scan_hw = hw;
                 } else if t > hw && scan_hw == hw {
                     // Forward edge inside the run: a loop exit if a latch
                     // forms later, else just where straight code stops.
                     // (Exits before the latch target invalidate it below.)
-                    exits.push(Exit { hw, cc: Some(cc), target, size });
+                    exits.push(Exit { hw, cc: Some(cc), target, size, resume: false });
                     hw += size;
                     scan_hw = hw;
                 } else {
@@ -2628,7 +3179,7 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
                     // reachability check when a latch forms; when none
                     // forms the region stays straight (never executed —
                     // declined driver-side), so scan length is harmless.
-                    exits.push(Exit { hw, cc: None, target: target_wide as u32, size });
+                    exits.push(Exit { hw, cc: None, target: target_wide as u32, size, resume: false });
                     hw += size;
                     scan_hw = hw;
                     continue;
@@ -2637,14 +3188,23 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
                 let t = ((target - base_pc) / 2) as usize;
                 if t < hw && scan_hw == hw {
                     // Unconditional backward latch (DOOM's memcpy/V_DrawPatch
-                    // copy loops end in B.N, not Bcc). Self-edges (t == hw,
-                    // `b .`) stop: no-progress loops hang identically
-                    // interpreted.
-                    latch = Some((hw, None, t, size));
+                    // copy loops end in B.N, not Bcc). Only a top-closing
+                    // edge latches; a nested one is a true exit and the
+                    // fallback candidate. Self-edges (t == hw, `b .`) stop:
+                    // no-progress loops hang identically interpreted.
+                    if t == 0 {
+                        latch = Some((hw, None, t, size));
+                        hw += size;
+                        break;
+                    }
+                    if fallback.is_none() {
+                        fallback = Some(((hw, None, t, size), emitted.len(), exits.len()));
+                    }
+                    exits.push(Exit { hw, cc: None, target, size, resume: false });
                     hw += size;
-                    break;
+                    scan_hw = hw;
                 } else if t > hw && scan_hw == hw {
-                    exits.push(Exit { hw, cc: None, target, size });
+                    exits.push(Exit { hw, cc: None, target, size, resume: false });
                     hw += size;
                     scan_hw = hw;
                 } else {
@@ -2652,165 +3212,77 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
                 }
             }
             Class::Stop(size) => {
-                let _ = size;
-                break;
+                // Unemittable item. In DIRECT mode it becomes a HOLE: the
+                // run returns kind 3 at the item's own address (cost 0)
+                // and the interpreter executes just it, so the scan can
+                // keep going and an outer latch past it can still form.
+                // Mirror mode keeps the old stop-at-first-unsupported rule
+                // (its shapes are unprofitable anyway).
+                if !is_direct(&segs) || emitted.is_empty() || holes >= MAX_HOLES {
+                    break;
+                }
+                exits.push(Exit {
+                    hw,
+                    cc: None,
+                    target: base_pc.wrapping_add((hw as u32) * 2), // own pc
+                    size,
+                    resume: true,
+                });
+                holes += 1;
+                hw += size;
+                scan_hw = hw;
             }
         }
     }
-    // Forward exits before the latch target would skip the loop: they
-    // invalidate it (region stops at the first such exit).
+    // ---- latch candidate selection ---------------------------------
+    // A backward edge onto the region top closes the ENCLOSING loop and
+    // is the natural latch: its body then covers the hot path plus the
+    // whole cold arm (which the translator reaches through holes and
+    // exits). A nested backward edge is only a FALLBACK candidate — it is
+    // restored, with the scan state it had, when no top latch forms or
+    // when the top-latched body will not shape. Both candidates get the
+    // same validation.
     let mut scan_end = scan_hw;
-    if let Some((_, _, t, _)) = latch {
-        if let Some(e) = exits.iter().find(|e| e.hw < t) {
-            scan_end = e.hw;
-            latch = None;
+    let validate = |lat: (usize, Option<u32>, usize, usize),
+                    em: &[(Item, usize)],
+                    ex: &[Exit],
+                    sk_end: &mut usize|
+     -> Option<Vec<Skip>> {
+        let (_, _, t, _) = lat;
+        // A real forward exit before the body top skips the loop: not a
+        // loop shape at all. (Hole exits are pass-through statically, so
+        // they do not invalidate anything.)
+        if let Some(e) = ex.iter().find(|e| e.hw < t && !e.resume) {
+            *sk_end = e.hw;
+            return None;
+        }
+        classify_body(em, ex, lat, base_pc)
+    };
+    let mut skips: Vec<Skip> = Vec::new();
+    let mut latch = latch;
+    if let Some(lat) = latch {
+        match validate(lat, &emitted, &exits, &mut scan_end) {
+            Some(sk) => skips = sk,
+            None => latch = None,
         }
     }
-    // Internal-skip edges (DOOM V_DrawPatch column loop): a CONDITIONAL
-    // forward edge whose target lies strictly inside the latched body
-    // (hw, li) is not a loop exit — the run continues at the target,
-    // skipping the spanned items that iteration. Skipped static counts
-    // are subtracted dynamically via the skip-adjust global, so every
-    // count formula stays exact (kind-3/kind-1/fuel/completion all
-    // subtract it). Unconditional internal edges, backward non-latch
-    // edges, off-item-boundary targets, and dead body items decline the
-    // loop — straight regions never execute, so declining is always
-    // sound.
-    let mut skips: Vec<Skip> = Vec::new();
-    if let Some((li, _, t, _)) = latch {
-        // TRUE halfword starts of emitted items. The scan's hw advances
-        // through branches too, but emitted[] holds items only — so
-        // reconstruct by skipping branch widths (exits in scan order +
-        // the latch itself). A naive items-only accumulation misplaces
-        // every item past the first branch (caught by the skip
-        // differential, not review: skips silently never formed).
-        let mut item_starts: Vec<usize> = Vec::with_capacity(emitted.len());
-        {
-            let mut hc = 0usize;
-            let mut e2 = 0usize;
-            let mut latched = false;
-            for (_, size) in emitted.iter() {
-                loop {
-                    if e2 < exits.len() && exits[e2].hw == hc {
-                        hc += exits[e2].size;
-                        e2 += 1;
-                        continue;
-                    }
-                    if !latched {
-                        if let Some((lhw, _, _, lsz)) = latch {
-                            if lhw == hc {
-                                hc += lsz;
-                                latched = true;
-                                continue;
-                            }
-                        }
-                    }
-                    break;
+    if latch.is_none() {
+        if let Some((fb, fe, fx)) = fallback {
+            // Drop everything scanned past the nested latch: the legacy
+            // shape ends there (the outer loop translates on its own when
+            // the driver reaches it again).
+            emitted.truncate(fe);
+            exits.truncate(fx);
+            scan_hw = fb.0;
+            match validate(fb, &emitted, &exits, &mut scan_end) {
+                Some(sk) => {
+                    skips = sk;
+                    latch = Some(fb);
                 }
-                item_starts.push(hc);
-                hc += size;
-            }
-        }
-        let is_body_start = |h: usize| -> bool { item_starts.contains(&h) };
-        let mut bad = false;
-        // Prefix straddle (item crossing t) is rejected by the latch
-        // arm below; mirror that here so skips never form on it.
-        for (i, &st) in item_starts.iter().enumerate() {
-            if st < t && st + emitted[i].1 > t {
-                bad = true;
-            }
-        }
-        // Classify body exits. A CONDITIONAL forward edge strictly
-        // inside the body, landing on an item boundary, is an internal
-        // skip (the run continues at the target). Everything else in the
-        // body is a true exit (legacy kind-3 return, which subtracts
-        // skipAdj — no decline needed), EXCEPT backward/self edges, which
-        // are nested-loop shapes v1 does not cover. Off-boundary forward
-        // edges also stay legacy true exits (old code never checked exit-
-        // target boundaries; synthetic vectors pin this).
-        for e in exits.iter() {
-            if e.hw < t || e.hw >= li {
-                continue;
-            }
-            let lo = base_pc as u64 + (t as u64) * 2;
-            let hi = base_pc as u64 + (li as u64) * 2;
-            let tgt = e.target as u64;
-            if tgt >= lo && tgt < hi {
-                let thw = ((e.target - base_pc) / 2) as usize;
-                if thw <= e.hw {
-                    bad = true; // backward/self edge: nested shape
-                    break;
+                None => {
+                    latch = None;
+                    scan_end = scan_hw;
                 }
-                if e.cc.is_some() && is_body_start(thw) {
-                    skips.push(Skip { hw: e.hw, cc: e.cc.unwrap(), target_hw: thw, k: 0 });
-                }
-                // Else: legacy true exit (unconditional, or off-boundary).
-            }
-            // Else: true exit (below-base outer top, past-li, ...).
-        }
-        // Reachability over the merged body layout (items + branches in
-        // hw order): every ITEM must be reachable from the top.
-        // Branches apply effects only when reached (internal edges add
-        // target + fallthrough; conditional true exits keep fallthrough;
-        // unconditional true exits cut it). Unreached items decline.
-        if !bad {
-            use std::collections::HashSet;
-            let mut reach: HashSet<usize> = HashSet::new();
-            reach.insert(t);
-            let mut pos = t;
-            loop {
-                if pos == li {
-                    break;
-                }
-                if pos > li {
-                    bad = true; // overshoot: layout gap
-                    break;
-                }
-                if let Some(idx) = item_starts.iter().position(|&x| x == pos) {
-                    if !reach.contains(&pos) {
-                        bad = true;
-                        break;
-                    }
-                    reach.insert(pos + emitted[idx].1);
-                    pos += emitted[idx].1;
-                    continue;
-                }
-                if let Some(e) = exits.iter().find(|e| e.hw == pos) {
-                    if reach.contains(&pos) {
-                        if let Some(sk) = skips.iter().find(|sk| sk.hw == pos) {
-                            reach.insert(sk.target_hw);
-                            reach.insert(pos + e.size);
-                        } else if e.cc.is_some() {
-                            reach.insert(pos + e.size);
-                        }
-                        // Unconditional true exit: fallthrough dead.
-                    }
-                    pos += e.size;
-                    continue;
-                }
-                bad = true; // gap: neither item nor branch (straddle fallout)
-                break;
-            }
-        }
-        if bad {
-            latch = None;
-            skips.clear();
-        } else {
-            // K per skip: items + exits spanned (nested edges count at
-            // every enclosing level, matching cycle's linear count).
-            for sk in skips.iter_mut() {
-                let mut k = 0u32;
-                for &st in item_starts.iter() {
-                    if st > sk.hw && st < sk.target_hw && st >= t {
-                        k += 1;
-                    }
-                }
-                for e in exits.iter() {
-                    if e.hw > sk.hw && e.hw < sk.target_hw {
-                        k += 1;
-                    }
-                }
-                sk.k = k;
             }
         }
     }
@@ -2822,20 +3294,29 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
     let mut m = Module::new();
     m.functype(&[I32], &[0x7E]);
     m.func(0);
-    let pages = ((mirror_bytes + 65535) / 65536).max(1);
-    m.memory(pages);
     // Globals 0-11 keep their v1 indices (r0-r7, xpsr, tb_exit, tb_addr,
     // sp); 12-17 add r8-r12 + lr; 18 is the dirty-trailer count; 19 is
     // the skip-adjust (internal-skip exact counting, driver-invisible);
-    // 20 is the shared fuel pool (nested/call modules only; flat keeps l5).
-    for _ in 0..21 {
+    // 20 is the shared fuel pool (nested/call modules only; flat keeps l5);
+    // 21 is the miss-resume pc (direct mode only — the driver continues
+    // interpretation there instead of retrying an applied store).
+    if is_direct(&segs) {
+        // Shared-memory translation: import the host linear memory.
+        m.import_memory("env", "memory", 1);
+    } else {
+        let pages = ((mirror_bytes + 65535) / 65536).max(1);
+        m.memory(pages);
+    }
+    for _ in 0..22 {
         m.global_mut_i32(0);
     }
     m.export_func("run", 0);
-    m.export_mem("mem", 0);
+    if !is_direct(&segs) {
+        m.export_mem("mem", 0);
+    }
     for (i, name) in [
         "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "xpsr", "tb_exit", "tb_addr", "sp",
-        "r8", "r9", "r10", "r11", "r12", "lr", "dirtyCount", "skipAdj", "tbFuel",
+        "r8", "r9", "r10", "r11", "r12", "lr", "dirtyCount", "skipAdj", "tbFuel", "tb_pc",
     ]
         .iter()
         .enumerate()
@@ -2887,7 +3368,8 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
                 // cost (each executes when looping) + the latch itself.
                 let mut cyc: u32 = 1; // latch
                 for e in exits.iter() {
-                    if e.hw >= t && e.hw < li {
+                    // Holes cost 0: the run returns before the item.
+                    if e.hw >= t && e.hw < li && !e.resume {
                         cyc += 1;
                     }
                 }
@@ -2913,19 +3395,11 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
                     // Fuel for the partial is NOT pre-checked (bounded
                     // overshoot ~20 insts max — same class as a native
                     // chunk boundary; tick accounting stays exact).
-                    let mut hw = t;
-                    let mut at_boundary = false;
-                    for (it, size) in emitted.iter().skip(n as usize) {
-                        let _ = it;
-                        if hw == e_hw {
-                            at_boundary = true;
-                            break;
-                        }
-                        if hw > e_hw {
-                            break;
-                        }
-                        hw += size;
-                    }
+                    // (Boundaries come from item_starts_of — an items-only
+                    // walk desyncs at the first branch and silently
+                    // declines every mid-entry past one.)
+                    let starts = item_starts_of(&emitted, &exits, li, lsize);
+                    let at_boundary = starts.iter().any(|&s| s == e_hw);
                     if !at_boundary {
                         (false, 0usize, 0usize, 0u32, EntryMode::Top)
                     } else {
@@ -2933,7 +3407,7 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
                         // + Emit items in [e..li).
                         let mut p: u32 = 1;
                         for e2 in exits.iter() {
-                            if e2.hw >= e_hw && e2.hw < li {
+                            if e2.hw >= e_hw && e2.hw < li && !e2.resume {
                                 p += 1;
                             }
                         }
@@ -2976,7 +3450,8 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
         EntryMode::Mid { p_cost, .. } => (0, p_cost),
     };
     let mut n_out: u32 = 0;
-    for (it, _) in emitted.iter().take(emit_upto) {
+    let mut shw = 0usize;
+    for (it, sz) in emitted.iter().take(emit_upto) {
         if let Item::Mem { base, off, size: msize, is_store, wb, .. } = *it {
             let pack = (if base == 13 { 15 } else { base })
                 | ((msize == 4) as u32) << 5
@@ -2984,7 +3459,14 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
             slots.push(pack);
             slots.push(if wb == 1 { 0 } else { off as u32 });
         }
-        emit_item(&mut c, it, &ExecCount::Static(n_out as usize), &segs);
+        emit_item(
+            &mut c,
+            it,
+            &ExecCount::Static(n_out as usize),
+            &segs,
+            base_pc + (shw as u32) * 2,
+        );
+        shw += sz;
         n_out += 1;
     }
     // Item index where the loop body starts (prefix length).
@@ -2997,20 +3479,17 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
     let entry_idx = match entry_mode {
         EntryMode::Top => body_from,
         EntryMode::Mid { e_hw, .. } => {
-            let t_hw = match latch {
-                Some((_, _, t, _)) => t,
-                None => usize::MAX,
+            let (t_hw, lsize) = match latch {
+                Some((_, _, t, sz)) => (t, sz),
+                None => (usize::MAX, 1),
             };
-            let mut idx = body_from;
-            let mut hw = t_hw;
-            for (_, size) in emitted.iter().skip(body_from) {
-                if hw == e_hw {
-                    break;
-                }
-                hw += size;
-                idx += 1;
-            }
-            idx
+            let _ = t_hw;
+            // Same boundary reconstruction as the classification walk.
+            let starts = item_starts_of(&emitted, &exits, latch.map(|l| l.0).unwrap_or(usize::MAX), lsize);
+            starts
+                .iter()
+                .position(|&s| s == e_hw)
+                .unwrap_or(body_from)
         }
     };
     let n = match entry_mode {
@@ -3036,6 +3515,7 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
                 cycle,
                 &segs,
                 &mut slots,
+                base_pc,
             );
             debug_assert_eq!(end_hw, li);
             match cc {
@@ -3075,6 +3555,7 @@ pub fn translate_at(ops: &[u16], segs_in: &[u32], base_pc: u32, entry_pc: u32) -
             cycle,
             &segs,
             &mut slots,
+            base_pc,
         );
         debug_assert_eq!(end_hw, li);
         // latch: completed iter counted, continue; fallthrough (Bcc only)
@@ -3177,9 +3658,61 @@ pub fn region_meta(ops: &[u16], segs: &[u32], base_pc: u32) -> u32 {
     (b.is_loop as u32) | ((b.exit_off as u32) << 1)
 }
 
+/// Direct-mode region shape (same packing; see translate_direct).
+pub fn region_meta_direct(ops: &[u16], segs: &[u32], base_pc: u32) -> u32 {
+    let b = translate_direct(ops, segs, base_pc);
+    (b.is_loop as u32) | ((b.exit_off as u32) << 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_poll_loop_ops() {
+        // eth_http eth_recv_packet wait-loop halfwords, taken from the
+        // shipped bin (od -t x2 at file offset 0x8f8). Before these were
+        // classified the RX loop (42% of a traffic run's instructions)
+        // could never form, which capped translated share at 22.7%.
+        // TST.W r3,#2 (F013 0F02): flags only; the expansion is a plain
+        // imm8, so C is kept (carry == None).
+        if let Class::Emit(Item::TstW { rn, imm, carry }, 2) = classify(&[0xF013, 0x0F02], 0) {
+            assert_eq!((rn, imm), (3, 2));
+            assert!(carry.is_none(), "plain imm8 keeps the incoming C");
+        } else {
+            panic!("TST.W r3,#2 not classified");
+        }
+        // UBFX r3, lr, #0, #10 (F3CE 0309).
+        if let Class::Emit(Item::Ubfx { rd, rn, lsb, width }, 2) = classify(&[0xF3CE, 0x0309], 0)
+        {
+            assert_eq!((rd, rn, lsb, width), (3, 14, 0, 10));
+        } else {
+            panic!("UBFX not classified");
+        }
+        // CBNZ r3, 0x8000972 from 0x800090a (BB93): a register test, not
+        // xPSR, and the CBZ immediate layout is i:imm5:'0' (not B.cond's).
+        if let Class::BCond { cc, wide, size } = classify(&[0xBB93], 0) {
+            assert!(!wide);
+            assert_eq!(size, 1);
+            assert_eq!(cc, rtest_cc(3, true));
+            assert_eq!(
+                branch_target(&[0xBB93], 0, false, 0x0800_090a),
+                Some(0x0800_0972)
+            );
+        } else {
+            panic!("CBNZ not classified");
+        }
+        // CBZ r2, +6 (B11A) is the zero polarity of the same encoding.
+        if let Class::BCond { cc, .. } = classify(&[0xB11A], 0) {
+            assert_eq!(cc, rtest_cc(2, false));
+            assert_eq!(
+                branch_target(&[0xB11A], 0, false, 0x1000),
+                Some(0x1000 + 4 + 6)
+            );
+        } else {
+            panic!("CBZ not classified");
+        }
+    }
 
     #[test]
     fn loop_shapes() {
@@ -3524,4 +4057,52 @@ mod tests {
         // has run + mem + 9 global exports and ends with func end.
         assert_eq!(*b.bytes.last().unwrap(), 0x0B);
     }
+    #[test]
+    /// eth_http `eth_recv_packet` RX wait loop, real firmware bytes from
+    /// 0x080008f8 (130 bytes; the latch is hw 64 -> top). The hot path is
+    /// 10 instructions (poll, tst, bne, lsls, bmi, ubfx, cbnz -> skip to
+    /// hw 61, add, cmp, bne); everything between hw 10 and hw 61 is the
+    /// cold frame handler, which is full of instructions the emitter does
+    /// not support (pc-relative loads, `pop {pc}`, shifted-register adds).
+    ///
+    /// Before hole-tolerant translation the scan died at hw 10 (the first
+    /// MMIO store is fine, hw 20 is the first unsupported item), so the
+    /// outer loop never formed and every re-entry cost a 4096-instruction
+    /// interpreted chunk. Now the unsupported items become resume exits
+    /// and the enclosing loop shapes: the cbnz at hw 9 is an internal skip
+    /// straight to hw 61, so the hot iteration is emitted as straight-line
+    /// translated code.
+    #[test]
+    fn direct_eth_rx_wait_outer_loop() {
+        let ops: [u16; 80] = [
+            0xf8dc, 0x3618, 0xf013, 0x0f02, 0xd10c, 0x07db, 0xd427, 0xf3ce,
+            0x0309, 0xbb93, 0x608c, 0xf8dc, 0x3618, 0xf013, 0x0f02, 0xf10e,
+            0x0e01, 0xd0f2, 0xf8dc, 0x3618, 0x4a1e, 0x491f, 0xf023, 0x0302,
+            0xf8cc, 0x3618, 0xf8dc, 0x3620, 0xeb03, 0x0343, 0xeb02, 0x2343,
+            0x603b, 0xf8dc, 0x2624, 0xf8dc, 0x3620, 0x6032, 0xeb0c, 0x0cc3,
+            0x4a13, 0xf8cc, 0x1628, 0x2301, 0x4618, 0x6093, 0xbdf0, 0x6813,
+            0x061b, 0xd5fc, 0x6050, 0xf8dc, 0x3618, 0xf023, 0x0301, 0xf8cc,
+            0x3618, 0xf3ce, 0x0309, 0x2b00, 0xd0cc, 0xf10e, 0x0e01, 0x45ae,
+            0xd1be, 0x4a05, 0x6813, 0x061b, 0xd5fc, 0x2354, 0x6053, 0x2000,
+            0xbdf0, 0xbf00, 0x0008, 0x2000, 0x1000, 0x4001, 0x4b40, 0x004c,
+        ];
+        let base = 0x0800_08f8u32;
+        // One SRAM segment so the direct emitter has a region to address.
+        let segs: [u32; 3] = [0x2000_0000, 0, 0x2_0000];
+        let b = translate_at_direct(&ops, &segs, base, base);
+        assert!(b.is_loop, "outer RX loop must shape (holes + skip)");
+        assert_eq!(b.consumed, 65, "li(64) + latch(1) halfwords");
+        assert!(!b.bytes.is_empty());
+        // Mid-body entry at hw 61 (`add.w lr`): the driver submits the
+        // outer loop from the cbnz's target, i.e. inside its own body.
+        let b2 = translate_at_direct(&ops, &segs, base, base + 61 * 2);
+        assert!(b2.is_loop, "mid-entry at the cbnz target must shape");
+        assert_eq!(b2.consumed, 65);
+        // Entry at hw 5 (the inner re-check) is still the outer loop's
+        // body, so it must shape as well rather than decline.
+        let b3 = translate_at_direct(&ops, &segs, base, base + 5 * 2);
+        assert!(b3.is_loop);
+        assert_eq!(b3.consumed, 65);
+    }
+
 }

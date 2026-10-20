@@ -362,6 +362,17 @@ impl Cpu {
         best.map(|(_, _, irq)| irq)
     }
 
+    /// Non-consuming delivery predicate: an exception is enabled, unmasked
+    /// and preempting right now, i.e. the run loop would take it after the
+    /// next instruction. The TB driver calls this between translated runs
+    /// (which never touch the NVIC), so interrupt-driven firmware keeps
+    /// exact delivery with translated blocks enabled. Raw NVIC pending is
+    /// NOT the right test: a disabled or masked IRQ would make a naive
+    /// driver loop step one instruction per submission.
+    pub fn pending_ready(&self, sys: &WasmSystem) -> bool {
+        self.select_pending(sys).is_some()
+    }
+
     /// Raise a synchronous exception (SVC insn, MPU fault, UsageFault):
     /// take it when its priority permits activation, else escalate to
     /// HardFault (a synchronous fault cannot wait — silicon escalates; the

@@ -4987,3 +4987,458 @@ identical code paths. The fire-counter tests below are the regression pins.
 - Debug scaffolding stripped before commit (TB_PROF/TB_BIGRUNS/TB_MINRUN
   env → const TB_MIN_RUN=5000). `?v=`: vendor 51, emulator 4/5/5,
   app 67, worker 11, doom 92/worker 59/__doomVer 91.
+
+## 44. Shared-memory translated blocks (S1+S2): direct emission
+
+The mirror (S0..§43) kept a private RAM copy: every translated hit synced
+pages in, every store recorded a dirty range, every demand-page miss
+re-executed the whole attempt (dropping its instruction count), and each
+hit paid ~32us of JS sync/writeback bookkeeping. S1+S2 remove all of it
+by emitting translated blocks against the MODEL'S OWN linear memory.
+
+### S1 — layout stability (committed `0853e70`)
+- `FlatMemory.layout_version` bumps ONLY where a region buffer can move:
+  `load()` (flash/RAM sizing) and `map_extra()`. Plain guest stores never
+  grow a buffer, so pointers are stable for the life of a loaded image.
+- `FlatMemory::region_offsets()` / wasm `WasmCpu::region_offsets` export a
+  flat [guest_base, buffer_ptr_offset, len] triple table, flash FIRST.
+  A wasm32 pointer IS an offset into the module's memory, so a guest byte
+  maps to `ptr_off + (addr - base)`.
+- `WasmCpu::layout_version()` exposes the stability key. The driver keys
+  its translation cache on it and clears every cached module when it
+  changes (baked offsets just died). Native tests:
+  `layout_version_bumps_on_grow_only`, `layout_stable_across_doom_run`.
+
+### S2 — direct emission (`tb_translate*_direct`)
+- `tb_xlate.rs`: `translate_direct` / `translate_at_direct` emit the same
+  shapes with the region table offset appended as an internal sentinel
+  (`DIRECT_MARK`), so no signature churn. In direct mode:
+  - segment offsets are host-memory offsets (no mirror base),
+  - the validity bitmap and dirty trailer are NOT emitted,
+  - the module IMPORTS `env.memory` (min 1 page) instead of declaring and
+    exporting its own (`export_mem` is skipped) — mirror modules stay
+    self-contained for the Node glue,
+  - bit31 of a segment offset marks it STORE-READ-ONLY (flash): stores
+    there skip the segment and miss-exit, so flash protection/programming
+    keep the model's semantics; loads stay direct.
+- Miss protocol: on a miss the block sets global 21 (`tb_pc`) to the PC of
+  the FAULTING ITEM and returns kind 1 with the exact prefix count. The
+  driver sets pc = tb_pc and resumes interpretation there — no retry, since
+  every preceding store is already committed to live memory (a retry would
+  re-execute them). Mirror mode keeps the retry-from-entry protocol.
+- Driver (`site/emulator.js`): `tb_direct` option (null = auto). Auto is
+  ON when the glue's `__wbg_init()` returns exports with `memory` (the web
+  build); the nodejs glue is synchronous and hands back no memory handle,
+  so Node/`pkg` keeps the mirror path. `tbExec` is split into
+  `tbExecMirror` (unchanged) + `tbExecDirect` (regs in, run, regs out,
+  resume pc; no mirror globals beyond dirtyCount/validity, which are
+  unused). `?tb=1&tbmirror=1` forces mirror in the page for A/B.
+
+### Correctness pins
+- `.pw-scratch/test_tb_direct.mjs 20` — eth_http 20M inst: tb-off / mirror
+  / direct produce a BYTE-IDENTICAL UART transcript over the whole common
+  prefix (25724 B, 83 HTTP rounds); direct 170 hits / 0.73M translated /
+  miss=1 vs mirror 23 hits / 0.10M / miss=17. Direct is never behind.
+- `.pw-scratch/test_tb_direct_sem.mjs` (14 checks) — byte memcpy loop with
+  post-index writeback, poll loop, RO-flash store miss (kind 1, tb_pc,
+  prefix regs, memory untouched), unmapped load miss, mid-body entry.
+- All 15 TB differential harnesses still PASS; cargo 279/279.
+
+### Default ON for the console page (2026-10-20)
+`site/app.js` boots every preset with translated blocks enabled
+(`tb: !params.has('notb')`), so the direct path is what users get.
+Escapes: `?notb=1` = plain interpreter, `?tbmirror=1` = mirror path.
+- Page probe WITHOUT the `?tb` flag (i.e. the shipped default):
+  eth_http best 91.74 / median 88.50 vs `?notb=1` best 41.95 / median
+  41.43 — **2.14x** and the 80+ target is met by default. Re-measured
+  after the delivery gate below (paired, loaded box): 89.77 / 88.03
+  median vs notb 42.37 — unchanged.
+- Live-UI A/B (`.pw-scratch/cdp_live_ab.mjs`, the console page's own
+  worker loop at its real 6 x 20k burst cadence, `#stMips` sampled for
+  8 s after TCP traffic starts, order-discriminated both ways):
+  off 23.5/28.4/28.3/20.3 vs tb 36.1/36.7/33.7/37.4 → **~+30%** in the
+  configuration a user actually plays with (both orders agree; the
+  earlier always-off-first run could have been a warm-up artifact, the
+  reversed order rules that out).
+
+### Delivery gate + host-script pacing (found by the default-on suite)
+Turning TB on for every preset made the 44-preset browser suite fail four
+cases; both root causes are structural, not tuning:
+- **TB declines while guest exception delivery is on** (`deliverIrqs` =
+  `enable_irqs || irq_eth || freertos || lowpower`). Translated blocks run
+  guest instructions in their own module and never touch the NVIC, so a
+  pending SysTick/ETH exception cannot be taken while one runs — it waits
+  for the next interpreter dispatch, which on a tight translated loop may
+  never come. Symptom: `fpu_irq_test` (`FPU IRQ all PASS` → `FAIL`),
+  `eth_adv` (`ADV Test: done` → `FAIL`), `eth_feat_pps` (timeout) — all
+  three are IRQ firmware, all three pass again with the gate. The gate is
+  in `tbEnabled` (`site/emulator.js`), so those presets run exactly the
+  interpreter path they were validated on; polling firmware is unaffected.
+  (A finer fix — cap translated fuel and drain `has_pending_interrupt()`
+  to the interpreter between slices — is possible but changes interrupt
+  latency; do it only with the rate-sensitive presets as the gate.)
+- **Host-scripted devices must advance per STEP, not per burst**
+  (`site/emu-worker.js`). The worker used to call `usbhost.frame()` /
+  `driveDcmi()` / `driveFeatHooks()` once after a burst of up to 12 steps
+  or 20 ms of wall time. Translated bursts run ~2x faster, so the guest
+  advanced ~2x further per host tick and `usb_cdc_test` began timing out
+  (`USB FAIL`). They now advance inside the step loop whenever a host
+  script is active (`hosted` = usbhost || dcmiPhases || featHooks), which
+  is also the node-harness cadence they were validated at. Cost is a
+  string `includes` per step for those presets only.
+
+### Measured
+- Page probe (`.pw-scratch/cdp_mips.mjs --tb eth_http`, paired A/B same
+  box, 500k-inst bursts): direct best 91.07/90.58, median 90.09/88.65;
+  mirror best 81.57/89.93, median 79.49/79.24 → direct ~+11% on medians,
+  and the 80+ MIPS page target holds.
+- Spin-heavy Node A/B (`.pw-scratch/eth_spin_ab.mjs`, 200k steps, 55%
+  translated): off 36.1, mirror 68.0, direct 67.0 MIPS — parity, because
+  in that shape the mirror's per-hit tax is amortized over ~94k translated
+  instructions per hit. Direct's win is on the page, where hits are
+  shorter-lived.
+- DOOM gameplay: TB share is ~0.1% in a 30M window (chunk starts rarely
+  land on loop tops; the memcpy/VDP loops are entered from straight-line
+  code), so no TB mode moves DOOM — measure it with the interpreter, not
+  the TB driver. The honest DOOM pill harness is
+  `.pw-scratch/doom_play_modes.mjs` (drive to menuActive==0/gs==0 first;
+  an early "phase==play" exit still sits at the NIGHTMARE confirm).
+- Blinky has 0 TB hits in every mode (its delay loop is not a translatable
+  shape) — blinky MIPS is interpreter-only by construction.
+
+### S2.5 — IRQ delivery predicate: TB on for interrupt firmware (2026-10-20)
+
+S2 shipped with TB declining every delivery-enabled preset
+(`deliverIrqs`), because a translated run never touches the NVIC, so a
+pending SysTick/ETH exception waited for the next interpreter dispatch —
+on a tight translated loop that could be never (`fpu_irq_test`,
+`eth_adv`, `eth_feat_pps` all failed under default-on). S2.5 keeps TB
+for those classes by handing control back to the interpreter exactly
+when an exception is deliverable:
+
+- **Core** (`cpu/mod.rs`): `Cpu::pending_ready()` — the same selection
+  predicate the delivery path itself uses: enabled + unmasked
+  (PRIMASK/BASEPRI/FAULTMASK) + preempting (priority vs active). Raw
+  NVIC pending is NOT usable: disabled or masked IRQs stay pending
+  forever and the driver would spin delivering nothing. Exported as
+  `pending_exception_ready()` (`lib.rs`). Native test
+  `pending_ready_matches_delivery_gates` pins the gates.
+- **Driver** (`site/emulator.js`): `tbEnabled` requires
+  `!deliverIrqs || typeof cpu.pending_exception_ready === 'function'`
+  (old bundles keep the S2 gate). `tbRun` checks
+  `cpu.pending_exception_ready()` before every submission and runs
+  `cpu.step(1)`, which takes the exception exactly like the interpreter.
+  Model pends arrive at run boundaries (`tick_n` after each translated
+  run, MMIO misses, step-end `tick_peripherals`), so no pending can
+  appear mid-translated-run and be missed; one is delivered at the next
+  boundary.
+
+**SysTick cadence note (why freertos_test's TIM2 print moved).**
+`Nvic::maybe_set_systick_intr_pending` pends at most ONE tick per check
+and resets `last = n` (no accumulation). The interpreter checks once per
+JS step, so at 100k steps and ~61k-instruction periods it drops ticks;
+TB checks per translated run and delivers a near-nominal rate. TIM2 is
+instruction-clocked, so the same guest busy-loop sees a slightly larger
+advance under TB (6000 → 6220 counts, +3.7%) because more ISR work runs
+inside the window. The functional transcript and every PASS marker are
+identical, and `site/probe_freertos.mjs` PASSes with `TB=1` (4 TCBs,
+maxTick 100). This is TB being *closer* to silicon (SysTick would fire
+during a long step on hardware too), not a regression — but any guest
+that measures tick cadence inside one step will see the difference.
+`.pw-scratch/tb_irq_diff.mjs` normalizes that one timing line for
+freertos and keeps every other byte strict.
+
+Measured (`.pw-scratch/tb_irq_diff.mjs`, same box, back-to-back):
+
+| case | UART | hits | translated / executed | tb-off → tb-on wall |
+|---|---|---|---|---|
+| fpu_irq (SysTick + FPU) | identical | 18 | 1.73M / 1.90M (91%) | 0.07 → 0.02 s |
+| freertos (SVC/PendSV/SysTick) | identical (timing line normalized) | 61 | 5.88M / 6.10M (96%) | 0.16 → 0.03 s |
+| eth_dhcp (irq_eth) | identical | 10 | 0.61M / 1.00M (61%) | 0.06 → 0.02 s |
+| eth_irq (irq_eth) | identical | 6 | 0.31M / 0.70M (44%) | 0.02 → 0.01 s |
+
+`TB=1` existing harnesses all PASS: `test_fpu_irq.mjs` (18 IRQs, S0–S3 +
+FPSCR intact), `test_eth_irq_wasm.mjs` (PING → ISR → PONG),
+`test_flow_wasm.mjs` (2 DHCP/TCP/HTTP rounds), `probe_freertos.mjs`.
+Page-side: `fpu_irq_test` boots to `FPU IRQ all PASS` with default TB
+(`.pw-scratch/one_case.mjs fpu`).
+
+### LE condition bug: a silent-wrong latch, found by eth_feat_test (2026-10-20)
+
+`emit_cond`'s LE arm emitted `Z || N==V` — the **GE** test — instead of
+`Z || N!=V`. Every pre-existing TB test loop used BNE/BCS/BGE (the DOOM
+copy/VDP loops are BNE/BCS/BGE too), so the arm was never exercised until
+`eth_feat_test`'s `for (volatile int i = 0; i < 20000; i++);` delay spins
+(`ble.n` latches). Under TB those spins collapsed from 20000 iterations to
+**one**: the guest finished a "20 ms" delay inside a single 20k-instruction
+step, so the PHY read landed before the harness hook could raise link —
+`LINK UP FAIL`, then RBUS/MFC/ROS/RXWOL cascaded off the same shortened
+delays. Tells to recognize it elsewhere: translated runs whose reported
+`insts` disagree with `iterations x body`, and firmware delays vanishing.
+
+Fix: `i32_eq` → `i32_ne` (the code comment already said `N!=V`; the
+condition was the only disagreement). Pinned by
+**`site/test_tb_xlate.mjs`** (wired into `npm test` and `test:unit`):
+- all 14 condition codes x all 16 NZCV patterns against an independent JS
+  truth table (224 cases, taken = fuel-out kind 2, not-taken = kind 0),
+- the exact firmware spin halfwords (`9b0a 3301 930a 9b0a 4293 ddf9`,
+  base 0x0801b4c) with exact accounting: 120000 instructions for the full
+  20000-iteration run, 6 instructions for a residual counter at the bound,
+  18 at fuel 20 (kind 2).
+The pre-fix build fails `spin-full` (6 instructions, slot 1) and the
+`cc-le-*` rows, so the pin is anti-vacuous. Treat `emit_cond` as a
+silent-wrongness surface: any edit there must keep that sweep green.
+
+### Gotchas
+- Direct stores bypass `write_seq`/`note_write`; only the mirror driver
+  consumed them, so this is safe — do not resurface them as a correctness
+  signal.
+- MPU: both translate paths decline while `is_mpu_enabled()` (the driver
+  gate), because direct accesses would bypass the model's MPU check.
+- Buffers must not move at runtime: any new `Vec` growth path MUST bump
+  `layout_version` or cached blocks will write freed offsets.
+- `emit_cond` has one arm per ARM condition code; a wrong arm is silent
+  mis-execution, not a fault. `site/test_tb_xlate.mjs` sweeps all 14 x 16
+  NZCV — keep it green, and add a shape test when adding a new latch kind.
+- `tb_translate` declines a region whose forward exit sits **before** the
+  latch target (`exit.hw < t`): `for (i=0;i<N;i++)` entered at the init is
+  straight code (the driver interprets the header, then fuses the loop at
+  its top). That is by design — the spin is still translated, one entry
+  later. Don't "fix" it by fusing pre-check branches into the loop.
+- `?v=`: VENDOR_V 55, app.js 73, emulator.js 8, emu-worker.js 17,
+  doom.js 96 / worker 63 / `__doomVer` 95.
+
+### Battery (2026-10-20, S1+S2 tree)
+- `cargo test --release` 279/279 (`.pw-scratch/cargo_s2.log`).
+- `npm test` EXIT=0 (`.pw-scratch/npmtest_s2.log`): all node suites incl.
+  board matrix 156/156, QSPI CDP PASS.
+- `npm run test:wasm` EXIT=0 (`.pw-scratch/wasm_s2.log`): doom PASS
+  (save/load `SAVE ok slot=0` + `LOAD ok slot=0`, peak 0.508, 0% clip).
+- 15 TB differential harnesses + direct_sem 14 checks PASS.
+- **Default-on battery**: first 44-preset browser run with TB everywhere
+  was 40/44 (the four failures above); after the delivery gate + per-step
+  host servicing the same suite is **44/44 PASS, EXIT=0**
+  (`.pw-scratch/browser_tbdef2.log`). Re-verified through `npm test`
+  (`.pw-scratch/npmtest_tbdef.log`).
+- `site/cdp_smoke.mjs` gained `extraQuery` (appended to the preset URL)
+  so a single preset can be run with `?notb=1`/`?tbmirror=1` for gating
+  diagnostics without duplicating the harness.
+
+### Battery (2026-10-20, S2.5 tree — the LE fix included)
+Everything below was run on the tree that ships the LE fix, the IRQ
+predicate, and the `site/test_tb_xlate.mjs` pin:
+- `cargo test --release -- --test-threads=1` **280/280** EXIT=0
+  (`.pw-scratch/cargo_s25.verdict`).
+- **Board matrix with `TB=1`** (every entry translated — IRQ, ETH,
+  peripheral, Arduino): **176/176 pass, 0 fail**, EXIT 0
+  (`.pw-scratch/matrix_tb.log`). This is the coverage number that matters
+  for S2.5: prior to the LE fix this same run failed `eth_feat_test`
+  (`LINK UP FAIL`) on both maps.
+- TB differentials: all 16 scratch harnesses PASS
+  (`test_tb_diff/driver/mem/loop/poll/copy/skip/nest/regidx/call/
+  callmem/midentry/entry/direct_sem` + `test_tb_direct.mjs 20` 25724 B
+  byte-identical UART + `test_tb_integration.mjs`), and the new in-repo
+  `site/test_tb_xlate.mjs` 227 checks PASS (cond sweep + firmware spin).
+- IRQ differential (`.pw-scratch/tb_irq_diff.mjs`): all four cases
+  UART-identical with `direct=true` (fpu_irq 91% translated, freertos
+  96%, eth_dhcp 61%, eth_irq 44%).
+- `site/test_browser.mjs` (44 presets, TB default-on, rebuilt wasm):
+  **44/44 PASS, 0 FAIL**, EXIT 0 (`.pw-scratch/browser_s25b.log`) —
+  `eth_feat_pps` now passes (`WOKE BY WOL`), which was the LE-bug case.
+- `npm test` EXIT=0 (`.pw-scratch/final_npmtest.log`, includes the
+  44/44 browser suite and the QSPI CDP step).
+- `npm run test:wasm` EXIT=0 (`.pw-scratch/final_wasm.log`): doom PASS
+  (`SAVE ok slot=0 bytes=25350`, `LOAD ok slot=0`, peak 0.508, 0.0%
+  clipped), multi-firmware 7/7, lowpower, freertos probe.
+- `.pw-scratch/final_chain.verdict`: `NPMTEST=0 WASM=0`.
+- Diagnostics removed from `site/test_board_matrix.mjs` after the
+  investigation; only two deliberate knobs remain: `tb: process.env.TB
+  === '1'` (run the matrix translated) and `STEP` (step-cadence
+  experiments — the new/deep_periph probes are cadence-sensitive).
+- **Page engine probe** (`.pw-scratch/cdp_mips.mjs`, shipped default,
+  stopped loop): `eth_http` best 89.93 / median 82.64 vs `--notb` best
+  33.05 / median 29.36 → **2.7x engine**. Blinky (0 TB hits) alternated
+  back-to-back, 2 reps each: 44.76/45.05 default vs 45.96/45.17 `--notb`
+  — neutral, as expected (an earlier 22-25 blinky reading was a transient
+  box dip, not a regression; re-measured per the box-noise rule).
+- **Live-UI** (`.pw-scratch/cdp_live_ab.mjs`, worker loop running):
+  `eth_http` off 36.7 vs tb 35.8 (off-first) and off 30.9 vs tb 34.9
+  (tb-first); blinky control 37.9 vs 37.7 (x1.00). Honest read: the
+  engine is 2.7x faster, but the console's live loop saturates at
+  ~35-37 MIPS on the worker→page state toll, so a noisy box cannot
+  resolve the earlier quiet-box +30% — today it is "no regression,
+  ceiling-bound". Raising the live ceiling needs less per-burst state,
+  not more engine speed (S3/S4 change nothing there).
+
+### Live console loop: the ceiling was duty cycle, not the state toll (2026-10-20)
+
+The "saturates at ~35-37 MIPS on the worker→page state toll" verdict above
+was measured but mis-attributed. Instrumenting the worker per burst
+(temporary `WPROF`: `step` / `gather` / `postMessage` / gap, since removed)
+showed **gather 0.05 ms + post 0.06 ms** — the state payload is free — while
+a 12-step burst finished in **18–19 ms of a ~30 ms rAF cycle**: the worker
+idled 35–40% of every frame. `BURST_STEPS` is therefore a throughput knob,
+not just a latency knob.
+
+- Shipped: **`BURST_STEPS` 12 → 24**, **`WALL_BUDGET_MS` 20 → 40**. The
+  2026-10-10 "24 steps is neutral (+7.5%), revert to 12" verdict predates
+  translated blocks: the engine has since ~doubled, so the old burst no
+  longer fills a frame. Numbers are in the code comment.
+- Measured live (`.pw-scratch/cdp_live_rate.mjs`, window rate from `#stInst`,
+  interleaved, 10 s windows): `eth_http` **53.2 / 57.6 MIPS and 44.3 / 48.0
+  HTTP rounds/s** vs `?notb=1` **40.3 / 31.2 MIPS, 33.6 / 26.1 rounds/s**.
+  Burst sweep: 12 → 39.7/41.5, 24 → 50.7/54.5/57.5, 32 → 47.8/58.6,
+  48 → 50.2 (92–97% duty, contention). Plateau 24–32; ship 24.
+- Depth-4 tick pipeline: 44.8/55.3 vs default 54.5/49.6 — noise, keep 2.
+- **Do not size `emu.step(n)` up to chase MIPS**: at 500k steps the meter
+  reads 70 MIPS but HTTP rounds per 20M instructions collapse 83 → 3 (RX is
+  serviced between steps). Step size = RX granularity (keep 100k); burst
+  steps per tick = throughput (24).
+- **`#stMips` is a 0.5 s window refreshed on UI frames** — a single read can
+  show 20 while the window is 55. Sample repeatedly (median) or derive the
+  rate from `#stInst`.
+- Final battery on this tree (`.pw-scratch/battery_final.sh` →
+  `battery_final.verdict`, `BATTERY_EXIT=0`): cargo **283/283**
+  (`--test-threads=1`), `site/test_tb_xlate.mjs` **231 checks**, 17 TB
+  differential harnesses, `TB=1` board matrix **176/176**, `npm test` EXIT 0
+  (44/44 browser presets), `npm run test:wasm` EXIT 0 (doom save/load,
+  peak 0.508, 0% clipped).
+- `?v=`: `VENDOR_V` **56**, `app.js?v=76`, `emulator.js?v=10`,
+  `emu-worker.js?v=21`, `doom.js?v=97`, `doom-worker.js?v=64`,
+  `__doomVer` **96**. The SVD fetches ride the same number (`board.svd +
+  '?v=56'` in app.js, `stm32f407.svd?v=56` in doom.js) — they were still
+  at 49; §0 says bump the vendor group together, and the files are
+  byte-identical, so this only forces a re-fetch. `app.js`/`emu-worker.js`
+  went 75/20 → 76/21 for the `?gate=` knob; `emulator.js` 9 → 10 for the
+  submit fast path (§ next block).
+- **Final engine numbers on the shipped bytes** (`.pw-scratch/cdp_mips.mjs
+  eth_http`, back-to-back pairs): TB best **86.81 / 87.41**, median
+  **85.32 / 86.51** vs `--notb` best **42.92 / 43.14**, median **42.81 /
+  41.74** → **~2.0x**, the 60 MIPS page bar met with margin. A spot
+  re-run after the SVD literal bump read 87.57 best / 86.21 median, and
+  `fpu_irq_test` (TB + IRQ predicate + SVD fetch) still passes in-page
+  with 0 errors.
+
+### Version guard: two stale vendor literals were shipping the old model (2026-10-20)
+
+`site/emu-worker.js` (the console page's default execution path) still
+imported `stm32_periph_wasm.js?v=55` and passed `wasmUrl .wasm?v=55`, while
+every other consumer had moved to 56 — so the worker ran the **previous**
+peripheral wasm against the current glue. Nothing failed (the S2 export set
+is a superset), which is exactly why it survived a green battery.
+
+- Fixed both literals (import + `wasmUrl`), and added
+  **`site/test_versions.mjs`** — a served-asset version guard wired into
+  `npm test` and `test:unit`. It asserts: one `?v=` per asset across
+  `site/*.js|html`, the **vendor group together** (glue + `.wasm` + the
+  `.svd` fetches), every referenced file exists on disk, `__doomVer`
+  numeric, and anti-vacuity counts (20 references / 10 groups, so a
+  silently-dropped reference fails the guard too). Verified anti-vacuous by
+  reverting one literal to 55 — it fails.
+- Gotcha that made the bug invisible: the wasm URL does **not** inherit the
+  JS import's query string, so both need the same literal **explicitly**
+  (that is the `wasmUrl` opt in `createEmulator`); the guard now pins the
+  pair.
+
+### `TB_MIN_RUN` gate: knob added, verdict "keep 5000" (2026-10-20)
+
+`tbMinRun` is now a `createEmulator` option (default 5000) reachable from the
+page as **`?gate=N`** (`app.js` → `emu-worker.js` → driver), so the
+share/overhead trade of the run-length gate can be swept without editing
+code.
+
+- Node sweep (eth_http 20M @20k, 3 reps): TB share 5000 → 44.5%, 2000 →
+  52.4%, 600 → 52.5% (i.e. the gate does cost real share).
+- **But Node wall MIPS for identical configs ranged 24.7–37.0**, so Node
+  cannot decide it; the page probe is the metric. Three interleaved page
+  rounds read 61.05/39.06/38.08, then 45.13/31.53/41.22, then
+  39.78/28.38/35.11 for 5000/2000/600 — every round's first slot (5000)
+  won and the absolute level decayed monotonically across rounds, which is
+  load drift (box at load 32 on 16 cores), not a code effect.
+- **Decision: keep `TB_MIN_RUN = 5000`.** The measurement is contaminated
+  and a 600-gate run buys share by paying a full probe (and possible
+  decline-thrash) on every short run — re-litigating it on a loaded box
+  would be chasing noise. Re-sweep on a quiet box if share ever needs a
+  bump.
+
+### Cost split (`TB_DIAG`) and the submit fast path (2026-10-20)
+
+The old bookkeeping could only say "probe = 26–30% of wall". `TB_DIAG=1`
+now times the parts separately (`probeNs/probeCalls`, `execNs/execCalls`,
+`interpNs/interpCalls`, `readNs/readCalls`, `metaNs/metaCalls`,
+`buildNs/buildCalls`, `cacheHit`, `fastHit`/`fastNs`, `tbDiag()`), and
+`.pw-scratch/tb_diag.mjs` prints the split. Units are **ms**, not ns.
+
+The split on eth_http (20M inst, TB on) said the probe was not just big but
+mostly wasted: every `tbRun` submit paid `wuc.mem_read(pc, 160)` (~6.6 µs)
++ a `bytes.slice()` for the u16 view + the MPU/IT gates +
+`tb_translate_meta` (~16.5 µs) + a back-scan, and for a **mid-body** entry a
+**second** read + meta at the top. The entry was cached, but under
+`'top:'+top` while the submit was keyed by `pc` — so ~60% of submits missed
+and re-ran the whole discovery (`cacheHits 883/2460`).
+
+- **Fix (`site/emulator.js`, JS only — no wasm rebuild): a submit cache
+  `tbFast: pc → { e, base, meta, bytes, off }`.** Direct mode already
+  imports the model's `Memory` (it is the translation target), so the same
+  code bytes are readable in this thread with no wasm round trip:
+  `tbMemView()` keeps a `Uint8Array` over `tbMem.buffer` (rebuilt only when
+  the buffer object changes, i.e. after `memory.grow`), `tbGuestOff()` maps
+  a guest window to a wasm offset through the region table (the `list`
+  entries now carry `off`), and validation is a 160-byte compare
+  (`tbEqAt`) against the copy the entry was built from. A repeat submit is
+  `Map.get` + a 160-byte compare + the existing decline gates
+  (`declined` / `tbShort`) + `tbExec`.
+- **Soundness**: the compare is the same code-identity check the slow path
+  does, just against live memory instead of a fresh read; a changed byte
+  drops the fast entry and the slow path rebuilds. `tbSegsFor()` runs
+  **before** the map read (it is what notices a `layout_version` bump and
+  clears both caches), so a fast entry whose baked region offsets just died
+  can never be executed. Mirror mode never populates the map
+  (`tbGuestOff` → −1), `TB_NOMETACACHE` disables it, and
+  `layout_version` changes clear it with `tbCache`.
+- **Measured (cost split, load-robust ratio)**: lookup/interp
+  **0.333 → 0.147** (−56%); probe per submit 46.3 → **1.3 µs** at 500k steps
+  (2,414 fast hits vs 143 slow submits, `cacheHits 0/2460` — every repeat is
+  now a fast hit). Node wall on the same 20M budget 491 → ~310 ms (box
+  dependent; the ratio is the honest number).
+- **Page A/B** (interleaved 3×; A = pre-change driver, swapped by copying
+  `.pw-scratch/emulator_{A,B}.js` over `site/emulator.js`, same wasm, same
+  tree): `cdp_mips.mjs eth_http` best-of-5 **A 75.76 / 80.65 / 86.21** vs
+  **B 82.51 / 92.42 / 92.25** — the fast path wins all three rounds
+  (+9%, +15%, +7%; mean +10%). Medians A 66.84 / 76.45 / 78.99 vs B
+  53.19* / 89.61 / 83.89 (*round 1 B caught a boot-warmup outlier; the box
+  was at load 12–16).
+- **Live console rate** (12 s windows, same interleave): A 44.8 / 47.1 /
+  40.6 MIPS at 37.3 / 39.2 / 33.9 rounds/s vs B 40.1 / 48.3 / 47.5 at
+  33.4 / 40.2 / 39.6 — mean **+2.5%/+2.7%**, i.e. neutral within noise, as
+  expected: the live loop is duty/state-bound, not engine-bound (see the
+  "ceiling was duty cycle" block above). The engine win shows up in the
+  probe, not in the console meter.
+- **Battery on the fast-path tree** (`.pw-scratch/fast_verify.log`,
+  `fast_battery.log`, `browser_fast.log`, `fast_rest.log`): cargo
+  **283/283**, 17 TB differential harnesses + `site/test_tb_xlate.mjs`
+  **231 checks**, `TB=1` board matrix **176/176**, `site/test_browser.mjs`
+  **44/44**, `site/test_qspi_cdp.mjs` / `test_npm_demo.mjs` /
+  `npm run test:wasm` / `test_flow_wasm` / `test_eth_irq_wasm` /
+  `test_fpu_irq` all EXIT 0, and the byte-identical 20M transcript check
+  (`test_tb_direct.mjs 20`) still passes with translated instruction counts
+  bit-identical (12,771,547) before and after.
+  A detached `npm test` run was killed twice by the environment mid-chain
+  (no verdict line, log simply stops), so the gates were first proven
+  individually; **then one clean foreground `npm test` finished EXIT=0**
+  (`.pw-scratch/npmtest_final.log`, 25 min): board matrix **176/176**,
+  browser suite **44/44**, `TB-XLATE PASS 231 checks`, QSPI CDP PASS,
+  `VERSIONS PASS`, 27/27 node suites.
+- **Final engine pair on the shipped bytes** (after the layout-order
+  hardening, interleaved, same box): `?notb=1` best **35.31 / 44.13**
+  (median 32.13 / 30.64) vs TB best **71.43 / 95.06** (median 70.42 /
+  93.28) — 2.0-3.1x, bar cleared. In-page spot check on the same files:
+  `eth_http`, `fpu_irq_test`, `eth_adv`, `usb_cdc_test` all PASS.
+- **Measurement gotcha (new)**: this box runs the **`powersave`** CPU
+  governor, so the first samples of a `cdp_mips` run are at low clocks and
+  the last ones at boosted clocks — a 43→54→58→95 ramp is clock ramp, not
+  JIT warm-up or a code effect. Consequence: read the **last/median**
+  samples and **always interleave with `?notb=1`** for the ratio; a single
+  early sample can read ~40% low. (Also seen: a 99%-CPU esp32-emu process
+  and another project's vitest pinning cores — leave them alone, use the
+  ratio.)

@@ -14,6 +14,11 @@ const firmware = new Uint8Array(readFileSync(new URL('../firmware/fpu_irq_test/f
 
 const emu = await createEmulator({
     firmware, bindings, svdXml, wasmInit: wasmBytes, enable_irqs: true,
+    // Opt-in translated blocks: the driver hands ready exceptions to the
+    // interpreter between runs (pending_exception_ready), so IRQ delivery
+    // stays exact. `TB=1 node site/test_fpu_irq.mjs` must print the same
+    // marker and IRQ count as the interpreter path.
+    tb: process.env.TB === '1',
 });
 
 const uart = [];

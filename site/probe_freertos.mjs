@@ -9,6 +9,8 @@ const firmware = new Uint8Array(readFileSync(new URL('../firmware/freertos_test/
 const emu = await createEmulator({
     firmware, bindings, svdXml,
     wasmInit: wasmBytes, enable_irqs: true, freertos: true,
+    // Opt-in TB differential: `TB=1 node site/probe_freertos.mjs`.
+    tb: process.env.TB === '1',
 });
 
 const uc = emu.uc, M = emu.Module || { ARM_REG_PC: 15, ARM_REG_LR: 14, ARM_REG_PSP: 13, ARM_REG_SP: 13, ARM_REG_CONTROL: 20 };

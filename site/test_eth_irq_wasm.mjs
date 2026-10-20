@@ -21,6 +21,8 @@ const emu = await createEmulator({
     firmware: fw, bindings, svdXml, wasmInit: wasmBytes,
     enable_irqs: true, irq_eth: true, eth,
     onTx: (pkt) => { frames.push(new Uint8Array(pkt)); },
+    // Opt-in TB differential: `TB=1 node site/test_eth_irq_wasm.mjs`.
+    tb: process.env.TB === '1',
 });
 
 let uart = '';

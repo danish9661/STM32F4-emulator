@@ -113,6 +113,31 @@ impl FlatMemory {
     fn in_ram(&self, addr: u32) -> bool {
         addr >= self.ram_base && (addr - self.ram_base) < self.ram.len() as u32
     }
+
+    /// Region table for shared-memory translation: flat triples
+    /// [guest_base, buffer_ptr_offset, len]. A wasm32 pointer IS an
+    /// offset into the module's linear memory, so the translated block
+    /// can address a guest byte at `addr` as `ptr_offset + (addr - base)`
+    /// directly — no mirror, no copy, no sync. Flash comes first and is
+    /// marked read-only by the caller (bit31 of the offset): guest stores
+    /// to flash must keep the model's semantics (ignored, or programmed
+    /// only while unlocked), so translated stores miss-exit instead.
+    /// Buffers never move while `layout_version` is unchanged (plain
+    /// stores never grow them); the driver keys its cache on that.
+    pub fn region_offsets(&self) -> Vec<u32> {
+        let mut out: Vec<u32> = Vec::with_capacity(3 * (2 + self.extra.len()));
+        let mut push = |base: u32, p: *const u8, len: usize| {
+            out.push(base);
+            out.push(p as usize as u32);
+            out.push(len as u32);
+        };
+        push(self.flash_base, self.flash.as_ptr(), self.flash.len());
+        push(self.ram_base, self.ram.as_ptr(), self.ram.len());
+        for r in self.extra.iter() {
+            push(r.base, r.data.as_ptr(), r.data.len());
+        }
+        out
+    }
     #[inline]
     fn note_write(&mut self) {
         self.write_seq = self.write_seq.wrapping_add(1);

@@ -2024,6 +2024,32 @@ fn irq_priority_order() {
 }
 
 #[test]
+fn pending_ready_matches_delivery_gates() {
+    // The TB driver's delivery predicate must mirror the run loop exactly.
+    // Raw NVIC pending is not enough: a pending-but-disabled or masked IRQ
+    // would make a naive driver fall back to one interpreted instruction
+    // per translated submission (livelock by a thousand cuts).
+    let _g = lock_boot();
+    let (mut cpu, mut mem) = boot(&irq_test_image(false));
+    let sys = crate::sys();
+    cpu.deliver_irqs = true;
+    assert!(!cpu.pending_ready(sys), "nothing pending");
+    sys.p.nvic.borrow_mut().set_intr_pending(0);
+    assert!(!cpu.pending_ready(sys), "pending but not enabled");
+    mem.write32(0xE000E100, 0x1); // ISER0: IRQ0
+    assert!(cpu.pending_ready(sys), "enabled + unmasked");
+    cpu.regs.primask = 1;
+    assert!(!cpu.pending_ready(sys), "PRIMASK masks delivery");
+    cpu.regs.primask = 0;
+    assert!(cpu.pending_ready(sys), "unmasked again");
+    // Consuming by taking it clears the predicate (tail of the gate).
+    let n = cpu.run(sys, &mut mem, 64);
+    assert!(n > 0);
+    no_fault(&cpu, &mem);
+    assert!(!cpu.pending_ready(sys), "taken means no longer ready");
+}
+
+#[test]
 fn basepri_masks_and_unmasks() {
     let _g = lock_boot();
     let (mut cpu, mut mem) = boot(&irq_test_image(false));

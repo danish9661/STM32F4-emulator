@@ -215,12 +215,14 @@ impl Code {
 /// Whole-module builder (counted so finish() is exact).
 pub struct Module {
     types: Vec<u8>,
+    imports: Vec<u8>,
     funcs: Vec<u8>,
     mems: Vec<u8>,
     globals: Vec<u8>,
     exports: Vec<u8>,
     codes: Vec<u8>,
     n_types: usize,
+    n_imports: usize,
     n_funcs: usize,
     n_mems: usize,
     n_globals: usize,
@@ -230,8 +232,8 @@ pub struct Module {
 
 impl Module {
     pub fn new() -> Self {
-        Self { types: Vec::new(), funcs: Vec::new(), mems: Vec::new(), globals: Vec::new(), exports: Vec::new(), codes: Vec::new(),
-            n_types: 0, n_funcs: 0, n_mems: 0, n_globals: 0, n_exports: 0, n_codes: 0 }
+        Self { types: Vec::new(), imports: Vec::new(), funcs: Vec::new(), mems: Vec::new(), globals: Vec::new(), exports: Vec::new(), codes: Vec::new(),
+            n_types: 0, n_imports: 0, n_funcs: 0, n_mems: 0, n_globals: 0, n_exports: 0, n_codes: 0 }
     }
     /// One function type: params + results (each a vec of valtypes).
     pub fn functype(&mut self, params: &[u8], results: &[u8]) {
@@ -250,6 +252,22 @@ impl Module {
         self.mems.push(0x00);
         leb_u32(min_pages, &mut self.mems);
         self.n_mems += 1;
+    }
+    /// Import a memory (`(module, name)`, min pages, no max). The imported
+    /// memory becomes index 0, so translated loads/stores address the
+    /// HOST's linear memory directly (shared-memory translation: no
+    /// mirror, no sync). Declaring no max accepts any host memory; the
+    /// min is a lower bound only, so growth is irrelevant. Section 2
+    /// must precede the function section (finish() emits in order).
+    pub fn import_memory(&mut self, module: &str, name: &str, min_pages: u32) {
+        leb_u32(module.len() as u32, &mut self.imports);
+        self.imports.extend_from_slice(module.as_bytes());
+        leb_u32(name.len() as u32, &mut self.imports);
+        self.imports.extend_from_slice(name.as_bytes());
+        self.imports.push(0x02); // kind: memory
+        self.imports.push(0x00); // limits: min only
+        leb_u32(min_pages, &mut self.imports);
+        self.n_imports += 1;
     }
     pub fn global_mut_i32(&mut self, init: u32) {
         // Mutable i32 global, const initializer (inits used are small
@@ -300,6 +318,7 @@ impl Module {
             section(id, &body, &mut out);
         };
         put(1, &self.types, self.n_types);
+        put(2, &self.imports, self.n_imports);
         put(3, &self.funcs, self.n_funcs);
         put(5, &self.mems, self.n_mems);
         put(6, &self.globals, self.n_globals);

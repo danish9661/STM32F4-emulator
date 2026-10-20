@@ -46,6 +46,11 @@ export class WasmCpu {
     get_sregs(): Uint32Array;
     get_xpsr(): number;
     /**
+     * Buffer-stability key for translated-block caches (bumped only when
+     * a region buffer can move, i.e. load()/map_extra() growth).
+     */
+    layout_version(): number;
+    /**
      * Load firmware bytes (writes through flash protection).
      */
     load_firmware(data: Uint8Array, base: number): void;
@@ -74,8 +79,21 @@ export class WasmCpu {
      */
     mem_write_seq(): bigint;
     constructor(sp: number, pc: number, flash_size: number, ram_size: number);
+    /**
+     * Non-consuming: the core would take an exception at the next
+     * instruction boundary (enabled + unmasked + preempting). Translated
+     * blocks never touch the NVIC, so the TB driver checks this between
+     * runs and lets the interpreter deliver. See Cpu::pending_ready.
+     */
+    pending_exception_ready(): boolean;
     read32(addr: number): number;
     read8(addr: number): number;
+    /**
+     * Region table for shared-memory translation: flat [guest_base,
+     * buffer_ptr_offset, len] triples (flash first). See
+     * FlatMemory::region_offsets.
+     */
+    region_offsets(): Uint32Array;
     reset_cpu(sp: number, pc: number): void;
     /**
      * Enable/disable inline guest exception delivery (NVIC SysTick, ETH,
@@ -1039,11 +1057,15 @@ export function tb_translate(ops: Uint16Array, segs: Uint32Array, base_pc: numbe
  */
 export function tb_translate_at(ops: Uint16Array, segs: Uint32Array, base_pc: number, entry_pc: number): Uint8Array;
 
+export function tb_translate_at_direct(ops: Uint16Array, segs: Uint32Array, base_pc: number, entry_pc: number): Uint8Array;
+
 /**
  * Halfwords consumed by translating the same run (call alongside
  * tb_translate; translation is deterministic and cheap for blocks).
  */
 export function tb_translate_consumed(ops: Uint16Array, segs: Uint32Array, base_pc: number): number;
+
+export function tb_translate_direct(ops: Uint16Array, segs: Uint32Array, base_pc: number): Uint8Array;
 
 /**
  * Static load slots for the driver mirror page-sync (see
@@ -1060,6 +1082,10 @@ export function tb_translate_loads_at(ops: Uint16Array, segs: Uint32Array, base_
 export function tb_translate_meta(ops: Uint16Array, segs: Uint32Array, base_pc: number): number;
 
 export function tb_translate_meta_at(ops: Uint16Array, segs: Uint32Array, base_pc: number, entry_pc: number): number;
+
+export function tb_translate_meta_at_direct(ops: Uint16Array, segs: Uint32Array, base_pc: number, entry_pc: number): number;
+
+export function tb_translate_meta_direct(ops: Uint16Array, segs: Uint32Array, base_pc: number): number;
 
 /**
  * Static store slots for the driver mirror page-sync (same flat
@@ -1489,11 +1515,15 @@ export interface InitOutput {
     readonly tb_scratch_bytes: () => number;
     readonly tb_translate: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly tb_translate_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly tb_translate_at_direct: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly tb_translate_consumed: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly tb_translate_direct: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly tb_translate_loads: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly tb_translate_loads_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly tb_translate_meta: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly tb_translate_meta_at: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+    readonly tb_translate_meta_at_direct: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+    readonly tb_translate_meta_direct: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly tb_translate_stores: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly tb_translate_stores_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly tb_valid_base: () => number;
@@ -1556,6 +1586,7 @@ export interface InitOutput {
     readonly wasmcpu_get_sp: (a: number) => number;
     readonly wasmcpu_get_sregs: (a: number, b: number) => void;
     readonly wasmcpu_get_xpsr: (a: number) => number;
+    readonly wasmcpu_layout_version: (a: number) => number;
     readonly wasmcpu_load_firmware: (a: number, b: number, c: number, d: number) => void;
     readonly wasmcpu_mem_fault: (a: number) => number;
     readonly wasmcpu_mem_read: (a: number, b: number, c: number, d: number) => void;
@@ -1563,8 +1594,10 @@ export interface InitOutput {
     readonly wasmcpu_mem_write_multi: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly wasmcpu_mem_write_seq: (a: number) => bigint;
     readonly wasmcpu_new: (a: number, b: number, c: number, d: number) => number;
+    readonly wasmcpu_pending_exception_ready: (a: number) => number;
     readonly wasmcpu_read32: (a: number, b: number) => number;
     readonly wasmcpu_read8: (a: number, b: number) => number;
+    readonly wasmcpu_region_offsets: (a: number, b: number) => void;
     readonly wasmcpu_reset_cpu: (a: number, b: number, c: number) => void;
     readonly wasmcpu_set_deliver_irqs: (a: number, b: number) => void;
     readonly wasmcpu_set_fpscr: (a: number, b: number) => void;

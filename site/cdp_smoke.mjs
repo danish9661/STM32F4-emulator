@@ -41,7 +41,7 @@ function findPython() {
     return null;
 }
 
-export async function runCdpSmoke({ fw, markers, failMarkers = [], domChecks = [], sendText = null, sendExpect = null, timeoutMs = 60000, httpPort = 8137, cdpPort = 9337 }) {
+export async function runCdpSmoke({ fw, markers, failMarkers = [], domChecks = [], sendText = null, sendExpect = null, timeoutMs = 60000, httpPort = 8137, cdpPort = 9337, extraQuery = '' }) {
     const python = findPython();
     if (!python) return { ok: false, reason: 'python not found (skipped)', pageErrors: [] };
     // Quick check that Chrome is actually reachable before starting the test
@@ -88,7 +88,7 @@ export async function runCdpSmoke({ fw, markers, failMarkers = [], domChecks = [
 
         await send('Page.enable');
         await send('Runtime.enable');
-        await send('Page.navigate', { url: `http://127.0.0.1:${httpPort}/console.html?fw=${encodeURIComponent(fw)}` });
+        await send('Page.navigate', { url: `http://127.0.0.1:${httpPort}/console.html?fw=${encodeURIComponent(fw)}${extraQuery ? '&' + extraQuery : ''}` });
 
         const t0 = Date.now();
         let sent = false;

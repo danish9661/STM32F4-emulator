@@ -188,6 +188,7 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
     const emu = await createEmulator({
         firmware: fw, bindings, svdXml: svdFor(B.svd), svdFile: B.svd + '.svd', wasmInit: wasmBytes,
         flash_size: B.flash, ram_size: B.ram, ...opts,
+        tb: process.env.TB === '1',
         ...(netsim ? { onTx: (frame) => { for (const r of netsim.onTx(frame)) emu.injectFrame(r); } } : {}),
     });
     if (script === 'wav') bindings.audio_load_wav(makeWav());
@@ -195,7 +196,7 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
     let uart = '', fed2 = false, fed3 = false, raised = 0, raising = false, echoed = false, collideDone = 0, linkDown = false, linkUp = false, usb = null;
     let ok = false;
     for (let i = 0; i < iters; i++) {
-        emu.step(step);
+        emu.step(Number(process.env.STEP) || step);
         uart += emu.drainUart();
         if (script === 'exti') {
             if (!raising && uart.includes('waiting for PA0 rising edge')) {
@@ -335,6 +336,7 @@ const runOne = async (demo, boardKey, bin, markers, anti, opts, script, iters, s
     else {
         fail++; failed.push(label);
         console.log(`[${label}] FAIL`);
+        if (process.env.DBG_UART) console.log('--- full uart ---\n' + uart.replace(/\r/g, ''));
         console.log('--- tail ---\n' + uart.replace(/\r/g, '').split('\n').filter(Boolean).slice(-6).join('\n'));
     }
     return ok ? 'pass' : 'fail';

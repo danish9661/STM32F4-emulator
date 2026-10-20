@@ -49,8 +49,8 @@
 //     status {text,cls} .. status line updates (same text as page setStatus)
 //     measureResult {id,mips,runs} reply to measure
 //     fault {info} ....... guest fault (faultInfo, for the fault panel)
-import * as bindings from './vendor/stm32_periph_wasm.js?v=52';
-import { createEmulator } from './emulator.js?v=5';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=56';
+import { createEmulator } from './emulator.js?v=10';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
 
@@ -59,11 +59,16 @@ import { createUsbHost } from './usbhost.js';
 // hosts: the worker thread being busy does NOT jank the page, but message
 // round trips (UI state, pokes) queue behind the burst — 20 ms bounds
 // interactive latency like doom-worker's 28 ms.
-const BURST_STEPS = 12;
+const BURST_STEPS = 24;
 const BURST_FINE_STEPS = 6;
-const WALL_BUDGET_MS = 20; // 24-step bursts tried 2026-10-10: adjacent
-// A/B 34.4 vs 37.0 (+7.5%, under the bar) — reverted to 12 for lower
-// latency on identical throughput
+const WALL_BUDGET_MS = 40; // 2026-10-20: live-UI A/B (eth_http, window rate over
+// 10 s, interleaved): 12 steps/20 ms -> 39.7/41.5 MIPS (worker duty 61-69%,
+// ~9 ms idle per frame) vs 24 steps/40 ms -> 50.7/54.5/57.5 MIPS (duty 79-86%).
+// The 2026-10-10 "24 steps is neutral" result predates translated blocks: the
+// engine has since ~doubled, so the old 12-step burst now finishes in 18 ms of
+// a 30 ms frame and the worker idles. 32 steps measured 47.8/58.6 (no better,
+// more latency), 48 -> 97% duty but 50.2 (contention). Latency ~36 ms/burst,
+// same class as doom-worker's 28 ms.
 const TICK_STALE_MS = 200;
 const YIELD_MS = 4;
 
@@ -123,7 +128,7 @@ function selfTick() {
 // ── boot ──
 // BOOT_CFG (all cloneable; big buffers transferred):
 // { fw, svdXml, svdFile, flash_size, ram_size, extraMem[{addr,data}],
-//   uartAddr, name, enable_irqs, irq_eth, freertos, lowpower, tb, eth,
+//   uartAddr, name, enable_irqs, irq_eth, freertos, lowpower, tb, tb_direct, eth,
 //   ext_devices (minus function handlers; fsmcDevices rebuilt here),
 //   gateway (bool), audioWav, dcmiBig, camPrefeed {w,h,pixels} | null,
 //   useNetsim (bool: false in gateway mode) }
@@ -145,7 +150,7 @@ async function boot(c) {
         svdFile: c.svdFile,
         flash_size: c.flash_size,
         ram_size: c.ram_size,
-        wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=52',
+        wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=56',
         extra_mem: c.extraMem || [],
         uart_addr: c.uartAddr,
         enable_irqs: !!c.enable_irqs,
@@ -153,6 +158,8 @@ async function boot(c) {
         freertos: !!c.freertos,
         lowpower: !!c.lowpower,
         tb: !!c.tb,
+        tb_direct: c.tb_direct === undefined ? null : c.tb_direct,
+        tbMinRun: c.tbMinRun,
         eth: c.eth,
         ext_devices: ext,
         onTx: (pkt) => {
@@ -257,7 +264,14 @@ function burst() {
     const t0 = performance.now();
     const fine = !!cfg.fineSteps;
     const maxSteps = fine ? BURST_FINE_STEPS : BURST_STEPS;
-    let res = null, steps = 0;
+    let res = null, steps = 0, chunk = '';
+    // Host-scripted devices (USB host, DCMI camera, ETH feat hooks) advance
+    // per STEP: their scripts react to guest markers and drive model state
+    // the guest is waiting on, so servicing them once per burst ties the
+    // guest/host interleaving to how fast the CPU happens to run (translated
+    // blocks made bursts ~2x faster and the USB demo started timing out).
+    // Per-step is also the node-harness cadence these were validated at.
+    const hosted = !!(usbhost || cfg.dcmiPhases || featHooks);
     txFrames = [];
     for (let s = 0; s < maxSteps; s++) {
         try {
@@ -269,13 +283,16 @@ function burst() {
             return;
         }
         steps++;
+        if (hosted) {
+            chunk += pushUart(emu.drainUart());
+            try { if (usbhost) usbhost.frame(uartBuf); } catch {}
+            try { driveDcmi(); } catch {}
+            try { driveFeatHooks(); } catch {}
+        }
         if (res.stopped) break;
         if (performance.now() - t0 > WALL_BUDGET_MS) break;
     }
-    const chunk = pushUart(emu.drainUart());
-    try { if (usbhost) usbhost.frame(uartBuf); } catch {}
-    try { driveDcmi(); } catch {}
-    try { driveFeatHooks(); } catch {}
+    chunk += pushUart(emu.drainUart());
     const st = gatherState();
     st.inst = res ? res.instCount : 0;    st.pc = res ? res.pc >>> 0 : st.pc;
     st.stopped = res ? !!res.stopped : false;
