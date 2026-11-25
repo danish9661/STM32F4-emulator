@@ -153,6 +153,61 @@ for (const [label, entryHw] of [['top', 0], ['mid5', 5], ['mid61', 61]]) {
     check('rx-loop-top-is-loop', (meta & 1) === 1, `meta=0x${meta.toString(16)}`);
 }
 
-if (fail === 0) console.log(`TB-XLATE PASS ${pass} checks (cond ${14 * 16}, spin 3, rx-loop 4)`);
+// ── 4. Prefix holes (doom.bin, the W_LumpNameHash seed) ────────────────
+// The DOOM boot found this one: a HOLE (unsupported instruction) before the
+// loop top used to be skipped by the prefix walk, so the loop-top seed never
+// ran. In W_LumpNameHash the seed is `movw r0,#5381` at 0x08018a18:
+//   08018a14  subs r1,r0,#1
+//   08018a16  adds r2,r0,#7
+//   08018a18  movw r0,#5381     <- hole (2 halfwords)
+//   08018a1c  ldrb.w r3,[r1,#1]! <- loop top (the bne latch targets it)
+// With the hole skipped, the hash restarted from the CALLER's r0, the WAD
+// name hash table rejected hundreds of lumps and the boot died with
+// `W_GetNumForName: STCFN038 not found!`. A hole before the top must
+// DECLINE the loop shape; the driver then interprets up to the top and
+// translates the clean region there.
+//
+// Both checks fail on the pre-fix build (0x08018a16 used to shape), and that
+// shape was proven to corrupt the table (doom_tb_tableaudit: 1 misplaced
+// entry), so this pair is anti-vacuous.
+const doomBin = new Uint8Array(readFileSync(new URL('../firmware/doom/doom.bin', import.meta.url)));
+const doomOpsAt = (pc, n) => {
+    const off = (pc >>> 0) - 0x08000000;
+    const o = new Uint16Array(n);
+    for (let i = 0; i < n; i++) o[i] = doomBin[off + i * 2] | (doomBin[off + i * 2 + 1] << 8);
+    return o;
+};
+const DOOM_SEGS = new Uint32Array([0x08000000, 0x100000, 0]);
+{
+    const badOps = doomOpsAt(0x08018a16, 48);
+    const bad = bindings.tb_translate_meta_at_direct(badOps, DOOM_SEGS, 0x08018a16, 0x08018a16);
+    check('hash-prefix-hole-declines', (bad & 1) === 0, `meta=0x${bad.toString(16)}`);
+    const goodOps = doomOpsAt(0x08018a1c, 40);
+    const good = bindings.tb_translate_meta_direct(goodOps, DOOM_SEGS, 0x08018a1c);
+    check('hash-loop-forms-at-top', (good & 1) === 1, `meta=0x${good.toString(16)}`);
+    // meta >> 1 is the loop's exit offset: through the bne latch at
+    // 0x08018a38 = 15 halfwords from 0x08018a1c.
+    check('hash-loop-exit-off', (good >> 1) === 15, `exit_off=${good >> 1}`);
+    let ok = false, err = '';
+    try {
+        new WebAssembly.Module(bindings.tb_translate_direct(goodOps, DOOM_SEGS, 0x08018a1c));
+        ok = true;
+    } catch (e) { err = e.message; }
+    check('hash-loop-valid-wasm', ok, err);
+}
+// Synthetic prefix-hole shape: movw HOLE / movs / subs / bne back to movs.
+// t = 2 (the bne target), hole at hw 0 -> decline; the same region entered
+// at the loop top must shape.
+{
+    const ops = new Uint16Array([0xF241, 0x5005, 0x2003, 0x3801, 0xD1FC]);
+    const segs = new Uint32Array([0x20000000, 0, 0x1000]);
+    const bad = bindings.tb_translate_meta_at_direct(ops, segs, 0x1000, 0x1000);
+    check('synthetic-prefix-hole-declines', (bad & 1) === 0, `meta=0x${bad.toString(16)}`);
+    const top = ops.slice(2);
+    const good = bindings.tb_translate_meta_at_direct(top, segs, 0x1004, 0x1004);
+    check('synthetic-loop-at-top', (good & 1) === 1, `meta=0x${good.toString(16)}`);
+}
+
+if (fail === 0) console.log(`TB-XLATE PASS ${pass} checks (cond ${14 * 16}, spin 3, rx-loop 4, holes 6)`);
 else console.log(`TB-XLATE FAIL ${fail} of ${pass + fail}`);
 process.exit(fail === 0 ? 0 : 1);

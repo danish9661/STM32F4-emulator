@@ -58,6 +58,7 @@ export async function createEmulator(opts) {
         // Low-power: trap WFI/WFE and halt the core until a wakeup source
         // (e.g. RTC alarm) fires. Opt-in so default runs keep their speed.
         lowpower = false,
+        flat = false,
     } = opts;
 
     // Browser-safe env (Node `process` does not exist in the page; the
@@ -1478,6 +1479,7 @@ export async function createEmulator(opts) {
         const noBulk = typeof process !== 'undefined' && process.env && process.env.TB_NOBULK;
         const noMetaCache = typeof process !== 'undefined' && process.env && process.env.TB_NOMETACACHE;
         let tbFirstErr = '';
+        let tbDeviceCalls = 0, tbDeviceNotDevice = 0, tbDeviceErr = 0, tbDeviceIrq = 0, tbDeviceReset = 0;
 
 
         let tbPagesIn = 0, tbPagesOut = 0;
@@ -1567,6 +1569,8 @@ export async function createEmulator(opts) {
         const tbStats = () => ({ hits: tbHits, fallbacks: tbFallbacks, entries: tbCache.size,
             translated: tbTranslated, kind3: tbKind3, missRetry: tbMissRetry, firstErr: tbFirstErr,
             missDev: tbMissDev, missMem: tbMissMem,
+            deviceCalls: tbDeviceCalls, deviceNotDevice: tbDeviceNotDevice, deviceErr: tbDeviceErr,
+            deviceIrq: tbDeviceIrq, deviceReset: tbDeviceReset,
             direct: tbDirect,
 
 
@@ -1699,7 +1703,44 @@ export async function createEmulator(opts) {
         const tbTrBytesAt = tbDirect
             ? (bindings.tb_translate_at_direct || bindings.tb_translate_at)
             : bindings.tb_translate_at;
-        const tbImports = tbDirect ? { env: { memory: tbMem } } : {};
+        // Host-side model service for peripheral-space accesses made by
+        // translated blocks. Returns a packed i64: high 32 bits are
+        // status flags (0x1 IRQ pending, 0x2 watchdog reset requested,
+        // 0x4 service error, 0x8 NOT_DEVICE), low 32 bits the read value
+        // (0 for writes). Reads/writes to wild or unmapped space are
+        // reported as NOT_DEVICE with ZERO side effects; the translated
+        // block then bails to the interpreter, which raises the precise
+        // bus-fault there. Any model access that latches an interrupt or
+        // a watchdog reset returns with the status bits so the translated
+        // block stops after the instruction — same boundary the
+        // interpreter would have taken the exception at.
+        const tbDevice = (addr, width, mode, value) => {
+            const NOT_DEVICE = 0x8, IRQ = 0x1, RESET = 0x2, ERROR = 0x4;
+            const pack = (v, st) => (BigInt(st >>> 0) << 32n) | BigInt(v >>> 0);
+            tbDeviceCalls++;
+            try {
+                const kind = (typeof bindings.tb_mem_kind === 'function')
+                    ? bindings.tb_mem_kind(addr >>> 0) : 0;
+                if (kind !== 1) { tbDeviceNotDevice++; return pack(0, NOT_DEVICE); }
+                let v = 0;
+                if (mode) {
+                    periph_write(addr >>> 0, width >>> 0, value >>> 0);
+                } else {
+                    v = (periph_read(addr >>> 0, width >>> 0) >>> 0);
+                }
+                let st = 0;
+                try { if (deliverIrqs && has_pending_interrupt()) st |= IRQ; } catch {}
+                try { if (is_watchdog_reset_requested()) st |= RESET; } catch {}
+                if (st & IRQ) tbDeviceIrq++;
+                if (st & RESET) tbDeviceReset++;
+                return pack(v, st);
+            } catch (e) {
+                tbDeviceErr++;
+                try { if (!tbFirstErr) tbFirstErr = 'device: ' + String((e && e.message) || e).slice(0, 160); } catch {}
+                return pack(0, ERROR);
+            }
+        };
+        const tbImports = tbDirect ? { env: { memory: tbMem, device: tbDevice } } : {};
         // (No per-submit tracing: tbTryLoop runs hot; stats stay counters.)
         // Try one translated loop at pc. Returns insts executed, else 0
         // (caller falls back to a native chunk). Never throws.
@@ -2139,10 +2180,18 @@ export async function createEmulator(opts) {
                     e.run = ((e.run | 0) + 1) | 0;
                     e.runInst = ((e.runInst | 0) + insts) | 0;
                 }
-                if (kind === 1) {
-                    // Miss: continue in the interpreter at the faulting
-                    // item. insts counts the exact prefix already executed.
-                    tbMissRetry++;
+                if (kind === 1 || kind === 5) {
+                    // Miss (or a device-service error): continue in the
+                    // interpreter at the faulting item. insts counts the
+                    // exact prefix already executed. kind-5 means the
+                    // host model service threw — report it, then retry
+                    // natively (the interpreted MMIO path is native WASM,
+                    // not the JS service, so it cannot rethrow).
+                    if (kind === 5) {
+                        try { if (!tbFirstErr) tbFirstErr = 'device-service-error'; } catch {}
+                    } else {
+                        tbMissRetry++;
+                    }
                     try {
                         if (tbDevSpace(ex.tb_addr.value >>> 0)) tbMissDev++; else tbMissMem++;
                     } catch {}
@@ -2156,9 +2205,19 @@ export async function createEmulator(opts) {
                 if (kind === 3) tbKind3++;
                 if (kind === 0) {
                     cpu.set_pc((base + (meta >> 1) * 2) >>> 0);
+                } else if (kind === 4) {
+                    // A translated run stopped after an MMIO instruction
+                    // whose model access latched an interrupt (or the
+                    // watchdog): resume at the next instruction; the
+                    // outer loop delivers the exception before the next
+                    // translated run.
+                    cpu.set_pc(ex.tb_pc.value >>> 0);
                 } else if (kind === 3) {
                     cpu.set_pc(ex.tb_addr.value >>> 0);
                 }
+                // kind 2 (fuel out): the module reports the innermost loop
+                // top in tb_addr, so a flat run resumes there and a nested
+                // fuelled-out inner top resubmits as a standalone shape.
                 if (kind === 2) {
                     try { cpu.set_pc(ex.tb_addr.value >>> 0); } catch {}
                 }
@@ -2168,6 +2227,101 @@ export async function createEmulator(opts) {
                 return 0;
             }
         };
+        // ── flat whole-program module (pilot) ───────────────────────────
+        // One module holding every reachable block of the image; the
+        // driver only feeds it the pc and reads back (kind, insts).
+        // Opt-in via createEmulator({ flat: true }); requires direct mode
+        // (shared memory) and the tb_flat_translate export.
+        const HI_REGS = [[8, 'r8'], [9, 'r9'], [10, 'r10'], [11, 'r11'], [12, 'r12'], [14, 'lr']];
+        let flatInst = null, flatTried = false;
+        let flatBlocksOut = null, flatInstOut = null;
+        const flatTry = (pc, budget) => {
+            if (!flatTried) {
+                flatTried = true;
+                try {
+                    if (typeof bindings.tb_flat_build === 'function') {
+                        const out = bindings.tb_flat_build(firmware, tbSegsFor().flat);
+                        if (out && out.bytes && out.bytes.length) {
+                            flatInst = new WebAssembly.Instance(
+                                new WebAssembly.Module(out.bytes), tbImports);
+                            flatBlocksOut = Array.from(out.blocks);
+                            flatInstOut = flatInst;
+                        }
+                    }
+                } catch (e) {
+                    try { if (!tbFirstErr) tbFirstErr = 'flat: ' + String((e && e.message) || e).slice(0, 160); } catch {}
+                }
+            }
+            if (!flatInst) return 0;
+            const ex = flatInst.exports;
+            try { if (!ex.covers(pc >>> 0)) return 0; } catch { return 0; }
+            try {
+                const regs = cpu.get_regs();
+                const sp = cpu.get_sp();
+                const xpsr = cpu.get_xpsr();
+                for (let i = 0; i < 8; i++) ex['r' + i].value = regs[i];
+                for (const [r, nm] of HI_REGS) ex[nm].value = regs[r];
+                ex.xpsr.value = xpsr;
+                ex.sp.value = sp;
+                ex.tbFuel.value = 4096; // wasm call-stack bound (blocks/run)
+                const ret = ex.run(pc >>> 0, budget | 0);
+                const insts = Number(ret & 0xFFFFFFFFn);
+                const kind = Number(ret >> 32n);
+                for (let i = 0; i < 8; i++) regs[i] = ex['r' + i].value;
+                for (const [r, nm] of HI_REGS) regs[r] = ex[nm].value;
+                if (!noBulk && typeof cpu.set_regs_bulk === 'function') {
+                    const bulk = Array.from(regs.slice(0, 13));
+                    bulk.push(regs[14], ex.xpsr.value);
+                    cpu.set_regs_bulk(bulk);
+                } else {
+                    for (let i = 0; i < 8; i++) cpu.set_reg(i, regs[i]);
+                    for (const [r] of HI_REGS) cpu.set_reg(r, regs[r]);
+                    cpu.set_xpsr(ex.xpsr.value);
+                }
+                // Flat blocks move r13 (push/pop). set_regs_bulk has no sp
+                // slot; set_reg(13) writes the live r13 and the next
+                // interpreter instruction re-syncs the MSP/PSP bank (same
+                // rule as the run-loop bank sync).
+                if (typeof cpu.set_reg === 'function') {
+                    try { cpu.set_reg(13, ex.sp.value >>> 0); } catch {}
+                }
+                if (insts > 0) {
+                    try { tick_n(insts); } catch {}
+                    tbTranslated += insts;
+                    tbHits++;
+                }
+                if (kind === 1 || kind === 5) {
+                    // Miss: interpreter executes the unsupported item.
+                    if (kind === 5) {
+                        try { if (!tbFirstErr) tbFirstErr = 'device-service-error'; } catch {}
+                    } else {
+                        tbMissRetry++;
+                    }
+                    try { cpu.set_pc(ex.tb_pc.value >>> 0); } catch {}
+                    // A flat miss returns >0, so the step loop `continue`s
+                    // without ever running the interpreter — unlike
+                    // tbExecDirect, which leaves tbMissPc for the loop.
+                    // Execute the missed instruction HERE or pc never
+                    // advances (2026-11-25: 20M miss-retries, zero UART).
+                    let c1 = 0;
+                    try { c1 = cpu.step(1); } catch {}
+                    return insts + c1;
+                }
+                // kind 2 (budget/fuel out), 3 (out-of-module branch),
+                // 4 (IRQ/reset latch): resume at tb_addr / tb_pc.
+                if (kind === 4) {
+                    try { cpu.set_pc(ex.tb_pc.value >>> 0); } catch {}
+                } else {
+                    try { cpu.set_pc(ex.tb_addr.value >>> 0); } catch {}
+                }
+                return insts;
+            } catch (e) {
+                try { if (!tbFirstErr) tbFirstErr = 'flat-run: ' + String((e && e.message) || e).slice(0, 160); } catch {}
+                flatInst = null; // poisoned instance (stack overflow etc.): rebuild next submit
+                return 0;
+            }
+        };
+        const flatOn = flat && tbDirect && typeof bindings.tb_flat_build === 'function';
         const tbExec = (e, base, budget, meta, segs) => (tbDirect
             ? tbExecDirect(e, base, budget, meta)
             : tbExecMirror(e, base, budget, meta, segs));
@@ -2552,6 +2706,10 @@ export async function createEmulator(opts) {
                 }
                 const pc = cpu.get_pc() & 0xFFFFFFFE;
                 let step = 0;
+                if (flatOn) {
+                    step = flatTry(pc, n - done);
+                    if (step > 0) { done += step; tbDeclines = 0; continue; }
+                }
                 if (tbDeclines < 200 || (tbDeclines % 32) === 0) {
                     if (tbD) {
                         const _p0 = performance.now();
@@ -2604,6 +2762,8 @@ export async function createEmulator(opts) {
         };
         return {
             uc: wuc,
+            get flatBlocks() { return flatBlocksOut || []; },
+            get flatInst() { return flatInstOut; },
             read32: wread32, write32: wwrite32,
             getRegisters: () => { const r = cpu.get_regs(); return { R0: r[0], R1: r[1], R2: r[2], R3: r[3], R4: r[4], R5: r[5], R6: r[6], R7: r[7], R8: r[8], R9: r[9], R10: r[10], R11: r[11], R12: r[12], SP: r[13], LR: r[14], PC: r[15], XPSR: cpu.get_xpsr() >>> 0 }; },
             // VFPv4-SP file visibility (debugger pokes; Dd aliases S(2d)/S(2d+1)).

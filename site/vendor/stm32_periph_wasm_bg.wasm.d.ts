@@ -1,6 +1,11 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const __wbg_get_tbflatout_blocks: (a: number, b: number) => void;
+export const __wbg_get_tbflatout_bytes: (a: number, b: number) => void;
+export const __wbg_set_tbflatout_blocks: (a: number, b: number, c: number) => void;
+export const __wbg_set_tbflatout_bytes: (a: number, b: number, c: number) => void;
+export const __wbg_tbflatout_free: (a: number, b: number) => void;
 export const __wbg_wasmcpu_free: (a: number, b: number) => void;
 export const adc_clear_channel_value: (a: number, b: number, c: number) => void;
 export const adc_dual_latched: () => number;
@@ -159,6 +164,8 @@ export const spi_slave_gate: (a: number) => number;
 export const spi_slave_select: (a: number, b: number) => void;
 export const spi_take_events: (a: number, b: number, c: number) => void;
 export const spi_tap: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+export const tb_flat_build: (a: number, b: number, c: number, d: number) => number;
+export const tb_mem_kind: (a: number) => number;
 export const tb_scratch_bytes: () => number;
 export const tb_translate: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
 export const tb_translate_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;

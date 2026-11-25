@@ -24,11 +24,25 @@ pub struct MemRegion {
     pub data: Vec<u8>,
 }
 
+pub(crate) const PLAIN_FLASH: u8 = 0;
+pub(crate) const PLAIN_RAM: u8 = 1;
+pub(crate) const PLAIN_EXTRA: u8 = 2;
+
+/// A pre-resolved plain-memory location (see `FlatMemory::plain_loc`):
+/// which region, and the byte offset of the validated range start inside
+/// that region's buffer.
+#[derive(Clone, Copy)]
+pub struct PlainLoc {
+    kind: u8,
+    idx: u16,
+    off: u32,
+}
+
 /// QUADSPI memory-mapped window (AHB 0x90000000, DCR FSIZE-sized,
 /// typically 16MB): when the QSPI model reports the window live (last
 /// mode switch was memory-mapped), guest reads come straight from the
 /// bound flash image; otherwise the window reads erased (0xFFFFFFFF).
-fn is_qspi_mmap(addr: u32) -> bool {
+pub(crate) fn is_qspi_mmap(addr: u32) -> bool {
     (addr >= 0x90000000 && addr < 0xA0000000)
         && crate::sys().p.qspi_mmap_live()
 }
@@ -40,7 +54,7 @@ fn qspi_mmap_byte(addr: u32) -> u8 {
     ((w >> ((addr & 3) * 8)) & 0xFF) as u8
 }
 
-fn is_periph(addr: u32) -> bool {
+pub(crate) fn is_periph(addr: u32) -> bool {
     (addr >= 0x40000000 && addr < 0x51000000)
         // Full FSMC window (banks 1-4 every 0x10000000 up to 0xA0000000):
         // untapped banks must reach the model (inert 0), not the bus-fault
@@ -155,6 +169,12 @@ impl FlatMemory {
     /// takes the slow path unchanged. Ranges are disjoint by construction
     /// (flash 0x08.., RAM 0x20.. vs QSPI 0x90.. / periph windows), so
     /// checking flash/RAM first cannot steal a device access.
+    /// SAFETY: caller guarantees `o + size <= buf.len()` (via *_range).
+    #[inline]
+    unsafe fn get_le_unchecked<const N: usize>(buf: &[u8], o: usize) -> [u8; N] {
+        std::array::from_fn(|i| unsafe { *buf.get_unchecked(o + i) })
+    }
+
     #[inline]
     fn fast_plain(&self) -> bool {
         !crate::system::is_mpu_enabled() && !crate::system::unalign_trp()
@@ -185,6 +205,130 @@ impl FlatMemory {
             Some(off as usize)
         } else {
             None
+        }
+    }
+
+    /// True when `[addr, addr+len)` lies entirely inside ONE plain memory
+    /// region (flash, main SRAM, or one extra region) and the MPU /
+    /// UNALIGN_TRP gates are off — exactly the condition under which
+    /// `read_range` takes its direct slice copy. Fused executors use this
+    /// once per run to prove that every access in the run is side-effect
+    /// free and cannot fault; they then use `read8` per element, which is
+    /// the same plain path and therefore still exact (a read cannot have
+    /// effects, and no access can leave the validated region).
+    pub fn plain_readable(&self, addr: u32, len: u32) -> bool {
+        if !self.fast_plain() {
+            return false;
+        }
+        if len == 0 {
+            return true;
+        }
+        if self.flash_range(addr, len).is_some() {
+            return true;
+        }
+        if self.ram_range(addr, len).is_some() {
+            return true;
+        }
+        for r in self.extra.iter() {
+            let o = (addr as u64).wrapping_sub(r.base as u64);
+            if o + len as u64 <= r.data.len() as u64 {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// True when `[addr, addr+len)` lies in executable plain memory (flash
+    /// or main SRAM). Fused executors match their shape by reading the
+    /// following halfwords with `fetch16`, which touches the model for
+    /// peripheral addresses (side effects!) — this one check proves the
+    /// whole shape is in plain code space first, so a shape probe can
+    /// never reach a device register even at a region boundary.
+    #[inline]
+    pub fn plain_code(&self, addr: u32, len: u32) -> bool {
+        self.flash_range(addr, len).is_some() || self.ram_range(addr, len).is_some()
+    }
+
+    /// Resolve `[addr, addr+len)` to a directly indexable plain location,
+    /// once per fused run. Per-element access then costs an add + a Vec
+    /// index inside `loc_read8`/`loc_write8` — no region search, no
+    /// peripheral/QSPI tests, no MPU check, no global borrow. That is the
+    /// difference between a fused inner loop that beats the interpreter
+    /// and one that only saves dispatch (DOOM's tables and framebuffer all
+    /// live in extra regions, i.e. on the slow path).
+    ///
+    /// The returned location is only valid for `len` bytes from the range
+    /// start: `fast_plain()` must hold and nothing may grow the region
+    /// list in between (fused runs allocate nothing).
+    #[inline]
+    pub fn plain_loc(&self, addr: u32, len: u32) -> Option<PlainLoc> {
+        if !self.fast_plain() {
+            return None;
+        }
+        if let Some(o) = self.flash_range(addr, len) {
+            return Some(PlainLoc { kind: PLAIN_FLASH, idx: 0, off: o as u32 });
+        }
+        if let Some(o) = self.ram_range(addr, len) {
+            return Some(PlainLoc { kind: PLAIN_RAM, idx: 0, off: o as u32 });
+        }
+        for (i, r) in self.extra.iter().enumerate() {
+            let o = (addr as u64).wrapping_sub(r.base as u64);
+            if o + len as u64 <= r.data.len() as u64 {
+                return Some(PlainLoc { kind: PLAIN_EXTRA, idx: i as u16, off: o as u32 });
+            }
+        }
+        None
+    }
+
+    /// Store-capable twin: flash is excluded (guest stores there are
+    /// erase/program events with their own error arms, never plain).
+    #[inline]
+    pub fn plain_loc_writable(&self, addr: u32, len: u32) -> Option<PlainLoc> {
+        if !self.fast_plain() {
+            return None;
+        }
+        if let Some(o) = self.ram_range(addr, len) {
+            return Some(PlainLoc { kind: PLAIN_RAM, idx: 0, off: o as u32 });
+        }
+        for (i, r) in self.extra.iter().enumerate() {
+            let o = (addr as u64).wrapping_sub(r.base as u64);
+            if o + len as u64 <= r.data.len() as u64 {
+                return Some(PlainLoc { kind: PLAIN_EXTRA, idx: i as u16, off: o as u32 });
+            }
+        }
+        None
+    }
+
+    /// Read one byte at `loc.off + delta`. `delta` must stay below the
+    /// `len` the location was resolved with (the callers clamp by their
+    /// own iteration count, which the validation is sized for).
+    #[inline]
+    pub fn loc_read8(&self, loc: PlainLoc, delta: u32) -> u8 {
+        let o = (loc.off + delta) as usize;
+        match loc.kind {
+            PLAIN_FLASH => self.flash[o],
+            PLAIN_RAM => self.ram[o],
+            _ => self.extra[loc.idx as usize].data[o],
+        }
+    }
+
+    /// Store one byte at `loc.off + delta` (same bounds contract). Mirrors
+    /// `write8`'s plain path exactly, including the write-sequence bump
+    /// the (now removed) mirror driver used to consume.
+    #[inline]
+    pub fn loc_write8(&mut self, loc: PlainLoc, delta: u32, v: u8) {
+        let o = (loc.off + delta) as usize;
+        match loc.kind {
+            PLAIN_RAM => {
+                self.ram[o] = v;
+                self.note_write();
+            }
+            PLAIN_EXTRA => {
+                self.extra[loc.idx as usize].data[o] = v;
+                self.note_write();
+            }
+            // PLAIN_FLASH is never produced by plain_loc_writable.
+            _ => {}
         }
     }
 
@@ -445,10 +589,12 @@ impl Memory for FlatMemory {
         // window, so no device access can be stolen here).
         if self.fast_plain() {
             if let Some(o) = self.flash_range(addr, 1) {
-                return self.flash[o];
+                // SAFETY: flash_range validated [o, o+1).
+                return unsafe { *self.flash.get_unchecked(o) };
             }
             if let Some(o) = self.ram_range(addr, 1) {
-                return self.ram[o];
+                // SAFETY: ram_range validated [o, o+1).
+                return unsafe { *self.ram.get_unchecked(o) };
             }
         }
         // QSPI memory-mapped window wins over the FSMC inert-0 inside
@@ -502,10 +648,12 @@ impl Memory for FlatMemory {
         // unaligned checks either (execute permission belongs to the
         // loop-top XN check). Pure range math, zero global touches.
         if let Some(o) = self.flash_range(addr, 2) {
-            return u16::from_le_bytes([self.flash[o], self.flash[o + 1]]);
+            // SAFETY: fetch16 range-validated [o, o+2).
+            return u16::from_le_bytes(unsafe { Self::get_le_unchecked::<2>(&self.flash, o) });
         }
         if let Some(o) = self.ram_range(addr, 2) {
-            return u16::from_le_bytes([self.ram[o], self.ram[o + 1]]);
+            // SAFETY: fetch16 range-validated [o, o+2).
+            return u16::from_le_bytes(unsafe { Self::get_le_unchecked::<2>(&self.ram, o) });
         }
         if is_periph(addr) {
             // No MPU data check: the loop-top XN check owns execute
@@ -530,10 +678,11 @@ impl Memory for FlatMemory {
     fn read16(&self, addr: u32) -> u16 {
         if self.fast_plain() {
             if let Some(o) = self.flash_range(addr, 2) {
-                return u16::from_le_bytes([self.flash[o], self.flash[o + 1]]);
+                // SAFETY: read16 range-validated [o, o+2).
+                return u16::from_le_bytes(unsafe { Self::get_le_unchecked::<2>(&self.flash, o) });
             }
             if let Some(o) = self.ram_range(addr, 2) {
-                return u16::from_le_bytes([self.ram[o], self.ram[o + 1]]);
+                return u16::from_le_bytes(unsafe { Self::get_le_unchecked::<2>(&self.ram, o) });
             }
         }
         if is_qspi_mmap(addr) {
@@ -564,10 +713,11 @@ impl Memory for FlatMemory {
         // (each with its own region walk + MPU probe).
         if self.fast_plain() {
             if let Some(o) = self.flash_range(addr, 4) {
-                return u32::from_le_bytes([self.flash[o], self.flash[o + 1], self.flash[o + 2], self.flash[o + 3]]);
+                // SAFETY: read32 range-validated [o, o+4).
+                return u32::from_le_bytes(unsafe { Self::get_le_unchecked::<4>(&self.flash, o) });
             }
             if let Some(o) = self.ram_range(addr, 4) {
-                return u32::from_le_bytes([self.ram[o], self.ram[o + 1], self.ram[o + 2], self.ram[o + 3]]);
+                return u32::from_le_bytes(unsafe { Self::get_le_unchecked::<4>(&self.ram, o) });
             }
         }
         if is_periph(addr) {
@@ -591,7 +741,8 @@ impl Memory for FlatMemory {
         // writes are erase/program events, never hot).
         if self.fast_plain() {
             if let Some(o) = self.ram_range(addr, 1) {
-                self.ram[o] = v;
+                // SAFETY: write8 range-validated [o, o+1).
+                unsafe { *self.ram.get_unchecked_mut(o) = v };
                 self.note_write();
                 return;
             }
@@ -653,8 +804,11 @@ impl Memory for FlatMemory {
         if self.fast_plain() {
             if let Some(o) = self.ram_range(addr, 2) {
                 let b = v.to_le_bytes();
-                self.ram[o] = b[0];
-                self.ram[o + 1] = b[1];
+                // SAFETY: write16 range-validated [o, o+2).
+                unsafe {
+                    *self.ram.get_unchecked_mut(o) = b[0];
+                    *self.ram.get_unchecked_mut(o + 1) = b[1];
+                }
                 self.note_write();
                 return;
             }
@@ -680,10 +834,13 @@ impl Memory for FlatMemory {
         if self.fast_plain() {
             if let Some(o) = self.ram_range(addr, 4) {
                 let b = v.to_le_bytes();
-                self.ram[o] = b[0];
-                self.ram[o + 1] = b[1];
-                self.ram[o + 2] = b[2];
-                self.ram[o + 3] = b[3];
+                // SAFETY: write32 range-validated [o, o+4).
+                unsafe {
+                    *self.ram.get_unchecked_mut(o) = b[0];
+                    *self.ram.get_unchecked_mut(o + 1) = b[1];
+                    *self.ram.get_unchecked_mut(o + 2) = b[2];
+                    *self.ram.get_unchecked_mut(o + 3) = b[3];
+                }
                 self.note_write();
                 return;
             }

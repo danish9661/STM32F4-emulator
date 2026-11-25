@@ -1,577 +1,321 @@
-# HANDOVER — TB (static block translation) share push, STM32F4 WASM emulator
+# HANDOVER — flat whole-program translation pilot (2026-11-25)
 
-**Read this file first.** It is the complete state of the TB work so a fresh
-agent can continue without re-deriving anything.
-Written 2026-10-20, at the end of the session that fixed the last outstanding
-defect, tuned the live console loop, and took the full battery green.
-
----
-
-## 0. TL;DR — where the work stands
-
-| | State |
-|---|---|
-| Objective | Raise the share of traffic-firmware instructions executed as **translated blocks (TB)** in the browser page. Page-side MIPS is the ONLY primary metric (Node is diagnostic). |
-| Committed | **S1** only (`0853e70`): `layout_version` + `region_offsets` (shared-memory foundation). |
-| Uncommitted | **S2** (direct mode) + **S2.5** (IRQ predicate) + `emit_cond` LE fix + classifier/driver slice + hole-tolerant translation + widened driver windows + 2 skip-emitter fixes + the **§4 walk fix** + the **live-burst change** (`BURST_STEPS` 24 / `WALL_BUDGET_MS` 40) + the **submit fast path** (§13) + the **version guard** (`site/test_versions.mjs`, after two stale vendor literals in `emu-worker.js`) + the `?gate=` knob. |
-| Last green battery | cargo **283/283** (`--test-threads=1`), one clean `npm test` **EXIT 0** (matrix 176/176, browser 44/44, tb_xlate 231 checks, qspi CDP, versions guard; `.pw-scratch/npmtest_final.log`), 17 TB differential harnesses PASS, `npm run test:wasm` EXIT 0 (`.pw
-| **Active defect** | **None.** The RX-wait-loop validation failure is fixed (§4) and pinned by `site/test_tb_xlate.mjs` §3 (each of the three RX-loop entries is `new WebAssembly.Module`-validated). |
-| Measured state | Page engine probe `eth_http`: **85–92 MIPS** with TB vs 33–43 `?notb=1` (≥60 bar met); the submit fast path alone was worth **+10% mean best-of-5** (3/3 interleaved rounds, §13). Live console page: **53–58 MIPS** and 44–48 HTTP rounds/s vs 31–40 and 26–34 interpreter (interleaved, quiet box). |
-| Next move | Nothing is required to ship. Optional share push: §8 items 1–3; the submit-probe cost is now 1.3 µs (was 37–46), so the remaining TB-on time is interpreted chunks (§8 item 1) and the per-hit handshake. |
+**For the next session: read this file first, then AGENTS.md §46 (appendices).**
+Nothing is committed. Worktree has 23 modified files. The user asked for this
+handover because repeated OpenChamber crashes; a fresh conversation should
+pick up from here and continue the work.
 
 ---
 
-## 1. Hard rules (from the user — do not violate)
+## 1. THE GOAL AND THE RULES THE USER SET (read this first — it explains every decision)
 
-1. **Page-side browser MIPS is the only primary metric.** Node MIPS is
-   diagnostic only. Never present a Node number as a result without its
-   page-side counterpart (`.pw-scratch/cdp_mips.mjs`).
-2. **Judge speed only by back-to-back / interleaved A/B on the same box
-   state.** The box is shared and noisy (another tenant's headless Chrome).
-   Single runs prove nothing; deltas under ~8% are noise.
-3. **Every slice lands behind the full battery + a same-box A/B.**
-4. **No commit of in-progress work without a separate user order.** The
-   working tree is intentionally dirty. `git stash@{0}` (WIP vdpix in
-   `cpu/thumb.rs`, `cpu/mod.rs`, `cpu/tests.rs`) must **not** be popped.
-5. **Changes must be universal across firmware. Never modify firmware.**
-6. The user authorized a full rewrite / static translation if needed; the
-   page is already >80 MIPS on `eth_http` with TB default-on, the goal now
-   is *share*, not raw MIPS.
-7. Scratch lives in `.pw-scratch/` (keep logs + scripts, delete PNG dumps).
-   Do not touch other tenants' background processes; never `pkill` blindly.
+The user's objective from the start: **make the emulator itself faster, across
+all firmware** — not DOOM, not one test. Their exact words when I drifted to
+DOOM: *"why are you fixated on doom, i am talking about emulator just make the
+emulator faster. doom will automatically becomes faster."* Then: *"do whole-
+program static translation — a real project, not chips-and-dips work. Before
+that commitment, the highest-value thing I can do is a scoped pilot."* Then
+*"start working"* — the pilot is authorized and in progress.
 
----
+Rules the user set (violating them wastes their time):
+- **Page-side browser MIPS/FPS is the primary metric.** Node MIPS is
+  diagnostic only — never present a Node number as a result without its
+  page-side counterpart.
+- **Speed claims only from back-to-back/interleaved same-box A/B.** Single
+  runs prove nothing; <8% is noise. This box drifts ±8–10% over hours —
+  interleave arms and use many reps.
+- **Every accepted change lands behind the full battery + a same-box A/B.**
+- **No commits without an explicit user order.** (Nothing is committed now.)
+- **"Without reducing quality"** — no low-detail fallback or other guest-side
+  cheat; the emulator must get genuinely faster. Never modify firmware to
+  make a test pass.
+- **No silent wrongness** in translator/decoder; new fusions need
+  anti-vacuous fire-counter tests.
 
-## 2. Architecture recap (what TB is)
-
-The emulator has two execution paths:
-
-* **Interpreter** — `stm32-periph-wasm/src/cpu/thumb.rs` (Rust Thumb-2
-  decoder) + `cpu/mem.rs` (flat memory). Always correct, ~80 MIPS.
-* **Translated blocks (TB)** — a *subset* of straight-line/loop Thumb is
-  translated at runtime into a **WASM module** that runs against the
-  model's own linear memory (direct mode) or a private mirror (mirror
-  mode). The driver (`site/emulator.js`) compiles the module once, caches
-  it, and submits runs with a fuel budget.
-
-Flow (driver): pc → read `TB_LOOKAHEAD` halfwords → `tb_translate*_direct`
-(Rust) → bytes → `new WebAssembly.Module` → instantiate → seed globals
-(r0–r12, lr, xpsr, sp) → `run(fuel)` → read `tb_exit` kind + globals →
-either continue, or handle kind 1 (miss) / kind 3 (resume) / kind 2
-(fuel-out).
-
-Exit kinds (global 10 = `tb_exit`, global 21 = `tb_pc`):
-
-| kind | meaning | driver action |
-|---|---|---|
-| 0 | completed the region | continue at the fallthrough pc |
-| 1 | miss (MMIO / unmapped / flash store) | direct mode: pc = `tb_pc` (faulting item), then `cpu.step(1)` (exactly ONE native instruction) and resubmit |
-| 2 | fuel exhausted | resubmit with the remaining budget |
-| 3 | resume exit (hole / true exit) | pc = `tb_addr`; a *hole* resumes at the unemittable item's own address |
-
-Direct mode (shipped default) imports the model's exported linear memory
-(`env.memory`); guest address → memory offset = `(addr - base) + ptr_offset`.
-Flash segments carry bit31 = store-read-only, so a flash store misses out.
+What was explicitly REJECTED along the way (do not re-propose):
+- "Lowering the clock" as a speedup — it's a fidelity knob, not acceleration.
+- DOOM-only tuning — the user rejected the framing entirely.
+- Interpreter-only micro-optimization as the main path — small wins only
+  (that's why we moved to whole-program translation).
 
 ---
 
-## 3. What is uncommitted (the S2+ stack) — quick map
+## 2. WHY THE FLAT TRANSLATOR IS THE CURRENT PATH (the evidence chain)
 
-**Rust (`stm32-periph-wasm/src/`)**
+1. **The interpreter's per-instruction overhead is the wall.** Thumb-2 fetch,
+   decode, dispatch, flag/MPU/guard checks dominate for firmware without
+   translatable loops. The existing block translator (loop-shaped regions,
+   `tb_xlate.rs`) covers only ~41.6% of eth_http; blinky-class code ~0%.
+2. **We removed the first systematic bail-out**: MMIO accesses inside
+   translated regions used to force an interpreter fallback at every device
+   register poll. We added an `env.device` import that calls the Rust
+   peripheral model inline (§46, shipped, uncommitted). Result: eth_http
+   page **94 MIPS vs 42 interpreter**, **+16% over the previous best**, zero
+   miss-retries, byte-identical transcript. This proved translation is the
+   right lever.
+3. **We then tried to widen loop coverage** — and discovered it is
+   cost-model-limited, not opcode-limited. The hot RX-poll loops *are*
+   recognized as loops (`tb_translate_meta_direct` → `is_loop=1`); the
+   run-length gate declines them because packets arrive often, so each wait
+   is short and cannot amortize the fixed ~10–15 µs wasm↔JS per-hit cost.
+   Forcing translation there would be **slower**. That closed "just extend
+   the loop translator" as the answer.
+4. **Interpreter polish was harvested** (validated fast-path indexing
+   +3.6–4.9%, kept; NVIC mirror + TRACE_ON hoist, noise-neutral, kept;
+   `fetch16_opt` fold measured −3..−4%, **reverted**). Remaining wins are
+   below this box's noise floor.
+5. **Static census answered the go/no-go**: recursive-descent CFG walk over
+   the eth_http image showed **~90% of real instructions fit today's
+   emitter** (1221 supported; remaining families: wide modified-imm ALU,
+   MOVW/MOVT, wide halfword loads, POP.W/PUSH.W, MUL/MLA, extends). Missing
+   instructions can fall back per-item through the existing kind-1 protocol,
+   so soundness is inherited, not re-proven. → GO for the flat pilot.
+6. **Design chose a single module** with many block functions + an in-module
+   `dispatch(pc)` (binary search) rather than one module per block: crossing
+   wasm↔JS per basic block would cost more than interpretation. Intra-module
+   edges are direct `call`s; the i64 result bubbles up; guest call depth =
+   wasm call depth; two budgets (exact instruction budget + block-count fuel
+   to bound the wasm stack); unsupported instructions exit kind-1 and the
+   interpreter resumes.
 
-* `tb_xlate.rs` (the translator, ~4k lines) — the hot file. Key anchors:
-  * `emit_body_walk` **line 274** — walks a loop body, emits items/exits/skips.
-  * `macro_rules! close_skips` **line 324** — closes skip blocks whose target
-    equals the current halfword.
-  * skip preamble **line ~303-315** — opens one block per distinct internal-skip
-    target, **outermost-first** (largest target first).
-  * `classify_body` **line 2867** — validates a latched body, returns the
-    internal-skip edges (`Skip { hw, cc, target_hw, k }`).
-  * `item_starts_of` **line 2816** — the single source of truth for item
-    boundaries (items-only walks desync at the first branch).
-  * `translate_at_impl` **line 2974** — linear scan, latch selection, emission.
-  * `translate_at_direct` **line 2806** — direct-mode entry.
-  * `MAX_HOLES = 24` — unemittable items become "holes" (resume exits).
-* `tb_emit.rs` — the WASM byte builder (`Code`).
-* `cpu/mem.rs` — `region_offsets`, `layout_version`, contiguous-RAM fast path.
-* `cpu/mod.rs` — `Cpu::pending_ready()` (the S2.5 IRQ predicate).
-* `lib.rs` — exports: `tb_translate*`, `tb_translate*_direct`,
-  `tb_translate_meta*`, `pending_exception_ready`, `region_offsets`,
-  `layout_version`.
-
-**JS (`site/emulator.js`)** — the driver. Anchors: `TB_LOOKAHEAD = 80`
-(line 1499), `TB_BACK = TB_LOOKAHEAD*2 - 2` (1504), `TB_FWD = 64` (1505),
-`TB_MIN_RUN = 5000` (1515, constant — the page-measured value, see §7),
-`tbClass` / `tbBodyOk` / `tbFlowOk`,
-`tbFindTop` / `tbMidLatch` / `tbTryLoop` / `tbTryEntry`, `tbExecDirect`
-(with `tbMissPc`), `tbRun`. `TB_DIAG=1` (declaration ~1480, accessor ~2545)
-is a **kept dev knob**: per-pc hit/decline attribution for
-`.pw-scratch/tb_diag.mjs`, zero cost when unset (the per-submit `if (tbD)`
-checks are null-cheap; it is not on the per-instruction path).
-
-**In-repo pin** — `site/test_tb_xlate.mjs` (untracked, must be added):
-condition-code sweep (14 cc × 16 NZCV) + the exact firmware spin
-halfwords with exact instruction accounting + `WebAssembly.Module`
-validation of the three RX-loop entries. **231 checks.** Wired into
-`npm test` / `npm run test:unit`. **It is a silent-wrongness surface:
-`emit_cond` must stay green.**
-
----
-
-## 4. DEFECT — FIXED (RX-wait loop module failed WASM validation)
-
-**Status: fixed and verified.** `emit_body_walk` now drains *every* skip/exit
-starting at the current halfword (plus a trailing drain after the last item),
-exactly as sketched below; `bhw` reaches the latch and `open` ends empty.
-Verified by `TB_DIAG=1 node .pw-scratch/tb_diag.mjs 12 20000` (`eBuild 0`,
-hits 699, translated 5.33M = 44% at gate 5000, kind3 8, missRetry 5) and
-pinned in-repo by `site/test_tb_xlate.mjs` §3, which builds each of the three
-RX-loop entries and runs `new WebAssembly.Module(bytes)` on it (231 checks).
-Keeping the diagnosis below as the record of *why* the walk must drain
-eagerly — it is the same class of bug as the `local_tee` leak.
-
-### Symptom
-The eth_http RX-wait loop (base `0x080008f8`) is the hottest shape in the
-whole corpus (~42% of eth_http instructions live in `eth_recv_packet`'s
-wait/re-arm, plus ~21% in the TX-done countdown + flag-poll loops). Its
-translated module fails WASM validation:
-
-```
-unterminated control structure @+430      (entry 0x8000972, 2846 bytes)
-```
-
-Two of three preamble skip blocks (targets 47 and 61) never close, so the
-loop assembler's `end loop` / `end $end` land on the leftover skip blocks
-and the function ends one `end` short.
-
-### Root cause (confirmed by instrumentation, this session)
-
-`emit_body_walk` processes **at most one exit per item iteration** and then
-falls through to emit "the next item" at whatever `bhw` now is:
-
-```rust
-for (it, size) in items.iter() {
-    close_skips!();
-    ...skip edge at bhw...
-    if ei < exits.len() && exits[ei].hw == bhw { ...emit exit...; bhw += esize; }
-    emit_item(c, it, ...);     // <-- assumes the exit advance landed exactly on this item
-    partial += 1;
-    bhw += size;
-}
-```
-
-That assumption holds when branches and items alternate, but **holes
-(consecutive unemittable items) break it**: the RX frame handler contains
-runs of holes (hw 20, 21, 22 …). The walk drains only the FIRST hole of a
-run, then emits the following item at the *wrong* address and `bhw` falls
-behind by the sizes of the un-drained holes.
-
-Instrumented trace (temporary `eprintln!`, since removed):
-
-```
-STEP start=0 bhw=17 size=2 exits_left=[(17,1,false), (20,1,true), (21,1,true)]
-STEP start=0 bhw=20 size=2 exits_left=[(20,1,true), (21,1,true), (22,2,true)]
-STEP start=0 bhw=23 size=2 exits_left=[(21,1,true), (22,2,true), (40,1,true)]   <-- 21,22 never drained
-...
-UNCLOSED start=0 bhw=54 open=[61, 47] items=30
-```
-
-* `bhw` ends at **54** but the latch is at **64** → the walk never reaches
-  skip targets 47 and 61 → blocks stay open → module unterminated.
-* The 10-halfword deficit is exactly the un-drained hole sizes
-  (21:1 + 22:2 + 40:1 + 42:1 + 44:1 + 46:1 + 53:1 + 62:1 …).
-* The trace also proves the emitted items after the first hole run are
-  emitted at **wrong addresses** (`base_pc + bhw*2`), i.e. the module was
-  not merely unterminated — it was mis-addressed (harmless only because
-  those items are dead code on the hot path, but it must be fixed).
-
-### Fix (applied — `emit_exit_arm` + `drain_one!()`)
-
-In `emit_body_walk`, drain **every** branch/hole that starts at the current
-halfword before emitting the next item:
-
-```rust
-for (it, size) in items.iter() {
-    loop {
-        close_skips!();
-        let mut advanced = false;
-        // skip edge at bhw (emits cond + br_if(depth), consumes its exits[] entry)
-        if let Some(sk) = skips.iter().find(|sk| sk.hw == bhw) { ...; advanced = true; }
-        // hole / true exit at bhw (emits the kind-3 arm)
-        if ei < exits.len() && exits[ei].hw == bhw { ...; bhw += esize; advanced = true; }
-        if !advanced { break; }
-    }
-    // bhw now sits exactly on this item's start
-    ...slots / emit_item / partial += 1 / bhw += size;
-}
-// drain trailing exits (holes after the last item, before the latch)
-loop { close_skips!(); if exit at bhw { emit; bhw += esize; continue; } break; }
-```
-
-Notes:
-* Keep the accounting identical (partial / cycle / `k` formulas) — only the
-  *number of exits drained per item* changes.
-* A `debug_assert!(open.is_empty(), "unclosed skip blocks …")` sits at the
-  end of `emit_body_walk` (release builds compile it out). It is the guard
-  that would have caught this in debug builds — keep it.
-* After the fix `bhw` reaches `li` (64) and `open` is empty.
-
-### Regression gap that let this through (now closed)
-
-`cargo test` only asserts `b.is_loop` and `b.consumed` — **never that the
-emitted module validates**. Rust has no wasm validator here, so add the
-check on the JS side:
-
-```js
-// site/test_tb_xlate.mjs (add)
-const b = bindings.tb_translate_at_direct(ops, segs, base, base + 61*2);
-new WebAssembly.Module(b);   // must not throw
-```
-
-Do it for the three entries of the eth_http RX loop: `0x8f8` (top),
-`0x8f8 + 61*2` (mid, the cbnz target) and `0x8f8 + 5*2` (mid). This pins
-both skip bugs (the `local_tee` leak and the lazy-nesting bug) and the
-hole-drain bug.
+**Evidence that the pilot is promising:** even a nearly-empty module (4–6
+blocks, most instructions still interpreted) ran eth_http at **70.7 vs 52.9
+MIPS** with a byte-identical transcript over 16 HTTP rounds. The upside is
+large once the full call graph translates.
 
 ---
 
-## 5. Ground truth — the eth_http RX-wait loop (base `0x080008f8`)
+## 3. IMMEDIATE SAFETY RULES (learned the hard way — do not skip)
 
-Real firmware bytes, halfword map (from `.pw-scratch/eth_http.dis`):
-
-```
- 0 ldr.w r3,[ip,#0x618]     1 | 2 tst.w #2 | 4 bne -> 18
- 5 lsls r3,r3,#31           6 bmi -> 47
- 7 ubfx r3,lr,#0,#10        9 cbnz r3 -> 61   (hot ~1023/1024)
-10 str r4,[r1,#8]  (MMIO 0x40029008 = DMARPDR re-arm, every ~1024 iters)
-11 ldr.w | 13 tst.w | 15 add.w lr,#1 | 17 beq -> 5
-18..46 cold frame handler (POP {r4-r7,pc} at 46)  <-- many holes
-47 ldr r3,[r2,#0] | 48 lsls #24 | 49 bpl -> 47 (self-spin) | 50 str r0,[r2,#4] (MMIO)
-51..59 tx-done stores/ubfx/cmp | 60 beq -> 10
-61 add.w lr,#1 | 63 cmp lr,r5 | 64 bne -> 0   <-- THE LATCH (t = 0, top)
-65..73 tail | 73+ literal pool
-```
-
-* Loop = 65 halfwords / 130 bytes. Latch at hw 64.
-* Holes (unemittable) at hw 3, 14, 16, 20/21, 22, 39/40, 42, 44, 46, 53, 62
-  — ~11-13 total, under `MAX_HOLES = 24`.
-* The three internal skips: hw 4 → 18, hw 6 → 47, hw 9 → 61.
-* Hot path: 0..9 → skip to 61 → 63,64 latch. It never touches the holes,
-  which is exactly why hole-tolerant translation pays off.
-* The loop re-arms DMARPDR (MMIO store at hw 10) every ~1024 iterations, so
-  a translated run ends by a kind-1 miss about every ~10k instructions; the
-  miss → `cpu.step(1)` path keeps the following iterations translated.
+- `stm32-periph-wasm/Cargo.toml` `[profile.release]` was changed from
+  `lto = true` (fat) to `lto = "thin"`. **Fat LTO spikes the link to ~12.8 GB
+  RSS and the kernel OOM-killer kills OpenChamber** — journalctl evidence on
+  2026-11-05 (3×) and 2026-11-25, each in a different OpenChamber scope,
+  i.e. other sessions/windows are collateral victims. Do NOT revert without
+  asking. Never launch a fat-LTO build.
+- Before any heavy command: `free -m | awk 'NR==2{print $7}'`; if available
+  < 4 GB, do not build. Note: measuring "memory is fine" *after* a crash is
+  meaningless — the crash freed the memory.
+- One consolidated background chain for heavy work (background tool call or
+  `setsid nohup ... > log 2>&1; echo rc > verdict`), **no sleep-poll loops**
+  (repeatedly crashed tool calls), **never `pkill -f` a pattern that matches
+  your own command line** (killed its own run).
+- Last launch: background shell `sh_21381a03f001M7O6fjy7Eo9UYH` (PID 15613),
+  command in `stm32-periph-wasm`:
+  `FLAT_DBG=1 cargo test --release -j 2 flat_blocks_cover -- --nocapture > /tmp/flat_test.log 2>&1; echo rc > /tmp/flat_test.verdict`
+  Check `/tmp/flat_test.verdict` first thing; if absent and the log is
+  frozen, the session died again — just relaunch (thin LTO links in ~1 min).
+- The user asked whether to start a fresh conversation: yes, they restart;
+  this file is the continuity mechanism.
 
 ---
 
-## 6. Decisions already taken (do not re-litigate)
+## 4. What is already shipped in the tree (all validated, uncommitted)
 
-1. **Direct TB mode** imports the model's exported `memory` (`env.memory`);
-   region buffers never move (`layout_version` guards; any new `Vec` growth
-   path MUST bump it or cached blocks write freed offsets).
-2. **Direct miss (kind 1)** resumes at the faulting item's PC via global 21
-   (`tb_pc`) — **no retry** (every preceding store is already committed).
-   The driver records `tbMissPc`, runs **exactly one** native instruction
-   (`cpu.step(1)` — never the 4096-inst chunk) and resubmits.
-3. **TB default ON** in the console page (`tb: !params.has('notb')`);
-   escapes `?notb=1` (interpreter only) and `?tbmirror=1` (mirror path).
-4. **S2.5**: TB stays ON for interrupt firmware. The core exposes
-   `pending_exception_ready()`; `tbRun` checks it before every submission
-   and, when true, runs `cpu.step(1)` to take the exception exactly like
-   the interpreter. (The S2.5 alternative — TB declines when
-   `deliverIrqs` — broke `fpu_irq_test`, `eth_adv`, `eth_feat_pps`.)
-5. **Host-scripted devices** (USB host, DCMI camera, ETH feat hooks) must
-   advance **per STEP**, not per burst (`site/emu-worker.js`).
-6. **Skip blocks are opened in a preamble**, one per distinct internal-skip
-   target, outermost-first — lazy per-edge opening nests 61 inside 47
-   inside 18, whose ends can never be reached LIFO.
-7. **Skip condition uses `local_set`**, never `local_tee` (a tee leaks one
-   wasm stack value per skip block → module validation failure).
-8. **Hole-tolerant translation**: unemittable items become resume exits
-   (kind 3, `tb_addr` = own PC, cost 0); the scan continues; reachability
-   treats a hole as pass-through. Backward non-top edges are *evaluated*
-   exits (cost 1), not resume exits.
-9. **Top latch preferred** over nested; the first nested backward edge is
-   kept as a restorable fallback.
-10. **`item_starts_of()` is the only source of item boundaries.**
-11. `emit_cond` is a **silent-wrongness surface** (the LE arm was wrong:
-    it emitted GE instead of `Z || N!=V`; it collapsed 20000-iteration
-    firmware spins into one iteration and broke `eth_feat_test`).
-12. **`TB_MIN_RUN = 5000` is final.** Node says 600 is better (+5.5%,
-    8/8 reps); the page says 600 is ~9% worse (interleaved best
-    87.4/88.0 → 78.0/79.6). The page is the metric. The code comment
-    carries the numbers so nobody "fixes" it back.
-13. **Live console burst = 24 steps / 40 ms wall budget** (`site/emu-worker.js`).
-    The 2026-10-10 "24 steps is neutral, revert to 12" verdict predates TB:
-    the engine has since ~doubled, so a 12-step burst finishes in ~18 ms of
-    a ~30 ms frame and the worker idles 35–40% of every cycle. Measured
-    (window rate, interleaved): 12 → 39.7/41.5 MIPS, 24 → 50.7/54.5/57.5,
-    32 → 47.8/58.6, 48 → 50.2 at 97% duty. Ship 24 (best mean, ~36 ms
-    latency, same class as doom-worker's 28 ms).
-14. **Depth-2 tick pipeline stays.** `?depth=4` measured 44.8/55.3 vs
-    default 54.5/49.6 — no effect beyond noise.
-15. **Do not enlarge the *step* size** to win MIPS: at 500k steps the MIPS
-    meter reads 70 but HTTP rounds collapse 83 → 3 per 20M instructions
-    (RX is serviced between steps). Real work is judged at the worker's
-    100k cadence or by rounds/s.
+- §46 of AGENTS.md: inline MMIO device service in translated blocks
+  (`env.device` import, `tb_mem_kind`, kind-1/4/5 protocol, counters).
+- Interpreter polish: validated fast-path indexing (+3.6–4.9%, kept), NVIC
+  pending mirror + TRACE_ON hoist (noise-neutral, kept), `fetch16_opt` fold
+  (REVERTED after measured −3..−4%).
+- Versions: vendor **v61** across app.js/doom.js/doom-worker.js/emu-worker.js,
+  app.js v82, doom.js v102 / `__doomVer` 101, doom.html. `test_versions.mjs`
+  passed at v61.
+- Last full battery on that (pre-flat) tree: cargo 289/289, TB-XLATE 237/237,
+  15 TB differential harnesses, `test_tb_direct.mjs 20` byte-identical
+  transcript, `npm run test:wasm` PASS, browser **44/44**. Re-run at the end
+  of the pilot (flat code is additive/opt-in, but verify).
 
 ---
 
-## 7. Measured results so far (record, do not re-derive)
+## 5. The flat translator — implementation map (`tb_xlate.rs`, ~1400 new lines)
 
-### Engine (page probe `.pw-scratch/cdp_mips.mjs`, rAF loop stopped, best-of-5)
-* `eth_http` TB default: **best 85–91 / median 82–89** vs `?notb=1`
-  **best 33–42 / median 29–41** → **2.1–2.7×**. The 60 MIPS page bar is met
-  on heavy firmware; blinky is neutral (0 TB hits by construction).
-  Final paired run on the shipped bytes (after the `TB_MIN_RUN` fold and the
-  `?v=56` vendor literals, interleaved): TB **86.81 / 87.41 best, 85.32 /
-  86.51 median** vs `--notb` **42.92 / 43.14 best, 42.81 / 41.74 median**;
-  spot re-run after the SVD literal bump: **87.57 best / 86.21 median**.
+- `FlatOut { bytes, blocks }`; `FlatTerm` (Br/BrCond/Bl/RetDispatch/Miss/
+  BrOut); `FlatBlock { pc, items, term, term_pc }`; `FlatDec::It/Term`.
+- `flat_decode()`: decodes branches itself; CBZ (`imm5<<1` mask fixed),
+  B.N/B.cond (offset `imm<<1`), B.W/Bcc.W/BL (25/21-bit J math), PC-relative
+  literal loads (0x48xx, F8DF/F89F → `Item::MemConst`), ADR (0xA0xx →
+  `Item::MovConst`), PUSH/POP T1 (→ sp-relative `Item::Mem` stores/loads
+  FIRST + `Item::SpAdj` LAST — critical: if a store misses, sp hasn't
+  changed, so interpreter re-execution is safe; pop{pc} loads the return
+  address into the dead-at-epilogue LR then `RetDispatch`).
+- `flat_blocks()`: recursive-descent CFG from vector-table roots (vectors =
+  odd words in image; BL pushes BOTH call target and return address; BrCond
+  pushes target+fall); dedup by pc, sorted output.
+- `translate_flat(image, segs)`: imports `env.memory` + `env.device`
+  (device import = func 0); globals 0–21 identical to loop modules (driver
+  syncs by name) plus `flatAcc` i64 global 22; exports `run(pc, budget)`,
+  `dispatch(pc)`, `covers(pc)`, all globals, one function per block. Binary-
+  search dispatch; in-module edge = direct `call` (i64 result bubbles up);
+  kind 1/2/3/4 exits; exact accounting (ACC += per-block LTOT at every
+  edge, budget in global 9, tbFuel bounds wasm stack depth).
+- New `Item`s: MemConst/MovConst/SpAdj; `ExecCount::Flat`;
+  `tb_emit.rs::global_mut_i64`; `lib.rs::tb_flat_build` (`getter_with_clone`)
+  returning bytes + blocks.
+- Driver `site/emulator.js`: `flat` opt; `flatTry` (build once, covers check,
+  register sync, `ex.tbFuel=4096`, `run(pc,budget)`, kind handling, **sp
+  writeback via `cpu.set_reg(13, ex.sp.value)`** — `set_regs_bulk` omits sp
+  and push/pop move it); `flatOn` gate; called before tbTryLoop in step().
 
-### Live console page (`.pw-scratch/cdp_live_rate.mjs`, the configuration a
-user actually runs — worker loop at 24-step bursts, window rate from `#stInst`,
-interleaved)
-* `eth_http` default: **53.2 / 57.6 MIPS**, **44.3 / 48.0** HTTP rounds/s.
-* `eth_http ?notb=1`: **40.3 / 31.2 MIPS**, 33.6 / 26.1 rounds/s.
-* Burst sweep (10 s windows, interleaved, `?burst=` knob during measurement):
-  12 → 39.7/41.5; 24 → 50.7/54.5/57.5; 32 → 47.8/58.6; 48 → 50.2 (92–97%
-  duty). Plateau is 24–32.
-* Attribution of the old ceiling (temporary `WPROF` in `emu-worker.js`, since
-  removed): per burst `step` was 18–19 ms of a ~30 ms cycle with
-  `gather` 0.05 ms and `postMessage` 0.06 ms — **the state toll is negligible;
-  the ceiling was duty cycle**, not engine speed or UI work.
+### Bugs found and fixed (each was a silent coverage/kill, not cosmetic)
+- `visited[idx+k]` with `k in 0..li` (bytes vs halfwords) stopped every block
+  after one instruction.
+- wide-branch gate `(op & 0xFF00)==0xF000` matched only 0xF0xx, dropping BLs.
+- B.N/B.cond offset missing `<<1` → targets 2 bytes off, mid-instruction.
+- BL decoded but only `ret` pushed, not the call target → main never reached.
+- `_start`'s `ldr.w sp,[pc,#8]` (rn=15) → added PC-relative literal items.
+- `push {r3,lr}` (0xB508) untranslatable → added push/pop decomposition.
+- Block function needs `local(10, I32)` (no param) so LTOT stays index 9.
+- dispatch/covers must use `emit_flat_return` (they have no LTOT local).
+- Item-level exit counts: `ExecCount::Flat` commits LTOT once; post-commit
+  tails use plain returns — never double-add.
 
-### Gate (`.pw-scratch/tb_gate_ab.mjs`, 5–8 interleaved reps, 30M inst, 20k steps)
-* Node: 5000 → 600 = **+5.5%** (35.26 → 40.17 median), share 44.5% → 52.4%,
-  6/6–8/8 consistent.
-* Page: 5000 → 600 = **~9% worse** (see §6.12). Gate stays 5000. The 600 win
-  comes from eth_http RX-loop arms averaging 1.8–3.1k inst/hit — under the
-  floor, and each hit pays the fixed sync/writeback cost.
-
-### Per-hit / submit attribution (`TB_PROF`, 20M inst, 20k steps, since removed)
-* Total TB-on time ≈ 500–540 ms: **interpreted chunks ~335 ms (62%)**,
-  **submit path ~127 ms (24%)** across 4045 submits, per-hit pre+run ~23 ms
-  (~6.6 µs/hit: `get` 0.40, `assign` 1.92, `read` 1.59, bulk 0.71,
-  `tick_n` 1.30, `setpc` 0.15 µs).
-* Submit split: `mem_read` 17 ms, cache select 2 ms (1926 cached / 822
-  cached-declines), `tbTrMetaAt` 35 ms over 2534 slow-path submits (only 9
-  produced loops), builds 4 ms. The rest is `tbFindTop`/`tbMidLatch` assists
-  plus `tbTryEntry`'s mid-entry re-probe (its cache key `'top:'+pc` never
-  matches the `tbTryLoop` fast path).
-* At the worker's cadence (100k steps) submits are 5× rarer, so the submit
-  path is ~5% — the live number is not submit-bound.
-
-### Step-size × work (`20M inst`, `.pw-scratch/tb_stepsize.mjs`)
-| steps | TB MIPS | rounds | tb-off MIPS | rounds |
-|---|---|---|---|---|
-| 20k | 39.98 | 83 | 33.75 | 83 |
-| 100k | 67.22 | 16 | 39.13 | 16 |
-| 500k | 70.01 | 3 | 39.96 | 3 |
-
-Rows are **not comparable as speed**: round count collapses because RX is
-serviced only between steps. TB is +18% wall on equal real work (same
-rounds, same insts) at the 20k cadence, and the MIPS meter at large steps is
-a spin-mix artifact.
-
-### Census / other
-* **PC census** (interpreter, 20k steps): ~42% of eth_http instructions in
-  `eth_recv_packet` (RX wait / re-arm), ~21% in the TX-done countdown +
-  flag-poll loops.
-* **Miss-exit census**: device-space misses ~1 per 12M instructions on
-  eth_http / blinky / ltdc / spi_flash.
-* **DOOM**: TB share ~0.1% — chunk starts rarely land on loop tops; the
-  memcpy/VDP loops are entered from straight-line code. **DOOM is not a TB
-  target**; measure it with the interpreter
-  (`.pw-scratch/doom_play_modes.mjs`). A VDP pixel-loop interpreter fusion
-  regressed DOOM ~15% and lives in `git stash@{0}` — do not pop it.
-* **Blinky**: 0 TB hits in every mode — interpreter-only by construction.
+### Test pins
+- `tb_xlate.rs` `mod flat_tests`: `flat_blocks_cover_call_graph` asserts >50
+  blocks and presence of main `0x080014dc`, setup `0x08000a18`, loop
+  `0x08000c3c`, eth_recv_packet `0x080008e0`, build_tcp_frame `0x080006ac`,
+  handle_arp `0x0800052c`. Last known result: **6 blocks, FAIL** (main
+  popped but died on its first `push`). The push/pop fix landed after that;
+  the re-run is the background job in §3.
+- `.pw-scratch/test_tb_flat.mjs [budgetM]`: eth_http flat vs interp,
+  transcript compare + rounds (see §2 for the surprising partial result).
+- `.pw-scratch/flat_verify_chain.sh`: one-chain battery (cargo, artifact
+  rebuild, flat test, TB-XLATE + 15 differentials). Its LTO-off env is now
+  redundant (Cargo.toml thin), harmless.
+- `.pw-scratch/flat_cover_probe.mjs`, `flat_build_probe.mjs`,
+  `tb_meta_probe.mjs`: diagnostics; driver stashes `emu.flatBlocks` /
+  `emu.flatInst`.
 
 ---
 
-## 8. Remaining work (all optional — the slice is shippable)
+## 6. Next steps (in order)
 
-1. **Mid-entry cache fast path.** `tbTryEntry` keys entries `'top:'+pc`, so a
-   mid-body submit re-runs `tbTrMetaAt` (35 ms / 2534 submits at 20k steps).
-   Fix: store `e.top` on assist-built entries so `tbTryLoop`'s
-   `e.top === undefined && bytesEqual` path can hit, or keep a second cache
-   keyed by exact pc+layout. Worth ~5% of Node submit time; unmeasured on the
-   page (likely under the 8% bar at the page's larger steps).
-2. **Page-granular "no loop here" decline bitmap** (flash code never
-   changes, so a repeat probe costs ~0 instead of `mem_read` + compare +
-   meta). Same 5% class.
-3. **Share on DOOM** would need nested-loop fusion (census first) — not
-   required by any current target.
-4. **Commit on a separate user order.** Everything below is already done.
+1. Read `/tmp/flat_test.verdict` + log (§3). If `flat_blocks_cover_call_graph`
+   still fails, use `FLAT_DBG=1` traces (walker prints every pop/term) to find
+   the next blocking opcode and add it to `flat_decode` (same pattern:
+   decode statically, reuse `Item::Mem`/MemConst/SpAdj, miss fallback).
+2. When the walk passes: `cargo test --release -j 2` (full, thin LTO), then
+   rebuild `pkg` + `site/vendor` (`npm run build:wasm:node`, `npm run build:wasm`),
+   restore `site/vendor/stm32f407.svd`, remove `site/vendor/.gitignore`.
+3. Run `.pw-scratch/test_tb_flat.mjs 20` — expect byte-identical transcript
+   and a translated share much higher than loop-only TB's ~42%.
+4. Interleaved A/B on eth_http 20M: current TB vs flat (best/median, ≥8%
+   bar). If flat loses, tune per-hit overhead / fuel / covers / shape limits.
+5. Full battery: cargo, TB-XLATE, 15 differentials, `test_tb_direct`,
+   `npm run test:wasm`, browser 44/44, `test_versions`; bump `?v=` on every
+   edited served file + VENDOR_V together if vendor wasm changed; record
+   `__doomVer`. AGENTS.md new section after §46.
+6. **Do not commit without an explicit user order.**
 
-
----
-
-## 9. Pre-ship checklist
-
-* [x] `TB_PROF` (per-hit attribution) and the worker's `WPROF` burst profiler
-      removed from `site/emulator.js` / `site/emu-worker.js`; the temporary
-      `?prof` / `?burst` / `?wallms` / `?depth` knobs removed from
-      `site/app.js`.
-* [x] `TB_MIN_RUN` folded into a constant (5000) with the page-vs-Node
-      measurement in the comment; the env override is gone.
-* [x] `TB_DIAG` **kept deliberately** as a documented dev knob
-      (`.pw-scratch/tb_diag.mjs` needs it; it compiles to a null check per
-      submit and is not on the per-instruction path). Declared in §3.
-* [x] `debug_assert!(open.is_empty())` kept in `emit_body_walk`.
-* [x] `site/test_tb_xlate.mjs` validates the three RX-loop entries with
-      `new WebAssembly.Module` (231 checks, in `npm test`).
-* [x] `?v=` bumped on every edited served file and on all `VENDOR_V`
-      literals after the wasm rebuild: `VENDOR_V` **56**, `app.js?v=75`
-      (console.html), `emulator.js?v=9` (app.js / emu-worker.js /
-      doom-worker.js), `emu-worker.js?v=20`, `doom.js?v=97` (doom.html),
-      `doom-worker.js?v=64`, `__doomVer` **96**. The SVD fetches share
-      `VENDOR_V` too (`board.svd + '?v=56'` in app.js, `stm32f407.svd?v=56`
-      in doom.js) — they were still at 49 and are now bumped with the rest
-      as §0 requires; content is byte-identical, so this only re-fetches.
-* [x] `site/vendor` **and** `stm32-periph-wasm/pkg` rebuilt from the same
-      source (vendor 1779388 B, pkg 1901229 B).
-* [x] `git add site/test_tb_xlate.mjs` (staged; commit on order).
-* [ ] Restore the SVDs + `rm site/vendor/.gitignore` if any wasm rebuild
-      is run again (`npm run build:wasm` does both automatically).
-
+## 7. Environment facts
+- Box: 16 GB, other OpenChamber sessions + other tenants; thin LTO is now
+  the repo default; memory gate before heavy commands.
+- `wasm-pack build --release --target nodejs` for pkg; `--target web
+  --out-dir ../site/vendor` for browser; the latter deletes the SVD and
+  writes `.gitignore` containing `*` — restore/delete every time.
+- Node 22.22; shell tool timeout ~120 s default (hard `timeout N` ≤185 for
+  foreground, background chains for anything longer).
+- The user is frustrated by the crashes; keep them informed, never claim
+  memory is "fine" after a crash, never hide a failure.
 
 ---
 
-## 10. Gotchas that will bite again
+## 8. 2026-11-25 session — CRASH ROOT CAUSE FIXED + flat pilot status
 
-* **wasm-pack wipes its out-dir**: `site/vendor` loses the SVDs and gains a
-  `.gitignore` containing `*` (which silently untracks the vendor assets).
-  Restore both after every rebuild.
-* **JS bitwise vs comparison**: `tk && (m & 0x800) === 0` parses as
-  `tk && (m & (0x800 === 0))` — always false. Parenthesize the whole
-  comparison. Same family as the bridge-u32 bug: read u32 fields with
-  `>>> 0`.
-* **Bridge u32 fields** must be read `>>> 0` (0xDEADBEEF parses as a
-  negative int32).
-* **A decline costs a 4096-instruction interpreted chunk** (65536 once
-  `tbDeclines >= 200`) — a decline-thrash looks like a speed collapse.
-* **Fuel/amortization**: a 10-instruction loop body still runs ~2000
-  iterations per `run()`, so a `TB_MIN_RUN` gate in the thousands need not
-  exclude it. Bigger *step batches* are proven HARMFUL (MIPS flat, HTTP
-  rounds 124 → 24) — never optimize by enlarging batches. Bigger *bursts*
-  (steps per rAF tick) are the opposite: they are what removed the console's
-  idle duty cycle (§6.13).
-* **Two different "batch" knobs, do not confuse them**: `emu.step(n)` size
-  (100k, RX-servicing granularity — keep) vs worker **burst** steps per tick
-  (24, pure throughput — tune). MIPS at large `step(n)` is a spin-mix
-  artifact; judge real work by rounds/s.
-* **Single runs prove nothing on this box**, however large the delta. Two
-  adjacent A/B/A runs minimum, interleaved, same session. The box has other
-  tenants' headless Chrome.
-* **Measuring the live page**: `#stMips` is a 0.5 s window refreshed only on
-  UI frames — sample it repeatedly and take the median, or compute the
-  window rate from `#stInst` (`.pw-scratch/cdp_live_rate.mjs` does both).
-  A single `#stMips` read can be 20 while the window is 55.
-* **SysTick cadence under TB**: TB checks `pending_exception_ready()` per
-  translated run, the interpreter once per JS step, so a guest that measures
-  tick cadence inside one step sees a ~3.7% shift (freertos' TIM2 line).
-  `.pw-scratch/tb_irq_diff.mjs` normalizes exactly that one line.
-* **Melt-crossing / rAF cadence** is unrelated to TB — do not "fix" slowness
-  by chasing backlog.
-* **`.pw-scratch/wasm_struct.py`** is the structural WASM checker used to
-  localize emitter imbalances (add frame ids if you extend it).
+### The OpenChamber crashes are NOT LTO / load / desktop: they were an
+### infinite loop in the new `flat_blocks()` CFG walker
+`journalctl -k` shows three identical OOM kills on 2026-11-25 (21:39:54,
+21:51:02, 22:01:30): `task=stm32_periph_wa`, **anon-rss 12.8/13.0/13.1 GB**,
+`total-vm ~25 GB`, each inside an `app-openchamber-<pid>.scope` cgroup.
+The killed process is the Rust test binary, not rustc/ld. Cause in
+`tb_xlate.rs::flat_blocks`: the decode `for` loop pushed decoded items into
+`items` but **never advanced `pc`**, so the first straight-line instruction
+(0x080009a4) was re-decoded forever until the kernel OOM-killer took down
+the whole session (the detached job looked like "nothing running").
 
----
+Fixes landed (all uncommitted):
+- `pc = pc.wrapping_add(hw*2)` on the LAST item of each decoded instruction
+  (`tick` flag) — PUSH/POP groups keep one advance for the whole group.
+- Defensive rail: a block over 4096 items becomes `Miss` instead of growing
+  unbounded. Anti-vacuous pin `flat_blocks_advance_pc` (2-byte NOP x3 + bx
+  lr) fails instantly if the advance disappears.
+- `Miss` is now a block BOUNDARY (queue fall-through) instead of ending the
+  walk; otherwise one PUSH.W in a prologue hid the whole call graph
+  (18 blocks / 3 of 6 key functions -> 576 blocks / all 6).
+- Added PUSH.W/POP.W T2 (E92D/E8BD) decomposition; fixed the pre-existing
+  16-bit POP offsets (were the PUSH negative formula) and its missing tick.
 
-## 11. Key files
+### Flat pilot: NOT shippable, keep OFF by default
+- A silent no-op bug was found: `flatTry` gated on `bindings.tb_flat_translate`
+  which does not exist (only `tb_flat_build`). The earlier "flat wins" Node
+  number and the first page A/B were **loop TB**, not flat. Fixed, then the
+  real flat path exposed further bugs: kind-1 miss never executed the
+  instruction (20M miss-retries, zero UART) — fixed by `cpu.step(1)` in the
+  miss path; backward in-module calls recursed to wasm stack overflow —
+  fixed by returning kind 3 on backward edges.
+- Current state: flat builds a 576-block module, but the guest stalls in the
+  RX-wait region (~60k inst, `pc=0x8000955`) and produces no HTTP rounds.
+  Repro: `node .pw-scratch/test_tb_flat.mjs 20`, diagnostics in
+  `flat_trace.mjs` / `flat_share.mjs`. `covers(pc)` and the resume-pc protocol
+  are the next suspects (stats show translated hits freeze while the guest
+  still reports stopped=false).
+- Page A/B (`cdp_mips.mjs`, neutral, pre-fix silent-no-op runs): default TB
+  medians 95.8/96.9/98.0 vs 97.3/97.5/96.5 — no ≥8% win, so flat failed the
+  acceptance bar regardless. `?flat=1` is an opt-in diagnostic only; the
+  shipped path is loop TB (2x interpreter, ~95 MIPS page).
+- Versions now: VENDOR_V 65, emulator.js v15, app.js v83, emu-worker v26,
+  doom.js v103 / `__doomVer` 102, doom-worker v68. `test_versions` PASS.
+- Cargo 292/292 green through every rebuild; no OOM since the pc fix
+  (all chains memory-gated, thin LTO, detached, hard timeout, verdict file).
 
-| Path | What |
-|---|---|
-| `stm32-periph-wasm/src/tb_xlate.rs` | the translator (hot file) |
-| `stm32-periph-wasm/src/tb_emit.rs` | WASM byte builder |
-| `stm32-periph-wasm/src/cpu/thumb.rs` | interpreter ground truth (CBZ ~1836, TST via `alu_op`/`rd_is_test`, UBFX ~2240) |
-| `stm32-periph-wasm/src/cpu/mem.rs` | flat memory, `region_offsets`, `layout_version` |
-| `stm32-periph-wasm/src/lib.rs` | wasm exports (`tb_translate*_direct`, `pending_exception_ready`, …) |
-| `site/emulator.js` | the TB driver (+ temporary `TB_DIAG` block to remove) |
-| `site/emu-worker.js` | page-side worker (host-scripted devices per step) |
-| `site/test_tb_xlate.mjs` | in-repo TB pin (cond sweep + firmware spin + RX-loop module validation) |
-| `site/test_versions.mjs` | served-asset `?v=` guard (20 refs / 10 groups, vendor group pinned together) |
-| `.pw-scratch/emulator_{A,B}.js` + `chain_fast_ab.sh` / `chain_fast_live.sh` | the submit-fast-path A/B (A = pre-change driver; swap by copying over `site/emulator.js`) |
-| `.pw-scratch/tb_diag.mjs` | per-pc hits/declines attribution, dumps `bad_mid.wasm` |
-| `.pw-scratch/tb_gate_ab.mjs` | interleaved `TB_MIN_RUN` gate A/B |
-| `.pw-scratch/tb_eth_wall.mjs` / `tb_eth_interleave.mjs` | traffic A/B harnesses |
-| `.pw-scratch/test_tb_direct.mjs` | byte-identical transcript acceptance (off / mirror / direct) |
-| `.pw-scratch/tb_outer_probe.mjs` | entry/window sweep at base `0x8f8` |
-| `.pw-scratch/cdp_mips.mjs` | **the** page-side MIPS probe (engine acceptance metric) |
-| `.pw-scratch/cdp_live_rate.mjs` | live console-page rate probe (window MIPS from `#stInst`, `#stMips` median, rounds/s) |
-| `.pw-scratch/tb_floor.mjs` | per-hit register-handshake microbench (6.6 µs/hit) |
-| `.pw-scratch/tb_stepsize.mjs` | step-size × TB census (the rounds-collapse table) |
-| `.pw-scratch/battery_final.sh` / `.verdict` | the one-shot final battery |
-| `.pw-scratch/eth_http.dis` | objdump of `eth_http.elf` (ground truth for §5) |
-| `.pw-scratch/wasm_struct.py` | structural WASM checker |
-| `.pw-scratch/doom_play_modes.mjs` | the honest DOOM pill harness |
+### Flat stall root cause (2026-11-25, later)
+Traced with a temporary env-gated `FLAT_TRACE` in `flatTry` (now removed).
+The repeating cycle is `0x8000cb8/cba (ADD SP-relative, Miss) -> bl
+eth_recv_packet -> DMASR poll -> pop {pc} -> back`. The guest prints
+`DHCP TX timeout` repeatedly: a whole `eth_send_packet` status-poll loop
+executes INSIDE one translated run, so `wProcessEth()` (which runs at
+`step()` end) never sees the TX poll in time. Node diagnostics:
+`tx=1..2, rx=1..2, flag[0x20000620]=1, DMASR=0x370040`, guest stalls in RX
+wait with `stopped=false`, no fault, translated hits frozen. This is the
+same "big batches starve servicing" trap as §42, structural to flat's
+long runs.
+- Attempted fix: have `env.device` return a SERVICE status (0x10) on a
+  rising TX/RX poll, exit kind-4, and call `wProcessEth/wProcessDma`
+  immediately. It did NOT fix the stall (one SERVICE event at DMAOMR
+  init, none at DMATPDR) and touched the shipped loop-TB path, so it was
+  **REVERTED** (mask back to 0x3, no JS poll detection, no extra service
+  call). Do not re-propose without a new design.
+- Final versions after the revert: VENDOR_V **67**, emulator.js **v17**,
+  app.js v83, emu-worker v26, doom.js v103 / `__doomVer` 102,
+  doom-worker v68. Both wasm targets rebuilt; `test_versions` PASS.
+- Final battery after the revert: `.pw-scratch/battery_final.sh` ->
+  `BATTERY_EXIT=0` (cargo 292, TB-XLATE, 15 TB differentials, `TB=1`
+  matrix, `npm test` 252 s, `npm run test:wasm`). No commits.
 
----
+### Final flat attempt (user chose "one more flat attempt", 2026-11-25)
+Tried bounded flat runs (`min(budget, 5000)`) + `wProcessEth/wProcessDma`
+at every run boundary. Still stalls. Step-by-step differential
+(`.pw-scratch/flat_diverge.mjs`, interp vs flat, same firmware/netsim):
+- interp reaches `DHCP Discover` at ~60k reported instructions; flat at
+  ~20k — flat **undercounts guest work by ~3x** on eth_http, while blinky
+  accounting matches exactly (10k instructions to `tick 0` both modes).
+- flat's 5M-iteration `eth_send_packet` poll "expires" within ~40k reported
+  instructions and prints `DHCP TX timeout` repeatedly.
+This is a path-specific instruction-accounting / control-flow defect in the
+flat emitter, not a servicing problem. Fixing it means differential-testing
+the emitter against the interpreter block-by-block — a redesign, not a
+patch. The bounded-run + boundary-service change was REVERTED; tree is back
+to the green state (VENDOR_V 67, emulator.js v17, `test_versions` PASS).
 
-## 12. One-paragraph state summary
+### Recommendation for the next session
+The loop-TB path is the product: ~95 MIPS page, 2x interpreter, fully
+green. Flat has now had its renewed mandate and one bounded attempt; both
+failed. Do NOT attempt ad-hoc flat patches again — the next flat attempt
+must start with a block-level differential harness (flat module vs
+interpreter, per-block register/flag/instruction-count equality) before
+any speed measurement. Otherwise pivot to a different speed lever.
+Nothing is committed.
 
-TB (static block translation of Thumb-2 into WASM modules that run against
-the model's own linear memory) is implemented end to end, shipped default-on
-for the console page, and **green**: cargo 283/283, `TB=1` board matrix
-176/176, 17 TB differential harnesses, the in-repo 231-check pin (including
-`WebAssembly.Module` validation of the three eth_http RX-wait-loop entries
-that used to fail), 44/44 browser presets, `npm test` and `test:wasm` all
-EXIT 0. On the page it is **2.1–2.7× the interpreter on heavy firmware**
-(85–91 vs 33–42 MIPS best-of-5, `eth_http`, the ≥60 bar) with a
-byte-identical UART transcript, and the live console — after raising the
-worker burst to 24 steps / 40 ms — runs **53–58 MIPS and 44–48 HTTP
-rounds/s** versus 31–40 MIPS and 26–34 rounds/s interpreted (interleaved,
-same box). The submission path was then attacked with the new cost-split
-instrument and a zero-copy submit cache (§13): per-submit probe **46.3 →
-1.3 µs**, lookup/interp ratio 0.333 → 0.147, page best-of-5 **+10% mean**
-(3/3 interleaved rounds, `eth_http` 82.5–92.4 vs 75.8–86.2), live console
-+2.5% (duty-bound, noise). The remaining known costs are measured and
-small: interpreted chunks are ~77% of TB-on time at 500k steps (TB share,
-not overhead) and the per-hit register handshake 6.6 µs. Two hygiene items
-landed alongside: `site/test_versions.mjs` (a stale `?v=55` pair in
-`emu-worker.js` had been running the previous wasm against the current
-glue) and the `?gate=` / `tbMinRun` knob (verdict: keep 5000; its A/B was
-load-contaminated). Nothing is blocked; the tree is intentionally
-uncommitted and waiting on an explicit commit order.
-
----
-
-## 13. Submit fast path (this session's slice — engine overhead, not share)
-
-`TB_DIAG`'s cost split (`TB_DIAG=1 node .pw-scratch/tb_diag.mjs 20 500000`,
-units are **ms**) showed the submit probe at **26–30% of wall** and ~3.5x the
-translated run it looked up: each submit paid a 160-byte guest `mem_read`
-(~6.6 µs), a `bytes.slice()` for the u16 view, the MPU/IT gates, a meta
-probe (~16.5 µs) and a back-scan — and mid-body entries paid a **second**
-read + meta at the top, because entries are cached under `'top:'+top` while
-submits are keyed by `pc` (`cacheHits 883/2460`).
-
-`site/emulator.js` now keeps `tbFast: pc → {e, base, meta, bytes, off}`:
-
-- zero-copy validation: direct mode already imports the model's `Memory`, so
-  `tbMemView()` returns a `Uint8Array` over `tbMem.buffer` (rebuilt only when
-  the buffer object changes) and `tbGuestOff()` maps a guest window to a wasm
-  offset via the region table (`list` entries now carry `off`); the check is a
-  160-byte compare against the copy the entry was built from;
-- the decline gates (`declined`, `tbShort`) still run per submit, so
-  re-probe/permanent-decline accounting is unchanged;
-- `tbSegsFor()` runs **before** the map read (that is what notices a
-  `layout_version` bump and clears `tbCache` + `tbFast`), so an entry whose
-  baked offsets died can never execute;
-- mirror mode never populates the map, `TB_NOMETACACHE` disables it, and the
-  wasm is untouched (no `VENDOR_V` bump — only `emulator.js?v=` 9 → 10).
-
-Numbers: probe per submit **46.3 → 1.3 µs** (2,414 fast hits / 143 slow
-submits, `cacheHits 0/2460`), lookup/interp **0.333 → 0.147**; page
-best-of-5 `eth_http` **A 75.76/80.65/86.21 vs B 82.51/92.42/92.25**
-(+9/+15/+7%, 3/3 rounds); live console +2.5% mean (noise; the loop is
-duty-bound). Battery green: cargo 283/283, TB diffs + 231-check pin, `TB=1`
-matrix 176/176, browser 44/44, qspi CDP / npm demo / `test:wasm` EXIT 0,
-`test_tb_direct.mjs 20` byte-identical with translated counts unchanged
-(12,771,547).
-
-Two other things recorded this session: `site/test_versions.mjs` (two stale
-`?v=55` vendor literals in `emu-worker.js` had been running the previous
-wasm against the current glue — nothing failed, hence the guard), and
-`TB_MIN_RUN` stays **5000** (its page A/B was contaminated by load drift:
-the first slot won every round while the absolute level decayed 61 → 39).
+### Do NOT re-propose, per user
+Lowering the clock; DOOM-only tuning; interpreter micro-opts as the main
+path; commits without an explicit user order. Node MIPS is diagnostic;
+page-side sampling is the metric; <8% is noise on this box.

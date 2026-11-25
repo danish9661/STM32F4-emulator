@@ -975,6 +975,7 @@ impl Cpu {
             if self.sleeping {
                 break;
             }
+            let trace_on = TRACE_ON.load(Ordering::Relaxed);
             // Deferred MPU data fault from the previous instruction (see
             // mem.rs): raise before fetching the next one. Takes precedence
             // over new interrupt delivery (the fault is older).
@@ -1018,7 +1019,7 @@ impl Cpu {
                 }
             }
             let pc = self.regs.r[15] & !1;
-            if TRACE_ON.load(Ordering::Relaxed) {
+            if trace_on {
                 TRACE_BUF.lock().unwrap().push(pc);
             }
             // Precise bus fault on a wild fetch: raise before executing
@@ -1061,13 +1062,13 @@ impl Cpu {
             let fused_n = if (op & 0xF800) == 0x3800
                 && self.it_n == 0
                 && !self.it_pred
-                && !TRACE_ON.load(Ordering::Relaxed)
+                && !trace_on
             {
                 thumb::fused_spin(self, sys, mem, pc, op)
             } else if (op & 0xF800) == 0x6800
                 && self.it_n == 0
                 && !self.it_pred
-                && !TRACE_ON.load(Ordering::Relaxed)
+                && !trace_on
             {
                 thumb::fused_poll(self, sys, mem, pc, op)
             } else if (op & 0xF800) == 0xF800
@@ -1075,12 +1076,13 @@ impl Cpu {
                 && (op >> 4) & 0xF == 1
                 && self.it_n == 0
                 && !self.it_pred
-                && !TRACE_ON.load(Ordering::Relaxed)
+                && !trace_on
             {
-                thumb::fused_memcpy(self, sys, mem, pc, op)
+                thumb::fused_memcpy(self, sys, mem, pc, op, budget.saturating_sub(done))
             } else {
                 0
             };
+            let prev_done = done;
             let ok = if fused_n > 0 {
                 done += fused_n;
                 self.cycles += fused_n as u64;
@@ -1104,8 +1106,15 @@ impl Cpu {
             if fused_n == 0 {
                 done += 1;
             }
-            if done & 15 == 0 {
-                crate::system::INSTRUCTION_COUNT.fetch_add(16u64, Ordering::Relaxed);
+            // Publish the virtual clock for every 16-instruction boundary
+            // crossed by this step. The old per-16 check (`done & 15 == 0`)
+            // was exact only for the 1-2-3-4-instruction fusions; a bulk
+            // memcpy dispatch charges thousands at once and would skip
+            // boundaries (the model clock would lag the guest). Delta form
+            // is exact for any fused_n, including 0.
+            let cross = (done >> 4).wrapping_sub(prev_done >> 4);
+            if cross > 0 {
+                crate::system::INSTRUCTION_COUNT.fetch_add(cross as u64 * 16, Ordering::Relaxed);
             }
             // Keep the inactive... no — keep the CURRENT stack bank in sync
             // with r13 after every thread-mode instruction. PUSH/POP/ADD-SP
@@ -1138,7 +1147,7 @@ impl Cpu {
             // priority scan in the common nothing-pending case. Both are
             // required: skipping the scan on deliver_off alone still pays
             // select_pending's borrow+walk for every IRQ-driven firmware.
-            if self.deliver_irqs && sys.p.nvic.borrow().any_pending() {
+            if self.deliver_irqs && crate::system::any_pending() {
                 if let Some(irq) = self.select_pending(sys) {
                     // Bind first: `if let` would extend the borrow_mut guard
                     // through the body and take_exception would re-borrow.

@@ -262,6 +262,9 @@ struct Skip {
 /// or nested loops use the global so every level checks one pool.
 /// Chosen per module at compile time — flat emission is untouched.
 const ADJ_GLOBAL: u32 = 19;
+/// Flat whole-program modules: run instruction accumulator (i64 global,
+/// index 22, exported as `flatAcc`; reset by `run` at entry).
+const ACC_GLOBAL: u32 = 22;
 const FUEL_GLOBAL: u32 = 20;
 /// Scratch local for the skip condition (l7; l1-l6 are fuel/iters/temps
 /// owned by other code — emit_valid_check uses l1, seg guards l3/l4).
@@ -460,6 +463,7 @@ fn emit_body_walk(
             &ExecCount::Dynamic { n: n_count, cycle, partial },
             segs,
             base_pc + (bhw as u32) * 2,
+            size * 2,
         );
         partial += 1;
         bhw += size;
@@ -650,6 +654,10 @@ fn is_direct(segs: &[(u32, u32, u32)]) -> bool {
     matches!(segs.last(), Some(s) if *s == DIRECT_MARK)
 }
 
+/// Function index of the imported translated-block device service.
+/// It is always the first imported function in direct modules.
+const DEVICE_IMPORT_IDX: u32 = 0;
+
 /// Mirror-miss guard over a segment table: l3 holds the guest byte
 /// address. Each segment (guest_base, size, mirror_off) is tried in
 /// order; the first with (addr-base) < size-len wins and sets l4 to the
@@ -666,6 +674,11 @@ enum ExecCount {
     /// nests are exact by construction (skipped items never increment),
     /// so no static terms participate and no adj correction applies.
     Nested,
+    /// Flat whole-program modules: the run accumulator is the GLOBAL
+    /// (prior blocks' instructions); this exit adds this block's local
+    /// LTOT into it and yields the total. Only valid at exit points
+    /// (it persists the addition).
+    Flat,
 }
 
 /// Run-total local (LTOT, l9): nested/call modules count EXACTLY by
@@ -700,6 +713,16 @@ fn emit_exec_count(c: &mut Code, exec: &ExecCount) {
             c.local_get(LTOT_LOCAL);
             c.i64_extend_u();
         }
+        ExecCount::Flat => {
+            // ACC += LTOT (persist), result = ACC. Callers OR the exit
+            // kind into the high word and return immediately.
+            c.global_get(ACC_GLOBAL);
+            c.local_get(LTOT_LOCAL);
+            c.i64_extend_u();
+            c.i64_add();
+            c.global_set(ACC_GLOBAL);
+            c.global_get(ACC_GLOBAL);
+        }
     }
 }
 
@@ -710,6 +733,11 @@ fn emit_seg_guard(
     exec: &ExecCount,
     is_store: bool,
     pc: u32,
+    ilen: usize,
+    rtg: u32,
+    base_g: u32,
+    off: i32,
+    wb: u32,
 ) {
     c.block_void(); // $miss
     c.block_void(); // $ok
@@ -734,17 +762,126 @@ fn emit_seg_guard(
     }
     c.br(0); // no segment matched: miss arm
     c.end(); // $ok
+    if is_direct(segs) {
+        // Fast path for peripheral-space accesses (ETH/USART/RCC/... every
+        // wait loop in real firmware polls a device register): hand the
+        // access to the host model service instead of bailing to the
+        // interpreter. Wild/unmapped addresses are reported as
+        // NOT_DEVICE with NO side effects and stay an interpreter
+        // fallback, which raises the precise bus-fault there. Never
+        // falls through: exits return, success branches to $item_done.
+        emit_mmio_fallback(
+            c, exec, is_store, pc, ilen, rtg, base_g, off, wb, len,
+        );
+    } else {
+        c.i32_const(1).global_set(9);
+        c.local_get(3).global_set(10);
+        // Resume pc of the faulting ITEM (global 21). Mirror mode retries
+        // from the entry snapshot; direct mode has already committed the
+        // preceding stores to live memory, so it resumes the interpreter
+        // here instead (never re-executes an applied store).
+        c.i32_const(pc as i32).global_set(21);
+        emit_exec_count(c, exec);
+        c.i64_const(1u64 << 32).i64_or();
+        c.return_();
+    }
+    c.end(); // $miss
+}
+
+/// Device fast path for memory items whose address is not in any guest
+/// region: call the host `env.device` service.
+/// Outcomes (the service executes the model call, or declines before any
+/// side effect):
+///   status bit 0x8 NOT_DEVICE: no access happened; return kind-1 with the
+///     resume pc at the item, the interpreter handles it (bus-fault for
+///     wild accesses, model for peripheral holes).
+///   status bit 0x4 DEVICE_ERROR: service threw; return kind-5 the same
+///     way (interpreter re-executes; the model is deterministic).
+///   otherwise the access happened in the model. Writes / reads without
+///   pending delivery/reset fall through to $item_done; reads then update
+///   Rt with writeback in silicon order. IRQ/RESET latches stop the
+///   translated run with kind-4, pc = next instruction, and the count
+///   includes this item, so the driver delivers the exception/reset once
+///   the instruction is architecturally complete.
+#[allow(clippy::too_many_arguments)]
+fn emit_mmio_fallback(
+    c: &mut Code,
+    exec: &ExecCount,
+    is_store: bool,
+    pc: u32,
+    ilen: usize,
+    rtg: u32,
+    base_g: u32,
+    off: i32,
+    wb: u32,
+    size: u32,
+) {
+    // l3 = access address; call env.device(addr, width, mode, value).
+    c.local_get(3);
+    c.i32_const(size as i32);
+    c.i32_const(is_store as i32);
+    if is_store {
+        c.local_get(1);
+    } else {
+        c.i32_const(0);
+    }
+    c.call(DEVICE_IMPORT_IDX);
+    c.local_set(10); // l10 = packed (status<<32 | value)
+
+    // l8 = status (high 32 bits).
+    c.local_get(10);
+    c.i64_const(32u64).i64_shr_u();
+    c.i32_wrap_i64();
+    c.local_set(8);
+
+    // NOT_DEVICE: plain miss, no side effects.
+    c.local_get(8).i32_const(0x8).i32_and();
+    c.if_void();
     c.i32_const(1).global_set(9);
     c.local_get(3).global_set(10);
-    // Resume pc of the faulting ITEM (global 21). Mirror mode retries
-    // from the entry snapshot; direct mode has already committed the
-    // preceding stores to live memory, so it resumes the interpreter
-    // here instead (never re-executes an applied store).
     c.i32_const(pc as i32).global_set(21);
     emit_exec_count(c, exec);
     c.i64_const(1u64 << 32).i64_or();
     c.return_();
-    c.end(); // $miss
+    c.end();
+
+    // DEVICE_ERROR: same shape, kind-5 (driver reports it, interpreter
+    // re-runs the instruction).
+    c.local_get(8).i32_const(0x4).i32_and();
+    c.if_void();
+    c.i32_const(5).global_set(9);
+    c.local_get(3).global_set(10);
+    c.i32_const(pc as i32).global_set(21);
+    emit_exec_count(c, exec);
+    c.i64_const(5u64 << 32).i64_or();
+    c.return_();
+    c.end();
+
+    // Silicon order: writeback first, then the Rt write (so Rt==Rn reads
+    // win, matching the ordinary memory arm and the interpreter).
+    if wb != 0 {
+        c.local_get(2).i32_const(off).i32_add().global_set(base_g);
+    }
+    if !is_store {
+        c.local_get(10);
+        c.i32_wrap_i64();
+        c.global_set(rtg);
+    }
+
+    // IRQ/RESET latch: stop after this instruction (kind-4).
+    c.local_get(8).i32_const(0x3).i32_and();
+    c.if_void();
+    let next_pc = pc.wrapping_add(ilen as u32);
+    c.i32_const(4).global_set(9);
+    c.i32_const(next_pc as i32).global_set(21);
+    c.i32_const(next_pc as i32).global_set(10);
+    emit_exec_count(c, exec);
+    c.i64_const(1).i64_add(); // the device access itself is one instruction
+    c.i64_const(4u64 << 32).i64_or();
+    c.return_();
+    c.end();
+
+    c.br(1); // $item_done
 }
 
 /// Validity check after a successful segment guard: l4 holds the mirror
@@ -820,6 +957,14 @@ enum Item {
     Mem { base: u32, off: i32, rt: u32, size: u32, is_store: bool, wb: u32,
           idx: Option<u32>, sh: u32 }, // register offset: addr = base+(idx<<sh)
                                        // (None = plain imm `off`; SP=13 allowed as idx)
+    /// PC-relative literal load (LDR literal T1/T2): the address is
+    /// statically known — Align(pc+4,4) + off. Flat/direct only (the
+    /// loop translator never emits it; classify is untouched).
+    MemConst { rt: u32, off: i32, size: u32 },
+    /// ADR T1: rd = Align(pc+4,4) + off (no flags).
+    MovConst { rd: u32, off: i32 },
+    /// Stack-pointer adjust (push/pop decomposition; no flags). Flat only.
+    SpAdj { delta: i32 },
 }
 
 /// Slot pack for one memory item: base(5b: 0-14 reg, 15 = SP) |
@@ -860,7 +1005,9 @@ fn emit_lsls(c: &mut Code, rd: usize, rs: usize, im: u32) {
 
 /// Emit one Item (never a branch). `exec` drives the miss-exit count;
 /// `segs` is the mirror segment table (guest_base, size, mirror_off).
-fn emit_item(c: &mut Code, item: &Item, exec: &ExecCount, segs: &[(u32, u32, u32)], pc: u32) {
+/// `ilen` is the instruction size in BYTES (2 or 4), used by the device
+/// fallback to resume interpretation at the following instruction.
+fn emit_item(c: &mut Code, item: &Item, exec: &ExecCount, segs: &[(u32, u32, u32)], pc: u32, ilen: usize) {
     match *item {
         Item::Alu16(op) => {
             match op & 0xF800 {
@@ -983,6 +1130,9 @@ fn emit_item(c: &mut Code, item: &Item, exec: &ExecCount, segs: &[(u32, u32, u32
         Item::Mem { base, off, rt, size, is_store, wb, idx, sh } => {
             let bg = reg_g(base);
             let rtg = reg_g(rt);
+            // $item_done: success path (segment store/load or device
+            // service) branches here to skip the shared memory epilogue.
+            c.block_void(); // $item_done
             // l2 = base value; l3 = access address.
             c.global_get(bg).local_tee(2);
             if let Some(ir) = idx {
@@ -1000,7 +1150,15 @@ fn emit_item(c: &mut Code, item: &Item, exec: &ExecCount, segs: &[(u32, u32, u32
                 // Imm / pre-index: access at base + off.
                 c.i32_const(off).i32_add().local_set(3);
             }
-            emit_seg_guard(c, segs, size, exec, is_store, pc);
+            // Direct device fallback consumes the value from l1 inside
+            // the guard; mirror mode must NOT spill it here — the
+            // validity check below uses l1 as its temp (caught live:
+            // every mirrored store stored the check's temp instead of
+            // the value — the spin tests failed).
+            if is_store && is_direct(segs) {
+                c.global_get(rtg).local_set(1);
+            }
+            emit_seg_guard(c, segs, size, exec, is_store, pc, ilen, rtg, bg, off, wb);
             // Demand-paging (mirror mode only): the page must be synced
             // (see BITBASE). Direct mode addresses live guest bytes, so
             // there is neither a page table nor a dirty trailer to keep.
@@ -1009,11 +1167,14 @@ fn emit_item(c: &mut Code, item: &Item, exec: &ExecCount, segs: &[(u32, u32, u32
                 emit_valid_check(c, exec);
             }
             if is_store {
-                // Value into l1 BEFORE the dirty record (which uses l2).
                 // NOTE: the store address is l4 (mirror index), NOT l3
                 // (guest address) — storing to l3 faults far outside the
                 // module memory (caught live, straight STRB OOB).
-                c.global_get(rtg).local_set(1);
+                // Mirror mode spills the value here, after the validity
+                // check (it clobbers l1).
+                if !is_direct(segs) {
+                    c.global_get(rtg).local_set(1);
+                }
                 c.local_get(4);
                 c.local_get(1);
                 if size == 4 {
@@ -1041,6 +1202,54 @@ fn emit_item(c: &mut Code, item: &Item, exec: &ExecCount, segs: &[(u32, u32, u32
                     c.i32_load8_u(0, 0).global_set(rtg);
                 }
             }
+            c.end(); // $item_done
+        }
+        Item::MemConst { rt, off, size } => {
+            // PC-relative literal load: static address, direct segment
+            // read (flash image or SRAM). Out-of-segment -> kind-1 miss
+            // (the interpreter serves periph/QSPI pool reads, which do
+            // not occur for real literal pools).
+            let addr = (pc.wrapping_add(4) & !3).wrapping_add(off as u32);
+            let mut hit: Option<(u32, u32)> = None; // (host_off, ro)
+            if is_direct(segs) {
+                for (base, slen, mo) in segs.iter() {
+                    if *base == u32::MAX {
+                        continue;
+                    }
+                    if addr >= *base && addr + size <= base.wrapping_add(*slen) {
+                        hit = Some(((mo & !MO_RO).wrapping_add(addr - *base), *mo & MO_RO));
+                        break;
+                    }
+                }
+            }
+            match hit {
+                Some((host, _ro)) => {
+                    c.i32_const(host as i32);
+                    if size == 4 {
+                        c.i32_load(2, 0).global_set(reg_g(rt));
+                    } else {
+                        c.i32_load8_u(0, 0).global_set(reg_g(rt));
+                    }
+                }
+                None => {
+                    // Miss: interpreter re-executes the literal load.
+                    c.i32_const(addr as i32).global_set(10); // tb_addr
+                    c.i32_const(pc as i32).global_set(21); // tb_pc
+                    emit_exec_count(c, exec);
+                    c.i64_const(1u64 << 32).i64_or();
+                    c.return_();
+                }
+            }
+        }
+        Item::MovConst { rd, off } => {
+            let val = (pc.wrapping_add(4) & !3).wrapping_add(off as u32);
+            c.i32_const(val as i32).global_set(reg_g(rd));
+        }
+        Item::SpAdj { delta } => {
+            c.global_get(reg_g(13));
+            c.i32_const(delta);
+            c.i32_add();
+            c.global_set(reg_g(13));
         }
     }
 }
@@ -1208,7 +1417,7 @@ fn classify(ops: &[u16], i: usize) -> Class {
         let rn = (op & 0xF) as u32;
         let rt = ((o2 >> 12) & 0xF) as u32;
         if rt == 15 || rn == 15 || rt > 14 || (rn > 14) {
-            return Class::Stop(1); // PC-involved: not in the ABI
+            return Class::Stop(2); // PC-involved: not in the ABI
         }
         if c == 8 || c == 9 || c == 12 || c == 13 {
             // T2 imm12: 8 STRB, 9 LDRB, 12 STR, 13 LDR.
@@ -1250,12 +1459,12 @@ fn classify(ops: &[u16], i: usize) -> Class {
             // unprivileged T-variants o2&0xF00==0xE00 stay out —
             // MPU privilege differs there).
             if (o2 & 0xC00) == 0 || (o2 & 0xF00) == 0xE00 {
-                return Class::Stop(1);
+                return Class::Stop(2);
             }
             // Byte only here (word PUW stays interpreted for now).
             let size = match c {
                 0 | 1 => 1,
-                _ => return Class::Stop(1),
+                _ => return Class::Stop(2),
             };
             let is_store = c == 0;
             let puw_p = (o2 >> 10) & 1;
@@ -1277,7 +1486,7 @@ fn classify(ops: &[u16], i: usize) -> Class {
                 2,
             );
         }
-        return Class::Stop(1);
+        return Class::Stop(2); // other F8 shapes: 32-bit
     }
     if (op & 0xFF00) == 0xEA00 || (op & 0xFF00) == 0xEB00 {
         // ADD.W only (op=8, s=0, no flags): register+LSL and
@@ -1405,10 +1614,21 @@ fn classify(ops: &[u16], i: usize) -> Class {
         }
         return Class::Stop(2); // cc 14/15: AL-unfusable / fault
     }
-    Class::Stop(1)
+    // Anything else: 32-bit iff the first halfword is a Thumb-2 prefix
+    // (0b11101/0b11110/0b11111 => 0xE800-0xFFFF). Sizing an unsupported
+    // 32-bit item as 1 halfword would resume the scan MID-INSTRUCTION
+    // and emit phantom holes at a halfword that is not an instruction
+    // start (doom's `mls`/`umull` crawl did exactly that).
+    Class::Stop(if (op & 0xF800) >= 0xE800 { 2 } else { 1 })
 }
 // 21-bit Bcc.W offset (J bits used DIRECTLY, no S inversion —
 // GAS-verified, mirrors the interpreter arm).
+#[inline]
+fn sxN(v: u32, bits: u32) -> i32 {
+    let s = 32 - bits;
+    ((v << s) as i32) >> s
+}
+
 fn sx21(v: u32) -> i32 {
     if v & 0x100000 != 0 {
         (v | 0xFFE00000) as i32
@@ -1416,6 +1636,237 @@ fn sx21(v: u32) -> i32 {
         v as i32
     }
 }
+/// #[doc(hidden)] Static whole-program coverage census (diagnostics).
+/// Recursive descent from the vector table over the raw image; counts
+/// every reachable instruction against the translator's own `classify()`
+/// and reports the top unsupported 32-bit opcodes. Diagnostics only —
+/// never shipped to the wasm exports.
+#[doc(hidden)]
+pub struct CoverReport {
+    pub reachable_instructions: u64,
+    pub supported: u64,
+    pub predicated: u64,
+    pub blocks: u64,
+    pub indirect_dispatches: u64,
+    pub unsupported_top: Vec<(u64, u64)>,
+}
+
+#[doc(hidden)]
+pub fn static_cover(image: &[u8], flash_base: u32) -> CoverReport {
+    let n_hw = image.len() / 2;
+    let mut ops = Vec::with_capacity(n_hw);
+    for c in image.chunks_exact(2) {
+        ops.push(u16::from_le_bytes([c[0], c[1]]));
+    }
+    let mut visited = vec![false; n_hw];
+    let mut work: Vec<u32> = Vec::new();
+    // Vector table: every word index 0..512 with bit0 set (SP has bit0 = 0,
+    // it is naturally skipped by the mask).
+    // Vector table discovery: every vector is an odd address inside the
+    // image (Thumb bit). The scan stops at the first word that is not —
+    // the padding/code boundary. This covers all interrupt handlers
+    // without depending on device-specific vector counts.
+    let vec_words = std::env::var("COVER_VECWORDS").ok().and_then(|v| v.parse::<usize>().ok());
+    let img_lo = flash_base as u64;
+    let img_hi = img_lo + image.len() as u64;
+    let in_flash = |v: u32| { let a = v as u64; a >= img_lo && a < img_hi };
+    let read_word = |off: usize| -> u32 {
+        u32::from_le_bytes([image[off], image[off+1], image[off+2], image[off+3]])
+    };
+    let reset_pc = read_word(4) & !1;
+    work.push(reset_pc);
+    let mut off = 8usize;
+    if let Some(n) = vec_words {
+        let end = 4 + n * 4;
+        while off < end.min(image.len()) {
+            let v = read_word(off);
+            if v & 1 == 1 && in_flash(v) {
+                work.push(v & !1);
+            }
+            off += 4;
+        }
+    } else {
+        while off + 4 <= image.len() {
+            let v = read_word(off);
+            if v & 1 == 1 && in_flash(v) {
+                work.push(v & !1);
+                off += 4;
+            } else {
+                break;
+            }
+        }
+    }
+    let mut r = CoverReport { reachable_instructions: 0, supported: 0, predicated: 0, blocks: 0, indirect_dispatches: 0, unsupported_top: Vec::new() };
+    let mut unsup: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    let dbg_blocks = std::env::var("COVER_DBG").is_ok();
+    while let Some(mut pc) = work.pop() {
+        if dbg_blocks {
+            eprintln!("block @ 0x{:08x}", pc);
+        }
+        let mut it_left = 0u32;
+        loop {
+            let idx = match (pc.wrapping_sub(flash_base)).checked_div(2) {
+                Some(i) if (i as usize) < n_hw => i as usize,
+                _ => break,
+            };
+            if visited[idx] { break; }
+            // Mark the whole instruction. `len` is in BYTES; a 2-byte
+            // instruction occupies exactly ONE halfword (the off-by-one
+            // killed the next instruction's slot and every block stopped
+            // after its first instruction).
+            let op = ops[idx];
+            let li = crate::cpu::thumb::len(op);
+            for k in 0..li / 2 {
+                visited[idx + k] = true;
+            }
+            if dbg_blocks { eprintln!("  cnt 0x{:08x} op=0x{:04x}", pc, op); }
+            r.reachable_instructions += 1;
+            if it_left > 0 {
+                it_left -= 1;
+                r.predicated += 1;
+                *unsup.entry(0xFFFE_0001).or_default() += 1;
+            } else {
+                // Branch forms the whole-program dispatcher resolves
+                // (BL/B.W/Bcc.W) count as supported: they are control
+                // flow, not data ops the emitter must reproduce.
+                let is_dispatch = (op & 0xF800) == 0xF000
+                    && li == 4
+                    && ops.get(idx + 1).map(|&o2| (o2 & 0xC000) == 0x8000 || (o2 & 0xC000) == 0xC000).unwrap_or(false);
+                match classify(&ops, idx) {
+                    Class::Emit(..) | Class::BCond { .. } | Class::BUn { .. } => {
+                        r.supported += 1;
+                    }
+                    Class::Stop(_) if is_dispatch => {
+                        r.supported += 1;
+                    }
+                    Class::Stop(_) => {
+                        let key: u64 = if li == 2 {
+                            ((op as u64) << 16) | ops[idx + 1] as u64
+                        } else {
+                            op as u64
+                        };
+                        *unsup.entry(key).or_default() += 1;
+                    }
+                }
+            }
+            // IT instruction starts a predicated run.
+            if op & 0xFFE0 == 0xBF00 {
+                let mask = op & 0xF;
+                it_left = mask.count_ones() + 1;
+            }
+            // Branch / dispatch decoding, mirroring the interpreter:
+            let s = (op >> 10) & 1;
+            if (op & 0xF800) == 0xE000 {
+                // B.N unconditional: offset = imm11 << 1, signed 12 bits.
+                let off = sxN(((op & 0x7FF) as u32) << 1, 12);
+                let t = pc.wrapping_add(4).wrapping_add(off as u32);
+                if dbg_blocks { eprintln!("push 0x{:08x} (B.N from 0x{:08x})", t, pc); }
+                work.push(t);
+                r.blocks += 1;
+                break;
+            }
+            if (op & 0xF000) == 0xD000 {
+                let cc = ((op >> 8) & 0xF) as u32;
+                if cc < 14 {
+                    let off = sxN(((op & 0xFF) as u32) << 1, 9);
+                    let t = pc.wrapping_add(4).wrapping_add(off as u32);
+                    if dbg_blocks { eprintln!("push 0x{:08x} (B.cond cc={} from 0x{:08x})", t, cc, pc); }
+                    work.push(t);
+                    // fallthrough continues
+                } else {
+                    r.blocks += 1;
+                    break; // UDF/SVC
+                }
+            } else if is_cbz(op) {
+                let i = ((op >> 9) & 1) as u32;
+                let imm5 = ((op >> 3) & 0x1F) as u32;
+                let off = (((i << 5) | imm5) << 1) as i32;
+                let t = pc.wrapping_add(4).wrapping_add(off as u32);
+                if dbg_blocks { eprintln!("push 0x{:08x} (CBZ/CBNZ from 0x{:08x})", t, pc); }
+                work.push(t);
+                // fallthrough continues
+            } else if (op & 0xFF87) == 0x4700 {
+                // BX reg
+                r.indirect_dispatches += 1;
+                r.blocks += 1;
+                break;
+            } else if (op & 0xFFFF) == 0x4770 || (op & 0xFFF0) == 0xBD00 {
+                // BX LR / POP {..., pc}
+                r.indirect_dispatches += 1;
+                r.blocks += 1;
+                break;
+            } else if (op & 0xF800) == 0xF000 || (op & 0xFFF0) == 0xE8D0 {
+                // 32-bit forms with a branch in the second halfword?
+                // (0xF000-0xF7FF: B.W/Bcc.W/BL; 0xE8Dx: TBB/TBH. The
+                // old top-byte test (op & 0xFF00) == 0xF000 matched
+                // only 0xF0xx and silently dropped every BL with
+                // imm10 >= 0x100 — main's `bl setup` (0xF7FF FA9B)
+                // never pushed its target and the census starved.)
+                if let Some(&o2h) = ops.get(idx + 1) {
+                    let o2 = o2h as u32;
+                    let opw = op as u32;
+                    if (opw & 0xF800) == 0xF000 && (o2 & 0xC000) == 0x8000 {
+                        // B.W / Bcc.W: o2[15:14] == 10
+                        let s2 = (opw >> 10) & 1;
+                        let j1 = (o2 >> 13) & 1;
+                        let j2 = (o2 >> 11) & 1;
+                        let imm11 = o2 & 0x7FF;
+                        if (o2 & 0x1000) != 0 {
+                            // B.W unconditional.
+                            let i1 = j1 ^ s2 ^ 1;
+                            let i2 = j2 ^ s2 ^ 1;
+                            let off = sxN((s2 << 24) | (i1 << 23) | (i2 << 22) | ((opw & 0x3FF) << 12) | (imm11 << 1), 25);
+                            let t = pc.wrapping_add(4).wrapping_add(off as u32);
+                            if dbg_blocks { eprintln!("push 0x{:08x} (B.W from 0x{:08x})", t, pc); }
+                            work.push(t);
+                            r.blocks += 1;
+                            break;
+                        } else {
+                            let cc = (opw >> 6) & 0xF;
+                            if cc < 14 {
+                                let imm6 = opw & 0x3F;
+                                let off = sxN((s2 << 20) | (j1 << 19) | (j2 << 18) | (imm6 << 12) | (imm11 << 1), 21);
+                                let t = pc.wrapping_add(4).wrapping_add(off as u32);
+                                if dbg_blocks { eprintln!("push 0x{:08x} (Bcc.W from 0x{:08x})", t, pc); }
+                                work.push(t);
+                                // fallthrough continues
+                            } else {
+                                r.blocks += 1;
+                                break;
+                            }
+                        }
+                    } else if (opw & 0xF800) == 0xF000 && (o2 & 0xC000) == 0xC000 && (o2 & 0xF000) == 0xF000 {
+                        // BL: o2[15:14] == 11.
+                        let s2 = (opw >> 10) & 1;
+                        let j1 = (o2 >> 13) & 1;
+                        let j2 = (o2 >> 11) & 1;
+                        let i1 = j1 ^ s2 ^ 1;
+                        let i2 = j2 ^ s2 ^ 1;
+                        let imm11 = o2 & 0x7FF;
+                        let off = sxN((s2 << 24) | (i1 << 23) | (i2 << 22) | ((opw & 0x3FF) << 12) | (imm11 << 1), 25);
+                        let t = pc.wrapping_add(4).wrapping_add(off as u32);
+                        if dbg_blocks { eprintln!("push 0x{:08x} (BL from 0x{:08x})", t, pc); }
+                        work.push(t);
+                        // call: fallthrough continues
+                    } else if opw == 0xE8D0 || opw == 0xE8D8 {
+                        // TBB/TBH: indirect table branch.
+                        if (o2 & 0xF000) == 0xF000 {
+                            r.indirect_dispatches += 1;
+                            r.blocks += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            pc = pc.wrapping_add(li as u32);
+        }
+    }
+    r.unsupported_top = unsup.into_iter().collect();
+    r.unsupported_top.sort_by(|a, b| b.1.cmp(&a.1));
+    r.unsupported_top.truncate(24);
+    r
+}
+
 // Branch target in i64 space: below-base targets are None (they wrap
 // to huge u32 and would masquerade as forward edges — the old signed
 // check caught this; the first u32 cut did not).
@@ -2093,6 +2544,7 @@ fn emit_tree(
         segs: &[(u32, u32, u32)],
         slots: &mut Vec<u32>,
         pc: u32,
+        ilen: usize,
     ) {
         if let Item::Mem { base, off, size: msize, is_store, wb, .. } = *it {
             let pack = (if base == 13 { 15 } else { base }) | ((msize == 4) as u32) << 5
@@ -2100,7 +2552,7 @@ fn emit_tree(
             slots.push(pack);
             slots.push(if wb == 1 { 0 } else { off as u32 });
         }
-        emit_item(c, it, &ExecCount::Nested, segs, pc);
+        emit_item(c, it, &ExecCount::Nested, segs, pc, ilen);
         emit_tick(c);
     }
     // ---- Body plan for one loop span: linear op sequence. ----
@@ -2335,10 +2787,10 @@ fn emit_tree(
             self.lay.edges.iter().find(|e| e.hw == h).map(|e| (e.size, e.cc, e.target))
         }
         fn counted(&mut self, c: &mut Code, hw: usize) -> Option<()> {
-            let (_, it) = self.item_at(hw)?;
+            let (sz, it) = self.item_at(hw)?;
             let segs = self.segs;
             let pc = self.base_pc + (hw as u32) * 2;
-            emit_counted(c, &it, segs, &mut self.slots, pc);
+            emit_counted(c, &it, segs, &mut self.slots, pc, sz * 2);
             Some(())
         }
         // Shared-fuel check: fuel < cycle -> tb_addr=level_top, br Fuel.
@@ -2588,7 +3040,7 @@ fn emit_tree(
             if let Some((sz, it)) = self.item_at(h) {
                 let segs = self.segs;
                 let pc = self.base_pc + (h as u32) * 2;
-                emit_counted(c, &it, segs, &mut self.slots, pc);
+                emit_counted(c, &it, segs, &mut self.slots, pc, sz * 2);
                 cyc += 1;
                 h += sz;
                 continue;
@@ -2625,7 +3077,7 @@ fn emit_tree(
             let (sz, it) = self.item_at(h)?;
             let segs = self.segs;
             let pc = self.base_pc + (h as u32) * 2;
-            emit_counted(c, &it, segs, &mut self.slots, pc);
+            emit_counted(c, &it, segs, &mut self.slots, pc, sz * 2);
             cyc += 1;
             h += sz;
         }
@@ -2690,7 +3142,7 @@ fn emit_tree(
             let (sz, it) = st.item_at(h)?;
             let segs = st.segs;
             let pc = base_pc + (h as u32) * 2;
-            emit_counted(c, &it, segs, &mut st.slots, pc);
+            emit_counted(c, &it, segs, &mut st.slots, pc, sz * 2);
             h += sz;
         }
         if h != cal.prefix_end {
@@ -2717,11 +3169,17 @@ fn emit_tree(
     // ---- Module assembly ----
     // Func indices: 0 = top run func; callees 1.. in tree order.
     let mut m = Module::new();
-    m.functype(&[I32], &[0x7E]); // (i32)->i64 run
-    m.functype(&[], &[0x7E]); // ()->i64 callees
-    m.func(0);
+    let run_ty = m.functype(&[I32], &[0x7E]); // (i32)->i64 run
+    let callee_ty = m.functype(&[], &[0x7E]); // ()->i64 callees
+    if is_direct(segs) {
+        let device_ty = m.functype(&[I32, I32, I32, I32], &[0x7E]);
+        let device_idx = m.import_func("env", "device", device_ty);
+        debug_assert_eq!(device_idx, DEVICE_IMPORT_IDX);
+    }
+    m.func(run_ty);
+    let run_idx = m.imported_func_count();
     for _ in tree.top.calls.iter() {
-        m.func(1);
+        m.func(callee_ty);
     }
     if is_direct(segs) {
         // Shared-memory translation: translated code addresses the HOST
@@ -2735,7 +3193,7 @@ fn emit_tree(
     for _ in 0..22 {
         m.global_mut_i32(0);
     }
-    m.export_func("run", 0);
+    m.export_func("run", run_idx);
     if !is_direct(segs) {
         m.export_mem("mem", 0);
     }
@@ -2750,8 +3208,9 @@ fn emit_tree(
     }
     let mut st = NestEmit { lay, base_pc, segs, slots: Vec::new(), stack: Vec::new() };
     // Top plan (calls carry callee-top HW for target verification).
+    let fn_offset = m.imported_func_count() as usize;
     let top_calls: Vec<(usize, usize, u32)> = tree.top.calls.iter().enumerate()
-        .map(|(i, c)| (c.edge_hw, 1 + i, c.callee.top as u32)).collect();
+        .map(|(i, c)| (c.edge_hw, fn_offset + 1 + i, c.callee.top as u32)).collect();
     if top_calls.len() > 1 {
         return None;
     }
@@ -3250,9 +3709,14 @@ fn translate_at_impl(
      -> Option<Vec<Skip>> {
         let (_, _, t, _) = lat;
         // A real forward exit before the body top skips the loop: not a
-        // loop shape at all. (Hole exits are pass-through statically, so
-        // they do not invalidate anything.)
-        if let Some(e) = ex.iter().find(|e| e.hw < t && !e.resume) {
+        // loop shape at all. A HOLE (resume exit) before the top is just
+        // as fatal for EMISSION: the prefix walk cannot jump over it (it
+        // would have to return mid-prefix, leaving the loop unreachable)
+        // and silently skipping it executes the wrong arithmetic -- doom's
+        // `movw r0,#5381` seed vanished this way, corrupting
+        // W_LumpNameHash. Declining is sound: the driver interprets up to
+        // the loop top and translates the clean region there.
+        if let Some(e) = ex.iter().find(|e| e.hw < t) {
             *sk_end = e.hw;
             return None;
         }
@@ -3286,14 +3750,15 @@ fn translate_at_impl(
             }
         }
     }
-    // Prefix = emitted items fully before the latch target (halfword
-    // starts < t); loop body = the rest. (Items are branch-free, so an
-    // item straddling t is impossible: t is an item boundary because the
-    // latch target is encodable only at one... not exactly — t can split
-    // a 32-bit pair in theory. Guard: prefix items must END at/before t.)
     let mut m = Module::new();
-    m.functype(&[I32], &[0x7E]);
-    m.func(0);
+    let run_ty = m.functype(&[I32], &[0x7E]);
+    if is_direct(&segs) {
+        let device_ty = m.functype(&[I32, I32, I32, I32], &[0x7E]);
+        let device_idx = m.import_func("env", "device", device_ty);
+        debug_assert_eq!(device_idx, DEVICE_IMPORT_IDX);
+    }
+    m.func(run_ty);
+    let run_idx = m.imported_func_count();
     // Globals 0-11 keep their v1 indices (r0-r7, xpsr, tb_exit, tb_addr,
     // sp); 12-17 add r8-r12 + lr; 18 is the dirty-trailer count; 19 is
     // the skip-adjust (internal-skip exact counting, driver-invisible);
@@ -3310,7 +3775,7 @@ fn translate_at_impl(
     for _ in 0..22 {
         m.global_mut_i32(0);
     }
-    m.export_func("run", 0);
+    m.export_func("run", run_idx);
     if !is_direct(&segs) {
         m.export_mem("mem", 0);
     }
@@ -3326,7 +3791,8 @@ fn translate_at_impl(
     // Flat single-loop modules keep legacy local-l5 fuel (nested/call
     // modules use the shared FUEL_GLOBAL pool via separate emission).
     let mut c = Code::new();
-    c.local(7, I32); // l1..l7 (p0 = fuel param; l7 = skip-cond scratch)
+    c.local(9, I32); // l1..l9 (p0 = fuel param; l7 = skip-cond scratch; l8/l9 = device status/LTOT)
+    c.local(1, I64); // l10 (device-service result / future multi-word returns)
     // prologue (uniform): spill fuel, zero iters + skip-adjust.
     // (Nested path rewrites the spill to the shared pool; flat keeps l5.)
     c.local_get(0).local_set(5);
@@ -3344,24 +3810,32 @@ fn translate_at_impl(
         Top,
         Mid { e_hw: usize, p_cost: u32 },
     }
+    // True halfword start of every emitted item (exits interleaved).
+    // Sizes alone CANNOT reconstruct positions -- a hole is not an item,
+    // so an items-only walk reports the following item early and puts
+    // loop-top code in the prefix (doom's movw hole did exactly that).
+    let starts_all = item_starts_of(
+        &emitted,
+        &exits,
+        latch.map(|l| l.0).unwrap_or(usize::MAX),
+        latch.map(|l| l.3).unwrap_or(1),
+    );
     let (is_loop, exit_off, body_from, cycle, entry_mode) = match latch {
         Some((li, cc, t, lsize)) => {
-            let mut start_hw = 0usize;
             let mut n: u32 = 0;
             let mut ok = true;
-            for (it, size) in emitted.iter() {
-                let _ = it;
-                if start_hw >= t {
+            for (i, &st) in starts_all.iter().enumerate() {
+                if st >= t {
                     break; // item starts at/after the top: body begins
                 }
-                if start_hw + size > t {
+                if st + emitted[i].1 > t {
                     ok = false; // 32-bit item straddling the top: unsafe
                     break;
                 }
-                start_hw += size;
                 n += 1;
             }
-            if !ok || start_hw != t {
+            let body_ok = (n as usize) < starts_all.len() && starts_all[n as usize] == t;
+            if !ok || !body_ok {
                 (false, 0usize, 0usize, 0u32, EntryMode::Top)
             } else {
                 // cycle = body Emit insts + forward exits taken-not-taken
@@ -3404,20 +3878,23 @@ fn translate_at_impl(
                         (false, 0usize, 0usize, 0u32, EntryMode::Top)
                     } else {
                         // Partial cost: 1 (latch eval) + exits in [e..li)
-                        // + Emit items in [e..li).
+                        // + emitted items in [e..li).
+                        // Positions come from the SAME boundary walk that
+                        // validated the entry. An items-only `h += size`
+                        // walk desyncs at the first exit before the entry
+                        // (exits consume halfwords too) and silently
+                        // under-counts the partial: doom's memcpy tail
+                        // reported 1 for a store+latch pair, drifting the
+                        // virtual clock on every fuel-out.
                         let mut p: u32 = 1;
                         for e2 in exits.iter() {
                             if e2.hw >= e_hw && e2.hw < li && !e2.resume {
                                 p += 1;
                             }
                         }
-                        {
-                            let mut h = t;
-                            for (_, size) in emitted.iter().skip(n as usize) {
-                                if h >= e_hw && h < li {
-                                    p += 1;
-                                }
-                                h += size;
+                        for &s in starts.iter() {
+                            if s >= e_hw && s < li {
+                                p += 1;
                             }
                         }
                         (true, li + lsize, n as usize, cyc, EntryMode::Mid { e_hw, p_cost: p })
@@ -3450,8 +3927,7 @@ fn translate_at_impl(
         EntryMode::Mid { p_cost, .. } => (0, p_cost),
     };
     let mut n_out: u32 = 0;
-    let mut shw = 0usize;
-    for (it, sz) in emitted.iter().take(emit_upto) {
+    for (k, (it, sz)) in emitted.iter().take(emit_upto).enumerate() {
         if let Item::Mem { base, off, size: msize, is_store, wb, .. } = *it {
             let pack = (if base == 13 { 15 } else { base })
                 | ((msize == 4) as u32) << 5
@@ -3459,14 +3935,18 @@ fn translate_at_impl(
             slots.push(pack);
             slots.push(if wb == 1 { 0 } else { off as u32 });
         }
+        // Exact item start (holes/branches before it are halfwords too):
+        // this pc is the kind-1 miss resume address, so a size-only walk
+        // would resume one instruction early.
+        let pshw = starts_all.get(k).copied().unwrap_or(0);
         emit_item(
             &mut c,
             it,
             &ExecCount::Static(n_out as usize),
             &segs,
-            base_pc + (shw as u32) * 2,
+            base_pc + (pshw as u32) * 2,
+            *sz * 2,
         );
-        shw += sz;
         n_out += 1;
     }
     // Item index where the loop body starts (prefix length).
@@ -3585,10 +4065,17 @@ fn translate_at_impl(
         c.i64_extend_u();
         c.return_();
         c.end(); // $fuelout
-        // Resume address: the entry pc (mid-entry resubmits mid-body;
-        // top-entry entry==base, identical to the old leave-pc behavior).
-        // Nested inner fuel-outs overwrite this with their own top below.
-        c.i32_const(entry_pc as i32).global_set(10);
+        // Resume address: the LOOP TOP, never the entry pc. A mid-entry
+        // run has already executed its partial first pass [entry..latch)
+        // by the time the fuel-out check runs, and every later iteration
+        // starts at the top — resuming at the entry would re-execute the
+        // last partial item (a store loop advanced its pointer TWICE per
+        // fuel-out: DOOM's memcpy tail corrupted Z_Malloc's heap head).
+        // Top-entry regions with a straight prefix [base..top) are the
+        // same rule: the prefix ran once in this run, the next iteration
+        // begins at the top. (Tree/nested emission has its own fuel-outs
+        // with per-level tops.)
+        c.i32_const((base_pc + (t as u32) * 2) as i32).global_set(10);
         c.local_get(6).i32_const(cycle as i32).i32_mul().i32_const(n as i32).i32_add();
         c.global_get(ADJ_GLOBAL).i32_sub();
         c.i64_extend_u();
@@ -3667,6 +4154,25 @@ pub fn region_meta_direct(ops: &[u16], segs: &[u32], base_pc: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_unsupported_wide_holes_as_two_halfwords() {
+        // A hole must advance the item walk by its FULL width. Sized as one
+        // halfword, the instruction's second halfword is classified as an
+        // item of its own (`movw r0,#5381` = F241 5005, and 0x5005 is
+        // `str r5,[r0,r0]`), so every position computed after it — skip
+        // ends, prefix splits, exit offsets — shifts by one halfword.
+        // Nothing faults; the region diverges silently.
+        // doom.bin 0x08018a18 (the W_LumpNameHash seed): the boot bug.
+        assert!(matches!(classify(&[0xF241, 0x5005], 0), Class::Stop(2)));
+        // ldr.w r0,[pc,#4]: F8 T2 with rn == 15 (PC-relative literal load;
+        // PC-involved rn/rt are outside the register ABI).
+        assert!(matches!(classify(&[0xF8DF, 0x0004], 0), Class::Stop(2)));
+        // The final fallthrough is sized by the Thumb-2 prefix rule: a
+        // 32-bit prefix counts two halfwords, everything else one.
+        assert!(matches!(classify(&[0xE9CD], 0), Class::Stop(2))); // strd
+        assert!(matches!(classify(&[0x4770], 0), Class::Stop(1))); // bx lr
+    }
 
     #[test]
     fn classifies_poll_loop_ops() {
@@ -4104,5 +4610,945 @@ mod tests {
         assert!(b3.is_loop);
         assert_eq!(b3.consumed, 65);
     }
+}
 
+#[cfg(test)]
+mod cover_tests {
+    #[test]
+    fn static_coverage_report() {
+        let path = std::env::var("COVER_FW").unwrap_or_else(|_| "../firmware/eth_http/eth_http.bin".to_string());
+        let img = match std::fs::read(&path) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("skip: {path}: {e}");
+                return;
+            }
+        };
+        let r = super::static_cover(&img, 0x08000000);
+        let total = r.reachable_instructions;
+        println!("image: {path} ({} bytes)", img.len());
+        println!("reachable instructions: {total} (blocks {}, indirect dispatches {})", r.blocks, r.indirect_dispatches);
+        println!("supported (Emit+BCond+BUn): {} ({:.1}%)", r.supported, 100.0 * r.supported as f64 / total.max(1) as f64);
+        println!("IT-predicated (out of scope today): {} ({:.1}%)", r.predicated, 100.0 * r.predicated as f64 / total.max(1) as f64);
+        println!("top unsupported:");
+        for (k, n) in &r.unsupported_top {
+            if *k == 0xFFFE_0001 {
+                println!("  <IT-predicated regions>  {}x", n);
+            } else if *k >> 16 > 0xFFFF {
+                println!("  F{:04X} {:04X}  {}x", (k >> 16) & 0xFFFF, k & 0xFFFF, n);
+            } else {
+                println!("  {:04X}        {}x", k & 0xFFFF, n);
+            }
+        }
+    }
+}
+
+// ── Flat whole-program translation (pilot) ────────────────────────────
+//
+// Emits ONE wasm module holding every reachable basic block of the image:
+// per-block functions (same register globals, Item emission, seg guards
+// and device fallback as the loop translator), an in-module `dispatch(pc)`
+// (binary search over the sorted block table; direct `call` for
+// intra-module edges), `run(pc, budget)` and `covers(pc)` entries.
+//
+// Control flow:
+// - intra-module branch/BL: direct `call $block` (the result i64 bubbles
+//   up; guest call depth == wasm call depth; LR-mediated returns dispatch
+//   on the LR global).
+// - out-of-module target: kind-3 exit (tb_addr), driver re-dispatches.
+// - unsupported instruction: kind-1 miss exit (tb_pc = that instruction),
+//   interpreter executes it; the next dispatch re-enters the module.
+// - device access latching an IRQ/watchdog: kind-4 (same protocol as the
+//   loop translator — stop after the instruction, pc = next).
+// - two budgets: `budget` (instructions, checked at block tails, exact)
+//   and tbFuel (block dispatches, bounds the wasm call stack; the driver
+//   resets it per run). Fuel-out = kind-2 with tb_addr = next pc.
+
+#[doc(hidden)]
+pub struct FlatOut {
+    pub bytes: Vec<u8>,
+    /// Sorted block start pcs (the dispatch table order).
+    pub blocks: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+enum FlatTerm {
+    /// Unconditional branch, target possibly out of module.
+    Br(u32),
+    /// Conditional: taken -> target, not-taken -> fall.
+    BrCond { cc: u32, target: u32, fall: u32 },
+    /// BL: lr = ret; call target (guest call).
+    Bl { target: u32, ret: u32 },
+    /// bx lr / pop {.., pc}: dispatch on the LR global.
+    RetDispatch,
+    /// Unsupported instruction at pc: kind-1 miss (interpreter resumes there).
+    Miss(u32),
+    /// Walked off the image (should not happen; sound exit).
+    BrOut(u32),
+}
+
+struct FlatBlock {
+    pc: u32,
+    items: Vec<(Item, usize, u32)>, // (item, halfword len, pc)
+    term: FlatTerm,
+    /// pc of the terminator instruction (budget-out resumes here; the
+    /// branch/BL re-executes, which is side-effect-free and costs one
+    /// counted instruction per budget boundary).
+    term_pc: u32,
+}
+
+/// IT-with-mask detection (0xBF00 exact = NOP, WFE/WFI/YIELD have mask 0).
+#[inline]
+fn is_it(op: u16) -> bool {
+    op & 0xFF00 == 0xBF00 && op & 0x0F != 0
+}
+
+/// One decoded piece: an emitted item (`tick` marks the LAST item of the
+/// source instruction — the walker ticks once per instruction) or a block
+/// terminator.
+enum FlatDec {
+    It(Item, usize, bool),
+    Term(FlatTerm),
+}
+
+/// Decode one instruction at `idx` (pc) into items and/or a block
+/// terminator. Branch decoding mirrors the interpreter arms exactly
+/// (offsets are imm<<1; wide J-bit handling per the B.W/Bcc.W/BL shapes).
+/// PUSH/POP decompose into sp-relative stores/loads FIRST and the SpAdj
+/// LAST, so a mid-instruction miss re-executes cleanly (the completed
+/// stores are idempotent; the sp change happens only after they all
+/// succeeded).
+fn flat_decode(ops: &[u16], idx: usize, pc: u32) -> Vec<FlatDec> {
+    let op = ops[idx];
+    // CBZ/CBNZ first (classify also claims it, but the target decode
+    // differs from B.cond so the flat walker handles it directly).
+    if is_cbz(op) {
+        let rn = (op & 7) as u32;
+        let nonzero = (op >> 11) & 1 != 0;
+        let i = ((op >> 9) & 1) as u32;
+        let imm5 = ((op >> 3) & 0x1F) as u32;
+        let off = ((i << 5) | imm5) << 1;
+        let target = pc.wrapping_add(4).wrapping_add(off);
+        let cc = rtest_cc(rn, nonzero);
+        return vec![FlatDec::Term(FlatTerm::BrCond { cc, target, fall: pc + 2 })];
+    }
+    match classify(ops, idx) {
+        Class::Emit(item, hw) => vec![FlatDec::It(item, hw, true)],
+        Class::BCond { cc, wide, size } => {
+            let (target, fall) = if wide {
+                let o2 = ops[idx + 1] as u32;
+                let opw = op as u32;
+                let s = (opw >> 10) & 1;
+                let j1 = (o2 >> 13) & 1;
+                let j2 = (o2 >> 11) & 1;
+                let off = sxN(
+                    (s << 20) | (j1 << 19) | (j2 << 18) | ((opw & 0x3F) << 12) | ((o2 & 0x7FF) << 1),
+                    21,
+                );
+                (pc.wrapping_add(4).wrapping_add(off as u32), pc + (size as u32) * 2)
+            } else {
+                let off = sxN(((op & 0xFF) as u32) << 1, 9);
+                (pc.wrapping_add(4).wrapping_add(off as u32), pc + 2)
+            };
+            vec![FlatDec::Term(FlatTerm::BrCond { cc, target, fall })]
+        }
+        Class::BUn { size } => {
+            let target = if size == 1 {
+                let off = sxN(((op & 0x7FF) as u32) << 1, 12);
+                pc.wrapping_add(4).wrapping_add(off as u32)
+            } else {
+                let o2 = ops[idx + 1] as u32;
+                let opw = op as u32;
+                let s = (opw >> 10) & 1;
+                let j1 = (o2 >> 13) & 1;
+                let j2 = (o2 >> 11) & 1;
+                let i1 = j1 ^ s ^ 1;
+                let i2 = j2 ^ s ^ 1;
+                let off = sxN(
+                    (s << 24) | (i1 << 23) | (i2 << 22) | ((opw & 0x3FF) << 12) | ((o2 & 0x7FF) << 1),
+                    25,
+                );
+                pc.wrapping_add(4).wrapping_add(off as u32)
+            };
+            vec![FlatDec::Term(FlatTerm::Br(target))]
+        }
+        Class::Stop(s) => {
+            let _ = s;
+            // PC-relative literal loads + ADR (rn==15 shapes the loop
+            // translator declines): statically addressed, so they emit
+            // as constant items. T1 LDR-literal (0x48xx), T2 word/byte
+            // literal (F8DF/F89F), ADR (0xA0xx).
+            if op & 0xF800 == 0x4800 {
+                return vec![FlatDec::It(Item::MemConst {
+                        rt: ((op >> 8) & 7) as u32,
+                        off: ((op & 0xFF) as i32) * 4,
+                        size: 4,
+                    },
+                     1,
+            true,
+            )];
+            }
+            if (op & 0xFF00) == 0xF800 && op < 0xFA00 {
+                if let Some(&o2) = ops.get(idx + 1) {
+                    let c4 = (op >> 4) & 0xF;
+                    if (c4 == 13 || c4 == 9) && op & 0xF == 0xF {
+                        return vec![FlatDec::It(
+                            Item::MemConst {
+                                rt: ((o2 >> 12) & 0xF) as u32,
+                                off: (o2 & 0xFFF) as i32,
+                                size: if c4 == 13 { 4 } else { 1 },
+                            },
+                            2,
+                            true,
+                        )];
+                    }
+                }
+            }
+            if op & 0xF800 == 0xA000 {
+                return vec![FlatDec::It(Item::MovConst {
+                        rd: ((op >> 8) & 7) as u32,
+                        off: ((op & 0xFF) as i32) * 4,
+                    },
+                     1,
+            true,
+            )];
+            }
+            // PUSH T1 (0xB4xx) / POP T1 (0xBCxx no-pc, 0xBDxx with pc):
+            // decompose into sp-relative Item::Mem ops + a trailing SpAdj
+            // (loads/stores FIRST — idempotent under re-execution — and
+            // the sp change only after they all succeeded). pop {.., pc}
+            // loads the return address into LR (dead at every epilogue)
+            // and terminates with RetDispatch.
+            if op & 0xFE00 == 0xB400 {
+                let mask = (op & 0xFF) as u32;
+                let with_lr = (op & 0x100) != 0;
+                let count = mask.count_ones() + with_lr as u32;
+                if count == 0 {
+                    return vec![FlatDec::It(Item::Alu16(0xBF00), 1, true)]; // push {}: nop
+                }
+                let mut v = Vec::new();
+                let mut k = 0i32;
+                for r in 0..8u32 {
+                    if mask & (1 << r) != 0 {
+                        v.push(FlatDec::It(
+                            Item::Mem {
+                                base: 13,
+                                off: (4 * k - 4 * count as i32),
+                                rt: r,
+                                size: 4,
+                                is_store: true,
+                                wb: 0,
+                                idx: None,
+                                sh: 0,
+                            },
+                            1,
+                            false,
+                        ));
+                        k += 1;
+                    }
+                }
+                if with_lr {
+                    v.push(FlatDec::It(
+                        Item::Mem {
+                            base: 13,
+                            off: (4 * k - 4 * count as i32),
+                            rt: 14,
+                            size: 4,
+                            is_store: true,
+                            wb: 0,
+                            idx: None,
+                            sh: 0,
+                        },
+                        1,
+                        false,
+                    ));
+                    k += 1;
+                }
+                v.push(FlatDec::It(Item::SpAdj { delta: -((4 * count) as i32) }, 1, true));
+                return v;
+            }
+            if op & 0xFE00 == 0xBC00 {
+                let mask = (op & 0xFF) as u32;
+                let with_pc = (op & 0x100) != 0;
+                let count = mask.count_ones() + with_pc as u32;
+                if count == 0 {
+                    return vec![FlatDec::It(Item::Alu16(0xBF00), 1, true)]; // pop {}: nop
+                }
+                let mut v = Vec::new();
+                let mut k = 0i32;
+                for r in 0..8u32 {
+                    if mask & (1 << r) != 0 {
+                        v.push(FlatDec::It(
+                            Item::Mem {
+                                base: 13,
+                                // POP is LDMIA: positive offsets from the
+                                // OLD sp (PUSH/STMDB is negative). Using the
+                                // push formula loaded garbage into LR/pc and
+                                // the guest jumped to pc=1.
+                                off: 4 * k,
+                                rt: r,
+                                size: 4,
+                                is_store: false,
+                                wb: 0,
+                                idx: None,
+                                sh: 0,
+                            },
+                            1,
+                            false,
+                        ));
+                        k += 1;
+                    }
+                }
+                if with_pc {
+                    // Return address into LR (dead at every epilogue);
+                    // the block terminates with dispatch(lr).
+                    v.push(FlatDec::It(
+                        Item::Mem {
+                            base: 13,
+                            off: 4 * k,
+                            rt: 14,
+                            size: 4,
+                            is_store: false,
+                            wb: 0,
+                            idx: None,
+                            sh: 0,
+                        },
+                        1,
+                        false,
+                    ));
+                    k += 1;
+                }
+                // Tick on the last item so the walker advances past this
+                // instruction (a POP without `pc` has no terminator to do
+                // it); RetDispatch then resumes at the following pc on a
+                // budget boundary instead of re-executing the pop.
+                v.push(FlatDec::It(Item::SpAdj { delta: (4 * count) as i32 }, 1, true));
+                if with_pc {
+                    v.push(FlatDec::Term(FlatTerm::RetDispatch));
+                }
+                return v;
+            }
+            // PUSH.W T2 (e92d mask) / POP.W T2 (e8bd mask): the compiler's
+            // prologue/epilogue form. Same decomposition as T1 — stores/
+            // loads FIRST, SpAdj LAST — extended to r8-r12/lr/pc. Without
+            // this every function entry is a one-instruction block that
+            // kind-1 exits, so whole-program translation does nothing.
+            if op == 0xE92D || op == 0xE8BD {
+                let mask = ops.get(idx + 1).copied().unwrap_or(0) as u32;
+                let is_push = op == 0xE92D;
+                let with_pc = !is_push && mask & (1 << 15) != 0;
+                let count = mask.count_ones();
+                if count == 0 {
+                    return vec![FlatDec::It(Item::Alu16(0xBF00), 2, true)];
+                }
+                let mut v = Vec::new();
+                let mut k = 0i32;
+                for r in 0..15u32 {
+                    if r == 13 || (!is_push && r == 15) || mask & (1 << r) == 0 {
+                        continue;
+                    }
+                    v.push(FlatDec::It(
+                        Item::Mem {
+                            base: 13,
+                            off: if is_push { 4 * k - 4 * count as i32 } else { 4 * k },
+                            rt: r,
+                            size: 4,
+                            is_store: is_push,
+                            wb: 0,
+                            idx: None,
+                            sh: 0,
+                        },
+                        2,
+                        false,
+                    ));
+                    k += 1;
+                }
+                if with_pc {
+                    // pop {.., pc}: the return address is dead at every
+                    // epilogue, so load it into LR and dispatch on it.
+                    v.push(FlatDec::It(
+                        Item::Mem {
+                            base: 13,
+                            off: 4 * k,
+                            rt: 14,
+                            size: 4,
+                            is_store: false,
+                            wb: 0,
+                            idx: None,
+                            sh: 0,
+                        },
+                        2,
+                        false,
+                    ));
+                }
+                v.push(FlatDec::It(
+                    Item::SpAdj {
+                        delta: if is_push { -(4 * count as i32) } else { 4 * count as i32 },
+                    },
+                    2,
+                    true,
+                ));
+                if with_pc {
+                    v.push(FlatDec::Term(FlatTerm::RetDispatch));
+                }
+                return v;
+            }
+            // Wide branch / call shapes classify declines but the flat
+            // dispatcher owns: BL (call), B.W (unconditional), Bcc.W.
+            if (op & 0xF800) == 0xF000 {
+                if let Some(&o2) = ops.get(idx + 1) {
+                    let o2 = o2 as u32;
+                    let opw = op as u32;
+                    if (o2 & 0xC000) == 0x8000 {
+                        // B.W unconditional (bit12 set) vs Bcc.W.
+                        if (o2 & 0x1000) != 0 {
+                            let s = (opw >> 10) & 1;
+                            let j1 = (o2 >> 13) & 1;
+                            let j2 = (o2 >> 11) & 1;
+                            let i1 = j1 ^ s ^ 1;
+                            let i2 = j2 ^ s ^ 1;
+                            let off = sxN(
+                                (s << 24) | (i1 << 23) | (i2 << 22) | ((opw & 0x3FF) << 12) | ((o2 & 0x7FF) << 1),
+                                25,
+                            );
+                            return vec![FlatDec::Term(FlatTerm::Br(pc.wrapping_add(4).wrapping_add(off as u32)))];
+                        }
+                        let cc = (opw >> 6) & 0xF;
+                        if cc < 14 {
+                            let s = (opw >> 10) & 1;
+                            let j1 = (o2 >> 13) & 1;
+                            let j2 = (o2 >> 11) & 1;
+                            let off = sxN(
+                                (s << 20) | (j1 << 19) | (j2 << 18) | ((opw & 0x3F) << 12) | ((o2 & 0x7FF) << 1),
+                                21,
+                            );
+                            return vec![FlatDec::Term(FlatTerm::BrCond {
+                                cc,
+                                target: pc.wrapping_add(4).wrapping_add(off as u32),
+                                fall: pc + 4,
+                            })];
+                        }
+                        return vec![FlatDec::Term(FlatTerm::Miss(pc))]; // AL branch: unreachable
+                    }
+                    if (o2 & 0xC000) == 0xC000 && (o2 & 0xF000) == 0xF000 {
+                        // BL: lr = pc+4; call target.
+                        let s = (opw >> 10) & 1;
+                        let j1 = (o2 >> 13) & 1;
+                        let j2 = (o2 >> 11) & 1;
+                        let i1 = j1 ^ s ^ 1;
+                        let i2 = j2 ^ s ^ 1;
+                        let off = sxN(
+                            (s << 24) | (i1 << 23) | (i2 << 22) | ((opw & 0x3FF) << 12) | ((o2 & 0x7FF) << 1),
+                            25,
+                        );
+                        return vec![FlatDec::Term(FlatTerm::Bl {
+                            target: pc.wrapping_add(4).wrapping_add(off as u32),
+                            ret: pc + 4,
+                        })];
+                    }
+                }
+            }
+            // bx lr / pop {.., pc}: LR-mediated return.
+            if op == 0x4770 {
+                return vec![FlatDec::Term(FlatTerm::RetDispatch)];
+            }
+            if op & 0xFF00 == 0xBD00 && op & 0x0100 != 0 {
+                return vec![FlatDec::Term(FlatTerm::RetDispatch)];
+            }
+            // Everything else: interpreter fallback at this instruction.
+            vec![FlatDec::Term(FlatTerm::Miss(pc))]
+        }
+    }
+}
+
+/// CFG walk: maximal straight-line blocks from the vector-table roots.
+fn flat_blocks(image: &[u8], flash_base: u32) -> Vec<FlatBlock> {
+    let n_hw = image.len() / 2;
+    let mut ops = Vec::with_capacity(n_hw);
+    for c in image.chunks_exact(2) {
+        ops.push(u16::from_le_bytes([c[0], c[1]]));
+    }
+    let in_image = |pc: u32| -> Option<usize> {
+        let d = pc.wrapping_sub(flash_base);
+        if (d as usize) < image.len() && d & 1 == 0 {
+            Some((d / 2) as usize)
+        } else {
+            None
+        }
+    };
+    let mut work: Vec<u32> = Vec::new();
+    let mut queued = std::collections::HashSet::new();
+    let mut push = |pc: u32, work: &mut Vec<u32>, queued: &mut std::collections::HashSet<u32>| {
+        if in_image(pc).is_some() && queued.insert(pc) {
+            work.push(pc);
+        }
+    };
+    // Seeds: reset vector + every vector-table entry (odd words inside the
+    // image, scan stops at the first non-vector word — same rule as the
+    // census).
+    let read_word = |off: usize| -> u32 {
+        u32::from_le_bytes([image[off], image[off + 1], image[off + 2], image[off + 3]])
+    };
+    let img_lo = flash_base as u64;
+    let img_hi = img_lo + image.len() as u64;
+    push(read_word(4) & !1, &mut work, &mut queued);
+    let mut off = 8usize;
+    while off + 4 <= image.len() {
+        let v = read_word(off);
+        if v & 1 == 1 {
+            let a = v as u64;
+            if a >= img_lo && a < img_hi {
+                push(v & !1, &mut work, &mut queued);
+                off += 4;
+                continue;
+            }
+        }
+        break;
+    }
+    let mut out: Vec<FlatBlock> = Vec::new();
+    let mut seen_start: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let dbg = std::env::var("FLAT_DBG").is_ok();
+    while let Some(pc0) = work.pop() {
+        if dbg {
+            eprintln!("flat: pop 0x{pc0:08x} (work={})", work.len());
+        }
+        if !seen_start.insert(pc0) {
+            continue;
+        }
+        let mut pc = pc0;
+        let mut items: Vec<(Item, usize, u32)> = Vec::new();
+        let mut term_pc = pc0;
+        let mut term_hit = false;
+        let mut term = FlatTerm::BrOut(pc0);
+        loop {
+            let idx = match in_image(pc) {
+                Some(i) => i,
+                None => {
+                    term = FlatTerm::BrOut(pc);
+                    break;
+                }
+            };
+            let op = ops[idx];
+            if is_it(op) {
+                term = FlatTerm::Miss(pc);
+                break;
+            }
+            for dec in flat_decode(&ops, idx, pc) {
+                match dec {
+                    FlatDec::It(item, hw, tick) => {
+                        // One item group per source instruction; the tick
+                        // flag marks the last item (multi-item push/pop
+                        // groups count once). Advance pc on that LAST item
+                        // only: every item of a PUSH/POP group carries hw=1
+                        // and the same pc, so advancing per item would skip
+                        // ahead by N halfwords. Omitting the advance loops
+                        // on one pc and grows `items` until the OOM killer
+                        // fires (2026-11-25: stm32_periph_wa @ 13 GB RSS).
+                        items.push((item, hw, pc));
+                        if tick {
+                            pc = pc.wrapping_add((hw as u32) * 2);
+                        }
+                        // Defensive rail: a runaway walk must decline this
+                        // block, never exhaust the host's memory.
+                        if items.len() > 4096 {
+                            if dbg {
+                                eprintln!("flat: runaway block at 0x{pc0:08x}");
+                            }
+                            items.clear();
+                            term = FlatTerm::Miss(pc0);
+                            term_pc = pc0;
+                            term_hit = true;
+                            break;
+                        }
+                    }
+                    FlatDec::Term(t) => {
+                        if dbg {
+                            eprintln!("flat: term @0x{pc:08x} -> {:?}", match &t {
+                                FlatTerm::Br(x) => format!("Br 0x{x:08x}"),
+                                FlatTerm::BrCond { target, fall, .. } => format!("BrCond 0x{target:08x}/0x{fall:08x}"),
+                                FlatTerm::Bl { target, ret } => format!("Bl 0x{target:08x} ret 0x{ret:08x}"),
+                                FlatTerm::RetDispatch => "RetDispatch".into(),
+                                FlatTerm::Miss(m) => format!("Miss 0x{m:08x}"),
+                                FlatTerm::BrOut(x) => format!("BrOut 0x{x:08x}"),
+                            });
+                        }
+                        // Queue successor block starts.
+                        match t {
+                            FlatTerm::Br(tg) => push(tg, &mut work, &mut queued),
+                            FlatTerm::BrCond { target, fall, .. } => {
+                                push(target, &mut work, &mut queued);
+                                push(fall, &mut work, &mut queued);
+                            }
+                            FlatTerm::Bl { target, ret, .. } => {
+                                push(target, &mut work, &mut queued);
+                                push(ret, &mut work, &mut queued);
+                            }
+                            FlatTerm::Miss(m) => {
+                                // An unsupported instruction is a block
+                                // BOUNDARY, not the end of the walk: kind-1
+                                // re-executes it in the interpreter and the
+                                // next dispatch re-enters translation here.
+                                // Without this, one PUSH.W in a prologue
+                                // hid every callee behind it (2026-11-25:
+                                // only 18 blocks, 3/6 key functions).
+                                let op = *ops.get(idx).unwrap_or(&0);
+                                let hw = if op & 0xF800 >= 0xE800 { 4 } else { 2 };
+                                push(m.wrapping_add(hw), &mut work, &mut queued);
+                            }
+                            _ => {}
+                        }
+                        term = t;
+                        term_pc = pc;
+                        term_hit = true;
+                        break;
+                    }
+                }
+            }
+            if term_hit {
+                break;
+            }
+        }
+        out.push(FlatBlock { pc: pc0, items, term, term_pc });
+    }
+    out.sort_by_key(|b| b.pc);
+    out
+}
+
+/// Flat per-instruction tick (same shape as the nested emit_tick, which
+/// lives inside an impl scope and is not reachable here).
+fn emit_flat_tick(c: &mut Code) {
+    c.local_get(LTOT_LOCAL).i32_const(1).i32_add().local_set(LTOT_LOCAL);
+}
+
+/// Block-tail accumulator: ACC += LTOT (LTOT is dead after this — the
+/// block either returns or tail-calls, never touches LTOT again).
+fn emit_acc_commit(c: &mut Code) {
+    c.global_get(ACC_GLOBAL);
+    c.local_get(LTOT_LOCAL);
+    c.i64_extend_u();
+    c.i64_add();
+    c.global_set(ACC_GLOBAL);
+}
+
+/// Flat exit: tb_pc/tb_addr set by the caller where needed; returns
+/// (kind << 32) | ACC. Commits this block's LTOT first (item-level exits
+/// use ExecCount::Flat which does the same — exactly one commit per exit).
+fn emit_flat_exit(c: &mut Code, kind: u64) {
+    emit_acc_commit(c);
+    c.global_get(ACC_GLOBAL);
+    c.i64_const(kind << 32);
+    c.i64_or();
+    c.return_();
+}
+
+/// Return with the accumulator AS-IS (the caller already committed LTOT —
+/// dispatch/covers have no LTOT local, and post-commit tails must not
+/// double-add).
+fn emit_flat_return(c: &mut Code, kind: u64) {
+    c.global_get(ACC_GLOBAL);
+    c.i64_const(kind << 32);
+    c.i64_or();
+    c.return_();
+}
+
+/// Binary search over the sorted block table. Leaf action: dispatch calls
+/// the block (result bubbles via return), covers returns 1.
+fn emit_search(c: &mut Code, blocks: &[u32], lo: usize, hi: usize, base_fn: u32, covers: bool) {
+    if hi - lo == 1 {
+        c.local_get(0);
+        c.i32_const(blocks[lo] as i32);
+        c.i32_eq();
+        c.if_void();
+        if covers {
+            c.i32_const(1).return_();
+        } else {
+            c.call(base_fn + lo as u32);
+            c.return_();
+        }
+        c.end();
+    } else {
+        let mid = (lo + hi) / 2;
+        c.local_get(0);
+        c.i32_const(blocks[mid] as i32);
+        c.i32_lt_u();
+        c.if_void();
+        emit_search(c, blocks, lo, mid, base_fn, covers);
+        c.else_();
+        emit_search(c, blocks, mid, hi, base_fn, covers);
+        c.end();
+    }
+}
+
+/// Emit one block function. Terminator edges:
+/// - in-module: direct `call $block` (result = function result);
+/// - out-of-module/exit: kind-3 (tb_addr) or kind-1 (tb_pc) return.
+fn emit_flat_block(
+    c: &mut Code,
+    b: &FlatBlock,
+    index_of: &std::collections::HashMap<u32, u32>,
+    segs: &[(u32, u32, u32)],
+    base_fn: u32,
+) {
+    // No param (blocks know their own pc), so 10 i32 locals occupy
+    // indices 0..9 (l1..l9 roles unchanged; l0 unused scratch) and the
+    // i64 scratch lands on l10 — the exact index layout emit_item and
+    // the device fallback were written against.
+    c.local(10, I32); // l0..l9 i32 (LTOT = l9)
+    c.local(1, I64); // l10 i64 (device result scratch)
+    for (item, hw, pc) in &b.items {
+        emit_item(c, item, &ExecCount::Flat, segs, *pc, hw * 2);
+        emit_flat_tick(c);
+    }
+    // Commit this block's instructions BEFORE any edge: the innermost
+    // exit's ACC must include every prior block (in-module edges do not
+    // return through this frame's LTOT again).
+    emit_acc_commit(c);
+    // Instruction-budget check (budget rides in tb_exit / global 9):
+    // budget < ACC -> budget out, resume at the terminator instruction
+    // (re-executing a branch/BL is side-effect-free).
+    c.global_get(9);
+    c.i64_extend_u();
+    c.global_get(ACC_GLOBAL);
+    c.i64_lt_u();
+    c.if_void();
+    c.i32_const(b.term_pc as i32).global_set(10); // tb_addr = resume pc
+    emit_flat_return(c, 2);
+    c.end();
+    match b.term {
+        FlatTerm::Miss(mpc) => {
+            c.i32_const(mpc as i32).global_set(21); // tb_pc
+            emit_flat_return(c, 1);
+        }
+        // Direct `call` is only safe for FORWARD edges: a backward edge is
+        // a loop latch, and calling it nests one wasm frame per iteration
+        // until the stack overflows (2026-11-25: 20M steps, stack blowup).
+        // Let it fall through to kind 3 (resume at tb_addr) instead; the
+        // driver re-submits with a fresh stack.
+        FlatTerm::Br(t) | FlatTerm::BrCond { target: t, .. }
+            if index_of.contains_key(&t) && t > b.pc =>
+        {
+            c.call(base_fn + index_of[&t]);
+        }
+        FlatTerm::Br(t) => {
+            c.i32_const(t as i32).global_set(10); // tb_addr
+            emit_flat_return(c, 3);
+        }
+        FlatTerm::BrCond { cc, target, fall } => {
+            emit_cond(c, cc);
+            c.if_void();
+            if index_of.contains_key(&target) && target > b.pc {
+                c.call(base_fn + index_of[&target]);
+                c.return_();
+            } else {
+                c.i32_const(target as i32).global_set(10);
+                emit_flat_return(c, 3);
+            }
+            c.end();
+            // Fall-through edge (same backward-edge rule).
+            if index_of.contains_key(&fall) && fall > b.pc {
+                c.call(base_fn + index_of[&fall]);
+            } else {
+                c.i32_const(fall as i32).global_set(10);
+                emit_flat_return(c, 3);
+            }
+        }
+        FlatTerm::Bl { target, ret } => {
+            c.i32_const(ret as i32).global_set(reg_g(14)); // lr = return pc
+            if index_of.contains_key(&target) && target > b.pc {
+                c.call(base_fn + index_of[&target]);
+            } else {
+                c.i32_const(target as i32).global_set(10);
+                emit_flat_return(c, 3);
+            }
+        }
+        FlatTerm::RetDispatch => {
+            c.global_get(reg_g(14)); // lr
+            c.call(2); // $dispatch (func idx 2)
+        }
+        FlatTerm::BrOut(t) => {
+            c.i32_const(t as i32).global_set(10);
+            emit_flat_return(c, 3);
+        }
+    }
+}
+
+/// Build the whole-program flat module. `segs_in` is the driver's direct
+/// triple table (flash first, bit31 = read-only), like tb_translate_direct.
+#[doc(hidden)]
+pub fn translate_flat(image: &[u8], segs_in: &[u32]) -> Option<FlatOut> {
+    let mut segs: Vec<(u32, u32, u32)> = Vec::new();
+    let mut si = 0usize;
+    while si + 2 < segs_in.len() {
+        let (base, size, mo) = (segs_in[si], segs_in[si + 1], segs_in[si + 2]);
+        if size >= 4 {
+            segs.push((base, size, mo));
+        }
+        si += 3;
+    }
+    if segs.is_empty() {
+        return None;
+    }
+    let flash_base = segs[0].0;
+    segs.push(DIRECT_MARK);
+
+    let blocks = flat_blocks(image, flash_base);
+    if blocks.is_empty() {
+        return None;
+    }
+    let pcs: Vec<u32> = blocks.iter().map(|b| b.pc).collect();
+    let index_of: std::collections::HashMap<u32, u32> =
+        pcs.iter().enumerate().map(|(i, &p)| (p, i as u32)).collect();
+
+    let n = blocks.len();
+    if n > 8192 {
+        return None; // pilot bound (module size / emit time)
+    }
+
+    let mut m = Module::new();
+    let run_ty = m.functype(&[I32, I32], &[0x7E]); // (pc, budget) -> i64
+    let disp_ty = m.functype(&[I32], &[0x7E]); // (pc) -> i64
+    let covers_ty = m.functype(&[I32], &[I32]); // (pc) -> i32
+    let block_ty = m.functype(&[], &[0x7E]); // () -> i64
+    let device_ty = m.functype(&[I32, I32, I32, I32], &[0x7E]);
+    let device_idx = m.import_func("env", "device", device_ty);
+    debug_assert_eq!(device_idx, DEVICE_IMPORT_IDX);
+    m.import_memory("env", "memory", 1);
+    // Globals 0-21 identical to loop modules (driver syncs by name);
+    // 22 = flatAcc (i64 run accumulator).
+    for _ in 0..22 {
+        m.global_mut_i32(0);
+    }
+    m.global_mut_i64(0);
+    // Defined-function declaration order == index order: run=1, dispatch=2,
+    // covers=3, blocks=4..4+n (device import = 0).
+    m.func(run_ty);
+    let run_idx = m.imported_func_count(); // 1
+    m.func(disp_ty); // dispatch = 2
+    m.func(covers_ty); // covers = 3
+    for _ in 0..n {
+        m.func(block_ty); // blocks = 4..4+n
+    }
+    m.export_func("run", run_idx);
+    m.export_func("dispatch", 2);
+    m.export_func("covers", 3);
+    for (i, name) in [
+        "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "xpsr", "tb_exit", "tb_addr", "sp",
+        "r8", "r9", "r10", "r11", "r12", "lr", "dirtyCount", "skipAdj", "tbFuel", "tb_pc",
+    ]
+    .iter()
+    .enumerate()
+    {
+        m.export_global(name, i as u32);
+    }
+    m.export_global("flatAcc", ACC_GLOBAL);
+
+    // Code section order MUST match the declared func order:
+    // run(1), dispatch(2), covers(3), blocks(4..4+n).
+    {
+        // run(pc, budget): ACC = 0; tb_exit = budget; dispatch(pc).
+        let mut c = Code::new();
+        c.i64_const(0).global_set(ACC_GLOBAL);
+        c.local_get(0).global_set(9); // tb_exit = budget
+        c.local_get(0).call(2);
+        c.end();
+        m.code(&c);
+    }
+    {
+        // dispatch(pc): fuel--, fuel-out check, binary search, not-found exit.
+        let mut c = Code::new();
+        c.global_get(FUEL_GLOBAL);
+        c.i32_const(1);
+        c.i32_sub();
+        c.global_set(FUEL_GLOBAL);
+        c.global_get(FUEL_GLOBAL);
+        c.i32_const(0);
+        c.i32_lt_s();
+        c.if_void();
+        c.local_get(0).global_set(10); // tb_addr = pc
+        emit_flat_return(&mut c, 2);
+        c.end();
+        emit_search(&mut c, &pcs, 0, n, 4, false);
+        // Not found: kind-3 exit (out-of-module target).
+        c.local_get(0).global_set(10);
+        emit_flat_return(&mut c, 3);
+        c.end();
+        m.code(&c);
+    }
+    {
+        // covers(pc): 1 if the pc is a block start.
+        let mut c = Code::new();
+        emit_search(&mut c, &pcs, 0, n, 4, true);
+        c.i32_const(0).return_();
+        c.end();
+        m.code(&c);
+    }
+    for b in blocks.iter() {
+        let mut c = Code::new();
+        emit_flat_block(&mut c, b, &index_of, &segs, 4);
+        c.end();
+        m.code(&c);
+    }
+    let bytes = m.finish();
+    Some(FlatOut { bytes, blocks: pcs })
+}
+
+#[cfg(test)]
+mod flat_tests {
+    /// Anti-vacuous pin for the pc advance in `flat_blocks`: a straight-line
+    /// block must consume each source instruction exactly once. Without the
+    /// advance this test used to loop on the first NOP and grow `items`
+    /// without bound (the 2026-11-25 OOM crash).
+    #[test]
+    fn flat_blocks_advance_pc() {
+        let mut img = vec![0u8; 0x80];
+        // SP (even) + reset vector (odd) -> 0x08000040; vector scan stops at
+        // the first non-vector word (offset 8).
+        img[4..8].copy_from_slice(&0x08000041u32.to_le_bytes());
+        for (i, hw) in [0xBF00u16, 0xBF00, 0xBF00, 0x4770].iter().enumerate() {
+            let o = 0x40 + i * 2;
+            img[o..o + 2].copy_from_slice(&hw.to_le_bytes());
+        }
+        let blocks = super::flat_blocks(&img, 0x08000000);
+        assert_eq!(blocks.len(), 1, "expected one straight-line block");
+        let b = &blocks[0];
+        assert_eq!(b.pc, 0x08000040, "wrong block start");
+        assert_eq!(b.items.len(), 3, "pc did not advance (runaway block)");
+        assert_eq!(
+            b.items.iter().map(|x| x.2).collect::<Vec<_>>(),
+            vec![0x08000040, 0x08000042, 0x08000044],
+            "wrong item pcs"
+        );
+        assert_eq!(b.term_pc, 0x08000046, "terminator pc not advanced");
+        assert!(matches!(b.term, super::FlatTerm::RetDispatch));
+    }
+
+    #[test]
+    fn flat_blocks_cover_call_graph() {
+        let img = match std::fs::read("../firmware/eth_http/eth_http.bin") {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("skip: {e}");
+                return;
+            }
+        };
+        let blocks = super::flat_blocks(&img, 0x08000000);
+        if std::env::var("FLAT_DBG").is_ok() {
+            let tot: usize = blocks.iter().map(|b| b.items.len()).sum();
+            let max = blocks.iter().map(|b| b.items.len()).max().unwrap_or(0);
+            eprintln!(
+                "flat: {} blocks, {} items, avg {:.2}, max {}",
+                blocks.len(), tot, tot as f64 / blocks.len() as f64, max
+            );
+        }
+        // The call graph: _start -> main -> setup/loop -> {uart_ip,
+        // eth_recv_packet, build_tcp_frame, handle_arp, ETH_IRQHandler}.
+        // A starved walk (BL targets never queued) yields <10 blocks.
+        assert!(blocks.len() > 50, "flat walk found only {} blocks", blocks.len());
+        for pc in [0x080014dcu32, 0x08000a18, 0x08000c3c, 0x080008e0, 0x080006ac, 0x0800052c] {
+            assert!(
+                blocks.iter().any(|b| b.pc == pc),
+                "block 0x{pc:08x} missing from the flat walk"
+            );
+        }
+    }
 }

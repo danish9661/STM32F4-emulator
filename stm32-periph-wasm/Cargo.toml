@@ -11,7 +11,11 @@ crate-type = ["cdylib"]
 
 [profile.release]
 opt-level = 3
-lto = true
+# Fat LTO (`lto = true`) spikes the link to ~12.8 GB RSS on this 16 GB box
+# and the kernel OOM-killer takes down the desktop + OpenChamber (proven:
+# journalctl, 2026-11-05 and 2026-11-25, multiple sessions). Thin LTO keeps
+# nearly all the optimisation at ~1-2 GB. Any session can build safely now.
+lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = true

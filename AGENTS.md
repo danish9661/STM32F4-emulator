@@ -1,3 +1,5 @@
+> **FIRST**: Read `HANDOVER.md` at the repo root — flat-translation pilot state, OOM/crash rules, and the exact next steps (2026-11-25). Everything in this file is secondary until that is done.
+
 # AGENTS.md
 
 ## 0. Working agreement (added 2026-09-06, at user request)
@@ -5442,3 +5444,359 @@ and re-ran the whole discovery (`cacheHits 883/2460`).
   early sample can read ~40% low. (Also seen: a 99%-CPU esp32-emu process
   and another project's vitest pinning cores — leave them alone, use the
   ratio.)
+
+## 45. Interpreter fusion #4: bulk newlib memcpy (2026-10-22)
+
+DOOM's gameplay profile put **42.8% of all executed instructions** inside
+newlib's byte-at-a-time `memcpy` inner loop (`.pw-scratch/doom_prof.mjs`,
+PC samples aggregated by `doom.elf` symbol; next: R_DrawSpan 20.9%,
+wipe_doMelt 7.2%, R_DrawColumn 7.1%). The §43 fusion already collapsed
+that loop to one iteration per dispatch, which still cost a dispatch per
+byte. The bulk arm collapses the whole run instead — same guest
+semantics, same instruction charge, no quality knob anywhere.
+
+### Shape and contract (`cpu/thumb.rs::fused_memcpy`)
+The fused shape is exactly newlib's `memcpy` word loop as GCC 14 emits it
+(`ldrb.w Rt,[Rn],#1` / `strb.w Rt,[Rn2,#1]!` / `cmp Rn,Rm` / `bne P`):
+`F811 4B01` load, `F803 4F01` store, `4291` cmp, `D1F9` bne. Gate:
+- load POST-indexed `pa==0 && ua==1 && wa==1 && offa==1`,
+- store PRE-indexed `pb==1 && ub==1 && wb==1 && offb==1`,
+- `rta==rtb`, `rn2==rna`, `rm2` distinct from both pointers,
+  `rna!=rnb`, `rta!=rnb`, `budget_left>=4`.
+`remaining = end - src` (the loop is equality-terminated), and the bulk
+arm only runs for `0 < remaining <= 1<<24`; anything else falls through to
+the exact one-iteration arm.
+- Chunk cap `FUSED_MEMCPY_BULK_MAX = 4096` bytes (16k instructions),
+  **128 bytes when `deliver_irqs` is on** so exception latency stays
+  bounded (~512 instructions).
+- Copies through a stack `[u8; 4096]` via `mem.read_range`/`write_range`,
+  which refuse under MPU/UNALIGN_TRP, flash destinations and multi-region
+  spans — those all fall back to the one-iteration arm, so MPU and flash
+  programming are never bypassed.
+- Forward-overlap smear (`dst > src && dst-src < remaining`) bails to the
+  byte path; backward overlap is a valid memmove and bulk-copies.
+- End state is computed, not approximated: `Rn = src+n`, `Rn2 = dst+n`,
+  `Rt = last byte`, `CMP(src+n, end)` flags, `PC = pc+12`; a partial chunk
+  leaves `PC = pc|1` so the next step resumes at the loop top. Charged
+  `4*n` instructions, exactly the guest's own count.
+- `Cpu::run`'s 16-instruction clock publish is now delta-based
+  (`(done>>4) - (prev_done>>4)`); the old `done & 15 == 0` check would
+  skip boundaries once one dispatch charges thousands.
+
+### Tests (`cpu/tests.rs`, all with exact end-state comparison)
+`fused_memcpy_bulk_whole_run` (one dispatch, 20 inst),
+`fused_memcpy_bulk_chunks` (5000 B = 4096 + 904),
+`fused_memcpy_bulk_bails_on_forward_overlap` (smear proves the byte path
+ran), `fused_memcpy_bulk_declines_zero_remaining` (a `r1==r2` entry is a
+4G-byte runaway in silicon too; the guard must decline it), and
+`fused_memcpy_bulk_matches_byte_loop` — a differential over sizes
+1/2/7/64/4095/4096/4097/5000 comparing memory, **all registers, xPSR and
+the instruction charge** against the byte path. `cargo test --release --
+--test-threads=1` **289/289**.
+
+### Measured
+- **Node DOOM gameplay pill** (`.pw-scratch/doom_play_modes.mjs
+  --mode=off`, tb off, interleaved N-O-N-O on the same box): old
+  67.97 / 69.25 / 70.12 / 67.96 MIPS (median 68.6) vs new
+  151.75 / 145.41 / 123.95 / 122.41 (median 134.7) — **1.96x median,
+  2.16x best**, and the end-of-run guest state is *identical* in every
+  run (`x=69206016 y=-236978176 angle=1073741824 framecount=45
+  gametic=5`), i.e. the guest executed the same program, not an
+  approximation of it.
+- **Page engine probe** (`.pw-scratch/cdp_mips.mjs eth_http --notb`,
+  interpreter only): new 65.45 / 65.62 vs old 68.21 best (medians 64.0 /
+  65.2 vs 67.4) — **neutral**, as expected: eth_http has no newlib
+  byte-copy hot loop, and the guard costs nothing measurable there.
+- **DOOM page** (`.pw-scratch/pw_doom_rate.py`, the stats line sampled
+  once per 0.5 s during a W-held gameplay window): with the box quiet-ish
+  the old build auto-dropped to **low detail and still sat at 30-33/35**
+  while the new build held **high detail at 35/35** (69.4 vs 57.8 MIPS in
+  the `pw_doom.py` run). Under heavy load (second pair, another tenant at
+  ~120% CPU) both dropped to low, but the old build fell to **13-34/35
+  FPS** while the new one held **35/35** — the auto-detail controller is
+  host-load driven, the headroom is what changed.
+- **Determinism/function gate**: `node site/test_doom_wasm.mjs` (80M
+  inst) PASS — menu walk, `menuActive=0`/`gamestate=0`, 106 framebuffer
+  changes, `SAVE ok slot=0 bytes=25350` + `LOAD ok slot=0`, audio peak
+  0.508, 0.0% clipped.
+
+### Battery (this tree, all EXIT 0)
+`cargo test --release -- --test-threads=1` **289/289** · 17 TB
+differential harnesses (`test_tb_diff/driver/mem/loop/poll/copy/skip/nest/
+regidx/call/callmem/midentry/entry/direct_sem` + `test_tb_direct.mjs 20`
+byte-identical transcript + `test_tb_integration.mjs`) · `TB=1`
+`test_board_matrix.mjs` **176/176** · `npm test` (matrix **176/176**,
+browser **44/44**, VERSIONS, TB-XLATE 237, QSPI CDP) · `npm run
+test:wasm` (doom save/load, 7/7 multi, lowpower, freertos probe) ·
+`pkg` rebuilt (`build:wasm:node`) and spot-checked through `pkg/cli.mjs`.
+
+### Versions
+`VENDOR_V` 57→**58** (app.js ×4, doom.js, doom-worker.js ×2,
+emu-worker.js ×2), `app.js?v=` 78→**79** (console.html), `emu-worker.js`
+23→**24**, `doom.js` 98→**99** (doom.html), `doom-worker.js` 65→**66**,
+`__doomVer` 97→**98**; `emulator.js?v=11` unchanged (no driver edit).
+
+### Next lever (not started)
+R_DrawSpan (20.9% of DOOM gameplay) is the next per-pixel loop, but it is
+fixed-point span math with per-pixel light/colormap lookups — it needs a
+shape-restricted body executor that must stay bit-exact, plus its own
+fire-counter and differential pins. Nothing in this fusion blocks it.
+
+---
+
+## 46. Inline MMIO device service in translated blocks (2026-11-04)
+
+Closes the last systematic bail-out of the block translator: peripheral-space
+accesses (ETH/USART/RCC/SPI/I2C status polls — every wait loop in real
+firmware) no longer force an interpreter fallback inside a translated run.
+
+### How it works
+- Direct-mode translated modules now import `env.device`
+  (`(addr:i32, width:i32, mode:i32, value:i32) -> i64`): high 32 bits = status
+  (`0x1 IRQ pending`, `0x2 watchdog reset requested`, `0x4 service error`,
+  `0x8 NOT_DEVICE`), low 32 bits = read value (0 for writes).
+- `site/emulator.js` `tbDevice()` implements the service: `tb_mem_kind`
+  export (new, `lib.rs`) classifies the address. `1` = peripheral space →
+  `periph_read`/`periph_write` in the Rust model run inline; after any access
+  the service samples `has_pending_interrupt()` (delivery on only) and
+  `is_watchdog_reset_requested()`. `0`/`2` (unmapped/flash-adjacent/QSPI mmap)
+  → `NOT_DEVICE` with **zero side effects**; the translated block exits with
+  kind-1 and the interpreter re-executes the instruction (precise bus-fault /
+  benign-0 / QSPI-image semantics, unchanged).
+- A read/write that latches an IRQ or an IWDG/WWDG reset stops the translated
+  run with kind-4 (`pc` = next instruction, instruction count inclusive), so
+  the exception is delivered at exactly the boundary the interpreter would
+  have stopped at — never mid-instruction, never skipped.
+  `deliver_irqs == false` (polling firmware) never sets the IRQ bit.
+- The host service threw → kind-5, reported once (`tbFirstErr`), same
+  miss-exit shape with `pc` = the faulting item (deterministic retry in the
+  interpreter; the JS path cannot rethrow across the model call it already
+  made).
+- Mirror mode (`?tbmirror=1`) and mirror segments are untouched: the import
+  exists only in direct modules.
+- Rust changes: `tb_emit.rs` gains `import_func` (imports are ordered before
+  defined functions; `n_imported_funcs` tracked), `functype` returns the
+  index; `tb_xlate.rs` emits the import for direct modules
+  (`DEVICE_IMPORT_IDX = 0`, flat + nested paths) and a shared `$item_done`
+  block per memory item (stores/loads branch to it instead of duplicating the
+  epilogue). Mirror operands: the store value is spilled to `l1` before the
+  guard only in direct mode — the mirror sizing check clobbers `l1`
+  (regression caught by the spin tests: 196604 inst + kind-1 instead of the
+  exact 120000). Flat run func locals grew to `l1..l9` + `l10:i64` (device
+  result scratch) — both failure modes ("invalid local index 10") were
+  local-count mismatches.
+- JS additions: `tbDeviceCalls`/`tbDeviceNotDevice`/`tbDeviceErr`/`tbDeviceIrq`
+  /`tbDeviceReset` counters, exposed via `emu.tbStats()`; `tb_irq_diff`-style
+  differential protocol unchanged.
+
+### Measured (same box, interleaved)
+- eth_http page-MIPS: **94.3/96.0** best/median (default TB) vs 42.3
+  (`?notb=1`, interpreter) and 81.3 (`--tbmirror`, pre-change class). +16%
+  over mirror, 2.2× over the interpreter. Blinky/tft neutral (no translatable
+  shapes). 83 HTTP rounds per 20M budget maintained, transcript byte-identical
+  to interpreter (`test_tb_direct.mjs`), `dev=2316 nd=0 err=0` (anti-vacuous:
+  the import really fires).
+- Node: ~49 MIPS median (diagnostic only).
+- Coverage share unchanged by design (41.5%): the barrier removed was a
+  *latency* barrier (miss + interpreter + re-submit per poll), not a shape
+  barrier. Widening coverage remains the translator's shape-match job.
+
+### Validation
+cargo 289/289 (`-- --test-threads=1`), TB-XLATE 237/237 (cond 224 + spin 3 +
+rx-loop 4 + holes 6), 15 TB differential harnesses green,
+`test_tb_direct.mjs 20` PASS, `npm run test:wasm` PASS (DOOM save/load),
+browser `test_browser.mjs` **44/44 PASS**, `test_versions` PASS.
+
+### Versions (this change)
+VENDOR_V 58→59, emulator.js 11→12, app.js 79→80, emu-worker.js 24→25,
+doom.js 99→100 (`doom.html`) + `__doomVer` 98→99, doom-worker.js 66→67.
+SVDs restored, `.gitignore` dropped. `pkg/` rebuilt (node target) too.
+Commit: none — awaiting user order.
+
+### Addendum 2026-11-04: interpreter micro-wins, one revert, final state
+- **Bounds-check removal in FlatMemory fast paths** (fetch16/read8/16/32/
+  write8/16/32): index with `get_unchecked` after `flash_range`/`ram_range`
+  proof. Interleaved A/B (8 alternating reps, blinky 25M inst, eth_http 6M):
+  **+4.9% / +3.6%** medians, every sample monotonic. Kept (semantics
+  identical).
+- **fetch16_opt (fold `is_mapped` into one pass)**: measured **−2.7..−4.1%**
+  in the same interleaved setup even after `#[inline]`; **REVERTED** to the
+  `is_mapped` + `fetch16` split. Lesson re-confirmed: on this interpreter
+  two predictable branch-heavy passes beat one Option-plumbed pass.
+- **NVIC pending mirror** (`system.rs` `ANY_PENDING`, published on every
+  NVIC pending mutation; run loop reads it instead of `RefCell`
+  `any_pending()`): neutral within noise (blinky −1.0%, eth_http +1.3%
+  over 16 alternating reps). Kept — polling firmware sees the same single
+  predicted branch as before; IRQ-on firmware skips a borrow per instruction.
+- One test caught a real bug in the fold attempt: the unmapped-fetch path
+  latched a deferred bus fault via `fetch_byte` (side effects the old
+  `is_mapped` probe lacked), which re-faulted the handler round
+  (`busfault_unmapped_fetch`). Probe must stay side-effect-free.
+- Final validation on the shipping tree: cargo 289/289, TB-XLATE 237/237,
+  15 TB differentials, `test_tb_direct.mjs 20` (byte-identical transcript),
+  `npm run test:wasm` (DOOM save/load), browser **44/44**, `test_versions`
+  PASS, `VENDOR_V` **59→60** (third rebuild), emulator.js 12, app.js 81,
+  emu-worker.js 25, doom-worker.js 67, doom.html doom.js 101 / `__doomVer`
+  100, console.html app.js 81.
+- Node toolchain note: stable rustup briefly self-healed its broken proxy
+  (`rustc` inapplicable) mid-session; builds verified on 1.99.1 afterward.
+
+### Addendum 2026-11-04 (2): polish floor reached, TB coverage blocked by the cost model
+- **TRACE_ON hoisted** out of the per-instruction fused-shape guards (one
+  load instead of up to three), **is_mpu_enabled** Acquire→Relaxed
+  (single-threaded). Both neutral within noise; kept.
+- **Why the RX-poll loops were declined by TB (mystery solved)** — and why
+  emitting more shapes will NOT help: the loops ARE recognized as loops by
+  the translator (probed directly: `tb_translate_meta_direct` →
+  `is_loop=1` at 0x08000902/0x080008f8/0x08000956). The block is the
+  **run-length gate** (TB_MIN_RUN=5000, 2 free runs + 128-probe / 256
+  hard decline): packets arrive frequently, so these waits are short, the
+  average per hit stays below the amortization floor versus the fixed
+  ~10-15µs wasm↔JS crossing + register spill. The gate is *correct*;
+  forcing such loops into translation would be slower, not faster.
+  Coverage expansion is **cost-model-limited**, not opcode-limited. The
+  only universal structural escape is whole-program static translation
+  (different architecture, multi-week).
+- Measurement caveat on this box: interleaved A/B noise is ±8-10% over
+  hours (v2/v4/v6 builds are indistinguishable within it; one v2 sample
+  spiked to 0.406s vs its 0.316 floor). Sub-5% claims need many alternating
+  reps and are treated as noise regardless; the bounds-check removal stays
+  the only solid interpreter win (+3.6-4.9%).
+- Final shell commands: `cargo test --release -- --test-threads=1`
+  289/289; TB-XLATE 237/237; 15 TB differentials; `test_tb_direct` ok;
+  `npm run test:wasm` PASS; browser **44/44**, `test_versions` PASS;
+  v61 across the chain (VENDOR_V 61, app 82, doom.js 102/__doomVer 101,
+  doom.html, console.html).
+
+### Static-translation pilot: coverage census (2026-11-05)
+New tool: `tb_xlate::static_cover` (run via
+`cargo test --release cover_tests -- --nocapture`, `COVER_FW=<bin>` for
+other firmwares). Recursive-descent CFG walk from the vector table over the
+raw image, classifying every reachable instruction with the translator's own
+`classify()`. Three walker bugs found and fixed on the way (each would have
+silently starved the CFG): (1) `visited` marked `idx + k` for `k in 0..li`
+with `li` in BYTES — a 2-byte instruction killed the next halfword's slot,
+so every block stopped after one instruction; (2) the wide-branch gate
+tested `(op & 0xFF00) == 0xF000`, matching only `0xF0xx` and silently
+dropping every BL with imm10 ≥ 0x100 (`f7ff fa9b` = main's `bl setup`); (3)
+B.N/B.cond offsets missed the `<<1` (Thumb offsets are imm*2), landing
+every target 2 bytes off — mid-instruction, misaligning whole regions.
+
+**eth_http census (5934-byte image, 1351 real .text instructions):**
+- 1790 halfword-slots walked (≈440 are literal-pool words decoded as
+  instructions — the $d pools inside functions; pollution, not code).
+- **1221 supported (68.2% of counted, ≈90% of real instructions)** with
+  today's emitter + the whole-program dispatcher resolving BL/B.W/Bcc.W.
+- IT-predicated: 21 (1.2%) — out of scope, interpreter fallback.
+- Real remaining families (the ≈10-25% gap), by count: wide modified-imm
+  ALU (ORR/BIC/MOV-imm/MVN/EOR/AND/SUBS: F043/F023/F04F/F44F/F5B6...),
+  MOVW/MOVT (F242/F641/F649), wide halfword loads/stores (F8AE/F8DF...),
+  POP.W/PUSH.W (E8BD/E92D), MUL/MLA (FBA1-FBA3), extends (B29B), wide
+  reg-shift ALU (EA4F/EBA3/EB02 — ADD.W reg is already supported).
+- Per-instruction fallback for anything untranslatable reuses the existing
+  miss-exit protocol (kind-1, interpreter re-executes) — soundness is
+  inherited, not re-proven.
+
+**Pilot decision data:** ~90% real-instruction coverage says GO for a
+scoped flat-block pilot: translate the hot functions (setup/loop/
+eth_recv_packet/build_tcp_frame/handle_arp/uart_ip/ETH_IRQHandler ≈ all
+executed volume) as ONE wasm module — many block functions + an in-module
+`dispatch(pc)` (sorted table + binary search or if-chain), direct
+`call` for intra-module edges, kind-3 exit to the driver for inter-module
+edges, per-item miss-exit for unsupported instructions, existing S2.5 IRQ
+predicate at module entry. The run-length gate does not apply (flat runs
+cover whole function bodies, tens of thousands of instructions per entry).
+Expected win: replaces the interpreter for the ~60% of eth_http volume
+today's loop-only translator never touches.
+
+### OOM discipline (2026-11-05, kernel-log-proven)
+The `cargo build/test --release` **link step with fat LTO spikes to
+12.6-12.7 GB RSS** on this 16 GB box (`lto = true, codegen-units = 1` in
+Cargo.toml). The kernel OOM killer fired twice on 2026-11-05 (11:27, 11:30,
+`anon-rss: 12.7 GB`, dmesg/journalctl evidence) — the link runs inside
+OpenChamber's own cgroup scope, so the crash takes the desktop and the
+session with it (user-visible: OpenChamber dies mid-command, ~6 times).
+Rules, effective immediately:
+- **All iteration/test builds run with `CARGO_PROFILE_RELEASE_LTO=off`**
+  (correctness is LTO-independent; only shipped builds and performance
+  A/Bs need the fat link).
+- **Full-fat release builds: once per ship, memory-gated** (available
+  < 4 GB → do not launch).
+- **Heavy work: one consolidated background chain** (setsid nohup or a
+  background tool call with a verdict file), never repeated foreground
+  cargo invocations, never `pkill -f` patterns that match the pkill's own
+  command line (killed its own run once more today).
+
+---
+
+## 47. Flat whole-program translation pilot — built, debugged, NOT shipped (2026-11-25)
+
+Pilot authorization: the user asked for scoped whole-program static
+translation as "a real project", with page-side MIPS as the metric,
+back-to-back same-box A/B for every claim, no quality reduction, and no
+commits without an explicit order. `HANDOVER.md` is the continuity file;
+this section is the durable record.
+
+### What was built (all uncommitted)
+- `tb_xlate.rs`: `flat_decode()` (branches/CBZ/B.W/Bcc.W/BL decoded
+  statically, PC-relative literals → `Item::MemConst`/`MovConst`, T1/T2
+  PUSH/POP decomposed to sp-relative `Item::Mem` stores/loads + trailing
+  `SpAdj`), `flat_blocks()` (recursive-descent CFG from vector-table roots,
+  dedup by pc, sorted), `translate_flat()` (one wasm module with a block
+  function per basic block, `dispatch(pc)` binary search, `covers(pc)`,
+  direct `call` for forward in-module edges, kind-3 exit for backward
+  edges/out-of-module, kind-1 per-item miss, exact instruction accounting
+  via `flatAcc` global 22 + LTOT). `lib.rs::tb_flat_build` export.
+- `site/emulator.js`: `flat` opt, `flatTry` (build once, covers check,
+  register sync, run, kind handling, sp writeback), called before
+  `tbTryLoop` in `step()`. `?flat=1` page opt-in through app.js/emu-worker.
+
+### Bugs found and fixed (each silent wrongness, each with a pin where noted)
+- **`flat_blocks()` never advanced `pc`** — the first straight-line
+  instruction was re-decoded forever, growing an item `Vec` to ~13 GB
+  until the kernel OOM-killed the Rust test binary **inside the
+  OpenChamber cgroup**, taking down the desktop/session (three identical
+  kills on 2026-11-25: `stm32_periph_wa`, anon-rss 12.8/13.0/13.1 GB,
+  `journalctl -k` evidence). This was the crash root cause — NOT the fat
+  LTO link (Cargo.toml is thin LTO now) and NOT host load. Fixed by
+  advancing `pc` on the last item of each decoded instruction (`tick`),
+  a 4096-item rail that declines a runaway block, and the anti-vacuous
+  `flat_blocks_advance_pc` unit test.
+- `Miss` ended the CFG walk, so one PUSH.W in a prologue hid the whole
+  call graph (18 blocks, 3/6 key functions) — now a block boundary that
+  queues the fall-through (576 blocks, all 6).
+- `flatTry` gated on a non-existent `tb_flat_translate` export — flat was
+  a silent no-op; the earlier "flat win" was loop TB. Gate fixed.
+- kind-1 miss set pc but never executed the faulting instruction (20M
+  miss-retries, zero UART) — fixed by `cpu.step(1)` in the flat miss path.
+- In-module backward branches used `call` → one wasm frame per loop
+  iteration → stack overflow — now kind-3 exit to the driver.
+- 16-bit POP used the PUSH (negative) offset formula and omitted the
+  `tick` flag → garbage return addresses (`pc=1`) and stalled walks;
+  fixed, plus added T2 PUSH/POP (E92D/E8BD) decoding.
+
+### Why it is NOT shipped (acceptance failed)
+- Page A/B (interleaved, 3 rounds): default loop TB medians 95.8/96.9/98.0
+  vs flat 97.3/97.5/96.5 — no ≥8% win (and the first A/B was the
+  silent-no-op bug, so it was really TB vs TB).
+- Two further attempts to fix the stall (env.device SERVICE status on a
+  rising TX/RX poll; bounded 5k-inst runs + ETH/DMA service at every
+  boundary) both **failed and were reverted** — do not re-propose them.
+- Final differential (`.pw-scratch/flat_diverge.mjs`): flat reaches
+  `DHCP Discover` at ~20k reported instructions vs interpreter ~60k
+  (blinky accounting matches exactly), and the 5M-iteration TX poll
+  "expires" in ~40k instructions. This is a path-specific instruction-
+  accounting / control-flow defect in the flat emitter, not a servicing
+  problem. Any future flat attempt MUST start with a block-level
+  differential harness (flat vs interpreter: registers, flags, counts)
+  before any speed measurement — more opcode coverage or service hooks
+  will not fix it.
+
+### Final state
+VENDOR_V **67**, `emulator.js` v17, `app.js` v83, `emu-worker.js` v26,
+`doom.js` v103 / `__doomVer` 102, `doom-worker.js` v68. Both wasm targets
+rebuilt, SVD restored, `site/vendor/.gitignore` removed, `test_versions`
+PASS. Full battery (`.pw-scratch/battery_final.sh`): cargo 292/292,
+TB-XLATE, 15 TB differentials, `TB=1` matrix, `npm test`, `npm run
+test:wasm` — `BATTERY_EXIT=0`. Nothing committed. The shipped loop-TB
+path stays the product: ~95 MIPS page-side, ~2× interpreter.

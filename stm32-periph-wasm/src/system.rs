@@ -21,13 +21,26 @@ pub fn get_ext_devices() -> &'static Mutex<ExtDevices> {
 pub static INSTRUCTION_COUNT: AtomicU64 = AtomicU64::new(0);
 pub fn instruction_count() -> u64 { INSTRUCTION_COUNT.load(Ordering::Relaxed) }
 
+// Hot-path mirror of "the NVIC has any pending bit (system or external,
+// enabled or not)". Written on every NVIC pending mutation (all writes to
+// `Nvic.pending` go through a publish), read by the CPU run loop per
+// instruction so polling firmware skips the RefCell borrow and IRQ-driven
+// firmware skips the priority walk. Producer is always under &mut the NVIC
+// inside the model; the read happens after any model call on the same
+// single-threaded pass, so there is no staleness window worth modelling.
+static ANY_PENDING: AtomicBool = AtomicBool::new(false);
+/// True when any NVIC pending bit is set (same predicate as Nvic::any_pending).
+#[inline]
+pub fn any_pending() -> bool { ANY_PENDING.load(Ordering::Relaxed) }
+pub(crate) fn set_any_pending(v: bool) { ANY_PENDING.store(v, Ordering::Relaxed); }
+
 static WATCHDOG_RESET_EVENT: AtomicBool = AtomicBool::new(false);
 // MPU master-enable latch (MPU_CTRL.ENABLE write). Level semantics follow
 // the register: clearing ENABLE clears this. The driver halts while set —
 // protection is not enforced, so running on would be silently wrong.
 static MPU_ENABLED: AtomicBool = AtomicBool::new(false);
 /// True while the guest holds MPU_CTRL.ENABLE (protection unmodeled).
-pub fn is_mpu_enabled() -> bool { MPU_ENABLED.load(Ordering::Acquire) }
+pub fn is_mpu_enabled() -> bool { MPU_ENABLED.load(Ordering::Relaxed) }
 pub fn set_mpu_enabled(v: bool) { MPU_ENABLED.store(v, Ordering::Release); }
 // Current CPU context for the MPU check (FlatMemory has no CPU handle).
 // Updated at Cpu::new/reset, exception entry/return, and MSR CONTROL —

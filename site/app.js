@@ -2,8 +2,8 @@
 // Preset + custom (.bin/.hex/.elf/.map) firmware loading, Run/Stop/Reset,
 // an optional WebSocket gateway (real network stack) with a netsim fallback,
 // live UART terminal, GPIO/peripheral register readout, and packet viewer.
-import * as bindings from './vendor/stm32_periph_wasm.js?v=56';
-import { createEmulator } from './emulator.js?v=10';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=67';
+import { createEmulator } from './emulator.js?v=17';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
 import { boardsOf, boardForSelection, BOARDS, boardLed } from './boards.js?v=7';
@@ -709,7 +709,7 @@ const bootWorker = async (id) => {
     setStatus('booting (worker)…', 'stop');
     let svdXml = '';
     try {
-        svdXml = await fetch('vendor/' + board.svd + '?v=56').then((r) => r.text());
+        svdXml = await fetch('vendor/' + board.svd + '?v=67').then((r) => r.text());
     } catch (e) { setStatus('boot: SVD fetch failed', 'err'); return false; }
     if (id !== session) return false;
     try { if (emuWorker) emuWorker.terminate(); } catch {}
@@ -749,6 +749,8 @@ const bootWorker = async (id) => {
         // interpreter, ?tbmirror=1 the mirror path (A/B/diagnostics).
         tb: !params.has('notb'),
         tb_direct: !params.has('notb') ? !params.has('tbmirror') : null,
+        // ?flat=1 runs the whole-program flat translator (A/B gate).
+        flat: params.has('flat'),
         // ?gate=N overrides the TB run-length gate (default 5000) for A/B.
         tbMinRun: params.has('gate') ? Number(params.get('gate')) : undefined,
         eth: ETH_RX_MAP[image.name],
@@ -770,7 +772,7 @@ const bootWorker = async (id) => {
     try { for (const w of WATCH) cfg.probes.push(w.addr >>> 0); } catch {}
     try { for (const t of TRACES) cfg.probes.push(t.addr >>> 0); } catch {}
     try { for (const [, a] of PERIPH_REGS) cfg.probes.push(a >>> 0); } catch {}
-    emuWorker = new Worker('emu-worker.js?v=21', { type: 'module' });
+    emuWorker = new Worker('emu-worker.js?v=26', { type: 'module' });
     emuWorker.onmessage = onWorkerMessage;
     emu = workerAdapter;
     netsim = null; usbhost = null; featHooks = null;
@@ -865,10 +867,10 @@ const boot = async () => {
         if (useWorker) { await bootWorker(id); return; }
         // Board variant per firmware preset (SVD + flash/RAM sizes), honoring
         // the board selector when the preset supports the selected board.
-        // NOTE (VENDOR_V): vendor asset versions (?v=56) must be bumped together
+        // NOTE (VENDOR_V): vendor asset versions (?v=67) must be bumped together
         // after every wasm-pack rebuild, or browsers keep the stale model.
         const { key: boardKey, board } = boardForSelection(image.name, boardSelectEl ? boardSelectEl.value : 'all');
-        const svdXml = await fetch('vendor/' + board.svd + '?v=56').then((r) => r.text());
+        const svdXml = await fetch('vendor/' + board.svd + '?v=67').then((r) => r.text());
         if (id !== session) return;
 
         netsim = gw.connected ? null : createNetSim();
@@ -893,7 +895,7 @@ const boot = async () => {
             svdFile: board.svd,
             flash_size: board.flash_size,
             ram_size: board.ram_size,
-            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=56',
+            wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=67',
             extra_mem: image.extraMem,
             uart_addr: image.uartAddr,
             enable_irqs: IRQ_FIRMWARES.has(image.name),
@@ -905,6 +907,7 @@ const boot = async () => {
             // interpreter, ?tbmirror=1 the mirror path (A/B/diagnostics).
             tb: !params.has('notb'),
             tb_direct: !params.has('notb') ? !params.has('tbmirror') : null,
+            flat: params.has('flat'),
             tbMinRun: params.has('gate') ? Number(params.get('gate')) : undefined,
             eth: ETH_RX_MAP[image.name],
             ext_devices: DEVICE_FIRMWARES[image.name],

@@ -59,6 +59,7 @@ impl Nvic {
             // Do NOT auto-enable: pending stays set but is only delivered
             // when the firmware sets the ISER bit (real NVIC behavior).
         }
+        self.publish_any_pending();
     }
 
     pub fn clear_pending(&mut self, irq: i32) {
@@ -66,6 +67,7 @@ impl Nvic {
         if let Some((idx, mask)) = Self::irq_reg_idx(irq) {
             self.pending_reg[idx] &= !mask;
         }
+        self.publish_any_pending();
     }
 
     /// Whether the given IRQ is pending (regardless of ISER enablement).
@@ -93,6 +95,12 @@ impl Nvic {
     /// have set a bit.
     pub fn any_pending(&self) -> bool {
         self.pending != 0
+    }
+
+    /// Mirror the pending bitmap to the process-global read by the CPU
+    /// run loop (see system.rs). Called after every pending mutation.
+    fn publish_any_pending(&self) {
+        crate::system::set_any_pending(self.pending != 0);
     }
 
     /// Deliverability gate for one exception: system exceptions are always
@@ -125,6 +133,7 @@ impl Nvic {
             self.pending_reg[idx] &= !mask;
             self.active[idx] |= mask;
         }
+        self.publish_any_pending();
     }
 
     /// Clear the ACTIVE bit on exception return (external IRQs).
@@ -186,6 +195,7 @@ impl Nvic {
                     self.pending_reg[idx] &= !mask;
                     self.active[idx] |= mask;
                 }
+                self.publish_any_pending();
                 return Some(irq);
             }
             // Disabled: leave pending (clears only when the ISR runs or via
@@ -282,6 +292,9 @@ impl Peripheral for Nvic {
                         self.pending |= 1u128 << (IRQ_OFFSET as u32 + i as u32 * 32 + b) as u128;
                     }
                 }
+                if self.pending != 0 {
+                    self.publish_any_pending();
+                }
             }
             0x80..=0x9C if offset < 0x80 + 4 * REG_WORDS as u32 => {
                 let i = ((offset - 0x80) / 4) as usize;
@@ -297,6 +310,7 @@ impl Peripheral for Nvic {
                         self.pending |= 1u128 << (IRQ_OFFSET as u32 + i as u32 * 32 + b) as u128;
                     }
                 }
+                self.publish_any_pending();
             }
             0x180..=0x19C if offset < 0x180 + 4 * REG_WORDS as u32 => {
                 // ICPR - Clear Pending Register
@@ -308,6 +322,7 @@ impl Peripheral for Nvic {
                         self.pending &= !(1u128 << (IRQ_OFFSET as u32 + i as u32 * 32 + b) as u128);
                     }
                 }
+                self.publish_any_pending();
             }
             0x200..=0x21C if offset < 0x200 + 4 * REG_WORDS as u32 => {
                 // IABR - Active Bit Register (read-only by software writes)

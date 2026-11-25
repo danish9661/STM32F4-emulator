@@ -1153,6 +1153,15 @@ pub(crate) fn fused_poll(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc
 pub(crate) static FUSED_MEMCPY_FIRES: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
 
+/// Largest byte span one bulk memcpy dispatch will move (see fused_memcpy).
+pub(crate) const FUSED_MEMCPY_BULK_MAX: u32 = 4096;
+
+/// Test-only: total bytes moved by the bulk path (proves it fires, and that
+/// it moves the right volume — a fire counter alone would accept a no-op).
+#[cfg(test)]
+pub(crate) static FUSED_MEMCPY_BYTES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
 /// Fused byte-copy loop: [LDRB.W Rt,[Rn],#imm @P] [STRB.W Rt2,[Rn2],#imm @P+4]
 /// [CMP-reg @P+8] [B.cond -> P @P+10] — newlib memcpy's inner loop
 /// (objdump-verified doom.elf memcpy+0xe @0x0801c5ce: F811 4B01 / F803 4F01
@@ -1174,8 +1183,26 @@ pub(crate) static FUSED_MEMCPY_FIRES: std::sync::atomic::AtomicU32 =
 ///   and unpriv T-variants ((o2&0xF00)==0xE00) bail (different paths).
 /// - CMP is the sop-10 T1 form with sub_flags(a,b,1) unconditionally (it is
 ///   one of the three flag-setting IT exceptions — same as the arm).
-/// Returns 4 when fused, else 0.
-pub(crate) fn fused_memcpy(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc: u32, op: u16) -> u32 {
+/// Bulk extension (2026-10-22): when the shape is exactly newlib's memcpy
+/// inner loop (`ldrb.w Rt,[Rn],#1` / `strb.w Rt,[Rn2,#1]!` / `cmp Rn,Rend`
+/// / `bne P`), the WHOLE remaining run is copied in one dispatch instead of
+/// one byte per dispatch. Measured need: memcpy is 42.8% of DOOM gameplay
+/// instructions (PC sampler, 12.9k samples over 40M inst) and the byte loop
+/// is 4 instructions per byte — at 60KB/frame that dominates the frame.
+/// Exactness: the register/flag end state is computed arm-for-arm
+/// (Rn = src+n, Rn2 = base+n, Rt = last byte, flags = CMP(src+n, end)); the
+/// charge is 4*n instructions, so the virtual clock and frame pacing are
+/// unchanged. The byte transfers go through `read_range`/`write_range`,
+/// which are `fast_plain()`-gated (MPU off + no UNALIGN_TRP) and refuse
+/// flash, MMIO and multi-region spans — every refusal falls back to the
+/// one-iteration fusion below, which keeps the exact per-byte path. Chunk
+/// size: 4096 bytes (16k inst) normally, 128 bytes (512 inst) while guest
+/// exception delivery is on, so a memcpy can delay an IRQ by at most 512
+/// instructions. Overlapping/backward copies bail: memcpy's overlap is UB
+/// and the forward byte loop's smear is not reproducible with a bulk move.
+///
+/// Returns 4 (one iteration) or 4*n (bulk) when fused, else 0.
+pub(crate) fn fused_memcpy(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc: u32, op: u16, budget_left: u32) -> u32 {
     // Guard: F8 LDRB (c nibble == 1). Filters everything else with zero
     // fetches (F9 signed forms have c==1 too but op>=0xFA00 excludes them).
     if op & 0xF800 != 0xF800 || op >= 0xFA00 || (op >> 4) & 0xF != 1 {
@@ -1267,11 +1294,6 @@ pub(crate) fn fused_memcpy(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, 
     let offa = if ua == 1 { imm8a } else { imm8a.wrapping_neg() };
     let ba = c.regs.r[rna];
     let addra = if pa == 1 { ba.wrapping_add(offa) } else { ba };
-    let v = mem.read8(addra) as u32;
-    if wa == 1 || pa == 0 {
-        c.regs.r[rna] = ba.wrapping_add(offa);
-    }
-    c.regs.r[rta] = v;
     // STRB.W (value read before writeback, matching the F8 arm — matters
     // when Rtb==Rnb).
     let pb = (o2b >> 10) & 1;
@@ -1281,6 +1303,77 @@ pub(crate) fn fused_memcpy(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, 
     let offb = if ub == 1 { imm8b } else { imm8b.wrapping_neg() };
     let bb = c.regs.r[rnb];
     let addrb = if pb == 1 { bb.wrapping_add(offb) } else { bb };
+
+    // ---- Bulk path: exactly newlib's memcpy inner loop ----
+    // `ldrb.w Rt,[Rn],#1` / `strb.w Rt,[Rn2,#1]!` / `cmp Rn,Rend` / `bne P`
+    // walks src and dst upward one byte per iteration and stops when the
+    // source pointer equals the end pointer, so the remaining iteration
+    // count is exactly `end - src`. Any other shape keeps the one-iteration
+    // fusion below (exact, just not bulk).
+    if rta == rtb
+        // Load: POST-indexed by +1 (F811 4B01 = P=0,U=1,W=1,imm=1), so the
+        // byte read is at the base and the base advances by one.
+        && pa == 0 && ua == 1 && wa == 1 && offa == 1
+        // Store: PRE-indexed by +1 (F803 4F01 = P=1,U=1,W=1,imm=1), so the
+        // byte written is at base+1 and the base advances by one.
+        && pb == 1 && ub == 1 && wb == 1 && offb == 1
+        && rn2 == rna
+        && rm2 != rna && rm2 != rnb
+        && rna != rnb && rta != rnb
+        && budget_left >= 4
+    {
+        let src = ba;
+        let end = c.regs.r[rm2];
+        let remaining = end.wrapping_sub(src);
+        // Forward walk only, and a sane length: a wraparound "walk" would be
+        // 4G iterations, which the unfused loop owns.
+        if remaining > 0 && remaining <= (1 << 24) {
+            let dst = addrb;
+            // Overlap with dst > src: the byte loop smears; a bulk move
+            // cannot reproduce that. Keep it interpreted (UB in C anyway).
+            let overlaps_fwd = dst > src && dst.wrapping_sub(src) < remaining;
+            // Chunk caps: the plain fast path moves up to 4096 bytes per
+            // dispatch (16k inst); with guest exception delivery on, cap so
+            // an IRQ can be delayed by at most 512 instructions.
+            let cap: u32 = if c.deliver_irqs { 128 } else { 4096 };
+            let n = remaining
+                .min(cap)
+                .min(budget_left / 4)
+                .min(FUSED_MEMCPY_BULK_MAX) as usize;
+            if !overlaps_fwd && n > 0 {
+                let mut buf = [0u8; FUSED_MEMCPY_BULK_MAX as usize];
+                if mem.read_range(src, &mut buf[..n]) && mem.write_range(dst, &buf[..n]) {
+                    let nn = n as u32;
+                    c.regs.r[rna] = src.wrapping_add(nn);
+                    c.regs.r[rnb] = bb.wrapping_add(nn);
+                    c.regs.r[rta] = buf[n - 1] as u32;
+                    // The last iteration's CMP runs with the updated base.
+                    let a = c.regs.r[rn2];
+                    let b = c.regs.r[rm2];
+                    sub_flags(c, a, b, 1);
+                    if nn == remaining {
+                        // Loop exited: the BNE is not taken.
+                        adv(c, pc, 12);
+                    } else {
+                        // Budget/chunk split: still inside the loop, so the
+                        // next dispatch re-enters the fusion.
+                        c.regs.r[15] = pc | 1;
+                    }
+                    #[cfg(test)]
+                    FUSED_MEMCPY_FIRES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(test)]
+                    FUSED_MEMCPY_BYTES.fetch_add(nn, std::sync::atomic::Ordering::Relaxed);
+                    return 4 * nn;
+                }
+            }
+        }
+    }
+
+    let v = mem.read8(addra) as u32;
+    if wa == 1 || pa == 0 {
+        c.regs.r[rna] = ba.wrapping_add(offa);
+    }
+    c.regs.r[rta] = v;
     mem.write8(addrb, (c.regs.r[rtb] & 0xFF) as u8);
     if wb == 1 || pb == 0 {
         c.regs.r[rnb] = bb.wrapping_add(offb);

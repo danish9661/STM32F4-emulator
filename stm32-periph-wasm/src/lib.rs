@@ -415,6 +415,39 @@ pub fn dac_underrun(ch: u8) -> bool {
 }
 
 /// QSPI memory-mapped window live (scope probe: FMODE=11 switch settled).
+/// Flat whole-program translation (pilot): build the module for `image`
+/// against the driver's direct segment table. Returns None when the image
+/// yields no blocks or exceeds the pilot bound.
+#[wasm_bindgen]
+pub fn tb_flat_build(image: &[u8], segs: &[u32]) -> Option<TbFlatOut> {
+    tb_xlate::translate_flat(image, segs).map(|o| TbFlatOut { bytes: o.bytes, blocks: o.blocks })
+}
+
+/// Flat module + block table (driver diagnostics: the driver stashes the
+/// block list on the emulator object for coverage probes).
+#[wasm_bindgen(getter_with_clone)]
+pub struct TbFlatOut {
+    pub bytes: Vec<u8>,
+    pub blocks: Vec<u32>,
+}
+
+/// Classify an access for the translated-block device fallback.
+/// 0 = not a peripheral/QSPI window (fall back to the interpreter, which
+///     either serves the mapped memory or raises the precise bus-fault),
+/// 1 = peripheral-space access, served by the Rust model.
+/// 2 = live QSPI memory-mapped flash image (reads have no model side
+///     effects; the caller deliberately falls back to the interpreter).
+#[wasm_bindgen]
+pub fn tb_mem_kind(addr: u32) -> u32 {
+    if crate::cpu::mem::is_periph(addr) {
+        1
+    } else if crate::cpu::mem::is_qspi_mmap(addr) {
+        2
+    } else {
+        0
+    }
+}
+
 #[wasm_bindgen]
 pub fn qspi_mmap_live() -> bool {
     let sys = crate::sys();

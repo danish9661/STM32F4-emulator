@@ -1,6 +1,18 @@
 /* tslint:disable */
 /* eslint-disable */
 
+/**
+ * Flat module + block table (driver diagnostics: the driver stashes the
+ * block list on the emulator object for coverage probes).
+ */
+export class TbFlatOut {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    blocks: Uint32Array;
+    bytes: Uint8Array;
+}
+
 export class WasmCpu {
     free(): void;
     [Symbol.dispose](): void;
@@ -865,9 +877,6 @@ export function pwr_wakeup(): void;
  */
 export function pwr_wakeup_standby(): void;
 
-/**
- * QSPI memory-mapped window live (scope probe: FMODE=11 switch settled).
- */
 export function qspi_mmap_live(): boolean;
 
 /**
@@ -1034,6 +1043,24 @@ export function spi_take_events(peripheral: string): Uint32Array;
  * each byte event (1 = data) so the JS device can parse TFT-style traffic.
  */
 export function spi_tap(peripheral: string, cs?: string | null, dc?: string | null): void;
+
+/**
+ * QSPI memory-mapped window live (scope probe: FMODE=11 switch settled).
+ * Flat whole-program translation (pilot): build the module for `image`
+ * against the driver's direct segment table. Returns None when the image
+ * yields no blocks or exceeds the pilot bound.
+ */
+export function tb_flat_build(image: Uint8Array, segs: Uint32Array): TbFlatOut | undefined;
+
+/**
+ * Classify an access for the translated-block device fallback.
+ * 0 = not a peripheral/QSPI window (fall back to the interpreter, which
+ *     either serves the mapped memory or raises the precise bus-fault),
+ * 1 = peripheral-space access, served by the Rust model.
+ * 2 = live QSPI memory-mapped flash image (reads have no model side
+ *     effects; the caller deliberately falls back to the interpreter).
+ */
+export function tb_mem_kind(addr: number): number;
 
 /**
  * Mirror scratch reserve in bytes (dirty trailer + validity bitmap
@@ -1354,6 +1381,11 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly __wbg_get_tbflatout_blocks: (a: number, b: number) => void;
+    readonly __wbg_get_tbflatout_bytes: (a: number, b: number) => void;
+    readonly __wbg_set_tbflatout_blocks: (a: number, b: number, c: number) => void;
+    readonly __wbg_set_tbflatout_bytes: (a: number, b: number, c: number) => void;
+    readonly __wbg_tbflatout_free: (a: number, b: number) => void;
     readonly __wbg_wasmcpu_free: (a: number, b: number) => void;
     readonly adc_clear_channel_value: (a: number, b: number, c: number) => void;
     readonly adc_dual_latched: () => number;
@@ -1512,6 +1544,8 @@ export interface InitOutput {
     readonly spi_slave_select: (a: number, b: number) => void;
     readonly spi_take_events: (a: number, b: number, c: number) => void;
     readonly spi_tap: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly tb_flat_build: (a: number, b: number, c: number, d: number) => number;
+    readonly tb_mem_kind: (a: number) => number;
     readonly tb_scratch_bytes: () => number;
     readonly tb_translate: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly tb_translate_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;

@@ -3422,6 +3422,270 @@ fn fused_memcpy_copies() {
     );
 }
 
+/// Bulk memcpy: the same newlib shape, but with a budget that lets the whole
+/// run finish in ONE dispatch. Asserts exact end state, exact instruction
+/// charge (4/byte), the byte count actually moved, and PC past the loop.
+/// The one-iteration path above is the budget-starved fallback; this is the
+/// shipped DOOM path (42.8% of gameplay instructions measured).
+#[test]
+fn fused_memcpy_bulk_whole_run() {
+    use crate::cpu::thumb::{FUSED_MEMCPY_BYTES, FUSED_MEMCPY_FIRES};
+    use std::sync::atomic::Ordering;
+    let _g = lock_boot();
+    FUSED_MEMCPY_FIRES.swap(0, Ordering::Relaxed);
+    FUSED_MEMCPY_BYTES.swap(0, Ordering::Relaxed);
+    let ops: [u16; 6] = [0xF811, 0x4B01, 0xF803, 0x4F01, 0x4291, 0xD1F9];
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../firmware/blinky/blinky.bin"));
+    for (i, w) in ops.iter().enumerate() {
+        mem.write16(0x20002000 + (i as u32) * 2, *w);
+    }
+    let src = [0x48u8, 0x45, 0x4C, 0x4C, 0x4F]; // HELLO
+    for (i, b) in src.iter().enumerate() {
+        mem.write8(0x20000100 + i as u32, *b);
+    }
+    cpu.regs.r[1] = 0x20000100;
+    cpu.regs.r[2] = 0x20000105;
+    cpu.regs.r[3] = 0x2000010F;
+    cpu.regs.r[15] = 0x20002001;
+    let sys = crate::sys();
+    let before = crate::system::INSTRUCTION_COUNT.load(Ordering::Relaxed);
+    // One dispatch with room for exactly the whole loop (5 bytes = 20 inst).
+    let n = cpu.run(sys, &mut mem, 20);
+    assert_eq!(n, 20, "one bulk dispatch charges 4*5");
+    assert_eq!(cpu.regs.r[15] & !1, 0x2000200C, "PC past the loop (BNE not taken)");
+    for (i, b) in src.iter().enumerate() {
+        assert_eq!(mem.read8(0x20000110 + i as u32), *b, "dst byte {}", i);
+    }
+    assert_eq!(cpu.regs.r[1], 0x20000105, "src pointer at end");
+    assert_eq!(cpu.regs.r[3], 0x20000114, "dst pointer advanced");
+    assert_eq!(cpu.regs.r[4], 0x4F, "last byte in r4");
+    assert_ne!(cpu.regs.xpsr & 0x40000000, 0, "Z set at exit");
+    assert_eq!(FUSED_MEMCPY_FIRES.load(Ordering::Relaxed), 1, "one dispatch");
+    assert_eq!(FUSED_MEMCPY_BYTES.load(Ordering::Relaxed), 5, "moved 5 bytes");
+    // The model clock advanced by the full charge (chunked publisher).
+    let after = crate::system::INSTRUCTION_COUNT.load(Ordering::Relaxed);
+    assert!(after - before >= 16, "virtual clock published, got {}", after - before);
+}
+
+/// Bulk memcpy chunking: a 5000-byte run is two dispatches (4096 + 904),
+/// exact charge each time, and the pointer/flags state is right between them.
+#[test]
+fn fused_memcpy_bulk_chunks() {
+    use crate::cpu::thumb::{FUSED_MEMCPY_BYTES, FUSED_MEMCPY_FIRES};
+    use std::sync::atomic::Ordering;
+    let _g = lock_boot();
+    FUSED_MEMCPY_FIRES.swap(0, Ordering::Relaxed);
+    FUSED_MEMCPY_BYTES.swap(0, Ordering::Relaxed);
+    let ops: [u16; 6] = [0xF811, 0x4B01, 0xF803, 0x4F01, 0x4291, 0xD1F9];
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../firmware/blinky/blinky.bin"));
+    // Code page at 0x20004000 — the 5000-byte data pattern starts at
+    // 0x20001000 and would otherwise overwrite the instructions.
+    const CODE: u32 = 0x20004000;
+    for (i, w) in ops.iter().enumerate() {
+        mem.write16(CODE + (i as u32) * 2, *w);
+    }
+    for i in 0..5000u32 {
+        mem.write8(0x20001000 + i, (i.wrapping_mul(37) & 0xFF) as u8);
+    }
+    cpu.regs.r[1] = 0x20001000;
+    cpu.regs.r[2] = 0x20001000 + 5000;
+    cpu.regs.r[3] = 0x200008FF; // dst base -> first store byte 0x20000900
+    cpu.regs.r[15] = CODE | 1;
+    let sys = crate::sys();
+    let n1 = cpu.run(sys, &mut mem, 4 * 4096);
+    assert_eq!(n1, 4 * 4096, "first chunk capped at 4096 bytes");
+    assert_eq!(cpu.regs.r[15] & !1, CODE, "still inside the loop");
+    assert_eq!(cpu.regs.r[1], 0x20001000 + 4096);
+    assert_eq!(cpu.regs.r[3], 0x20000900 + 4096 - 1, "dst base = last written byte");
+    assert_eq!(cpu.regs.xpsr & 0x40000000, 0, "Z clear mid-loop");
+    let n2 = cpu.run(sys, &mut mem, 4 * 904);
+    assert_eq!(n2, 4 * 904, "second chunk is the remainder");
+    assert_eq!(cpu.regs.r[15] & !1, CODE + 12, "done");
+    for i in 0..5000u32 {
+        assert_eq!(mem.read8(0x20000900 + i), mem.read8(0x20001000 + i), "byte {}", i);
+    }
+    assert_eq!(FUSED_MEMCPY_BYTES.load(Ordering::Relaxed), 5000, "total moved");
+    assert!(FUSED_MEMCPY_FIRES.load(Ordering::Relaxed) >= 2, "chunked dispatches");
+}
+
+/// Bulk memcpy must NOT reinterpret an overlapping dst>src copy: the byte
+/// loop smears (read-after-write), a bulk move would not. The bulk arm has to
+/// bail and the one-iteration fusion must reproduce the smear exactly.
+#[test]
+fn fused_memcpy_bulk_bails_on_forward_overlap() {
+    use crate::cpu::thumb::{FUSED_MEMCPY_BYTES, FUSED_MEMCPY_FIRES};
+    use std::sync::atomic::Ordering;
+    let _g = lock_boot();
+    FUSED_MEMCPY_FIRES.swap(0, Ordering::Relaxed);
+    FUSED_MEMCPY_BYTES.swap(0, Ordering::Relaxed);
+    let ops: [u16; 6] = [0xF811, 0x4B01, 0xF803, 0x4F01, 0x4291, 0xD1F9];
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../firmware/blinky/blinky.bin"));
+    for (i, w) in ops.iter().enumerate() {
+        mem.write16(0x20002000 + (i as u32) * 2, *w);
+    }
+    let src = [0x48u8, 0x45, 0x4C, 0x4C, 0x4F]; // HELLO
+    for (i, b) in src.iter().enumerate() {
+        mem.write8(0x20000100 + i as u32, *b);
+    }
+    cpu.regs.r[1] = 0x20000100;
+    cpu.regs.r[2] = 0x20000105;
+    // dst = 0x102 (overlaps src): the forward byte loop smears to H,E,H,E,H.
+    cpu.regs.r[3] = 0x20000101;
+    cpu.regs.r[15] = 0x20002001;
+    let sys = crate::sys();
+    // A budget large enough that the bulk arm WOULD fire on a non-overlapping
+    // copy: the bail must come from the overlap check, not the budget. The
+    // exact smear below is the anti-vacuous proof — a bulk move would have
+    // produced H,E,L,L,O. (The last 1-2 iterations are naturally
+    // non-overlapping as the source pointer catches the end; those may take
+    // the bulk path and are still exact.)
+    cpu.run(sys, &mut mem, 100);
+    let expect = [0x48u8, 0x45, 0x48, 0x45, 0x48];
+    for (i, b) in expect.iter().enumerate() {
+        assert_eq!(mem.read8(0x20000102 + i as u32), *b, "smear byte {}", i);
+    }
+    assert!(FUSED_MEMCPY_FIRES.load(Ordering::Relaxed) >= 3, "byte loop still fused");
+}
+
+/// Differential: the bulk arm must produce the SAME guest state as the
+/// one-iteration byte-loop arm, across sizes, addresses and chunk splits.
+/// The byte-loop arm is the reference (it is the validated §43 fusion, and
+/// it bails to literal interpretation for anything it cannot do). Compares
+/// memory, all registers, xPSR flags and the instruction charge.
+#[test]
+fn fused_memcpy_bulk_matches_byte_loop() {
+    use crate::cpu::thumb::FUSED_MEMCPY_BYTES;
+    use std::sync::atomic::Ordering;
+    let _g = lock_boot();
+    let ops: [u16; 6] = [0xF811, 0x4B01, 0xF803, 0x4F01, 0x4291, 0xD1F9];
+    const CODE: u32 = 0x20004000;
+    const SRC: u32 = 0x20001000;
+    const DST: u32 = 0x200008FF; // base, first stored byte is DST+1
+    // Sizes chosen to hit: 1, a few, exactly one chunk, chunk+1, two chunks.
+    // (A r1==r2 entry is excluded on purpose: the guest copies one byte and
+    // then compares SRC+1 against SRC, so it walks 4G bytes — a runaway in
+    // silicon too. `fused_memcpy_bulk_declines_zero_remaining` pins the
+    // guard for that entry without waiting for the walk.)
+    for &count in &[1u32, 2, 7, 64, 4095, 4096, 4097, 5000] {
+        let mut snap = |bulk: bool| {
+            FUSED_MEMCPY_BYTES.swap(0, Ordering::Relaxed);
+            let (mut cpu, mut mem) =
+                boot(include_bytes!("../../../firmware/blinky/blinky.bin"));
+            for (i, w) in ops.iter().enumerate() {
+                mem.write16(CODE + (i as u32) * 2, *w);
+            }
+            // Deterministic pattern in a disjoint data area.
+            for i in 0..count {
+                mem.write8(SRC + i, (i.wrapping_mul(29).wrapping_add(7) & 0xFF) as u8);
+            }
+            cpu.regs.r[1] = SRC;
+            cpu.regs.r[2] = SRC + count;
+            cpu.regs.r[3] = DST;
+            cpu.regs.r[5] = 0xDEAD_BEEF; // untouched sentinel
+            cpu.regs.r[15] = CODE | 1;
+            let sys = crate::sys();
+            let mut total = 0u32;
+            let mut guard = 0u32;
+            while cpu.regs.r[15] & !1 != CODE + 12 {
+                guard += 1;
+                assert!(guard < 200_000, "runaway count={}", count);
+                // Byte path: budget 1 forces the one-iteration arm
+                // (budget_left/4 == 0). Bulk: enough for the whole run.
+                let b = if bulk { count.saturating_mul(4) } else { 1 };
+                total += cpu.run(sys, &mut mem, b);
+            }
+            let mut memsnap = Vec::new();
+            for i in 0..count.max(1) {
+                memsnap.push(mem.read8(DST + 1 + i));
+                memsnap.push(mem.read8(SRC + i));
+            }
+            (
+                total,
+                cpu.regs.r,
+                cpu.regs.xpsr,
+                memsnap,
+                FUSED_MEMCPY_BYTES.load(Ordering::Relaxed),
+            )
+        };
+        let byte_run = snap(false);
+        let bulk_run = snap(true);
+        assert_eq!(byte_run.0, bulk_run.0, "instruction charge count={}", count);
+        assert_eq!(byte_run.1, bulk_run.1, "registers count={}", count);
+        assert_eq!(byte_run.2, bulk_run.2, "flags count={}", count);
+        assert_eq!(byte_run.3, bulk_run.3, "memory count={}", count);
+        assert_eq!(byte_run.3.len(), 2 * count.max(1) as usize);
+        if count > 4096 {
+            assert_eq!(byte_run.4, 0, "byte reference moves no bulk bytes");
+            assert_eq!(bulk_run.4, count, "bulk moved the whole run");
+        }
+    }
+}
+
+/// A `r1 == r2` entry is a runaway in the guest (one byte copied, then
+/// `SRC+1 != SRC` forever), so the bulk arm must decline it and leave the
+/// one-iteration arm to match the interpreter exactly. One dispatch is the
+/// observable window: with a big budget the bulk arm would otherwise move
+/// `2^32` bytes through its stack buffer.
+#[test]
+fn fused_memcpy_bulk_declines_zero_remaining() {
+    use crate::cpu::thumb::FUSED_MEMCPY_BYTES;
+    use std::sync::atomic::Ordering;
+    let _g = lock_boot();
+    let ops: [u16; 6] = [0xF811, 0x4B01, 0xF803, 0x4F01, 0x4291, 0xD1F9];
+    const CODE: u32 = 0x20004000;
+    const SRC: u32 = 0x20001000;
+    const DST: u32 = 0x200008FF;
+    let run = |budget: u32| {
+        FUSED_MEMCPY_BYTES.swap(0, Ordering::Relaxed);
+        let (mut cpu, mut mem) = boot(include_bytes!("../../../firmware/blinky/blinky.bin"));
+        for (i, w) in ops.iter().enumerate() {
+            mem.write16(CODE + (i as u32) * 2, *w);
+        }
+        mem.write8(SRC, 0xA5);
+        cpu.regs.r[1] = SRC;
+        cpu.regs.r[2] = SRC; // remaining == 0 (runaway shape)
+        cpu.regs.r[3] = DST;
+        cpu.regs.r[15] = CODE | 1;
+        let sys = crate::sys();
+        let insts = cpu.run(sys, &mut mem, budget);
+        (
+            insts,
+            cpu.regs.r[1],
+            cpu.regs.r[2],
+            cpu.regs.r[3],
+            cpu.regs.r[4],
+            cpu.regs.xpsr,
+            mem.read8(DST + 1),
+            FUSED_MEMCPY_BYTES.load(Ordering::Relaxed),
+        )
+    };
+    // Budget 1 cannot reach the bulk arm: the byte reference.
+    let reference = run(1);
+    // Budget 4 satisfies the bulk arm's budget gate, so only the length guard
+    // can keep it off. One iteration either way.
+    let guarded = run(4);
+    assert_eq!(reference.0, 4, "byte reference runs one iteration");
+    assert_eq!(guarded.0, 4, "guarded dispatch runs one iteration");
+    assert_eq!(reference.1, guarded.1, "r1 after one iteration");
+    assert_eq!(reference.1, SRC + 1);
+    assert_eq!(reference.2, guarded.2, "end pointer untouched");
+    assert_eq!(reference.3, guarded.3, "r3 after one iteration");
+    assert_eq!(reference.4, guarded.4, "Rt holds the copied byte");
+    assert_eq!(reference.4, 0xA5);
+    assert_eq!(reference.5, guarded.5, "flags after one iteration");
+    assert_eq!(reference.6, guarded.6, "stored byte");
+    assert_eq!(reference.6, 0xA5);
+    assert_eq!(
+        guarded.7, 0,
+        "the length guard must decline a zero-length (runaway) copy"
+    );
+    // Across many dispatches the runaway shape keeps walking one byte per
+    // iteration in the guest's own time; no chunk may ever be moved in bulk.
+    let long = run(1_000);
+    assert_eq!(long.0, 1_000, "runaway shape keeps executing guest iterations");
+    assert_eq!(long.7, 0, "no bulk bytes for a zero-length copy");
+}
+
 /// Fused countdown-spin: [NOP][SUBS r2,#1][BNE->NOP] runs 3 iterations
 /// with the fused arm live. 8 instructions total (3 fused x2 + 2 NOP),
 /// fires>0 (the wrong-origin first cut NEVER fired — this assert is the

@@ -217,6 +217,7 @@ pub struct Module {
     types: Vec<u8>,
     imports: Vec<u8>,
     funcs: Vec<u8>,
+    n_imported_funcs: usize,
     mems: Vec<u8>,
     globals: Vec<u8>,
     exports: Vec<u8>,
@@ -233,20 +234,28 @@ pub struct Module {
 impl Module {
     pub fn new() -> Self {
         Self { types: Vec::new(), imports: Vec::new(), funcs: Vec::new(), mems: Vec::new(), globals: Vec::new(), exports: Vec::new(), codes: Vec::new(),
-            n_types: 0, n_imports: 0, n_funcs: 0, n_mems: 0, n_globals: 0, n_exports: 0, n_codes: 0 }
+            n_types: 0, n_imports: 0, n_funcs: 0, n_mems: 0, n_globals: 0, n_exports: 0, n_codes: 0,
+            n_imported_funcs: 0 }
     }
     /// One function type: params + results (each a vec of valtypes).
-    pub fn functype(&mut self, params: &[u8], results: &[u8]) {
+    /// Register one function type and return its index.
+    pub fn functype(&mut self, params: &[u8], results: &[u8]) -> u32 {
         self.types.push(0x60);
         leb_u32(params.len() as u32, &mut self.types);
         self.types.extend_from_slice(params);
         leb_u32(results.len() as u32, &mut self.types);
         self.types.extend_from_slice(results);
         self.n_types += 1;
+        (self.n_types - 1) as u32
     }
     pub fn func(&mut self, type_idx: u32) {
         leb_u32(type_idx, &mut self.funcs);
         self.n_funcs += 1;
+    }
+    /// Function index of the next defined function (imported functions
+    /// occupy the low end of the index space, before defined ones).
+    pub fn imported_func_count(&self) -> u32 {
+        self.n_imported_funcs as u32
     }
     pub fn memory(&mut self, min_pages: u32) {
         self.mems.push(0x00);
@@ -269,6 +278,21 @@ impl Module {
         leb_u32(min_pages, &mut self.imports);
         self.n_imports += 1;
     }
+    /// Import a function and return its index. Imported functions are
+    /// indexed before locally-defined ones; memories/globals do not
+    /// consume function index space.
+    pub fn import_func(&mut self, module: &str, name: &str, type_idx: u32) -> u32 {
+        leb_u32(module.len() as u32, &mut self.imports);
+        self.imports.extend_from_slice(module.as_bytes());
+        leb_u32(name.len() as u32, &mut self.imports);
+        self.imports.extend_from_slice(name.as_bytes());
+        self.imports.push(0x00); // kind: function
+        leb_u32(type_idx, &mut self.imports);
+        self.n_imports += 1;
+        let idx = self.n_imported_funcs;
+        self.n_imported_funcs += 1;
+        idx as u32
+    }
     pub fn global_mut_i32(&mut self, init: u32) {
         // Mutable i32 global, const initializer (inits used are small
         // non-negative, where unsigned LEB == signed form exactly).
@@ -281,6 +305,28 @@ impl Module {
         self.globals.push(0x0B);
         self.n_globals += 1;
     }
+    /// Mutable i64 global, const initializer (flat modules: the run
+    /// instruction accumulator).
+    pub fn global_mut_i64(&mut self, init: i64) {
+        self.globals.push(0x7E);
+        self.globals.push(0x01);
+        self.globals.push(0x42); // i64.const
+        let mut v = init as u64;
+        loop {
+            let mut b = (v & 0x7F) as u8;
+            v >>= 7;
+            if v != 0 || (b & 0x40) != 0 {
+                b |= 0x80;
+            }
+            self.globals.push(b);
+            if v == 0 && (b & 0x80) == 0 {
+                break;
+            }
+        }
+        self.globals.push(0x0B);
+        self.n_globals += 1;
+    }
+
     pub fn export_global(&mut self, name: &str, idx: u32) {
         leb_u32(name.len() as u32, &mut self.exports);
         self.exports.extend_from_slice(name.as_bytes());

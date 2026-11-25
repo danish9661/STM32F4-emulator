@@ -49,8 +49,8 @@
 //     status {text,cls} .. status line updates (same text as page setStatus)
 //     measureResult {id,mips,runs} reply to measure
 //     fault {info} ....... guest fault (faultInfo, for the fault panel)
-import * as bindings from './vendor/stm32_periph_wasm.js?v=56';
-import { createEmulator } from './emulator.js?v=10';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=67';
+import { createEmulator } from './emulator.js?v=17';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
 
@@ -59,16 +59,24 @@ import { createUsbHost } from './usbhost.js';
 // hosts: the worker thread being busy does NOT jank the page, but message
 // round trips (UI state, pokes) queue behind the burst — 20 ms bounds
 // interactive latency like doom-worker's 28 ms.
-const BURST_STEPS = 24;
+const BURST_STEPS = 48;
 const BURST_FINE_STEPS = 6;
 const WALL_BUDGET_MS = 40; // 2026-10-20: live-UI A/B (eth_http, window rate over
 // 10 s, interleaved): 12 steps/20 ms -> 39.7/41.5 MIPS (worker duty 61-69%,
 // ~9 ms idle per frame) vs 24 steps/40 ms -> 50.7/54.5/57.5 MIPS (duty 79-86%).
 // The 2026-10-10 "24 steps is neutral" result predates translated blocks: the
 // engine has since ~doubled, so the old 12-step burst now finishes in 18 ms of
-// a 30 ms frame and the worker idles. 32 steps measured 47.8/58.6 (no better,
-// more latency), 48 -> 97% duty but 50.2 (contention). Latency ~36 ms/burst,
-// same class as doom-worker's 28 ms.
+// a 30 ms frame and the worker idles. On that engine 32 steps measured
+// 47.8/58.6 (no better, more latency) and 48 -> 97% duty but 50.2
+// (contention). Latency ~36 ms/burst, same class as doom-worker's 28 ms.
+// 2026-10-20 (TB default-ON, engine 136 MIPS): 24 steps again underfills (2.4M
+// inst ~= 18 ms of a 16.7 ms frame -> the page's per-burst UI work dominates
+// twice as often). Interleaved eth_http live rate, 10 s windows:
+//   24 -> 77.9 / 82.1 / 45.1 MIPS (64.9 rounds/s)
+//   48 -> 122.4 / 97.0 / 59.8 MIPS (102.0 rounds/s)   +18% .. +57%
+//   96 -> 66.8 / 78.1 (hits the 40 ms budget instead: same duty, more variance)
+// 48 x 100k = 4.8M inst ~= 35 ms at this engine: fills the frame budget without
+// exceeding it, so burst latency stays bounded by WALL_BUDGET_MS.
 const TICK_STALE_MS = 200;
 const YIELD_MS = 4;
 
@@ -150,7 +158,7 @@ async function boot(c) {
         svdFile: c.svdFile,
         flash_size: c.flash_size,
         ram_size: c.ram_size,
-        wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=56',
+        wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=67',
         extra_mem: c.extraMem || [],
         uart_addr: c.uartAddr,
         enable_irqs: !!c.enable_irqs,
@@ -159,6 +167,7 @@ async function boot(c) {
         lowpower: !!c.lowpower,
         tb: !!c.tb,
         tb_direct: c.tb_direct === undefined ? null : c.tb_direct,
+        flat: !!c.flat,
         tbMinRun: c.tbMinRun,
         eth: c.eth,
         ext_devices: ext,
