@@ -3726,6 +3726,42 @@ fn fused_spin_fires() {
     );
 }
 
+/// Fused stack-counter loop (blinky's delay loop): LDR/ADDS/STR/LDR/
+/// CMP.W/BLT, six instructions per iteration. Two iterations from 3998
+/// exit at 4000; fires==2 proves the shape was recognized (without the
+/// fuse this would need 12 plain dispatches), flags/counter/pc exact.
+#[test]
+fn fused_memcntdn_fires() {
+    use crate::cpu::thumb::FUSED_MEMCOUNT_FIRES;
+    use std::sync::atomic::Ordering;
+    let _g = lock_boot();
+    FUSED_MEMCOUNT_FIRES.swap(0, Ordering::Relaxed);
+    // LDR r3,[sp,#4] / ADDS r3,#1 / STR r3,[sp,#4] / LDR r3,[sp,#4] /
+    // CMP.W r3,#4000 / BLT -> P (imm=-16: origin P+16).
+    let ops: [u16; 7] = [0x9B01, 0x3301, 0x9301, 0x9B01, 0xF5B3, 0x6F7A, 0xDBF8];
+    let (mut cpu, mut mem) = boot(include_bytes!("../../../firmware/blinky/blinky.bin"));
+    for (i, w) in ops.iter().enumerate() {
+        mem.write16(0x20002000 + (i as u32) * 2, *w);
+    }
+    mem.write16(0x2000200E, 0xBF00); // NOP after the loop
+    mem.write32(0x20000104, 3998);
+    cpu.regs.r[13] = 0x20000100;
+    cpu.regs.r[15] = 0x20002001; // loop top (Thumb)
+    let sys = crate::sys();
+    cpu.run(sys, &mut mem, 13); // 2 fused iterations (12) + NOP
+    assert_eq!(mem.read32(0x20000104), 4000, "counter reached the limit");
+    assert_eq!(cpu.regs.r[3], 4000, "Rt holds the last loaded value");
+    assert_ne!(cpu.regs.xpsr & 0x40000000, 0, "Z set by final CMP");
+    assert_eq!(cpu.regs.r[15] & !1, 0x20002010, "fell through past the NOP");
+    // One fused dispatch covers BOTH iterations (12 charged instructions)
+    // — that is the fusion; an unfused run would dispatch 12 times.
+    assert_eq!(
+        FUSED_MEMCOUNT_FIRES.load(Ordering::Relaxed),
+        1,
+        "both iterations must fuse in one dispatch"
+    );
+}
+
 /// Fused flag-poll: [LDR r3,[r2,#0]][LSLS r4,r3,#24][BPL->top] spins taken
 /// (N=0) then exits on a bit7-set byte (N=1). Both directions, fires>0.
 #[test]

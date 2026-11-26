@@ -1071,6 +1071,12 @@ impl Cpu {
                 && !trace_on
             {
                 thumb::fused_poll(self, sys, mem, pc, op)
+            } else if (op & 0xF800) == 0x9800
+                && self.it_n == 0
+                && !self.it_pred
+                && !trace_on
+            {
+                thumb::fused_memcntdn(self, sys, mem, pc, op, budget.saturating_sub(done))
             } else if (op & 0xF800) == 0xF800
                 && op < 0xFA00
                 && (op >> 4) & 0xF == 1

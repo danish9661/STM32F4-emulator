@@ -5823,3 +5823,93 @@ Versions bumped to VENDOR_V **68**; both wasm targets rebuilt; full battery
 re-run green (`BATTERY_EXIT=0`, npmtest 249 s, wasm 6 s). The new
 accounting fix and scratch harnesses are **uncommitted**; the earlier tree
 was committed as `00aad61`.
+
+---
+
+## 48. TB run-length gate: 5000 -> 600 (2026-11-26) — general speed win
+
+`TB_MIN_RUN` is the per-hit instruction average a translated loop must
+sustain before the translator keeps translating it. The old 5000 default
+was a "keep 5000" decision made on a **loaded box** (load ~32, handover
+§ "TB_MIN_RUN gate"), with contaminated measurements. On a quiet box
+(load 1.3) the sweep was repeated interleaved, page metric only:
+
+| gate | page MIPS (median, 2 rounds) | live window MIPS | HTTP rounds/s |
+|---|---|---|---|
+| 5000 (old) | 95.4 / 95.6 | 70.0 / 69.7 | 58.3 / 58.1 |
+| 2000 | 115.2 / 115.7 | — | — |
+| **600 (shipped)** | **167.8 / 171.8** | **87.2 / 86.0** | **72.7 / 71.8** |
+
+Shipped-default confirmation (no `?gate=`): page best 178.6/179.2,
+median 177.3/174.8; live 86.6/86.9 MIPS, 72.1/72.4 rounds/s. That is
+**+~85% page engine and +~24% live rounds/s** over the old default — the
+largest general (all-firmware) speed win since the direct emission.
+
+- Changed `tbMinRun` default in `site/emulator.js` 5000 -> 600 (with a
+  comment recording the sweep and why the old decision was wrong). The
+  `?gate=N` knob still overrides for A/B.
+- Larger interpreter fallback chunks were tested and REJECTED: 4096 ->
+  8192 dropped Node MIPS 42 -> 34 with identical rounds (do not retry).
+- Scratch harness `.pw-scratch/test_tb_direct.mjs`'s "direct count <=
+  mirror count" heuristic was relaxed to 0.1% tolerance: with more
+  translation, block-granularity overshoot shifted counts by 75/20M
+  (0.0004%) while transcripts and rounds matched exactly. Real assertions
+  (byte-identical transcript, rounds, no errors) are unchanged.
+- `emulator.js` v17 -> v18 in app.js/emu-worker.js/doom-worker.js;
+  VENDOR_V stays 68 (no wasm rebuild). Full battery after the change:
+  cargo 292, TB-XLATE, 15 differentials, `TB=1` matrix 176/176,
+  `npm test`, `npm run test:wasm` — `BATTERY_EXIT=0`.
+- **Reversal note:** do NOT restore 5000 based on the old contaminated
+  sweep. Re-sweep only on a quiet box with the page probe.
+
+### Burst re-tune after the gate win (same day)
+The 48-step worker burst was tuned for the OLD engine; at ~175 page MIPS
+it underfills the 40 ms wall budget. Interleaved live 10 s windows:
+48 -> 83.6/85.1 MIPS (69.7/70.8 rounds/s), 64 -> 91.8/92.0 MIPS
+(76.5/76.8 rounds/s). Kept `BURST_STEPS = 64` in `emu-worker.js` (v27 in
+app.js; VENDOR_V unchanged). 96 was already rejected (hits the 40 ms cap).
+Full battery after both changes: `BATTERY_EXIT=0` (matrix 176/176,
+npm test 281 s, wasm 7 s). Shipped live: ~92 MIPS / ~76 rounds/s.
+
+Cross-firmware page A/B (gate 600 vs 5000, 2 interleaved rounds):
+eth_http 175/181 vs 95/96 (+85%); blinky 47.2/47.2 vs 48.8/48.7 and
+tft_test 47.1/47.3 vs 48.4/47.4 (~2-4% lower, inside noise — both are
+interpreter-only classes with 16/34 TB hits out of ~900 steps and nothing
+to gain from the gate). Net: no meaningful regression, large win where
+translation applies. Blinky/tft remain interpreter-bound; TB_DIAG shows
+`shortDecl` dominance (477/439) — their delay loops are not a recognized
+shape (the §42 sextuple was deliberately skipped). That is the next
+project if those classes ever need work, not a gate problem.
+
+---
+
+## 49. Fused stack-counter loop (blinky-class) — 6x on those classes (2026-11-26)
+
+The §42 blinky sextuple (deliberately skipped then) is now implemented as
+`fused_memcntdn` in `cpu/thumb.rs`, hooked in `cpu/mod.rs` on the
+`LDR Rd,[sp,#imm]` (0x9800) first opcode. Shape: LDR/ADDS/STR/LDR/CMP.W/
+B.cond back to top — the compiler's `for(n=0;n<N;n++)` with the counter in
+a stack slot. Every member is arm-for-arm: loads/stores via mem.read32/
+write32 (MPU/MMIO/faults exact), ADDS via add_flags, CMP.W via expand_imm
++ alu_op(test), B.cond via cond_ok; branch origin is the B.cond's own
+address+4 (the §43 wrong-origin trap is avoided). Guards: mapped/MPU on
+all six fetch addresses and the data address, IT/trace/budget gates.
+Charge = 6 instructions per iteration (exact).
+
+- Anti-vacuous pin: `fused_memcntdn_fires` in cpu/tests.rs runs the REAL
+  blinky encodings (0x9B01/3301/9301/9B01/F5B3 6F7A/DBF8) with counter
+  3998→4000; asserts counter, Rt, Z, exit pc and fires==1 (one dispatch
+  for both iterations). Two real bugs caught by the pin: SP-relative
+  LDR/STR bit11 polarity backwards, and expecting 2 fires when one fused
+  dispatch correctly covers two iterations.
+- Controlled page A/B (same box, fresh Chrome, wasm bytes swapped):
+  no-fuse 47.35/47.30 best vs fused 287-301 best — **~6x** on blinky.
+  tft_test (same delay shape) 47 -> ~289. eth_http unchanged (~173-175).
+  Node blinky ~80 -> ~187.
+- Versions: VENDOR_V **69**, app.js v84 / console.html, emu-worker v28,
+  doom.js v104 / doom.html, `__doomVer` 102, emulator.js v18 (unchanged).
+  Both wasm targets rebuilt; SVD restored; `test_versions` PASS; full
+  battery green (`BATTERY_EXIT=0`: matrix 176/176, npm test 229 s).
+- The no-fuse measurement was made by temporarily disabling the hook and
+  rebuilding web wasm, then restoring the fused bytes byte-identically
+  (cmp verified) — no source left disabled. All uncommitted.

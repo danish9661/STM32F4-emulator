@@ -1150,6 +1150,132 @@ pub(crate) fn fused_poll(c: &mut Cpu, sys: &WasmSystem, mem: &mut FlatMemory, pc
 }
 
 #[cfg(test)]
+pub(crate) static FUSED_MEMCOUNT_FIRES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Fused stack-counter loop (blinky-style `for(n=0;n<4000;n++)` with the
+/// counter kept in a stack slot): six instructions per iteration —
+/// [LDR Rt,[sp,#off] @P] [ADDS Rt,#inc @P+2] [STR Rt,[sp,#off] @P+4]
+/// [LDR Rt,[sp,#off] @P+6] [CMP.W Rt,#lim @P+8..P+11]
+/// [B.cond -> P @P+12]. Measured 100% of blinky's dynamic pairs (§42).
+/// Every member is arm-for-arm with its decoder arm: the loads/stores go
+/// through mem.read32/write32 (MPU/MMIO/deferred faults exact), ADDS uses
+/// add_flags, CMP.W uses expand_imm + alu_op(test), B.cond uses cond_ok.
+/// Branch origin is the B.cond's own address (P+12)+4 = P+16 — the
+/// wrong-origin bug that made fusion #1/#2 never fire (§43) is avoided.
+/// Charge six instructions per iteration; bail with zero on any shape,
+/// MPU, IT, trace or budget mismatch (the normal path then executes it).
+pub(crate) fn fused_memcntdn(
+    c: &mut Cpu,
+    sys: &WasmSystem,
+    mem: &mut FlatMemory,
+    pc: u32,
+    op: u16,
+    budget_left: u32,
+) -> u32 {
+    if budget_left < 6 || (op & 0xF800) != 0x9800 {
+        return 0;
+    }
+    let rt = ((op >> 8) & 7) as usize;
+    let off = ((op & 0xFF) as u32) * 4;
+    let p2 = pc.wrapping_add(2);
+    let p4 = pc.wrapping_add(4);
+    let p6 = pc.wrapping_add(6);
+    let p8 = pc.wrapping_add(8);
+    let p10 = pc.wrapping_add(10);
+    let p12 = pc.wrapping_add(12);
+    if !(mem.is_mapped(p2) && mem.is_mapped(p4) && mem.is_mapped(p6)
+        && mem.is_mapped(p8) && mem.is_mapped(p10) && mem.is_mapped(p12))
+    {
+        return 0;
+    }
+    let o2 = mem.fetch16(p2);
+    if o2 & 0xF800 != 0x3000 || ((o2 >> 8) & 7) as usize != rt {
+        return 0; // ADDS Rt,#imm8
+    }
+    let inc = (o2 & 0xFF) as u32;
+    let o3 = mem.fetch16(p4);
+    // STR (sp) is 0x9000|Rt<<8|imm8 (bit11 clear); LDR (sp) is 0x9800
+    // (bit11 set). Getting this backwards silently declined every loop.
+    if o3 & 0xF800 != 0x9000 || ((o3 >> 8) & 7) as usize != rt || (o3 & 0xFF) as u32 * 4 != off {
+        return 0; // STR Rt,[sp,#off]
+    }
+    let o4 = mem.fetch16(p6);
+    if o4 & 0xF800 != 0x9800 || ((o4 >> 8) & 7) as usize != rt || (o4 & 0xFF) as u32 * 4 != off {
+        return 0; // LDR Rt,[sp,#off]
+    }
+    let o5 = mem.fetch16(p8);
+    let o6 = mem.fetch16(p10);
+    if o6 & 0x8000 != 0 || (o5 & 0xF000) != 0xF000 {
+        return 0; // wide modified-immediate
+    }
+    let opc = (((o5 >> 8) & 1) << 3) | (((o5 >> 7) & 1) << 2)
+        | (((o5 >> 6) & 1) << 1) | ((o5 >> 5) & 1);
+    if opc != 13 || (o5 & 0x10) == 0 || (o5 & 0xF) as usize != rt || ((o6 >> 8) & 0xF) != 15 {
+        return 0; // SUBS/CMP.W Rt,#imm (Rd=15 = test)
+    }
+    let imm12 = ((((o5 >> 10) & 1) as u32) << 11)
+        | ((((o6 >> 12) & 7) as u32) << 8) | ((o6 & 0xFF) as u32);
+    let o7 = mem.fetch16(p12);
+    if o7 & 0xF000 != 0xD000 {
+        return 0;
+    }
+    let cc = (o7 >> 8) & 0xF;
+    let target = pc.wrapping_add(16).wrapping_add(sx(((o7 & 0xFF) << 1) as u32, 9));
+    if target != pc {
+        return 0;
+    }
+    if crate::system::is_mpu_enabled() {
+        for f in [p2, p4, p6, p8, p10, p12] {
+            if sys.p.mpu_check(f, 2, false, true).is_some() {
+                return 0;
+            }
+        }
+    }
+    let addr = c.regs.r[13].wrapping_add(off);
+    if !mem.is_mapped(addr) || !mem.is_mapped(addr.wrapping_add(3)) {
+        return 0;
+    }
+    if crate::system::is_mpu_enabled() {
+        if sys.p.mpu_check(addr, 4, false, false).is_some()
+            || sys.p.mpu_check(addr, 4, true, false).is_some()
+        {
+            return 0;
+        }
+    }
+    let max_iter = (budget_left / 6).min(1 << 20);
+    let mut n = 0u32;
+    let mut taken = false;
+    while n < max_iter {
+        let v = mem.read32(addr);
+        let nv = add_flags(c, v, inc, 0);
+        c.regs.r[rt] = nv;
+        mem.write32(addr, nv);
+        let v2 = mem.read32(addr);
+        c.regs.r[rt] = v2;
+        let ci = carry(c) as u32;
+        let (imm, co) = expand_imm(imm12, ci);
+        let _ = alu_op(c, 13, true, v2, imm, ci, co, true);
+        n += 1;
+        taken = cond_ok(c, cc as u32);
+        if !taken {
+            break;
+        }
+    }
+    if n == 0 {
+        return 0;
+    }
+    if taken {
+        c.regs.r[15] = target | 1; // resume at loop top
+    } else {
+        adv(c, pc, 14); // BLT not taken: next instruction after the loop
+    }
+    #[cfg(test)]
+    FUSED_MEMCOUNT_FIRES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    n * 6
+}
+
+#[cfg(test)]
 pub(crate) static FUSED_MEMCPY_FIRES: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
 

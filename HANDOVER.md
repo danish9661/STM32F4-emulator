@@ -344,3 +344,52 @@ page-side sampling is the metric; <8% is noise on this box.
   `test_versions` PASS; full battery green (`BATTERY_EXIT=0`, npmtest
   249 s, wasm 6 s). The earlier tree was committed as `00aad61` on the
   user's order; THIS follow-up is uncommitted (no new commit order).
+
+---
+
+## 10. 2026-11-26 — general speed win: TB gate 5000 -> 600
+
+- User chose "commit accounting fix + pivot to general speed work".
+  Accounting fix committed as `86630a3`.
+- Profiled the shipped TB path (`.pw-scratch/tb_diag.mjs`): 71.6% of wall
+  in interpreted fallback chunks, translated share only 41.5% — the
+  run-length gate was the limiter.
+- Re-ran the gate sweep on a QUIET box (load 1.3; old 5000 decision was
+  made on a loaded box): page MIPS 5000=95, 2000=115, 600=170-178;
+  live 70 -> 87 MIPS and 58 -> 72 HTTP rounds/s. Interleaved 2 rounds,
+  tight spread, ≥8% bar cleared by a wide margin.
+- Set `tbMinRun` default to 600 in `emulator.js` (v18); `?gate=N` still
+  overrides. Larger fallback chunk 4096->8192 was tested and REVERTED
+  (42 -> 34 MIPS, same rounds). `test_tb_direct.mjs`'s count heuristic
+  relaxed to 0.1% tolerance (real transcript/round assertions intact).
+- Full battery after the change: `BATTERY_EXIT=0` (cargo 292, TB-XLATE,
+  15 differentials, matrix 176/176, npm test 254 s, test:wasm 7 s).
+  Shipped-default page: best 178.6/179.2, median 177.3/174.8 MIPS.
+- VENDOR_V unchanged (68, JS-only change). VENDOR_V/emulator version
+  literals PASS. This gate change is **uncommitted** (no order given).
+- Follow-up same day: with the faster engine, re-tuned the console worker
+  burst 48 -> 64 in `emu-worker.js` (v27 in app.js): live 83.6/85.1 ->
+  91.8/92.0 MIPS, 69.7 -> 76.5 rounds/s, interleaved 2 rounds. 96 was
+  already rejected (40 ms wall cap). Full battery green again
+  (`BATTERY_EXIT=0`, npmtest 281 s). Both gate + burst changes uncommitted.
+- Cross-firmware page A/B (gate 600 vs 5000, 2 rounds): eth_http +85%;
+  blinky/tft ~2-4% lower (interpreter-only, inside noise, no regression
+  of substance). Their loops are not recognized TB shapes (`shortDecl`
+  dominated); the §42 blinky sextuple fusion remains the only lever there
+  and was deliberately skipped. Gate change is safe across classes.
+
+---
+
+## 11. 2026-11-26 — blinky-class stack-counter fusion (general, ~6x)
+
+- Implemented `fused_memcntdn` (cpu/thumb.rs + hook in cpu/mod.rs) for the
+  six-instruction stack-counter delay loop (LDR/ADDS/STR/LDR/CMP.W/B.cond)
+  that dominates blinky and tft_test. Exact arm-for-arm semantics, guarded
+  by mapped/MPU/IT/trace/budget;Charge 6 per iteration.
+- Anti-vacuous Rust pin `fused_memcntdn_fires` uses the real blinky
+  encodings; caught two bugs (LDR/STR bit11 polarity, fire-count
+  expectation). Cargo 293/293.
+- Controlled page A/B (wasm bytes swapped, same box): no-fuse 47 MIPS vs
+  fused 287-301 on blinky; tft_test 47 -> 289; eth_http unchanged.
+- VENDOR_V 69, app.js v84, emu-worker v28, doom.js v104, full battery
+  green (`BATTERY_EXIT=0`, npmtest 229 s). All uncommitted.

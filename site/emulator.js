@@ -50,7 +50,10 @@ export async function createEmulator(opts) {
         // TB run-length gate: a cached shape must average at least this many
         // executed instructions per hit to keep translating (see TB_MIN_RUN).
         // Exposed so the gate can be A/B'd on the page without editing code.
-        tbMinRun = 5000,
+        // Page sweep 2026-11-26 (quiet box, interleaved): 5000 -> ~95 page
+        // MIPS / 58 rounds/s; 600 -> ~170 page MIPS / 72 rounds/s live.
+        // The old 5000 decision was measured on a loaded box (§ history).
+        tbMinRun = 600,
         // Shared-memory translation override. Default: on whenever the
         // wasm glue exposes the memory handle (web build). `false` pins
         // the mirror path (used by the direct-vs-mirror differential).

@@ -49,8 +49,8 @@
 //     status {text,cls} .. status line updates (same text as page setStatus)
 //     measureResult {id,mips,runs} reply to measure
 //     fault {info} ....... guest fault (faultInfo, for the fault panel)
-import * as bindings from './vendor/stm32_periph_wasm.js?v=68';
-import { createEmulator } from './emulator.js?v=17';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=69';
+import { createEmulator } from './emulator.js?v=18';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
 
@@ -59,7 +59,7 @@ import { createUsbHost } from './usbhost.js';
 // hosts: the worker thread being busy does NOT jank the page, but message
 // round trips (UI state, pokes) queue behind the burst — 20 ms bounds
 // interactive latency like doom-worker's 28 ms.
-const BURST_STEPS = 48;
+const BURST_STEPS = 64;
 const BURST_FINE_STEPS = 6;
 const WALL_BUDGET_MS = 40; // 2026-10-20: live-UI A/B (eth_http, window rate over
 // 10 s, interleaved): 12 steps/20 ms -> 39.7/41.5 MIPS (worker duty 61-69%,
@@ -77,6 +77,9 @@ const WALL_BUDGET_MS = 40; // 2026-10-20: live-UI A/B (eth_http, window rate ove
 //   96 -> 66.8 / 78.1 (hits the 40 ms budget instead: same duty, more variance)
 // 48 x 100k = 4.8M inst ~= 35 ms at this engine: fills the frame budget without
 // exceeding it, so burst latency stays bounded by WALL_BUDGET_MS.
+// 2026-11-26 (TB gate 600, page engine ~175 MIPS): 48 underfills again.
+// Interleaved live 10 s windows: 48 -> 83.6/85.1 MIPS (69.7/70.8 rounds/s),
+// 64 -> 91.8/92.0 MIPS (76.5/76.8 rounds/s). 64 keeps the 40 ms wall cap.
 const TICK_STALE_MS = 200;
 const YIELD_MS = 4;
 
@@ -158,7 +161,7 @@ async function boot(c) {
         svdFile: c.svdFile,
         flash_size: c.flash_size,
         ram_size: c.ram_size,
-        wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=68',
+        wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=69',
         extra_mem: c.extraMem || [],
         uart_addr: c.uartAddr,
         enable_irqs: !!c.enable_irqs,
