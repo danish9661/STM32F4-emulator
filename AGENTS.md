@@ -5800,3 +5800,26 @@ PASS. Full battery (`.pw-scratch/battery_final.sh`): cargo 292/292,
 TB-XLATE, 15 TB differentials, `TB=1` matrix, `npm test`, `npm run
 test:wasm` — `BATTERY_EXIT=0`. Nothing committed. The shipped loop-TB
 path stays the product: ~95 MIPS page-side, ~2× interpreter.
+
+### Follow-up 2026-11-26: flat emitter accounting bug found and fixed (still unshipped)
+The block-level differential prerequisite was built:
+`.pw-scratch/test_flat_block.mjs` — synthetic firmware image →
+`tb_flat_build` → execute the module with seeded globals, comparing regs,
+flags, instruction count and kind-3 re-entry against hand-computed values
+(4 vectors: countdown loop, straight ALU, forward branch, BL/call+return).
+It exposed a **real emitter bug**: branch/BL terminators were never
+charged (`FlatBlock` counted only `Item`s), and PUSH/POP decompositions
+charged once per register. Fixed by storing the group's `tick` flag in
+`FlatBlock.items` (charge one instruction per SOURCE instruction), charging
+the branch terminator, and not double-charging `pop {..,pc}` (its group
+already ticks). `flat_blocks_synthetic_items` Rust test pins the CFG shape.
+Result: `FLAT-BLOCK PASS 4/4`; on real eth_http, flat step 0 now matches the
+interpreter **exactly** (same pc 0x08000aa1, same UART) where before it was
+~3× ahead. Flat still does not ship: it now halts loudly (pc 0x080004F0,
+op E8BD/81F0 = `pop.w {r4-r8,pc}`, fault) with SP pointing at zeros — a
+separate stack-state defect, still being investigated. Diagnostic showed
+the fault persists with T2 PUSH/POP declined, so the corruption is earlier.
+Versions bumped to VENDOR_V **68**; both wasm targets rebuilt; full battery
+re-run green (`BATTERY_EXIT=0`, npmtest 249 s, wasm 6 s). The new
+accounting fix and scratch harnesses are **uncommitted**; the earlier tree
+was committed as `00aad61`.

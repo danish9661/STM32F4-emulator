@@ -319,3 +319,28 @@ Nothing is committed.
 Lowering the clock; DOOM-only tuning; interpreter micro-opts as the main
 path; commits without an explicit user order. Node MIPS is diagnostic;
 page-side sampling is the metric; <8% is noise on this box.
+
+---
+
+## 9. 2026-11-26 follow-up — accounting bug found, flat still unshipped
+
+- Built the block-level differential prerequisite:
+  `.pw-scratch/test_flat_block.mjs` (synthetic image -> `tb_flat_build` ->
+  seeded module execution vs hand-computed regs/flags/count, 4 vectors).
+- It found a REAL flat-emitter accounting bug: branch/BL terminators were
+  never charged, and PUSH/POP groups charged once per register. Fixed in
+  `tb_xlate.rs` (`FlatBlock.items` now carries the group `tick` flag; one
+  charge per source instruction; branch terminator charged; pop{pc} not
+  double-charged). Rust pin `flat_blocks_synthetic_items` added.
+  `FLAT-BLOCK PASS 4/4`.
+- On eth_http, flat step 0 now matches the interpreter EXACTLY (pc
+  0x08000aa1, same UART) — the ~3x accounting divergence is gone.
+- Flat still does not ship: it now faults loudly at 0x080004F0
+  (`pop.w {r4-r8,pc}`, op E8BD/81F0) with SP pointing at zeros. Declining
+  T2 PUSH/POP did not remove the fault, so the SP corruption is earlier.
+  Next diagnostic: find which translated item moves SP wrongly (compare
+  SP after each flat run vs the interpreter at the same pc).
+- Versions VENDOR_V **68**; both wasm targets rebuilt; SVD restored;
+  `test_versions` PASS; full battery green (`BATTERY_EXIT=0`, npmtest
+  249 s, wasm 6 s). The earlier tree was committed as `00aad61` on the
+  user's order; THIS follow-up is uncommitted (no new commit order).

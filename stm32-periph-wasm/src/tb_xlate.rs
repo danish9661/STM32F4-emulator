@@ -4689,7 +4689,10 @@ enum FlatTerm {
 
 struct FlatBlock {
     pc: u32,
-    items: Vec<(Item, usize, u32)>, // (item, halfword len, pc)
+    /// (item, halfword len, pc, tick) — `tick` marks the LAST item of a
+    /// source instruction (PUSH/POP decompose to many items); the emitter
+    /// charges exactly one instruction per group, on the ticking item.
+    items: Vec<(Item, usize, u32, bool)>,
     term: FlatTerm,
     /// pc of the terminator instruction (budget-out resumes here; the
     /// branch/BL re-executes, which is side-effect-free and costs one
@@ -5116,7 +5119,7 @@ fn flat_blocks(image: &[u8], flash_base: u32) -> Vec<FlatBlock> {
             continue;
         }
         let mut pc = pc0;
-        let mut items: Vec<(Item, usize, u32)> = Vec::new();
+        let mut items: Vec<(Item, usize, u32, bool)> = Vec::new();
         let mut term_pc = pc0;
         let mut term_hit = false;
         let mut term = FlatTerm::BrOut(pc0);
@@ -5144,7 +5147,7 @@ fn flat_blocks(image: &[u8], flash_base: u32) -> Vec<FlatBlock> {
                         // ahead by N halfwords. Omitting the advance loops
                         // on one pc and grows `items` until the OOM killer
                         // fires (2026-11-25: stm32_periph_wa @ 13 GB RSS).
-                        items.push((item, hw, pc));
+                        items.push((item, hw, pc, tick));
                         if tick {
                             pc = pc.wrapping_add((hw as u32) * 2);
                         }
@@ -5295,8 +5298,22 @@ fn emit_flat_block(
     // the device fallback were written against.
     c.local(10, I32); // l0..l9 i32 (LTOT = l9)
     c.local(1, I64); // l10 i64 (device result scratch)
-    for (item, hw, pc) in &b.items {
+    for (item, hw, pc, tick) in &b.items {
         emit_item(c, item, &ExecCount::Flat, segs, *pc, hw * 2);
+        // One charge per SOURCE instruction: a PUSH/POP decomposition
+        // emits one item per register but ticks only on the last one.
+        if *tick {
+            emit_flat_tick(c);
+        }
+    }
+    // The block terminator is itself an instruction (B/B.cond/BL/B.W/
+    // bx lr) and must be charged. A pop {..,pc} already ticked its
+    // trailing SpAdj at this pc, so it is not charged twice. Miss and
+    // BrOut are exits, not executed guest instructions.
+    let popped_pc = b.items.last().filter(|it| it.3 && it.2 == b.term_pc).is_some();
+    if matches!(b.term, FlatTerm::Br(_) | FlatTerm::BrCond { .. } | FlatTerm::Bl { .. }
+        | FlatTerm::RetDispatch) && !popped_pc
+    {
         emit_flat_tick(c);
     }
     // Commit this block's instructions BEFORE any edge: the innermost
@@ -5520,6 +5537,25 @@ mod flat_tests {
         );
         assert_eq!(b.term_pc, 0x08000046, "terminator pc not advanced");
         assert!(matches!(b.term, super::FlatTerm::RetDispatch));
+    }
+
+    #[test]
+    fn flat_blocks_synthetic_items() {
+        // movs r0,#1; b.n target; movs r1,#2 (skipped);
+        // target: movs r2,#3; nop; nop
+        let ops: [u16; 6] = [0x2001, 0xE000, 0x2102, 0x2203, 0xBF00, 0xBF00];
+        let mut img = vec![0u8; 8 + ops.len() * 2];
+        img[0..4].copy_from_slice(&0x20020000u32.to_le_bytes());
+        img[4..8].copy_from_slice(&0x08000009u32.to_le_bytes());
+        ops.iter().enumerate().for_each(|(i, op)| {
+            img[8 + i * 2..10 + i * 2].copy_from_slice(&op.to_le_bytes());
+        });
+        let blocks = super::flat_blocks(&img, 0x08000000);
+        assert_eq!(blocks.len(), 2, "forward-branch CFG shape changed");
+        assert_eq!(blocks[0].pc, 0x08000008);
+        assert_eq!(blocks[0].items.len(), 1, "B is a terminator, not an item");
+        assert_eq!(blocks[1].pc, 0x0800000E);
+        assert_eq!(blocks[1].items.len(), 3, "MOVS + two NOPs");
     }
 
     #[test]

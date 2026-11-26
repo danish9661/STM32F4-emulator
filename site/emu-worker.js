@@ -49,7 +49,7 @@
 //     status {text,cls} .. status line updates (same text as page setStatus)
 //     measureResult {id,mips,runs} reply to measure
 //     fault {info} ....... guest fault (faultInfo, for the fault panel)
-import * as bindings from './vendor/stm32_periph_wasm.js?v=67';
+import * as bindings from './vendor/stm32_periph_wasm.js?v=68';
 import { createEmulator } from './emulator.js?v=17';
 import { createNetSim } from './netsim.js';
 import { createUsbHost } from './usbhost.js';
@@ -158,7 +158,7 @@ async function boot(c) {
         svdFile: c.svdFile,
         flash_size: c.flash_size,
         ram_size: c.ram_size,
-        wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=67',
+        wasmUrl: 'vendor/stm32_periph_wasm_bg.wasm?v=68',
         extra_mem: c.extraMem || [],
         uart_addr: c.uartAddr,
         enable_irqs: !!c.enable_irqs,
