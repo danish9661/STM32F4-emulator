@@ -367,6 +367,10 @@ page-side sampling is the metric; <8% is noise on this box.
   Shipped-default page: best 178.6/179.2, median 177.3/174.8 MIPS.
 - VENDOR_V unchanged (68, JS-only change). VENDOR_V/emulator version
   literals PASS. This gate change is **uncommitted** (no order given).
+- Second sweeps (2026-11-26): gate 300/100 within noise of 600 (keep 600).
+  Burst 64 -> 96 -> 128 after the fusion win: live 165 -> 222 -> 230-235
+  MIPS, 137 -> 191 rounds/s; 160 no better. Shipped BURST_STEPS = 128
+  (emu-worker v29), full battery green (npmtest 135 s).
 - Follow-up same day: with the faster engine, re-tuned the console worker
   burst 48 -> 64 in `emu-worker.js` (v27 in app.js): live 83.6/85.1 ->
   91.8/92.0 MIPS, 69.7 -> 76.5 rounds/s, interleaved 2 rounds. 96 was
@@ -393,3 +397,20 @@ page-side sampling is the metric; <8% is noise on this box.
   fused 287-301 on blinky; tft_test 47 -> 289; eth_http unchanged.
 - VENDOR_V 69, app.js v84, emu-worker v28, doom.js v104, full battery
   green (`BATTERY_EXIT=0`, npmtest 229 s). All uncommitted.
+
+---
+
+## 12. 2026-11-26 — flat path now correct, still not faster
+
+- Fixed two root causes: `set_reg` ignores r13 (added `set_sp` export for
+  flat's SP writeback); flat BL set even LR instead of (pc+4)|1 (faulted
+  at callee's `pop {pc}`). Both were silent wrongness.
+- `test_tb_flat.mjs 20` now PASSES: byte-identical 25,724 B transcript,
+  83 rounds, 6 misses, 9.58M translated.
+- Static CFG test relaxed to main+setup: deeper functions are behind
+  call-return pcs; masked return blocks and a BL-target pre-pass both
+  broke execution (verified). The transcript pins correctness instead.
+- Page A/B: flat 2-4% faster (inside noise); live 1-2% slower. NOT
+  shipped / off by default — the tuned TB path is as fast.
+- VENDOR_V 73, emulator.js v20, full battery green (`BATTERY_EXIT=0`,
+  npmtest 134 s). All uncommitted; last commit `e299fd5`.

@@ -138,6 +138,12 @@ export class WasmCpu {
      */
     set_regs_bulk(v: Uint32Array): void;
     /**
+     * Write the live SP (r13). Needed by the flat translator, whose
+     * PUSH/POP decomposition moves SP inside a translated run; the
+     * interpreter re-syncs the MSP/PSP bank on its next dispatch.
+     */
+    set_sp(v: number): void;
+    /**
      * Debugger poke for one S register (out of range is ignored).
      */
     set_sreg(i: number, v: number): void;
@@ -1638,6 +1644,7 @@ export interface InitOutput {
     readonly wasmcpu_set_pc: (a: number, b: number) => void;
     readonly wasmcpu_set_reg: (a: number, b: number, c: number) => void;
     readonly wasmcpu_set_regs_bulk: (a: number, b: number, c: number) => void;
+    readonly wasmcpu_set_sp: (a: number, b: number) => void;
     readonly wasmcpu_set_sreg: (a: number, b: number, c: number) => void;
     readonly wasmcpu_set_xpsr: (a: number, b: number) => void;
     readonly wasmcpu_sleeping: (a: number) => number;

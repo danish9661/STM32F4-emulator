@@ -1885,6 +1885,10 @@ impl WasmCpu {
     pub fn get_it_n(&self) -> u32 { self.cpu.it_n as u32 }
     pub fn get_pc(&self) -> u32 { self.cpu.regs.r[15] }
     pub fn get_sp(&self) -> u32 { self.cpu.regs.r[13] }
+    /// Write the live SP (r13). Needed by the flat translator, whose
+    /// PUSH/POP decomposition moves SP inside a translated run; the
+    /// interpreter re-syncs the MSP/PSP bank on its next dispatch.
+    pub fn set_sp(&mut self, v: u32) { self.cpu.regs.r[13] = v; }
     pub fn get_regs(&self) -> Vec<u32> { self.cpu.regs.r.to_vec() }
     pub fn get_xpsr(&self) -> u32 { self.cpu.regs.xpsr }
     /// Write one low register (r0-r12 only; r13-r15 via reset_cpu).

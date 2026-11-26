@@ -5861,6 +5861,14 @@ largest general (all-firmware) speed win since the direct emission.
   `npm test`, `npm run test:wasm` — `BATTERY_EXIT=0`.
 - **Reversal note:** do NOT restore 5000 based on the old contaminated
   sweep. Re-sweep only on a quiet box with the page probe.
+- Second sweep (2026-11-26, quiet box): gate 300/100 were within noise of
+  600 (331/318 vs 327/305 vs 325/329 medians) — 600 stays the default.
+- Burst re-tune after the stack-counter fusion (which sped the engine up
+  again): with gate 600 + fusion, live windows were 64 -> 165 MIPS /
+  137 rounds/s, 96 -> 222 / 186, **128 -> 230-235 / 191-196**,
+  160 -> no better. Shipped BURST_STEPS = 128 (emu-worker v29 in app.js);
+  the 40 ms wall budget is the cap, so larger bursts add latency only.
+  Full battery green after the change (matrix 176/176, npmtest 135 s).
 
 ### Burst re-tune after the gate win (same day)
 The 48-step worker burst was tuned for the OLD engine; at ~175 page MIPS
@@ -5913,3 +5921,34 @@ Charge = 6 instructions per iteration (exact).
 - The no-fuse measurement was made by temporarily disabling the hook and
   rebuilding web wasm, then restoring the fused bytes byte-identically
   (cmp verified) — no source left disabled. All uncommitted.
+
+---
+
+## 50. Flat path now CORRECT but still not faster (2026-11-26)
+
+Two root causes of the flat stall/fault were found and fixed:
+- `WasmCpu::set_reg` deliberately ignores r13 (loop TB never moves SP),
+  so the flat driver's `set_reg(13, ex.sp.value)` was a **silent no-op**
+  and every translated PUSH/POP SP change reverted. Added `set_sp()`
+  export and use it in `flatTry`.
+- `flat_decode`'s BL set LR to even `pc+4`; the interpreter uses
+  `(pc+4)|1`. The even value got stacked and faulted at the callee's
+  `pop {pc}`. Fixed to `ret: (pc+4)|1` in the emitter (LR), while the
+  CFG walker explicitly does NOT queue call-return pcs.
+
+Result: `test_tb_flat.mjs 20` passes — **byte-identical 25,724 B
+transcript, 83 HTTP rounds, 6 misses**, 9.58M translated. The static CFG
+test (`flat_blocks_cover_call_graph`) now pins only main+setup: deeper
+functions sit behind call-return pcs, and both attempted fixes (masked
+return blocks, BL-target pre-pass) broke execution — verified. Deeper
+call-graph correctness is pinned by the transcript, not static reach.
+
+Page A/B (3 interleaved rounds, quiet box): flat 329/331/338 median vs
+default TB 318/325/325 — **2-4%, inside the noise bar**. Live: flat
+166/163 MIPS vs TB 167/166 (no gain, ~1% slower). So flat remains OFF by
+default: it is now correct, but the tuned loop-TB path is just as fast.
+
+Versions VENDOR_V **73**, emulator.js v20, app.js v84, emu-worker v28,
+doom.js v104 / `__doomVer` 102, doom-worker v72. Both wasm targets
+rebuilt, `test_versions` PASS, full battery green (`BATTERY_EXIT=0`,
+npmtest 134 s). All uncommitted.

@@ -425,6 +425,15 @@ export class WasmCpu {
         wasm.wasmcpu_set_regs_bulk(this.__wbg_ptr, ptr0, len0);
     }
     /**
+     * Write the live SP (r13). Needed by the flat translator, whose
+     * PUSH/POP decomposition moves SP inside a translated run; the
+     * interpreter re-syncs the MSP/PSP bank on its next dispatch.
+     * @param {number} v
+     */
+    set_sp(v) {
+        wasm.wasmcpu_set_sp(this.__wbg_ptr, v);
+    }
+    /**
      * Debugger poke for one S register (out of range is ignored).
      * @param {number} i
      * @param {number} v

@@ -600,7 +600,7 @@ async function boot(keepDetail) {
 
     try {
         const [svdXml, wad] = await Promise.all([
-            fetch('vendor/stm32f407.svd?v=69').then((r) => r.text()),
+            fetch('vendor/stm32f407.svd?v=73').then((r) => r.text()),
             fetch('doom1.wad').then((r) => r.arrayBuffer()),
         ]);
         const firmware = new Uint8Array(atob(FIRMWARES.doom.bytes).split('').map((c) => c.charCodeAt(0)));
@@ -614,7 +614,7 @@ async function boot(keepDetail) {
 
         // Bump ?v= on every doom-worker.js edit — worker scripts cache as hard
         // as module scripts, and a stale copy looks exactly like a bug.
-        worker = new Worker('doom-worker.js?v=69', { type: 'module' });
+        worker = new Worker('doom-worker.js?v=73', { type: 'module' });
         worker.onmessage = onWorkerMessage;
         worker.onerror = (e) => {
             setStatus('worker failed: ' + (e.message || 'load error'), 'error');

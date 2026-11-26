@@ -190,8 +190,9 @@ A second page (linked from the console's header/footer) that runs DOOM 1
 shareware on the emulated F407 — `site/doom1.wad` (4.2 MB) is loaded into
 8 MB of `extra_mem` by the driver, and the guest renders the CMAP256
 framebuffer to a 320×200 canvas (CSS-upscaled, `image-rendering:
-pixelated`) at ~65 MIPS / 35 FPS with audio (I2S mixer → AudioWorklet,
-11025 Hz). Emulation runs in `site/doom-worker.js` (a Web Worker driven by
+pixelated`) at ~65–72 MIPS / 35 FPS with audio (I2S mixer → AudioWorklet,
+11025 Hz; audio playback rate ~1.0× in the 2026-11-26 verification).
+Emulation runs in `site/doom-worker.js` (a Web Worker driven by
 the page's rAF ticks); `site/doom.js` is the UI shell only. Build stamp:
 `window.__doomVer` (hard-refresh if the console doesn't print the current
 number — worker scripts cache hard, hence the `?v=` on both `doom.js` and

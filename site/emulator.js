@@ -2285,8 +2285,10 @@ export async function createEmulator(opts) {
                 // slot; set_reg(13) writes the live r13 and the next
                 // interpreter instruction re-syncs the MSP/PSP bank (same
                 // rule as the run-loop bank sync).
-                if (typeof cpu.set_reg === 'function') {
-                    try { cpu.set_reg(13, ex.sp.value >>> 0); } catch {}
+                // set_reg intentionally ignores r13 (loop TB never moves
+                // SP). Flat PUSH/POP does — use the dedicated export.
+                if (typeof cpu.set_sp === 'function') {
+                    try { cpu.set_sp(ex.sp.value >>> 0); } catch {}
                 }
                 if (insts > 0) {
                     try { tick_n(insts); } catch {}

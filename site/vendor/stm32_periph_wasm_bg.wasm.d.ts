@@ -258,6 +258,7 @@ export const wasmcpu_set_fpscr: (a: number, b: number) => void;
 export const wasmcpu_set_pc: (a: number, b: number) => void;
 export const wasmcpu_set_reg: (a: number, b: number, c: number) => void;
 export const wasmcpu_set_regs_bulk: (a: number, b: number, c: number) => void;
+export const wasmcpu_set_sp: (a: number, b: number) => void;
 export const wasmcpu_set_sreg: (a: number, b: number, c: number) => void;
 export const wasmcpu_set_xpsr: (a: number, b: number) => void;
 export const wasmcpu_sleeping: (a: number) => number;

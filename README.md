@@ -54,9 +54,12 @@ preset can auto-boot via the URL: `?fw=eth_http`, `?fw=blinky`, `?fw=crypto_test
 
 **[`site/doom.html`](site/doom.html)** runs DOOM 1 shareware
 (doomgeneric, ported to the emulated F407) at the full 35 fps in a
-headless-Chrome-verified browser page — playable: at ~1M guest instructions
-per rendered frame, 35 fps needs ~32 MIPS and the Rust core delivers ~65
-(details and the measurements in AGENTS.md §16/§22). Because the guest mixes
+headless-Chrome-verified browser page — playable. Re-verified 2026-11-26:
+E1M1 holds **35/35 FPS at high detail**, ~35 t/s over a 90 s run with a
+5 s mid-run pause (no fast-forward: max 35.7 t/s, `jump=1` in every window,
+pause drift 0), audio context `running` at ~1.0× with no new underruns
+during play. The guest meter reads ~65–72 MIPS during gameplay (details and
+the measurements in AGENTS.md §16/§22/§40/§49). Because the guest mixes
 one frame of audio
 per rendered frame, sound below 35 fps plays slightly slow and pitched-down
 rather than breaking up — the worklet rate-matches instead of inserting

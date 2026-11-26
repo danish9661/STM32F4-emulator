@@ -6,8 +6,18 @@ description: What works today, known limitations, and the implementation roadmap
 
 # Progress and future work
 
-Status as of 2026-09-19. The authoritative living log is AGENTS.md; this
-document is the readable summary. Since AGENTS.md §23 the Rust Thumb-2
+Speed work 2026-11-26 (AGENTS.md §§48–50): the TB run-length gate default
+went 5000 → 600 (page engine ~95 → ~175 MIPS on a quiet box), the console
+worker burst 48 → 64 → 128 (live ~92 → ~230 MIPS, ~190 HTTP rounds/s),
+and a fused stack-counter delay loop made blinky/tft ~6× faster (~290 page
+MIPS). The flat whole-program translator is now functionally correct
+(byte-identical 25,724 B transcript, 83 HTTP rounds) but measured only
+2–4% faster than the tuned loop-TB path, so it stays off by default.
+DOOM was re-verified: 35/35 FPS at high detail, audio ~1.0×, and the old
+mid-run fast-forward bug does not reproduce (35.7 t/s max, drift 0).
+
+Status as of 2026-11-26. The authoritative living log is AGENTS.md;
+this document is the readable summary. Since AGENTS.md §23 the Rust Thumb-2
 core is the sole backend (Unicorn 2.1.4 removed after bit-identical parity
 was proven) — Unicorn-era mechanisms below (hooks, ISR pump, wedge,
 `maxBatch`, `?cpu=`) are marked as archaeology where they appear.
@@ -408,5 +418,5 @@ node site/test_can.mjs                      # CAN loopback + 2-node arbitration
 node site/test_audio.mjs                    # I2S DMA WAV replay + TX capture
 node site/test_ltdc.mjs                     # LTDC scanout + framebuffer pixels
 (cd stm32-periph-wasm && cargo test --release) # native unit + integration tests (use -- --test-threads=1 if parallel flakes)
-node site/test_board_matrix.mjs              # full board matrix (156 presets)
+node site/test_board_matrix.mjs              # full board matrix (176 presets)
 ```

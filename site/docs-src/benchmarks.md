@@ -4,7 +4,31 @@ All runs: Node 22, headless, `eth_http` firmware (DHCP + TCP + HTTP round
 trip), Linux. One "round" = one full DHCP → TCP connect → HTTP body →
 FIN cycle of the firmware. MIPS = emulated instructions / wall time.
 
-## Current headline numbers (2026-09-18, Rust core — netsim peer)
+## Current headline numbers (2026-11-26, Rust core — browser page)
+
+Page-side measurements are the primary metric; Node numbers below are
+diagnostic only. All rows are back-to-back/interleaved same-box A/B in
+headless Chrome, `?fw=eth_http` unless stated.
+
+| Workload | Page engine MIPS | Live console MIPS | HTTP rounds/s |
+|---|---|---|---|
+| `eth_http` (DHCP→TCP→HTTP, translated blocks) | **~320–340** | **~230** | **~190** |
+| `blinky` / `tft_test` (fused stack-counter loop) | **~290** | — | — |
+| `doom.html` E1M1 (35 t/s lock, high detail) | ~65–72 (guest meter) | 35/35 FPS | — |
+
+Key changes since the 2026-09 rows: shared-memory translated blocks
+(§44), debugged flat emitter (§47/§50), run-length gate 5000 → 600 (§48),
+worker burst 48 → 64 → 128, and the fused stack-counter delay loop (§49).
+Controlled A/B: gate alone +85% page engine; the fusion ~6× on
+blinky-class firmware; burst 128 +39% live rounds/s over burst 64.
+The old flat whole-program path is now functionally correct (byte-identical
+transcript, 83 HTTP rounds) but measured only 2–4% faster than loop-TB,
+so it stays off by default.
+
+Older Node-only numbers (below) predate these changes and are kept for
+historical context — do not quote them as current performance.
+
+### Node-only historical numbers (2026-09-18, netsim peer)
 
 Measured this session on the sole Rust Thumb-2 backend (Node 22,
 headless, netsim peer — not the gVisor gateway the old rows used, so
